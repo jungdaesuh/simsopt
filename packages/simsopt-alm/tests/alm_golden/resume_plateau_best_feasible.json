@@ -441,6 +441,19 @@
      "total_finite": true
     },
     {
+     "event": "snapshot_accepted_state",
+     "x": {
+      "$ndarray": "<f8",
+      "shape": [
+       2
+      ],
+      "data": [
+       "0x1.e666666666666p-1",
+       "0x1.0000000000000p+0"
+      ]
+     }
+    },
+    {
      "event": "evaluate_problem",
      "x": {
       "$ndarray": "<f8",
@@ -515,26 +528,13 @@
      }
     },
     {
-     "event": "snapshot_accepted_state",
-     "x": {
-      "$ndarray": "<f8",
-      "shape": [
-       2
-      ],
-      "data": [
-       "0x1.6666666666666p-1",
-       "0x1.0000000000000p+0"
-      ]
-     }
-    },
-    {
      "event": "on_outer_step",
      "outer_iteration": 1,
      "continuation_iteration": 0,
      "action": "subproblem_continue",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "406c91a1fcfa1138a1d6c8b32aa859890ec486055da0ea0f840416384fa35786"
+     "event_sha256": "27aa54492bf4ac124f049dd81fe1e2c09722523a93d3b4a4eb71a1da2443926d"
     },
     {
      "event": "evaluate_problem",
@@ -641,7 +641,7 @@
      "action": "subproblem_continue",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "63a0c8de65296fa69d085482c924e6444de645178f8237151afbcd3d6acdf9c6"
+     "event_sha256": "0966c8db077e13f57119b8a79306433f7b3726e266ae153aa57fe9e70fc9345d"
     },
     {
      "event": "evaluate_problem",
@@ -772,7 +772,7 @@
      "action": "subproblem_limit_penalty_increase",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "5192ebd03968abce1541d3a01f74cc71fe98ed10414d62a7f6639717106bb94d"
+     "event_sha256": "e149c583f4765dae573de67d8d4f4f6f00a3f10637c84f6e2b8755517cf83eee"
     },
     {
      "event": "snapshot_accepted_state",
@@ -846,7 +846,7 @@
        "fields": {
         "x": {
          "$tuple": [
-          "0x1.6666666666666p-1",
+          "0x1.e666666666666p-1",
           "0x1.0000000000000p+0"
          ]
         },
@@ -860,7 +860,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.1e8f5c28f5c35p+3"
+                "-0x1.7fae147ae14dbp+0"
                ]
               }
              ]
@@ -875,7 +875,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.299999999999ap+4",
+                "-0x1.219999999999ap+4",
                 "0x0.0p+0"
                ]
               }
@@ -886,7 +886,7 @@
           {
            "$tuple": [
             "base_value",
-            "0x1.59f5c28f5c290p+6"
+            "0x1.479c28f5c28f7p+6"
            ]
           },
           {
@@ -897,7 +897,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.3333333333334p-2"
+                "-0x1.99999999999a0p-5"
                ]
               }
              ]
@@ -912,7 +912,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.3333333333334p-2"
+                "-0x1.99999999999a0p-5"
                ]
               }
              ]
@@ -942,7 +942,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "0x1.6333333333332p+3",
+                "0x1.7b33333333332p+3",
                 "0x0.0p+0"
                ]
               }
@@ -970,7 +970,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "0x1.db33333333333p+4"
+                "0x1.df33333333333p+4"
                ]
               }
              ]
@@ -980,13 +980,13 @@
           {
            "$tuple": [
             "stationarity_norm",
-            "0x1.6333333333332p+3"
+            "0x1.7b33333333332p+3"
            ]
           },
           {
            "$tuple": [
             "total",
-            "0x1.3623d70a3d709p+6"
+            "0x1.419d70a3d70a4p+6"
            ]
           }
          ]
@@ -1002,7 +1002,7 @@
          "fields": {
           "x": {
            "$tuple": [
-            "0x1.6666666666666p-1",
+            "0x1.e666666666666p-1",
             "0x1.0000000000000p+0"
            ]
           }
@@ -1063,14 +1063,14 @@
        2
       ],
       "data": [
-       "0x1.6666666666666p-1",
+       "0x1.e666666666666p-1",
        "0x1.0000000000000p+0"
       ]
      },
      "success": false,
      "termination_reason": "plateau_stall",
-     "message": "ALM stopped after repeated feasible stationarity plateau without meaningful progress: max_violation=0.000e+00, stationarity=1.110e+01",
-     "objective": "0x1.59f5c28f5c290p+6",
+     "message": "ALM stopped after repeated feasible stationarity plateau without meaningful progress: max_violation=0.000e+00, stationarity=1.185e+01",
+     "objective": "0x1.479c28f5c28f7p+6",
      "constraint_names": {
       "$tuple": [
        "x0_cap"
@@ -1082,7 +1082,7 @@
        1
       ],
       "data": [
-       "-0x1.3333333333334p-2"
+       "-0x1.99999999999a0p-5"
       ]
      },
      "max_violation": "0x0.0p+0",
@@ -1096,7 +1096,7 @@
       ]
      },
      "penalty": "0x1.0000000000000p+0",
-     "stationarity_norm": "0x1.6333333333332p+3",
+     "stationarity_norm": "0x1.7b33333333332p+3",
      "kkt_stationarity_norm": null,
      "nit": 5,
      "outer_iterations": 2,
@@ -1106,24 +1106,24 @@
       "$mappingproxy": {
        "augmented_term_by_constraint": {
         "$tuple": [
-         "-0x1.1e8f5c28f5c35p+3"
+         "-0x1.7fae147ae14dbp+0"
         ]
        },
        "base_grad": {
         "$tuple": [
-         "-0x1.299999999999ap+4",
+         "-0x1.219999999999ap+4",
          "0x0.0p+0"
         ]
        },
-       "base_value": "0x1.59f5c28f5c290p+6",
+       "base_value": "0x1.479c28f5c28f7p+6",
        "constraint_values": {
         "$tuple": [
-         "-0x1.3333333333334p-2"
+         "-0x1.99999999999a0p-5"
         ]
        },
        "dual_update_values": {
         "$tuple": [
-         "-0x1.3333333333334p-2"
+         "-0x1.99999999999a0p-5"
         ]
        },
        "feasibility_values": {
@@ -1133,7 +1133,7 @@
        },
        "grad": {
         "$tuple": [
-         "0x1.6333333333332p+3",
+         "0x1.7b33333333332p+3",
          "0x0.0p+0"
         ]
        },
@@ -1141,11 +1141,11 @@
        "max_violation": "0x0.0p+0",
        "positive_shift_values": {
         "$tuple": [
-         "0x1.db33333333333p+4"
+         "0x1.df33333333333p+4"
         ]
        },
-       "stationarity_norm": "0x1.6333333333332p+3",
-       "total": "0x1.3623d70a3d709p+6"
+       "stationarity_norm": "0x1.7b33333333332p+3",
+       "total": "0x1.419d70a3d70a4p+6"
       }
      },
      "inner_result": null
@@ -1634,7 +1634,7 @@
      "action": "subproblem_continue",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "148a8f26cf9dbc4ae799d49a3dbc163bc15e0eca04ea9105f28f84d8bb5d2cbc"
+     "event_sha256": "859a987e408deab440f92b0b230f664401843454643bcd7581703178e0aca6ff"
     },
     {
      "event": "evaluate_problem",
@@ -1837,7 +1837,7 @@
      "action": "subproblem_limit",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "ed4a1aaeb72d6107e1fdaf05cd02a75e3cc9b15c15d185d498a6a5930174c71f"
+     "event_sha256": "68bdbbba5ae5dc6803ef86c0d6fa1758f1c200aa209d22d382010f666eaa0eb0"
     },
     {
      "event": "restore_incumbent_state",
@@ -1847,7 +1847,7 @@
        2
       ],
       "data": [
-       "0x1.6666666666666p-1",
+       "0x1.e666666666666p-1",
        "0x1.0000000000000p+0"
       ]
      }
@@ -1860,7 +1860,7 @@
        2
       ],
       "data": [
-       "0x1.6666666666666p-1",
+       "0x1.e666666666666p-1",
        "0x1.0000000000000p+0"
       ]
      }
@@ -1879,7 +1879,7 @@
      "fields": {
       "x": {
        "$tuple": [
-        "0x1.6666666666666p-1",
+        "0x1.e666666666666p-1",
         "0x1.0000000000000p+0"
        ]
       },
@@ -1888,7 +1888,7 @@
        "fields": {
         "x": {
          "$tuple": [
-          "0x1.6666666666666p-1",
+          "0x1.e666666666666p-1",
           "0x1.0000000000000p+0"
          ]
         }
@@ -1924,7 +1924,7 @@
        "fields": {
         "x": {
          "$tuple": [
-          "0x1.6666666666666p-1",
+          "0x1.e666666666666p-1",
           "0x1.0000000000000p+0"
          ]
         },
@@ -1938,7 +1938,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.1e8f5c28f5c35p+3"
+                "-0x1.7fae147ae14dbp+0"
                ]
               }
              ]
@@ -1953,7 +1953,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.299999999999ap+4",
+                "-0x1.219999999999ap+4",
                 "0x0.0p+0"
                ]
               }
@@ -1964,7 +1964,7 @@
           {
            "$tuple": [
             "base_value",
-            "0x1.59f5c28f5c290p+6"
+            "0x1.479c28f5c28f7p+6"
            ]
           },
           {
@@ -1975,7 +1975,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.3333333333334p-2"
+                "-0x1.99999999999a0p-5"
                ]
               }
              ]
@@ -1990,7 +1990,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "-0x1.3333333333334p-2"
+                "-0x1.99999999999a0p-5"
                ]
               }
              ]
@@ -2020,7 +2020,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "0x1.6333333333332p+3",
+                "0x1.7b33333333332p+3",
                 "0x0.0p+0"
                ]
               }
@@ -2048,7 +2048,7 @@
               "__alm_sequence__",
               {
                "$tuple": [
-                "0x1.db33333333333p+4"
+                "0x1.df33333333333p+4"
                ]
               }
              ]
@@ -2058,13 +2058,13 @@
           {
            "$tuple": [
             "stationarity_norm",
-            "0x1.6333333333332p+3"
+            "0x1.7b33333333332p+3"
            ]
           },
           {
            "$tuple": [
             "total",
-            "0x1.3623d70a3d709p+6"
+            "0x1.419d70a3d70a4p+6"
            ]
           }
          ]
@@ -2080,7 +2080,7 @@
          "fields": {
           "x": {
            "$tuple": [
-            "0x1.6666666666666p-1",
+            "0x1.e666666666666p-1",
             "0x1.0000000000000p+0"
            ]
           }

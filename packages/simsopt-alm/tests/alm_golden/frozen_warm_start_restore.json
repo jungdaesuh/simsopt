@@ -1505,6 +1505,19 @@
     "total_finite": true
    },
    {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    }
+   },
+   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",

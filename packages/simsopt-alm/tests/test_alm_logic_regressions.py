@@ -170,6 +170,28 @@ class SignalMismatchTests(unittest.TestCase):
         self.assertTrue(routing.signal_mismatch_active)
 
 
+def at_most_zero(x, multipliers, penalty):
+    """min (x - 1)^2 s.t. x <= 0: x* = 0, lambda* = 2."""
+    return augmented_inequality_objective(
+        (x[0] - 1.0) ** 2, [2.0 * (x[0] - 1.0)], [x[0]], [[1.0]], multipliers, penalty
+    )
+
+
+class FeasibleStartIncumbentTests(unittest.TestCase):
+    """B1 (control.py): a feasible start was never a best-feasible candidate,
+    so a run stopped by its limits returned an infeasible later iterate."""
+
+    def test_an_exhausted_run_restores_the_feasible_start(self):
+        result = minimize_alm(
+            [0.0], ["g"], at_most_zero, ALMSettings(max_outer_iterations=1), {"maxiter": 100}
+        )
+        self.assertFalse(result.success)
+        self.assertTrue(result.restored_best_feasible)
+        self.assertEqual(result.restored_best_feasible_reason, "final_iterate_infeasible")
+        np.testing.assert_array_equal(result.x, [0.0])
+        self.assertEqual(result.max_violation, 0.0)
+
+
 class FlaggedFiniteTrialTests(unittest.TestCase):
     """B4 (inner.py): a trial flagged ``nonfinite_evaluation`` with finite data
     was not sanitized, so L-BFGS-B took its made-up total and gradient."""

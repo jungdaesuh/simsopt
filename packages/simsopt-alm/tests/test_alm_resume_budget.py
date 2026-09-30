@@ -93,10 +93,16 @@ def _result_record(result) -> dict:
     }
 
 
+# An infeasible start (f's unconstrained minimizer, x0 + x1 <= 2 violated): a
+# spent budget then ends on the latest step's action, where a feasible start
+# would be restored as the best hard-feasible iterate.
+X0 = np.array([2.0, 1.0])
+
+
 def _run(inner_maxiter: int, resume_from=None):
     steps: list = []
     boundaries: list = []
-    x0 = np.zeros(2) if resume_from is None else resume_from.state.x
+    x0 = X0 if resume_from is None else resume_from.state.x
     result = minimize_alm(
         np.array(x0, dtype=float),
         CONSTRAINT_NAMES,
@@ -152,15 +158,14 @@ class ResumeContinuesTheUninterruptedRunTests(unittest.TestCase):
         return exhausted_boundaries
 
     def test_budget_spent_at_a_boundary_or_inside_an_outer(self):
-        # Budgets 3-6, 10 and 12 run out at the end of an outer iteration
-        # (after a penalty increase or a dual update), so the uninterrupted
-        # run stops before the next outer, and so must a resume with 0
-        # remaining; 1-2, 7-9 and 11 run out after a subproblem continuation,
-        # inside an outer, which then publishes only the terminal boundary
-        # (budget 11 leaves outer 3 one iteration short of the subproblem
-        # minimizer, where the multiplier update may not run).
+        # Budgets 4-10 run out at the end of an outer iteration (after a
+        # penalty hold or a dual update), so the uninterrupted run stops
+        # before the next outer, and so must a resume with 0 remaining; 1-3
+        # run out after a subproblem continuation, inside an outer, which
+        # then publishes only the terminal boundary. The run converges after
+        # 11 iterations.
         spent_where = {}
-        for run_maxiter in range(1, 13):
+        for run_maxiter in range(1, 11):
             with self.subTest(run_maxiter=run_maxiter):
                 result, steps, boundaries = _run(run_maxiter)
                 self.assertEqual(result.nit, run_maxiter)
@@ -173,9 +178,9 @@ class ResumeContinuesTheUninterruptedRunTests(unittest.TestCase):
         self.assertEqual(
             spent_where,
             {
-                **{budget: ("inside_outer", "subproblem_continue") for budget in (1, 2, 7, 8, 9, 11)},
-                **{budget: ("boundary", "penalty_increase") for budget in (3, 4, 5)},
-                **{budget: ("boundary", "dual_update") for budget in (6, 10, 12)},
+                **{budget: ("inside_outer", "subproblem_continue") for budget in (1, 2, 3)},
+                **{budget: ("boundary", "sufficient_decrease_hold") for budget in (4, 5)},
+                **{budget: ("boundary", "dual_update") for budget in range(6, 11)},
             },
         )
 

@@ -25,14 +25,14 @@
       2
      ],
      "data": [
-      "0x1.8ba2e8ba2e8bcp+0",
-      "0x1.1745d1745d179p-1"
+      "0x1.801d7e8093789p+0",
+      "0x1.003afd0126f10p-1"
      ]
     },
     "success": false,
     "termination_reason": "dual_update",
-    "message": "ALM spent the inner maxiter budget: max_violation=9.091e-02, stationarity=1.286e+01",
-    "objective": "0x1.a723f78985492p-2",
+    "message": "ALM spent the inner maxiter budget: max_violation=9.001e-04, stationarity=1.273e-01",
+    "objective": "0x1.ff14272aa15dap-2",
     "constraint_names": {
      "$tuple": [
       "sum_cap",
@@ -45,40 +45,40 @@
       2
      ],
      "data": [
-      "0x1.745d1745d1780p-4",
-      "-0x1.8ba2e8ba2e8bcp+0"
+      "0x1.d7e8093788000p-11",
+      "-0x1.801d7e8093789p+0"
      ]
     },
-    "max_violation": "0x1.745d1745d1780p-4",
+    "max_violation": "0x1.d7e8093788000p-11",
     "multipliers": {
      "$ndarray": "<f8",
      "shape": [
       2
      ],
      "data": [
-      "0x1.d1745d1745d60p-1",
+      "0x1.ff8a05fdb2190p-1",
       "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
-    "stationarity_norm": "0x1.9b68574794fdep+3",
-    "kkt_stationarity_norm": "0x1.6a09e667f3bcdp-53",
-    "nit": 6,
-    "outer_iterations": 1,
+    "stationarity_norm": "0x1.04b1a44bc61d0p-3",
+    "kkt_stationarity_norm": "0x1.6a09e667f3bcdp-52",
+    "nit": 5,
+    "outer_iterations": 2,
     "restored_best_feasible": false,
     "restored_best_feasible_reason": null,
     "evaluation": {
      "$mappingproxy": {
-      "total": "0x1.d1745d1745d60p-1",
-      "base_value": "0x1.a723f78985492p-2",
+      "total": "0x1.000541a2520b4p-1",
+      "base_value": "0x1.ff14272aa15dap-2",
       "base_grad": {
        "$ndarray": "<f8",
        "shape": [
         2
        ],
        "data": [
-        "-0x1.d1745d1745d10p-1",
-        "-0x1.d1745d1745d0ep-1"
+        "-0x1.ff8a05fdb21dcp-1",
+        "-0x1.ff8a05fdb21e0p-1"
        ]
       },
       "grad": {
@@ -87,8 +87,8 @@
         2
        ],
        "data": [
-        "0x1.22e8ba2e8ba61p+3",
-        "0x1.22e8ba2e8ba61p+3"
+        "0x1.70ad4733621a0p-4",
+        "0x1.70ad473362180p-4"
        ]
       },
       "constraint_values": {
@@ -97,8 +97,8 @@
         2
        ],
        "data": [
-        "0x1.745d1745d1780p-4",
-        "-0x1.8ba2e8ba2e8bcp+0"
+        "0x1.d7e8093788000p-11",
+        "-0x1.801d7e8093789p+0"
        ]
       },
       "constraint_grads": {
@@ -131,8 +131,8 @@
         2
        ],
        "data": [
-        "0x1.745d1745d1780p-4",
-        "-0x1.8ba2e8ba2e8bcp+0"
+        "0x1.d7e8093788000p-11",
+        "-0x1.801d7e8093789p+0"
        ]
       },
       "feasibility_values": {
@@ -141,20 +141,20 @@
         2
        ],
        "data": [
-        "0x1.745d1745d1780p-4",
+        "0x1.d7e8093788000p-11",
         "0x0.0p+0"
        ]
       },
-      "max_violation": "0x1.745d1745d1780p-4",
-      "max_feasibility_violation": "0x1.745d1745d1780p-4",
-      "stationarity_norm": "0x1.9b68574794fdep+3",
+      "max_violation": "0x1.d7e8093788000p-11",
+      "max_feasibility_violation": "0x1.d7e8093788000p-11",
+      "stationarity_norm": "0x1.04b1a44bc61d0p-3",
       "positive_shift_values": {
        "$ndarray": "<f8",
        "shape": [
         2
        ],
        "data": [
-        "0x1.4000000000032p+3",
+        "0x1.16cfd7720f308p+0",
         "0x0.0p+0"
        ]
       },
@@ -164,83 +164,27 @@
         2
        ],
        "data": [
-        "0x1.fbc4c2a50662dp-2",
+        "0x1.ecb8340571a16p-11",
         "0x0.0p+0"
        ]
       }
      }
     },
     "inner_result": {
-     "$OptimizeResult": {
-      "fun": "0x1.d1745d1745d16p-2",
-      "jac": {
-       "$ndarray": "<f8",
-       "shape": [
-        2
-       ],
-       "data": [
-        "0x1.4000000000000p-47",
-        "0x1.4800000000000p-47"
-       ]
-      },
-      "nfev": 10,
-      "njev": 10,
-      "nit": 6,
-      "status": 1,
-      "message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+     "$namespace": {
       "x": {
        "$ndarray": "<f8",
        "shape": [
         2
        ],
        "data": [
-        "0x1.8ba2e8ba2e8bcp+0",
-        "0x1.1745d1745d179p-1"
+        "0x1.801d7e8093789p+0",
+        "0x1.003afd0126f10p-1"
        ]
       },
-      "success": false,
-      "hess_inv": {
-       "$LbfgsInvHessProduct": {
-        "sk": {
-         "$ndarray": "<f8",
-         "shape": [
-          5,
-          2
-         ],
-         "data": [
-          "0x1.c9f25c5bfedd9p-1",
-          "0x1.c9f25c5bfedd9p-2",
-          "0x1.64bd3607d2809p-2",
-          "0x1.64bd3607d2809p-3",
-          "0x1.b0542a8ddfd85p-4",
-          "0x1.b0542a8ddfd85p-5",
-          "0x1.1ac27f40b0444p-4",
-          "0x1.f0db1eeb61e19p-7",
-          "0x1.2f96698a236c0p-6",
-          "-0x1.5515d3432b820p-6"
-         ]
-        },
-        "yk": {
-         "$ndarray": "<f8",
-         "shape": [
-          5,
-          2
-         ],
-         "data": [
-          "0x1.c9f25c5bfedd8p+0",
-          "0x1.c9f25c5bfedd8p-1",
-          "0x1.64bd3607d280cp-1",
-          "0x1.64bd3607d280cp-2",
-          "0x1.bee2b2182ad50p-2",
-          "0x1.52cda774b2df0p-2",
-          "0x1.f5c5fbb5cfb10p-1",
-          "0x1.be9c34dcfeaf0p-1",
-          "0x1.d06563b3ebd00p-7",
-          "-0x1.084971f029fd0p-4"
-         ]
-        }
-       }
-      }
+      "nit": 4,
+      "success": true,
+      "message": "ALM inner solve satisfied the KKT stationarity gate."
      }
     }
    }
@@ -253,45 +197,45 @@
      "sum_cap",
      "x0_floor"
     ],
-    "inner_iterations": 6,
-    "inner_success": false,
-    "inner_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+    "inner_iterations": 1,
+    "inner_success": true,
+    "inner_message": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
     "penalty": "0x1.9000000000000p+6",
     "penalty_values": [
      "0x1.9000000000000p+6",
      "0x1.9000000000000p+6"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.745d1745d1780p-4",
-    "stationarity_norm": "0x1.9b68574794fdep+3",
-    "raw_stationarity_norm": "0x1.9b68574794fdep+3",
+    "max_violation": "0x1.745d1745d1740p-4",
+    "stationarity_norm": "0x1.9b68574794f90p+3",
+    "raw_stationarity_norm": "0x1.9b68574794f90p+3",
     "kkt_stationarity_norm": "0x1.6a09e667f3bcdp-53",
     "constraint_values": [
-     "0x1.745d1745d1780p-4",
-     "-0x1.8ba2e8ba2e8bcp+0"
+     "0x1.745d1745d1740p-4",
+     "-0x1.8ba2e8ba2e8bap+0"
     ],
     "violation_values": [
-     "0x1.745d1745d1780p-4",
+     "0x1.745d1745d1740p-4",
      "0x0.0p+0"
     ],
     "solver_constraint_values": [
-     "0x1.745d1745d1780p-4",
-     "-0x1.8ba2e8ba2e8bcp+0"
+     "0x1.745d1745d1740p-4",
+     "-0x1.8ba2e8ba2e8bap+0"
     ],
     "hard_signed_constraint_values": [
-     "0x1.745d1745d1780p-4",
-     "-0x1.8ba2e8ba2e8bcp+0"
+     "0x1.745d1745d1740p-4",
+     "-0x1.8ba2e8ba2e8bap+0"
     ],
     "hard_violation_values": [
-     "0x1.745d1745d1780p-4",
+     "0x1.745d1745d1740p-4",
      "0x0.0p+0"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.745d1745d1780p-4",
-     "-0x1.8ba2e8ba2e8bcp+0"
+     "0x1.745d1745d1740p-4",
+     "-0x1.8ba2e8ba2e8bap+0"
     ],
-    "hard_max_violation": "0x1.745d1745d1780p-4",
-    "surrogate_max_value": "0x1.745d1745d1780p-4",
+    "hard_max_violation": "0x1.745d1745d1740p-4",
+    "surrogate_max_value": "0x1.745d1745d1740p-4",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
@@ -299,26 +243,26 @@
      "0x0.0p+0"
     ],
     "post_update_multipliers": [
-     "0x1.d1745d1745d60p-1",
+     "0x1.d1745d1745d10p-1",
      "0x0.0p+0"
     ],
     "feasibility_tolerance": "0x1.430cd74f6d478p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.47ae147ae147bp-7",
     "trust_radius": null,
-    "inner_maxiter": 6,
+    "inner_maxiter": 5,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.4800000000000p-47",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.0000000000000p-50",
     "inner_attempts": 1,
-    "accepted_move_norm": "0x1.a38e183fb690ep+0",
-    "accepted_move_norm_scaled": "0x1.a38e183fb690ep+0",
-    "infeasible_stall_move_tolerance": "0x1.5798ee2308c3ap-27",
-    "objective_delta": "0x1.22e8ba2e8ba2fp+2",
-    "feasibility_delta": "-0x1.745d1745d1780p-4",
+    "accepted_move_norm": "0x1.26e59ed16a5f5p-5",
+    "accepted_move_norm_scaled": "0x1.6f21fad8a99d8p-6",
+    "infeasible_stall_move_tolerance": "0x1.13fe09f347a6cp-26",
+    "objective_delta": "0x1.d317cb45f7960p-7",
+    "feasibility_delta": "-0x1.a10c1a10c1a00p-5",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x1.1e3779b97f49ap+2",
+    "stationarity_delta": "0x1.957bba5ff2431p-1",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -330,45 +274,45 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.a723f78985492p-2",
-    "conditioning_penalty_objective": "0x1.fbc4c2a50662ep-2",
-    "conditioning_penalty_objective_ratio": "0x1.333333333339fp+0",
-    "conditioning_total_grad_norm": "0x1.9b68574794fdep+3",
-    "conditioning_base_grad_norm": "0x1.492045d2dd940p+0",
-    "conditioning_penalty_grad_norm": "0x1.c48c6001f0b06p+3",
-    "conditioning_penalty_grad_ratio": "0x1.600000000003dp+3",
-    "penalty_gradient_norm": "0x1.c48c6001f0b06p+3",
-    "sufficient_decrease_measure": "0x1.745d1745d1780p-4",
+    "conditioning_base_objective": "0x1.a723f789854a2p-2",
+    "conditioning_penalty_objective": "0x1.fbc4c2a50657ep-2",
+    "conditioning_penalty_objective_ratio": "0x1.3333333333329p+0",
+    "conditioning_total_grad_norm": "0x1.9b68574794f90p+3",
+    "conditioning_base_grad_norm": "0x1.492045d2dd946p+0",
+    "conditioning_penalty_grad_norm": "0x1.c48c6001f0abap+3",
+    "conditioning_penalty_grad_ratio": "0x1.5fffffffffffbp+3",
+    "penalty_gradient_norm": "0x1.c48c6001f0abap+3",
+    "sufficient_decrease_measure": "0x1.745d1745d1740p-4",
     "dual_update_penalty_increase": true,
     "dual_update_penalty_increase_reason": "hard_feasibility_not_improved_after_dual_update",
     "action": "dual_update",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.745d1745d1780p-4",
-     "-0x1.8ba2e8ba2e8bcp+0"
+     "0x1.745d1745d1740p-4",
+     "-0x1.8ba2e8ba2e8bap+0"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.745d1745d1780p-4",
+     "0x1.745d1745d1740p-4",
      "0x0.0p+0"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.d1745d1745d60p-1",
+     "0x1.d1745d1745d10p-1",
      "0x0.0p+0"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.4000000000032p+3",
+     "0x1.3fffffffffffbp+3",
      "0x0.0p+0"
     ],
     "augmented_term_by_constraint": [
-     "0x1.fbc4c2a50662dp-2",
+     "0x1.fbc4c2a50657dp-2",
      "0x0.0p+0"
     ],
     "active_pressure_by_constraint": [
-     "0x1.d1745d1745da9p-1",
+     "0x1.d1745d1745d09p-1",
      "-0x0.0p+0"
     ],
     "surrogate_minus_hard_normalized_gap": [
@@ -379,9 +323,152 @@
      false,
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.aaaaaaaaaaa16p-1",
-    "augmented_gradient_norm": "0x1.9b68574794fdep+3",
+    "objective_to_augmented_term_ratio": "0x1.aaaaaaaaaaabap-1",
+    "augmented_gradient_norm": "0x1.9b68574794f90p+3",
     "surrogate_kkt_stationarity_norm": "0x1.6a09e667f3bcdp-53",
+    "multiplier_interpretation": "differentiable_alm_multipliers",
+    "max_raw_hard_violation": null,
+    "block_max_raw_hard_violation": null,
+    "block_max_normalized_violation": null,
+    "block_augmented_term": null,
+    "block_positive_shift_norm": null,
+    "blocking_constraint_name": null,
+    "blocking_constraint_block": null
+   },
+   {
+    "outer_iteration": 2,
+    "continuation_iteration": 0,
+    "constraint_names": [
+     "sum_cap",
+     "x0_floor"
+    ],
+    "inner_iterations": 4,
+    "inner_success": true,
+    "inner_message": "ALM inner solve satisfied the KKT stationarity gate.",
+    "penalty": "0x1.9000000000000p+6",
+    "penalty_values": [
+     "0x1.9000000000000p+6",
+     "0x1.9000000000000p+6"
+    ],
+    "block_penalties": null,
+    "max_violation": "0x1.d7e8093788000p-11",
+    "stationarity_norm": "0x1.b9613114d4b23p-47",
+    "raw_stationarity_norm": "0x1.b9613114d4b23p-47",
+    "kkt_stationarity_norm": "0x1.6a09e667f3bcdp-52",
+    "constraint_values": [
+     "0x1.d7e8093788000p-11",
+     "-0x1.801d7e8093789p+0"
+    ],
+    "violation_values": [
+     "0x1.d7e8093788000p-11",
+     "0x0.0p+0"
+    ],
+    "solver_constraint_values": [
+     "0x1.d7e8093788000p-11",
+     "-0x1.801d7e8093789p+0"
+    ],
+    "hard_signed_constraint_values": [
+     "0x1.d7e8093788000p-11",
+     "-0x1.801d7e8093789p+0"
+    ],
+    "hard_violation_values": [
+     "0x1.d7e8093788000p-11",
+     "0x0.0p+0"
+    ],
+    "surrogate_signed_constraint_values": [
+     "0x1.d7e8093788000p-11",
+     "-0x1.801d7e8093789p+0"
+    ],
+    "hard_max_violation": "0x1.d7e8093788000p-11",
+    "surrogate_max_value": "0x1.d7e8093788000p-11",
+    "hard_positive_shift_zero": false,
+    "signal_mismatch_active": false,
+    "multipliers": [
+     "0x1.d1745d1745d10p-1",
+     "0x0.0p+0"
+    ],
+    "post_update_multipliers": [
+     "0x1.ff8a05fdb2190p-1",
+     "0x0.0p+0"
+    ],
+    "feasibility_tolerance": "0x1.430cd74f6d478p-1",
+    "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
+    "stationarity_tolerance": "0x1.47ae147ae147bp-7",
+    "trust_radius": null,
+    "inner_maxiter": 4,
+    "inner_maxls": 20,
+    "inner_maxfun": null,
+    "inner_profile": "unbounded",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.4000000000000p-47",
+    "inner_attempts": 1,
+    "accepted_move_norm": "0x1.04b1a44bc6515p-4",
+    "accepted_move_norm_scaled": "0x1.3e22a4803b124p-5",
+    "infeasible_stall_move_tolerance": "0x1.198f0291a462fp-26",
+    "objective_delta": "0x1.a2f373d1a9fc9p-2",
+    "feasibility_delta": "0x1.70ad473362640p-4",
+    "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
+    "stationarity_delta": "0x1.9b68574794f89p+3",
+    "meaningful_progress": true,
+    "feasible_stall_count": 0,
+    "infeasible_stall": false,
+    "inner_false_success": false,
+    "inner_stall_reason": null,
+    "active_violation_index": 0,
+    "active_constraint_name": "sum_cap",
+    "nonfinite_candidate_evaluation": false,
+    "nonfinite_candidate_fields": null,
+    "multiplier_cap_binding": false,
+    "multiplier_cap_binding_indices": [],
+    "conditioning_base_objective": "0x1.ff14272aa15dap-2",
+    "conditioning_penalty_objective": "0x1.c23e64808fa00p-11",
+    "conditioning_penalty_objective_ratio": "0x1.c30e2a87074e3p-10",
+    "conditioning_total_grad_norm": "0x1.b9613114d4b23p-47",
+    "conditioning_base_grad_norm": "0x1.69b67a5c565e9p+0",
+    "conditioning_penalty_grad_norm": "0x1.69b67a5c565b2p+0",
+    "conditioning_penalty_grad_ratio": "0x1.fffffffffffb2p-1",
+    "penalty_gradient_norm": "0x1.69b67a5c565b2p+0",
+    "sufficient_decrease_measure": "0x1.d7e8093788000p-11",
+    "action": "dual_update",
+    "raw_signed_constraint_values": null,
+    "normalized_signed_constraint_values": [
+     "0x1.d7e8093788000p-11",
+     "-0x1.801d7e8093789p+0"
+    ],
+    "raw_hard_violation_values": null,
+    "normalized_feasibility_values": [
+     "0x1.d7e8093788000p-11",
+     "0x0.0p+0"
+    ],
+    "constraint_scales": null,
+    "constraint_blocks": null,
+    "normalized_multipliers": [
+     "0x1.d1745d1745d10p-1",
+     "0x0.0p+0"
+    ],
+    "raw_dual_estimates": null,
+    "positive_shift_values": [
+     "0x1.ff8a05fdb2190p-1",
+     "0x0.0p+0"
+    ],
+    "augmented_term_by_constraint": [
+     "0x1.c23e64808f929p-11",
+     "0x0.0p+0"
+    ],
+    "active_pressure_by_constraint": [
+     "0x1.d77b4c430099fp-11",
+     "-0x0.0p+0"
+    ],
+    "surrogate_minus_hard_normalized_gap": [
+     "0x0.0p+0",
+     "0x0.0p+0"
+    ],
+    "surrogate_hard_sign_mismatch_by_constraint": [
+     false,
+     false
+    ],
+    "objective_to_augmented_term_ratio": "0x1.2296f1826a619p+9",
+    "augmented_gradient_norm": "0x1.b9613114d4b23p-47",
+    "surrogate_kkt_stationarity_norm": "0x1.6a09e667f3bcdp-52",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
     "block_max_raw_hard_violation": null,
@@ -416,8 +503,8 @@
       2
      ],
      "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
+      "0x1.851eb851eb852p+0",
+      "0x1.0a3d70a3d70a4p-1"
      ]
     },
     "multipliers": {
@@ -441,8 +528,8 @@
       2
      ],
      "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
+      "0x1.851eb851eb852p+0",
+      "0x1.0a3d70a3d70a4p-1"
      ]
     },
     "multipliers": {
@@ -466,8 +553,33 @@
       2
      ],
      "data": [
-      "0x1.c9f25c5bfedd9p-1",
-      "0x1.c9f25c5bfedd9p-2"
+      "0x1.1d11d5c2f2b1cp+1",
+      "0x1.3a23ab85e5638p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.4000000000000p+3",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.8ba2e8ba2e8bap+0",
+      "0x1.1745d1745d174p-1"
      ]
     },
     "multipliers": {
@@ -491,273 +603,8 @@
       2
      ],
      "data": [
-      "0x1.c9f25c5bfedd9p-1",
-      "0x1.c9f25c5bfedd9p-2"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+1",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3e287baff40efp+0",
-      "0x1.3e287baff40efp-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3e287baff40efp+0",
-      "0x1.3e287baff40efp-1"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+1",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.592dbe58d20c7p+0",
-      "0x1.592dbe58d20c7p-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.592dbe58d20c7p+0",
-      "0x1.592dbe58d20c7p-1"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.9db55c61c19bdp+0",
-      "0x1.774881dd682a0p-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.6ad9e64cdd10bp+0",
-      "0x1.60f12ad47f93fp-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.6ad9e64cdd10bp+0",
-      "0x1.60f12ad47f93fp-1"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.6f983ff3059e6p+0",
-      "0x1.56487c3a6637ep-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.6f983ff3059e6p+0",
-      "0x1.56487c3a6637ep-1"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.8ba2e8ba2e8bcp+0",
-      "0x1.1745d1745d179p-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.8ba2e8ba2e8bcp+0",
-      "0x1.1745d1745d179p-1"
+      "0x1.8ba2e8ba2e8bap+0",
+      "0x1.1745d1745d174p-1"
      ]
     }
    },
@@ -769,8 +616,8 @@
       2
      ],
      "data": [
-      "0x1.8ba2e8ba2e8bcp+0",
-      "0x1.1745d1745d179p-1"
+      "0x1.8ba2e8ba2e8bap+0",
+      "0x1.1745d1745d174p-1"
      ]
     }
    },
@@ -782,8 +629,8 @@
       2
      ],
      "data": [
-      "0x1.8ba2e8ba2e8bcp+0",
-      "0x1.1745d1745d179p-1"
+      "0x1.8ba2e8ba2e8bap+0",
+      "0x1.1745d1745d174p-1"
      ]
     },
     "multipliers": {
@@ -792,7 +639,7 @@
       2
      ],
      "data": [
-      "0x1.d1745d1745d60p-1",
+      "0x1.d1745d1745d10p-1",
       "0x0.0p+0"
      ]
     },
@@ -806,7 +653,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": "hard_feasibility_not_improved_after_dual_update",
     "outer_termination": null,
-    "event_sha256": "a6bc15557bac13f7e950f30833d04dd5a31c144c72384f1cf916db64a97ac34c"
+    "event_sha256": "39e9cd20d0c0dda37a4189e5fbebe903d019becb5910dae848280e5f35e9431b"
    },
    {
     "event": "on_outer_boundary",
@@ -816,8 +663,579 @@
     "resume_eligible": true
    },
    {
+    "event": "outer_state_callback",
+    "outer_iteration": 2,
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6"
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.8ba2e8ba2e8bap+0",
+      "0x1.1745d1745d174p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.8ba2e8ba2e8bap+0",
+      "0x1.1745d1745d174p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.ad3beb0c695a7p-1",
+      "-0x1.4b1053ce5a964p-3"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.56d28faa23999p+0",
+      "0x1.5b4a3ea88e664p-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.56d28faa23999p+0",
+      "0x1.5b4a3ea88e664p-2"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.5d86bbd81a73ep+0",
+      "0x1.761aef6069cf7p-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.78576c8ff5dd2p+0",
+      "0x1.e15db23fd7743p-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.78576c8ff5dd2p+0",
+      "0x1.e15db23fd7743p-2"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.0000000000001p+1",
+      "0x1.0000000000001p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.79e6d71857989p+0",
+      "0x1.e79b5c615e61dp-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d26815eead24ap+0",
+      "0x1.a4d02bdd5a490p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.7b7bf736cefb9p+0",
+      "0x1.edefdcdb3bedep-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.b4da5d687b356p+0",
+      "0x1.69b4bad0f66a9p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.7d0f81086b8dap+0",
+      "0x1.f43e0421ae363p-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.a1e23133572a6p+0",
+      "0x1.43c46266ae54ap-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.7e907016fa94fp+0",
+      "0x1.fa41c05bea535p-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.95dffee723350p+0",
+      "0x1.2bbffdce4669ep-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.7fe3e58f7ab69p+0",
+      "0x1.ff8f963dead9fp-2"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.7fe3e58f7ab69p+0",
+      "0x1.ff8f963dead9fp-2"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.8168bca7bf21dp+0",
+      "0x1.02d1794f7e438p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.801d7e8093789p+0",
+      "0x1.003afd0126f10p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.d1745d1745d10p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.801d7e8093789p+0",
+      "0x1.003afd0126f10p-1"
+     ]
+    }
+   },
+   {
+    "event": "accepted_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.801d7e8093789p+0",
+      "0x1.003afd0126f10p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.801d7e8093789p+0",
+      "0x1.003afd0126f10p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.ff8a05fdb2190p-1",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "on_outer_step",
+    "outer_iteration": 2,
+    "continuation_iteration": 0,
+    "action": "dual_update",
+    "dual_update_penalty_reason": null,
+    "outer_termination": null,
+    "event_sha256": "bb182fa51c7b231bec6bd81b0db047494ed50599b2d462e655c41b8604d673eb"
+   },
+   {
     "event": "on_outer_boundary",
-    "completed_outer_iterations": 1,
+    "completed_outer_iterations": 2,
+    "completed_action": "dual_update",
+    "termination_reason": null,
+    "resume_eligible": true
+   },
+   {
+    "event": "on_outer_boundary",
+    "completed_outer_iterations": 2,
     "completed_action": "dual_update",
     "termination_reason": "dual_update",
     "resume_eligible": false
@@ -829,8 +1247,8 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.8ba2e8ba2e8bcp+0",
-       "0x1.1745d1745d179p-1"
+       "0x1.8ba2e8ba2e8bap+0",
+       "0x1.1745d1745d174p-1"
       ]
      },
      "accepted_state": null,
@@ -845,7 +1263,7 @@
      "completed_outer_iterations": 1,
      "multipliers": {
       "$tuple": [
-       "0x1.d1745d1745d60p-1",
+       "0x1.d1745d1745d10p-1",
        "0x0.0p+0"
       ]
      },
@@ -854,7 +1272,7 @@
      "update_stationarity_tol": "0x1.47ae147ae147bp-7",
      "trust_radius": null,
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.745d1745d1780p-4",
+     "sufficient_decrease_measure": "0x1.745d1745d1740p-4",
      "sufficient_decrease_multipliers": {
       "$tuple": [
        "0x0.0p+0",
@@ -866,7 +1284,7 @@
      "completed_action": "dual_update",
      "termination_reason": null,
      "resume_eligible": true,
-     "total_inner_iterations": 6,
+     "total_inner_iterations": 1,
      "cap_binding_detected": false,
      "cap_binding_indices": {
       "$tuple": []
@@ -878,7 +1296,7 @@
        {
         "$tuple": [
          "maxiter",
-         6
+         5
         ]
        }
       ]
@@ -890,8 +1308,8 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.8ba2e8ba2e8bcp+0",
-       "0x1.1745d1745d179p-1"
+       "0x1.801d7e8093789p+0",
+       "0x1.003afd0126f10p-1"
       ]
      },
      "accepted_state": null,
@@ -903,31 +1321,31 @@
       ]
      },
      "constraint_blocks": null,
-     "completed_outer_iterations": 1,
+     "completed_outer_iterations": 2,
      "multipliers": {
       "$tuple": [
-       "0x1.d1745d1745d60p-1",
+       "0x1.ff8a05fdb2190p-1",
        "0x0.0p+0"
       ]
      },
      "penalty": "0x1.9000000000000p+6",
-     "update_feasibility_tol": "0x1.430cd74f6d478p-1",
-     "update_stationarity_tol": "0x1.47ae147ae147bp-7",
+     "update_feasibility_tol": "0x1.0270ac3f8a9fap-4",
+     "update_stationarity_tol": "0x1.0624dd2f1a9fcp-10",
      "trust_radius": null,
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.745d1745d1780p-4",
+     "sufficient_decrease_measure": "0x1.d7e8093788000p-11",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x0.0p+0",
+       "0x1.d1745d1745d10p-1",
        "0x0.0p+0"
       ]
      },
-     "sufficient_decrease_penalty": "0x1.4000000000000p+3",
+     "sufficient_decrease_penalty": "0x1.9000000000000p+6",
      "best_feasible": null,
      "completed_action": "dual_update",
-     "termination_reason": "dual_update",
-     "resume_eligible": false,
-     "total_inner_iterations": 6,
+     "termination_reason": null,
+     "resume_eligible": true,
+     "total_inner_iterations": 5,
      "cap_binding_detected": false,
      "cap_binding_indices": {
       "$tuple": []
@@ -939,7 +1357,68 @@
        {
         "$tuple": [
          "maxiter",
-         6
+         5
+        ]
+       }
+      ]
+     }
+    }
+   },
+   {
+    "$dataclass": "ALMTransitionSnapshot",
+    "fields": {
+     "x": {
+      "$tuple": [
+       "0x1.801d7e8093789p+0",
+       "0x1.003afd0126f10p-1"
+      ]
+     },
+     "accepted_state": null,
+     "geometry_identity": null,
+     "constraint_names": {
+      "$tuple": [
+       "sum_cap",
+       "x0_floor"
+      ]
+     },
+     "constraint_blocks": null,
+     "completed_outer_iterations": 2,
+     "multipliers": {
+      "$tuple": [
+       "0x1.ff8a05fdb2190p-1",
+       "0x0.0p+0"
+      ]
+     },
+     "penalty": "0x1.9000000000000p+6",
+     "update_feasibility_tol": "0x1.0270ac3f8a9fap-4",
+     "update_stationarity_tol": "0x1.0624dd2f1a9fcp-10",
+     "trust_radius": null,
+     "last_cap_binding_active": false,
+     "sufficient_decrease_measure": "0x1.d7e8093788000p-11",
+     "sufficient_decrease_multipliers": {
+      "$tuple": [
+       "0x1.d1745d1745d10p-1",
+       "0x0.0p+0"
+      ]
+     },
+     "sufficient_decrease_penalty": "0x1.9000000000000p+6",
+     "best_feasible": null,
+     "completed_action": "dual_update",
+     "termination_reason": "dual_update",
+     "resume_eligible": false,
+     "total_inner_iterations": 5,
+     "cap_binding_detected": false,
+     "cap_binding_indices": {
+      "$tuple": []
+     },
+     "penalty_cap_reached": false,
+     "penalty_cap_requested": null,
+     "inner_options": {
+      "$tuple": [
+       {
+        "$tuple": [
+         "maxiter",
+         5
         ]
        }
       ]

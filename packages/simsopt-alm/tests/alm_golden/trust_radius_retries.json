@@ -26,7 +26,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a6p+0",
+      "0x1.00e2c4a6886aap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -45,10 +45,10 @@
       1
      ],
      "data": [
-      "0x1.c5894d10d4c00p-9"
+      "0x1.c5894d10d5400p-9"
      ]
     },
-    "max_violation": "0x1.c5894d10d4c00p-9",
+    "max_violation": "0x1.c5894d10d5400p-9",
     "multipliers": {
      "$ndarray": "<f8",
      "shape": [
@@ -59,7 +59,7 @@
      ]
     },
     "penalty": "0x1.9000000000000p+6",
-    "stationarity_norm": "0x1.6253443526440p-2",
+    "stationarity_norm": "0x1.6253443526a40p-2",
     "kkt_stationarity_norm": "0x0.0p+0",
     "nit": 17,
     "outer_iterations": 4,
@@ -67,7 +67,7 @@
     "restored_best_feasible_reason": null,
     "evaluation": {
      "$mappingproxy": {
-      "total": "0x1.440099cb59069p+6",
+      "total": "0x1.440099cb5906ap+6",
       "base_value": "0x1.43c03bd4a8d67p+6",
       "base_grad": {
        "$ndarray": "<f8",
@@ -85,7 +85,7 @@
         2
        ],
        "data": [
-        "0x1.6253443526440p-2",
+        "0x1.6253443526a40p-2",
         "0x0.0p+0"
        ]
       },
@@ -95,7 +95,7 @@
         1
        ],
        "data": [
-        "0x1.c5894d10d4c00p-9"
+        "0x1.c5894d10d5400p-9"
        ]
       },
       "constraint_grads": {
@@ -118,7 +118,7 @@
         1
        ],
        "data": [
-        "0x1.c5894d10d4c00p-9"
+        "0x1.c5894d10d5400p-9"
        ]
       },
       "feasibility_values": {
@@ -127,19 +127,19 @@
         1
        ],
        "data": [
-        "0x1.c5894d10d4c00p-9"
+        "0x1.c5894d10d5400p-9"
        ]
       },
-      "max_violation": "0x1.c5894d10d4c00p-9",
-      "max_feasibility_violation": "0x1.c5894d10d4c00p-9",
-      "stationarity_norm": "0x1.6253443526440p-2",
+      "max_violation": "0x1.c5894d10d5400p-9",
+      "max_feasibility_violation": "0x1.c5894d10d5400p-9",
+      "stationarity_norm": "0x1.6253443526a40p-2",
       "positive_shift_values": {
        "$ndarray": "<f8",
        "shape": [
         1
        ],
        "data": [
-        "0x1.256cf47c038bcp+4"
+        "0x1.256cf47c038d4p+4"
        ]
       },
       "augmented_term_by_constraint": {
@@ -148,7 +148,7 @@
         1
        ],
        "data": [
-        "0x1.0177dac0c088cp-4"
+        "0x1.0177dac0c0cf3p-4"
        ]
       }
      }
@@ -161,7 +161,7 @@
         2
        ],
        "data": [
-        "0x1.00e2c4a6886a6p+0",
+        "0x1.00e2c4a6886aap+0",
         "0x1.0000000000000p+0"
        ]
       },
@@ -179,7 +179,7 @@
     "constraint_names": [
      "x0_cap"
     ],
-    "inner_iterations": 8,
+    "inner_iterations": 10,
     "inner_success": true,
     "inner_message": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
     "penalty": "0x1.4000000000000p+3",
@@ -187,30 +187,30 @@
      "0x1.4000000000000p+3"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.0000000000000p+0",
-    "stationarity_norm": "0x1.8000000000000p+2",
-    "raw_stationarity_norm": "0x1.8000000000000p+2",
+    "max_violation": "0x1.6000000000000p+1",
+    "stationarity_norm": "0x1.e000000000000p+3",
+    "raw_stationarity_norm": "0x1.e000000000000p+3",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
     "violation_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
     "solver_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
     "hard_signed_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
     "hard_violation_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
-    "hard_max_violation": "0x1.0000000000000p+0",
-    "surrogate_max_value": "0x1.0000000000000p+0",
+    "hard_max_violation": "0x1.6000000000000p+1",
+    "surrogate_max_value": "0x1.6000000000000p+1",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
@@ -222,20 +222,20 @@
     "feasibility_tolerance": "0x1.96b230bcdc434p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.999999999999ap-4",
-    "trust_radius": "0x1.8000000000000p+1",
-    "inner_maxiter": 45,
+    "trust_radius": "0x1.0000000000000p+1",
+    "inner_maxiter": 41,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
     "inner_lbfgsb_projected_gradient_norm": "0x0.0p+0",
     "inner_attempts": 3,
-    "accepted_move_norm": "0x1.1e3779b97f4a8p+1",
-    "accepted_move_norm_scaled": "0x1.1e3779b97f4a8p+1",
-    "infeasible_stall_move_tolerance": "0x1.5798ee2308c3ap-27",
-    "objective_delta": "0x1.2400000000000p+5",
-    "feasibility_delta": "-0x1.0000000000000p+0",
-    "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x1.46625308ca7c0p+2",
+    "accepted_move_norm": "0x1.4000000000000p+1",
+    "accepted_move_norm_scaled": "0x1.8fce095e0c6d5p+0",
+    "infeasible_stall_move_tolerance": "0x1.13031874c0e76p-26",
+    "objective_delta": "0x1.0e00000000000p+5",
+    "feasibility_delta": "-0x1.4000000000000p+1",
+    "feasibility_delta_tolerance": "0x1.711947cfa26a2p-19",
+    "stationarity_delta": "0x1.e000000000000p+2",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -247,23 +247,23 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.0000000000000p+6",
-    "conditioning_penalty_objective": "0x1.4000000000000p+2",
-    "conditioning_penalty_objective_ratio": "0x1.4000000000000p-4",
-    "conditioning_total_grad_norm": "0x1.8000000000000p+2",
-    "conditioning_base_grad_norm": "0x1.0000000000000p+4",
-    "conditioning_penalty_grad_norm": "0x1.4000000000000p+3",
-    "conditioning_penalty_grad_ratio": "0x1.4000000000000p-1",
-    "penalty_gradient_norm": "0x1.4000000000000p+3",
-    "sufficient_decrease_measure": "0x1.0000000000000p+0",
+    "conditioning_base_objective": "0x1.3880000000000p+5",
+    "conditioning_penalty_objective": "0x1.2e80000000000p+5",
+    "conditioning_penalty_objective_ratio": "0x1.ef9db22d0e560p-1",
+    "conditioning_total_grad_norm": "0x1.e000000000000p+3",
+    "conditioning_base_grad_norm": "0x1.9000000000000p+3",
+    "conditioning_penalty_grad_norm": "0x1.b800000000000p+4",
+    "conditioning_penalty_grad_ratio": "0x1.199999999999ap+1",
+    "penalty_gradient_norm": "0x1.b800000000000p+4",
+    "sufficient_decrease_measure": "0x1.6000000000000p+1",
     "action": "penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.0000000000000p+0"
+     "0x1.6000000000000p+1"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
@@ -272,13 +272,13 @@
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.4000000000000p+3"
+     "0x1.b800000000000p+4"
     ],
     "augmented_term_by_constraint": [
-     "0x1.4000000000000p+2"
+     "0x1.2e80000000000p+5"
     ],
     "active_pressure_by_constraint": [
-     "0x1.4000000000000p+3"
+     "0x1.2e80000000000p+6"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -286,8 +286,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.999999999999ap+3",
-    "augmented_gradient_norm": "0x1.8000000000000p+2",
+    "objective_to_augmented_term_ratio": "0x1.08767ab5f34e4p+0",
+    "augmented_gradient_norm": "0x1.e000000000000p+3",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -304,7 +304,7 @@
     "constraint_names": [
      "x0_cap"
     ],
-    "inner_iterations": 3,
+    "inner_iterations": 2,
     "inner_success": true,
     "inner_message": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
     "penalty": "0x1.9000000000000p+6",
@@ -347,20 +347,20 @@
     "feasibility_tolerance": "0x1.430cd74f6d478p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.47ae147ae147bp-7",
-    "trust_radius": "0x1.8000000000000p+0",
+    "trust_radius": "0x1.8000000000000p+1",
     "inner_maxiter": 40,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
     "inner_lbfgsb_projected_gradient_norm": "0x0.0p+0",
-    "inner_attempts": 2,
-    "accepted_move_norm": "0x1.0000000000000p-1",
-    "accepted_move_norm_scaled": "0x1.c9f25c5bfedd9p-3",
-    "infeasible_stall_move_tolerance": "0x1.80274f468e3cfp-26",
-    "objective_delta": "0x1.8000000000000p+0",
-    "feasibility_delta": "-0x1.0000000000000p-1",
-    "feasibility_delta_tolerance": "0x1.92a737110e454p-20",
-    "stationarity_delta": "0x1.8000000000000p+2",
+    "inner_attempts": 1,
+    "accepted_move_norm": "0x1.4000000000000p+0",
+    "accepted_move_norm_scaled": "0x1.49cee5b7c9593p-2",
+    "infeasible_stall_move_tolerance": "0x1.4d610d8e2f550p-25",
+    "objective_delta": "0x1.2c00000000000p+3",
+    "feasibility_delta": "0x1.4000000000000p+0",
+    "feasibility_delta_tolerance": "0x1.711947cfa26a2p-19",
+    "stationarity_delta": "0x1.e000000000000p+3",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -429,7 +429,7 @@
     "constraint_names": [
      "x0_cap"
     ],
-    "inner_iterations": 4,
+    "inner_iterations": 3,
     "inner_success": true,
     "inner_message": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
     "penalty": "0x1.9000000000000p+6",
@@ -437,55 +437,55 @@
      "0x1.9000000000000p+6"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.6969696969690p-3",
-    "stationarity_norm": "0x1.8000000000000p-46",
-    "raw_stationarity_norm": "0x1.8000000000000p-46",
+    "max_violation": "0x1.6969696969670p-3",
+    "stationarity_norm": "0x1.e000000000000p-44",
+    "raw_stationarity_norm": "0x1.e000000000000p-44",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
     "violation_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
     "solver_constraint_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
     "hard_violation_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
-    "hard_max_violation": "0x1.6969696969690p-3",
-    "surrogate_max_value": "0x1.6969696969690p-3",
+    "hard_max_violation": "0x1.6969696969670p-3",
+    "surrogate_max_value": "0x1.6969696969670p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
      "0x0.0p+0"
     ],
     "post_update_multipliers": [
-     "0x1.1a5a5a5a5a5a0p+4"
+     "0x1.1a5a5a5a5a588p+4"
     ],
     "feasibility_tolerance": "0x1.430cd74f6d478p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.47ae147ae147bp-7",
-    "trust_radius": "0x1.2000000000000p+1",
-    "inner_maxiter": 39,
+    "trust_radius": "0x1.8000000000000p+1",
+    "inner_maxiter": 38,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.8000000000000p-46",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.e000000000000p-44",
     "inner_attempts": 1,
-    "accepted_move_norm": "0x1.52d2d2d2d2d2ep+0",
-    "accepted_move_norm_scaled": "0x1.f757f61ad619fp-2",
+    "accepted_move_norm": "0x1.52d2d2d2d2d32p+0",
+    "accepted_move_norm_scaled": "0x1.f757f61ad61a5p-2",
     "infeasible_stall_move_tolerance": "0x1.ce9506c5ff273p-26",
-    "objective_delta": "0x1.655a5a5a5a5a5p+6",
-    "feasibility_delta": "0x1.52d2d2d2d2d2ep+0",
+    "objective_delta": "0x1.655a5a5a5a5a6p+6",
+    "feasibility_delta": "0x1.52d2d2d2d2d32p+0",
     "feasibility_delta_tolerance": "0x1.92a737110e454p-20",
-    "stationarity_delta": "0x1.0dfffffffffffp+7",
+    "stationarity_delta": "0x1.0dffffffffffcp+7",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -498,22 +498,22 @@
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
     "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
-    "conditioning_penalty_objective": "0x1.8e9dacbbcad80p+0",
-    "conditioning_penalty_objective_ratio": "0x1.47ae147ae1461p-6",
-    "conditioning_total_grad_norm": "0x1.8000000000000p-46",
+    "conditioning_penalty_objective": "0x1.8e9dacbbcad40p+0",
+    "conditioning_penalty_objective_ratio": "0x1.47ae147ae142cp-6",
+    "conditioning_total_grad_norm": "0x1.e000000000000p-44",
     "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
-    "conditioning_penalty_grad_norm": "0x1.1a5a5a5a5a5a0p+4",
-    "conditioning_penalty_grad_ratio": "0x1.ffffffffffff5p-1",
-    "penalty_gradient_norm": "0x1.1a5a5a5a5a5a0p+4",
-    "sufficient_decrease_measure": "0x1.6969696969690p-3",
+    "conditioning_penalty_grad_norm": "0x1.1a5a5a5a5a588p+4",
+    "conditioning_penalty_grad_ratio": "0x1.fffffffffffcap-1",
+    "penalty_gradient_norm": "0x1.1a5a5a5a5a588p+4",
+    "sufficient_decrease_measure": "0x1.6969696969670p-3",
     "action": "dual_update",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.6969696969690p-3"
+     "0x1.6969696969670p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
@@ -522,13 +522,13 @@
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.1a5a5a5a5a5a0p+4"
+     "0x1.1a5a5a5a5a588p+4"
     ],
     "augmented_term_by_constraint": [
-     "0x1.8e9dacbbcad8ep+0"
+     "0x1.8e9dacbbcad4ap+0"
     ],
     "active_pressure_by_constraint": [
-     "0x1.8e9dacbbcad8fp+1"
+     "0x1.8e9dacbbcad4ap+1"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -536,8 +536,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.9000000000012p+5",
-    "augmented_gradient_norm": "0x1.8000000000000p-46",
+    "objective_to_augmented_term_ratio": "0x1.9000000000056p+5",
+    "augmented_gradient_norm": "0x1.e000000000000p-44",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -562,34 +562,34 @@
      "0x1.9000000000000p+6"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.c5894d10d4c00p-9",
+    "max_violation": "0x1.c5894d10d5400p-9",
     "stationarity_norm": "0x1.8000000000000p-47",
     "raw_stationarity_norm": "0x1.8000000000000p-47",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
     "violation_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
     "solver_constraint_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
     "hard_signed_constraint_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
     "hard_violation_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
-    "hard_max_violation": "0x1.c5894d10d4c00p-9",
-    "surrogate_max_value": "0x1.c5894d10d4c00p-9",
+    "hard_max_violation": "0x1.c5894d10d5400p-9",
+    "surrogate_max_value": "0x1.c5894d10d5400p-9",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.1a5a5a5a5a5a0p+4"
+     "0x1.1a5a5a5a5a588p+4"
     ],
     "post_update_multipliers": [
      "0x1.1fe3a76b2ef2ep+4"
@@ -597,20 +597,20 @@
     "feasibility_tolerance": "0x1.0270ac3f8a9fap-4",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.0624dd2f1a9fcp-10",
-    "trust_radius": "0x1.2000000000000p+1",
+    "trust_radius": "0x1.8000000000000p+1",
     "inner_maxiter": 35,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
     "inner_lbfgsb_projected_gradient_norm": "0x1.8000000000000p-47",
     "inner_attempts": 1,
-    "accepted_move_norm": "0x1.6253443526160p-3",
-    "accepted_move_norm_scaled": "0x1.caf4d5e9adbb4p-4",
-    "infeasible_stall_move_tolerance": "0x1.0943eeafc3efdp-26",
-    "objective_delta": "0x1.86ccc776daf80p+0",
-    "feasibility_delta": "0x1.6253443526160p-3",
+    "accepted_move_norm": "0x1.6253443526120p-3",
+    "accepted_move_norm_scaled": "0x1.caf4d5e9adb65p-4",
+    "infeasible_stall_move_tolerance": "0x1.0943eeafc3efap-26",
+    "objective_delta": "0x1.86ccc776dae40p+0",
+    "feasibility_delta": "0x1.6253443526120p-3",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x1.1a5a5a5a5a597p+4",
+    "stationarity_delta": "0x1.1a5a5a5a5a567p+4",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -623,38 +623,38 @@
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
     "conditioning_base_objective": "0x1.43c03bd4a8d67p+6",
-    "conditioning_penalty_objective": "0x1.f920c7fdd1800p-5",
-    "conditioning_penalty_objective_ratio": "0x1.8f6babe6113b0p-11",
+    "conditioning_penalty_objective": "0x1.f920c7fdd2000p-5",
+    "conditioning_penalty_objective_ratio": "0x1.8f6babe611a04p-11",
     "conditioning_total_grad_norm": "0x1.8000000000000p-47",
     "conditioning_base_grad_norm": "0x1.1fe3a76b2ef2bp+4",
     "conditioning_penalty_grad_norm": "0x1.1fe3a76b2ef2ep+4",
     "conditioning_penalty_grad_ratio": "0x1.0000000000003p+0",
     "penalty_gradient_norm": "0x1.1fe3a76b2ef2ep+4",
-    "sufficient_decrease_measure": "0x1.c5894d10d4c00p-9",
+    "sufficient_decrease_measure": "0x1.c5894d10d5400p-9",
     "action": "dual_update",
     "outer_termination": "max_outer",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.c5894d10d4c00p-9"
+     "0x1.c5894d10d5400p-9"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.1a5a5a5a5a5a0p+4"
+     "0x1.1a5a5a5a5a588p+4"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
      "0x1.1fe3a76b2ef2ep+4"
     ],
     "augmented_term_by_constraint": [
-     "0x1.f920c7fdd1806p-5"
+     "0x1.f920c7fdd207fp-5"
     ],
     "active_pressure_by_constraint": [
-     "0x1.fe083ebfa9461p-5"
+     "0x1.fe083ebfa9d60p-5"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -662,7 +662,7 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.4827c45979aaep+10",
+    "objective_to_augmented_term_ratio": "0x1.4827c4597952dp+10",
     "augmented_gradient_norm": "0x1.8000000000000p-47",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
@@ -698,8 +698,8 @@
       2
      ],
      "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
+      "0x1.4000000000000p+0",
+      "0x1.0000000000000p+0"
      ]
     },
     "multipliers": {
@@ -722,8 +722,8 @@
       2
      ],
      "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
+      "0x1.4000000000000p+0",
+      "0x1.0000000000000p+0"
      ]
     },
     "multipliers": {
@@ -746,8 +746,8 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+3",
-      "0x1.fffffffffffcdp+0"
+      "0x1.6800000000000p+3",
+      "0x1.0000000000000p+0"
      ]
     },
     "multipliers": {
@@ -770,1379 +770,7 @@
       2
      ],
      "data": [
-      "0x1.de57bef39c825p-1",
-      "0x1.de57bef39c7f5p-3"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.1de57bef39c82p+2",
-      "0x1.1de57bef39c66p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.1de57bef39c82p+2",
-      "0x1.1de57bef39c66p+0"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.cac955f69abd5p+2",
-      "0x1.32bf110e92a20p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.20f337296b8ccp+2",
-      "0x1.1e43c217958dep+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.75de469003251p+2",
-      "0x1.288169931417fp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.21bab4403e01ap+2",
-      "0x1.1e5bd0d84099cp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.5942d241b0c1fp+2",
-      "0x1.250e3ac432960p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.2211de7ea30a1p+2",
-      "0x1.1e6653dd345cdp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.467efa41eea74p+2",
-      "0x1.22cae723bd6e1p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.2237f59c6da27p+2",
-      "0x1.1e6aebd07eb1ap+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3a2964329ef27p+2",
-      "0x1.214e1bedd62e0p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3a2964329ef27p+2",
-      "0x1.214e1bedd62e0p+0"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.bfec3659ec3fep+2",
-      "0x1.0f61f6b0777b9p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3bb6502f557b6p+2",
-      "0x1.2118ed166b527p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.7dd14344a0ddap+2",
-      "0x1.183d71e371670p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3c1b96fe192bep+2",
-      "0x1.210b5b314b22fp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.6779e4daba68ep+2",
-      "0x1.1b3bc654f3c08p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3c47e5c0807e6p+2",
-      "0x1.21056b648fd48p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.58ca2cd6ee65fp+2",
-      "0x1.1d3388b14ca89p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3c5b444e94c93p+2",
-      "0x1.2102d300d7b2bp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.4f1f58a8927d7p+2",
-      "0x1.1e7f21f54dda1p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3c63ba040c976p+2",
-      "0x1.2101b0d2b8a9cp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.48c0d5eb83af4p+2",
-      "0x1.1f599a3658915p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3c676b301ad17p+2",
-      "0x1.2101322e4fc47p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.448df430ea452p+2",
-      "0x1.1fe99fcd36db0p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3c690771daebcp+2",
-      "0x1.2100faf1767d0p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.41c914565acfbp+2",
-      "0x1.20489af32387ep+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3c69bb2f1448cp+2",
-      "0x1.2100e2dc37e14p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3ff5760670e98p+2",
-      "0x1.208742c262c4fp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.412a16d4c8b9cp+2",
-      "0x1.205de87c29ac0p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3ff57ed6acb28p+2",
-      "0x1.20874194138e3p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.40c12ad56d46ap+2",
-      "0x1.206bf76ab1832p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+3",
-      "0x1.bd63c82453a42p-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3d654cbc2c118p+2",
-      "0x1.20375c46438bfp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.9eb2a65e1608cp+2",
-      "0x1.fee940586d5e0p-1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3e38b4cb525f7p+2",
-      "0x1.1ff02e9453f9dp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.7de5595a44264p+2",
-      "0x1.0a7fea30e47bap+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3e953026d4ba4p+2",
-      "0x1.1fd10b5162590p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.685e930637ddbp+2",
-      "0x1.11bf56bbf08e9p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3ebda595c5373p+2",
-      "0x1.1fc36c12414c5p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.5a37380e10e28p+2",
-      "0x1.168349823f358p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3ecf5515f4cacp+2",
-      "0x1.1fbd77b4c02cfp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.50e5d1491192cp+2",
-      "0x1.19a66db22360bp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3ed70e64f8cc5p+2",
-      "0x1.1fbaddf72ea71p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.4ac2142479ca3p+2",
-      "0x1.1bb79e1b887dcp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3eda6d4c33ca1p+2",
-      "0x1.1fb9bb6f39255p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.46b5e08905d46p+2",
-      "0x1.1d147f1e63461p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3edbe5a80a137p+2",
-      "0x1.1fb93cb7d916cp+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.440a7be05e503p+2",
-      "0x1.1dfa969f5d403p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3edc89bd67516p+2",
-      "0x1.1fb905790d669p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.4247a98ccce51p+2",
-      "0x1.1e926026d1763p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3edcd1419022cp+2",
-      "0x1.1fb8ed64dfbc8p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.3a2964329ef27p+2",
-      "0x1.214e1bedd62e0p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+2",
-      "0x1.fffffffffffe6p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+2",
-      "0x1.fffffffffffe6p+0"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+2",
-      "0x1.2c0685b4fe5e7p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+2",
-      "0x1.2c0685b4fe5e7p+0"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+2",
+      "0x1.4a6d6479831f2p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2166,7 +794,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+2",
+      "0x1.4a6d6479831f2p+1",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2179,8 +807,8 @@
       2
      ],
      "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
+      "0x1.c000000000002p+2",
+      "0x1.0000000000000p+0"
      ]
     },
     "multipliers": {
@@ -2193,7 +821,7 @@
      ]
     },
     "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
+    "total_finite": false
    },
    {
     "event": "evaluate_problem",
@@ -2203,81 +831,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
-      "0x1.0000000000000p+1"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+1",
-      "0x1.0000000000000p+1"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+1",
-      "0x1.0381c0e070382p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.0000000000000p+0",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+1",
-      "0x1.0381c0e070382p+0"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+1",
+      "0x1.6f0f306c0cf29p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2294,6 +848,78 @@
     "total_finite": true
    },
    {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.6614808d3fa44p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.7ddf16c070eb2p+1",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d4041ac04e12p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
     "event": "inner_callback",
     "x": {
      "$ndarray": "<f8",
@@ -2301,7 +927,4023 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.2d4041ac04e12p+2",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.c000000000001p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3005800a0ca71p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.8f0c1c2c60765p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3139158600cb1p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.6f25a427027eap+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.31bf45fa55a9fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.5a456569bd7e0p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.31f9e692c31a2p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4c9220b001f5bp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.321382e1bf6acp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.439009c0eb55dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.321eb140cc3adp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3da1d2103ceb5p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3da1d2103ceb5p+2",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.c000000000003p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3f98412107baap+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.94579b438cde5p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4073109f03113p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3f98475e78986p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4028ad79b5444p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3f984a166413bp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff795ec6b950p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff795ec6b950p+2",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.c00000000001fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.41d4365dff7bcp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7b3673167bp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.413232cca4efdp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7c03f547cdp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40c7494aad6c9p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7c5d7dcf31p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4080bb51b8767p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7c847f0293p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40522b3f08d71p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7c957cdb63p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4033705bef9ddp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7c9ce3bc1dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.401f285ef5064p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7ca01d2afdp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40037fcb2461dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7ca066344dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ff7da455e7dfp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffdad08416fep+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.400184ef47dc6p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.60086a13946b0p+3",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4d5ddd7962d98p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffd7923b8d1ap+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.48d1926680144p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40000aaace321p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffd7923f107ap+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fff2b1babf59p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffbea83850bp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffbea83850bp+2",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.c00000000044fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.41dc067be3971p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffdc15fc1c6p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.413a21075253cp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffe8e87433dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40cf4b633a013p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffee7e847cdp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4088ca861b024p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff0ed84497p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.405a4319e7c37p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff1fce9db9p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4025a81510abap+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff22c3c88dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4018d5c0c88b5p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff240d9c94p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000b8980febep+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff240dee68p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.400075287f411p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff240e120dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff24173abfp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.60004157c7af5p+3",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4d63beb291eb0p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40059f79e4fa9p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffbea95eb45p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0a1201f1p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4002b00d828cdp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0a16986dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4001b091b77b7p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0a189809p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0b4a14e9p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000b8a32c650p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0b4a94c6p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000645733059p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0b4acc79p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0b53cd91p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000128637ef5p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffc0b53db7dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff6b4ed19ep+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40000910faa6cp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffff6b4ed252p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffbea83850bp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p+0",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.9000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.bd3f410a70b1fp+0",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.ff4fd0429c2c7p+1",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.ff4fd0429c2c7p+1",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.9000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.034369a16c1a5p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.49a1b4d0b60d2p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.042e654fdc887p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3204bd9fc8415p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3204bd9fc8415p+2",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.9000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.332d7155fcd18p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.6196b8aafe68cp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3378fd17d770bp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.51e8c5b148332p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3399ff11f54a1p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.479ac9d7459c3p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.33a86915ca0f2p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40d29eb43533fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.33aeb375764f8p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3c5ae3335ab31p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3f4dc03b98fdep+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.404e678b334a8p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3f4dc03b98fdep+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3f4dc03b98fdep+2",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.9000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4015749f46486p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3f4dc571aec37p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fd1901a0367fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe5f3ec4065p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.400d9b6f19febp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe5f3ec4065p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe5f3ec4065p+2",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.9000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40c1b27c68544p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe64337b069p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.407f4b11b13f0p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe665c2f935p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4053783023e0cp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe674cf5a56p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40368c0bdbd6dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b5d8513p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40060f6c0e97ep+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b7cb9bap+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4003751f68755p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b8a5199p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4001bd5dbfa2fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b903d6fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe683507a22p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.400012c963a28p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe68351f4a9p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fff81bff03cfp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffe179603d7p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.9000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40c1b27c68544p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe64337b069p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.407f4b11b13f0p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe665c2f935p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4053783023e0cp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe674cf5a56p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40368c0bdbd6dp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b5d8513p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.40060f6c0e97ep+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b7cb9bap+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4003751f68755p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b8a5199p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4001bd5dbfa2fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe67b903d6fp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe683507a22p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.400012c963a28p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe68351f4a9p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fff81bff03cfp+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3fffe179603d7p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3ffe5f3ec4065p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p+0",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.e000000000000p+1",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "inner_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.e000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2314,7 +4956,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.e000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2327,7 +4969,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.e000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2350,7 +4992,7 @@
     "action": "penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "29b42bf003922a1c6c9d10e9d81c2539cf791323767f5fa3aebc9f054d746f5e"
+    "event_sha256": "4443d61ecd0d32830ae1809aa38430292b216d986565efce0d6d6a8467de488f"
    },
    {
     "event": "snapshot_accepted_state",
@@ -2360,7 +5002,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.e000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2394,7 +5036,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.e000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2418,7 +5060,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.e000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2442,31 +5084,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+3",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.2eba9b7867694p+1",
+      "-0x1.e000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2483,19 +5101,6 @@
     "total_finite": true
    },
    {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.2eba9b7867694p+1",
-      "0x1.0000000000000p+0"
-     ]
-    }
-   },
-   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",
@@ -2503,7 +5108,7 @@
       2
      ],
      "data": [
-      "0x1.4000000000000p+1",
+      "0x1.37c33901f9eedp+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2527,58 +5132,10 @@
       2
      ],
      "data": [
-      "0x1.4000000000000p+1",
+      "0x1.37c33901f9eedp+1",
       "0x1.0000000000000p+0"
      ]
     }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.0000000000000p+1",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.4000000000000p+2",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
    },
    {
     "event": "evaluate_problem",
@@ -2661,7 +5218,7 @@
     "action": "penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "0ed0f2a9232e5a1462468a98215025ef6d95c14082c7f4fe61ab9beb554c9c9d"
+    "event_sha256": "d7683387b742416b814d928ed49dfe81217a11e023a0734c890fdb336ac14c2a"
    },
    {
     "event": "snapshot_accepted_state",
@@ -2753,7 +5310,31 @@
       2
      ],
      "data": [
-      "-0x1.4000000000000p+0",
+      "-0x1.4000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2777,7 +5358,7 @@
       2
      ],
      "data": [
-      "-0x1.4000000000000p+0",
+      "0x0.0p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2790,7 +5371,7 @@
       2
      ],
      "data": [
-      "-0x1.6db6db6db6db7p-1",
+      "0x1.4a5294a5294a5p-2",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2814,7 +5395,7 @@
       2
      ],
      "data": [
-      "0x1.6db6db6db6db6p+0",
+      "0x1.9ce739ce739cep+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2838,7 +5419,31 @@
       2
      ],
      "data": [
-      "0x1.09f959c427e5cp-2",
+      "0x1.6d5b56d5b56d6p-1",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2fbc48f7c92b2p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2862,7 +5467,7 @@
       2
      ],
      "data": [
-      "0x1.09f959c427e5cp-2",
+      "0x1.2fbc48f7c92b2p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2875,31 +5480,7 @@
       2
      ],
      "data": [
-      "0x1.9000000000000p+2",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.9000000000000p+6",
-    "total_finite": false
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.80b94e5ba67d3p+0",
+      "0x1.210085a5bf296p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2923,31 +5504,7 @@
       2
      ],
      "data": [
-      "0x1.6ff26c0f66740p-1",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.9000000000000p+6",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.31d4390097a4fp+0",
+      "0x1.2d2d2d2d2d2cep+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2971,68 +5528,7 @@
       2
      ],
      "data": [
-      "0x1.31d4390097a4fp+0",
-      "0x1.0000000000000p+0"
-     ]
-    }
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.1d0876db19988p+0",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.9000000000000p+6",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.2d2d2d2d2d2d2p+0",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.9000000000000p+6",
-    "total_finite": true
-   },
-   {
-    "event": "inner_callback",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.2d2d2d2d2d2d2p+0",
+      "0x1.2d2d2d2d2d2cep+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3045,7 +5541,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d2p+0",
+      "0x1.2d2d2d2d2d2cep+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3058,7 +5554,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d2p+0",
+      "0x1.2d2d2d2d2d2cep+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3068,7 +5564,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3081,7 +5577,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "83bfdd9b6438213b3cddb933f0e0874582792028fc186b519f3e990b3bccfc86"
+    "event_sha256": "fffbff22df43258d93a37c91147c249cafdfd91030016547ee39403405d940ed"
    },
    {
     "event": "snapshot_accepted_state",
@@ -3091,7 +5587,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d2p+0",
+      "0x1.2d2d2d2d2d2cep+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3112,7 +5608,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6"
@@ -3125,7 +5621,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d2p+0",
+      "0x1.2d2d2d2d2d2cep+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3135,7 +5631,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3149,7 +5645,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d2p+0",
+      "0x1.2d2d2d2d2d2cep+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3159,7 +5655,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3173,7 +5669,7 @@
       2
      ],
      "data": [
-      "-0x1.7878787878786p+0",
+      "-0x1.2d2d2d2d2d2cep+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3183,7 +5679,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3197,7 +5693,7 @@
       2
      ],
      "data": [
-      "0x1.90e1c9fed7ffap-1",
+      "0x1.596139f69543ap-1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3207,7 +5703,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3221,7 +5717,7 @@
       2
      ],
      "data": [
-      "0x1.034eba671c188p+0",
+      "0x1.063688015c1e4p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3231,7 +5727,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3245,7 +5741,7 @@
       2
      ],
      "data": [
-      "0x1.034eba671c188p+0",
+      "0x1.063688015c1e4p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3258,7 +5754,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a6p+0",
+      "0x1.00e2c4a6886aap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3268,7 +5764,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a0p+4"
+      "0x1.1a5a5a5a5a588p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3282,7 +5778,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a6p+0",
+      "0x1.00e2c4a6886aap+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3295,7 +5791,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a6p+0",
+      "0x1.00e2c4a6886aap+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3308,7 +5804,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a6p+0",
+      "0x1.00e2c4a6886aap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3331,7 +5827,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": "max_outer",
-    "event_sha256": "dab7155f71734555deea6e9cedeca4df72b947ccab97c35a0f3dbd34b481b709"
+    "event_sha256": "17714292b386a6f59a84d3ae1700a7819107764c4c47f7c5a8d5b2e0ae1dbb81"
    },
    {
     "event": "snapshot_accepted_state",
@@ -3341,7 +5837,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a6p+0",
+      "0x1.00e2c4a6886aap+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3360,7 +5856,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.0000000000000p+1",
+       "0x1.e000000000000p+1",
        "0x1.0000000000000p+0"
       ]
      },
@@ -3369,7 +5865,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.0000000000000p+1",
+         "0x1.e000000000000p+1",
          "0x1.0000000000000p+0"
         ]
        }
@@ -3391,9 +5887,9 @@
      "penalty": "0x1.4000000000000p+3",
      "update_feasibility_tol": "0x1.96b230bcdc434p-1",
      "update_stationarity_tol": "0x1.999999999999ap-4",
-     "trust_radius": "0x1.8000000000000p+1",
+     "trust_radius": "0x1.0000000000000p+1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.0000000000000p+0",
+     "sufficient_decrease_measure": "0x1.6000000000000p+1",
      "sufficient_decrease_multipliers": {
       "$tuple": [
        "0x0.0p+0"
@@ -3404,7 +5900,7 @@
      "completed_action": "penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
-     "total_inner_iterations": 8,
+     "total_inner_iterations": 10,
      "cap_binding_detected": false,
      "cap_binding_indices": {
       "$tuple": []
@@ -3477,7 +5973,7 @@
      "penalty": "0x1.9000000000000p+6",
      "update_feasibility_tol": "0x1.430cd74f6d478p-1",
      "update_stationarity_tol": "0x1.47ae147ae147bp-7",
-     "trust_radius": "0x1.8000000000000p+0",
+     "trust_radius": "0x1.8000000000000p+1",
      "last_cap_binding_active": false,
      "sufficient_decrease_measure": "0x1.8000000000000p+0",
      "sufficient_decrease_multipliers": {
@@ -3490,7 +5986,7 @@
      "completed_action": "penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
-     "total_inner_iterations": 11,
+     "total_inner_iterations": 12,
      "cap_binding_detected": false,
      "cap_binding_indices": {
       "$tuple": []
@@ -3532,7 +6028,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.2d2d2d2d2d2d2p+0",
+       "0x1.2d2d2d2d2d2cep+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -3541,7 +6037,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.2d2d2d2d2d2d2p+0",
+         "0x1.2d2d2d2d2d2cep+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -3557,15 +6053,15 @@
      "completed_outer_iterations": 3,
      "multipliers": {
       "$tuple": [
-       "0x1.1a5a5a5a5a5a0p+4"
+       "0x1.1a5a5a5a5a588p+4"
       ]
      },
      "penalty": "0x1.9000000000000p+6",
      "update_feasibility_tol": "0x1.0270ac3f8a9fap-4",
      "update_stationarity_tol": "0x1.0624dd2f1a9fcp-10",
-     "trust_radius": "0x1.2000000000000p+1",
+     "trust_radius": "0x1.8000000000000p+1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.6969696969690p-3",
+     "sufficient_decrease_measure": "0x1.6969696969670p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
        "0x0.0p+0"
@@ -3618,7 +6114,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.00e2c4a6886a6p+0",
+       "0x1.00e2c4a6886aap+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -3627,7 +6123,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.00e2c4a6886a6p+0",
+         "0x1.00e2c4a6886aap+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -3649,12 +6145,12 @@
      "penalty": "0x1.9000000000000p+6",
      "update_feasibility_tol": "0x1.9d811398ddcc3p-8",
      "update_stationarity_tol": "0x1.a36e2eb1c432dp-14",
-     "trust_radius": "0x1.2000000000000p+1",
+     "trust_radius": "0x1.8000000000000p+1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.c5894d10d4c00p-9",
+     "sufficient_decrease_measure": "0x1.c5894d10d5400p-9",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.1a5a5a5a5a5a0p+4"
+       "0x1.1a5a5a5a5a588p+4"
       ]
      },
      "sufficient_decrease_penalty": "0x1.9000000000000p+6",

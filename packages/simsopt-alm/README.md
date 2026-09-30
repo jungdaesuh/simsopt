@@ -103,8 +103,8 @@ guarantee of descent from the start, and not a statement about which basin
 a nonconvex problem ends in. `policy.py` (`_kkt_point`) makes the decision and
 `core.py` (`_complementarity_gap`) measures the gap. Every other termination
 reason is a stop without that certificate; `result.restored_best_feasible`
-says when the solver returned the best feasible iterate it saw instead of
-the last one.
+says when the solver returned the best feasible iterate it saw (the start
+included) instead of the last one.
 
 ## Setup skill and guide
 

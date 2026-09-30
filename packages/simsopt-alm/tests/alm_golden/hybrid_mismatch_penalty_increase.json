@@ -787,6 +787,19 @@
     "total_finite": true
    },
    {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.dc28f5c28f5c3p-1",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",

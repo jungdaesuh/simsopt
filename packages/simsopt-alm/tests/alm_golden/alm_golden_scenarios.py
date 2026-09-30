@@ -1081,7 +1081,9 @@ def run_trust_radius_retries() -> dict:
         max_inner_attempts=3,
         history_max_entries=None,
     )
-    x0 = np.zeros(2)
+    # An infeasible start (x0 <= 1 is violated): from a feasible one the run
+    # would end by restoring it, not on the max-outer label it covers.
+    x0 = np.array([1.25, 1.0])
     return execute(
         ScenarioRun(
             x0=x0,
@@ -1271,11 +1273,15 @@ def run_inner_iteration_budget() -> dict:
     )
     return execute(
         ScenarioRun(
-            x0=np.zeros(2),
+            # Infeasible by less than the first subproblem's solution, so the
+            # dual update needs a penalty raise; from a feasible start the
+            # spent budget would end by restoring it, hiding its label.
+            x0=np.array([1.52, 0.52]),
             constraint_names=TOY_CONSTRAINTS,
             evaluate_problem=toy_convex_evaluate,
             settings=settings,
-            inner_options={"maxiter": 6},
+            # Spent at the end of outer 2, after its dual update.
+            inner_options={"maxiter": 5},
         )
     ).trajectory
 
@@ -1292,7 +1298,10 @@ def run_dual_update_penalty_cap() -> dict:
     )
     return execute(
         ScenarioRun(
-            x0=np.zeros(2),
+            # Infeasible by less than the first subproblem's solution (so
+            # the dual update needs a penalty raise), and not a feasible
+            # start the capped run would restore.
+            x0=np.array([1.52, 0.52]),
             constraint_names=TOY_CONSTRAINTS,
             evaluate_problem=toy_convex_evaluate,
             settings=settings,

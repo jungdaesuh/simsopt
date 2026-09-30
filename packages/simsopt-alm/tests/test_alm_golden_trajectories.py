@@ -75,9 +75,9 @@ _golden = golden.load_golden
 #       counts an iteration at the frozen start)     -
 #
 #   numeric replay, largest tolerance over scenarios:
-#   x              1.5e-13  (multiplier_cap_process_budget)
-#   objective      2.2e-13  (inner_iteration_budget)
-#   max_violation  2.5e-13  (dual_update_penalty_cap)
+#   x              1.6e-13  (trust_radius_retries)
+#   objective      9.7e-14  (toy_convex)
+#   max_violation  1.7e-13  (trust_radius_retries)
 #   multipliers    3.1e-12  (toy_convex)
 #   penalty        2.2e-15  (every scenario: eps)
 SENSITIVITY = golden.load_sensitivity()

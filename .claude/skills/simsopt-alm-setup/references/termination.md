@@ -7,11 +7,15 @@ the source in both directions). `success` is `yes` only for the two
 converged reasons.
 
 Read these together with `result.restored_best_feasible`: on any failure the
-solver returns the best hard-feasible iterate it saw instead of the last one
-when the last one is hard-infeasible or has a worse objective
-(`result.restored_best_feasible_reason` says which). A restored `result.x` is
-feasible and usable; set your objects to it before saving (`finish` in the
-templates does).
+solver returns the best hard-feasible iterate it saw (the start included)
+instead of the last one when the last one is hard-infeasible or has a worse
+objective (`result.restored_best_feasible_reason` says which). A restored
+`result.x` is feasible and usable; set your objects to it before saving
+(`finish` in the templates does). ALM iterates usually approach the boundary
+from outside, so a run from a feasible start that stops before converging can
+return that start; the last iterate is in the last outer-step event
+(`event.after.x`), and rerunning from it with a larger `max_outer_iterations`
+or `maxiter` continues the progress.
 
 ## Converged
 

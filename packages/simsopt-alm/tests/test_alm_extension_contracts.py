@@ -176,10 +176,19 @@ class AlmEvaluationBoundaryTests(unittest.TestCase):
         self.assertEqual(numpy_rejected.termination_reason, rejected.termination_reason)
 
     def test_a_numpy_true_search_flag_accepts_the_trial_step(self):
-        accepted = _solve(_trial_steps_flagged(True))
-        numpy_accepted = _solve(_trial_steps_flagged(np.bool_(True)))
-        self.assertFalse(np.array_equal(accepted.x, [3.0, 2.0]))
-        np.testing.assert_array_equal(numpy_accepted.x, accepted.x)
+        # The loop's iterate leaves the start (the result may restore the
+        # feasible start: the run nears x = (1, 0) from the infeasible side).
+        iterates = {}
+        for flag in (True, np.bool_(True)):
+            events = []
+            alm.minimize_alm(
+                np.array([3.0, 2.0]), ["x0_at_least_one"], _trial_steps_flagged(flag),
+                alm.ALMSettings(max_outer_iterations=3), {"maxiter": 50},
+                on_outer_step=events.append,
+            )
+            iterates[type(flag)] = events[-1].after.x
+        self.assertFalse(np.array_equal(iterates[bool], [3.0, 2.0]))
+        np.testing.assert_array_equal(iterates[np.bool_], iterates[bool])
 
     def test_a_negative_activity_tolerance_is_rejected(self):
         for tolerances in (np.array([-0.02]), -0.02):

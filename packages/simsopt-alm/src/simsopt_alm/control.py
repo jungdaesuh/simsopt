@@ -1120,6 +1120,37 @@ def _sufficient_decrease_measure(
     lam = np.asarray(multipliers, dtype=float).reshape(-1)
     return float(np.max(np.abs(np.maximum(g, -lam / float(penalty)))))
 
+def _improved_incumbent(
+    best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]],
+    *,
+    x: np.ndarray,
+    measured: ALMIterateMeasurement,
+    inner_result: Optional[object],
+    settings: ALMSettings,
+    snapshot_accepted_state_fn: Optional[Callable[[], AcceptedStateT]],
+) -> Optional[ALMFeasibleIncumbent[AcceptedStateT]]:
+    """``best_feasible``, or the measured iterate ``x`` as the new incumbent
+    when it is hard-feasible at ``feasibility_tol`` and ranks strictly better
+    (``_incumbent_objective_value``); the caller's accepted state is
+    snapshotted only for a new incumbent. Only the HARD (certified) channel
+    counts: a surrogate can read feasible where the design is not."""
+    if measured.routing_state.hard_max_violation > settings.feasibility_tol or (
+        best_feasible is not None
+        and _incumbent_objective_value(measured.evaluation)
+        >= _incumbent_objective_value(best_feasible.evaluation)
+    ):
+        return best_feasible
+    return ALMFeasibleIncumbent(
+        x=x.copy(),
+        evaluation=measured.evaluation,
+        multipliers=np.array(measured.multipliers, dtype=float),
+        penalty=float(measured.penalty),
+        inner_result=inner_result,
+        incumbent_state=(
+            None if snapshot_accepted_state_fn is None else snapshot_accepted_state_fn()
+        ),
+    )
+
 def _inner_solve_outcome(
     attempt: ALMInnerAttemptResult,
     *,
@@ -1286,6 +1317,16 @@ def _run_alm_continuation_step(
             ),
         )
 
+    # The start is a candidate too (a feasible x0 above all), before an inner
+    # solve can leave it.
+    state.best_feasible = _improved_incumbent(
+        state.best_feasible,
+        x=run_state.x,
+        measured=start,
+        inner_result=state.last_result,
+        settings=settings,
+        snapshot_accepted_state_fn=snapshot_accepted_state_fn,
+    )
     inner_attempt = _run_alm_inner_attempts(
         ALMInnerAttemptRequest(
             x=run_state.x,
@@ -1375,30 +1416,14 @@ def _run_alm_continuation_step(
         measured.stationarity_norm,
     )
 
-    # Record best_feasible only on the HARD (certified) channel, never the
-    # surrogate channel: the surrogate can read smoothed-feasible while the
-    # design is hard-infeasible, and callers hand best_feasible on as a
-    # hard-feasible incumbent. Mirrors the strict hard feasibility the
-    # converged label requires.
-    if measured.routing_state.hard_max_violation <= settings.feasibility_tol:
-        improves_best_feasible = (
-            state.best_feasible is None
-            or _incumbent_objective_value(state.final_eval)
-            < _incumbent_objective_value(state.best_feasible.evaluation)
-        )
-        if improves_best_feasible:
-            state.best_feasible = ALMFeasibleIncumbent(
-                x=run_state.x.copy(),
-                evaluation=state.final_eval,
-                multipliers=state.multipliers.copy(),
-                penalty=state.penalty,
-                inner_result=result,
-                incumbent_state=(
-                    None
-                    if snapshot_accepted_state_fn is None
-                    else snapshot_accepted_state_fn()
-                ),
-            )
+    state.best_feasible = _improved_incumbent(
+        state.best_feasible,
+        x=run_state.x,
+        measured=measured,
+        inner_result=result,
+        settings=settings,
+        snapshot_accepted_state_fn=snapshot_accepted_state_fn,
+    )
 
     # Every inner plan re-derives the staged values (gtol, profile caps)
     # from this step's ``inner_options`` (the caller's, with the call's
