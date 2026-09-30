@@ -88,7 +88,10 @@ SCALES: tuple[ExecutionScale, ...] = ("bounded", "native_default")
 STATES = ("x0", *(f"k{k}" for k in range(9)))
 CONTROL_STATES = ("x0", "k0")
 CONTROLS = ("NC1", "NC2", "NC3")
-#: The build whose library constants B2 established (R5).
+#: The build whose library constants B2 established. Checked only when a campaign reproduction is
+#: requested (PLAN.md amendment 8, F3): any other build still has its trig constants re-established
+#: by R4 and its precision and fast-math assumptions checked by R5.
+CAMPAIGN_REPRODUCTION_ENV = "SIMSOPT_PARITY_CAMPAIGN_REPRODUCTION"
 SIMSOPTPP_SHA256 = "0149cc25cefa1d90d01fc307e7a70975cd13c424ff7a35171e1ef8d945741453"
 JAX_VERSION = "0.10.0"
 #: HLO opcodes that evaluate a transcendental or a root; only the four B2 established may run (R2).
@@ -611,12 +614,25 @@ def test_pinned_builds_and_precision(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
 ) -> None:
-    """R5: the builds whose constants B2 established, FP64, and no fast-math XLA flag."""
+    """R5: FP64 and no fast-math XLA flag; the campaign's own builds only when reproducing it.
+
+    With ``SIMSOPT_PARITY_CAMPAIGN_REPRODUCTION=1`` the run claims to reproduce
+    the recorded campaign, so it must load the exact simsoptpp and jax/jaxlib
+    builds whose constants B2 established, and refuses otherwise. Without it any
+    build is tested on its own terms: R4 re-establishes the trig constants for
+    the build that runs, and this test checks the numerical assumptions.
+    """
     enable_strict_parity_backend(monkeypatch, request, parity_lane, precision="fp64")
-    library = Path(simsoptpp.__file__)
-    assert hashlib.sha256(library.read_bytes()).hexdigest() == SIMSOPTPP_SHA256, library
-    assert jax.__version__ == JAX_VERSION
-    assert jaxlib.__version__ == JAX_VERSION
+    if os.environ.get(CAMPAIGN_REPRODUCTION_ENV) == "1":
+        library = Path(simsoptpp.__file__)
+        loaded = hashlib.sha256(library.read_bytes()).hexdigest()
+        assert loaded == SIMSOPTPP_SHA256, (
+            f"{CAMPAIGN_REPRODUCTION_ENV}=1 reproduces the campaign build "
+            f"{SIMSOPTPP_SHA256}; {library} is {loaded}"
+        )
+        assert (jax.__version__, jaxlib.__version__) == (JAX_VERSION, JAX_VERSION), (
+            f"{CAMPAIGN_REPRODUCTION_ENV}=1 reproduces jax/jaxlib {JAX_VERSION}"
+        )
     assert bool(jax.config.read("jax_enable_x64"))
     policy = get_backend_policy()
     assert policy.resolved_precision == "fp64"

@@ -35,7 +35,8 @@ sum.  Injected with derived counts (units of ``u = 2**-53``, first order):
 * ``w``: envelope of ``sqrt(1/B2)`` and ``rsqrt(B2)``; ``|n|``: envelope of the norm and the nested
   ``jnp.hypot`` (+4 roundings); the label term scale 50 with one extra rounding.
 
-Library constants (pinned simsoptpp 0149cc25, glibc 2.43, jax/jaxlib 0.10.0, CUDA 12.9):
+Library constants (established on the campaign builds simsoptpp 0149cc25, glibc 2.43, jax/jaxlib 0.10.0, CUDA 12.9;
+the test re-establishes the trig constants for the build that runs, R4):
 sin/cos glibc and XLA CPU 0.55 ulp (glibc ``s_sin.c`` "~0.55 ULP"); XLA GPU libdevice 2.5 ulp
 (CUDA 12.9 Programming Guide Table 19: 2 ulp from the correctly rounded result); sqrt, divide,
 + - x correctly rounded; rsqrt charged 3 u (XLA CPU: vrsqrt14pd plus two Newton steps, derived
