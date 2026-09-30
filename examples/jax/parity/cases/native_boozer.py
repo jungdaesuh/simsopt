@@ -89,8 +89,10 @@ upstream's nine pre-registered first-stage ends at the case's scale (the
 tracked scatter record, frozen into the input bundle).  The starts are compared
 exactly; every replayed solve must meet upstream's success rule
 ``norm(J^T r) <= tol``; and the two lanes' solved states must lie within the sum
-of their stopping radii, ``(norm(b_native) + norm(b_jax)) / min(lambda_min)``
-(PLAN.md amendment 6, B1', the arbiter's ``stopping_bound`` comparator).
+of their stopping radii, ``(norm(b_native) + norm(b_jax)) / min(lambda_min)``,
+plus the carry-over ``max(norm(dx*/dt)) * |t_native - t_jax|`` of the two lanes'
+label targets (PLAN.md amendments 6 and 7, B1' and B1'', the arbiter's
+``stopping_bound`` comparator).
 """
 
 from __future__ import annotations
@@ -213,9 +215,10 @@ REPLAY_EXACT_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:area_solver_success",
     "replay:flux_solver_success",
 )
-#: The replayed Newton solutions, one row per start: the solved state (surface dofs, iota, G), then
-#: the stage's end norm(J^T r), then lambda_min(J^T J) at that state, each from the lane's own run.
-#: The arbiter's ``stopping_bound`` comparator judges them (PLAN.md amendment 6, B1').
+#: The replayed Newton solutions, one row per start: the solved state (surface dofs, iota, G), the
+#: stage's label target, its end norm(J^T r), lambda_min(J^T J) at that state and norm(dx*/dt), each
+#: from the lane's own run. The arbiter's ``stopping_bound`` comparator judges them (PLAN.md
+#: amendments 6 and 7, B1' and B1'').
 REPLAY_SOLUTION_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:area_solution",
     "replay:flux_solution",
@@ -519,15 +522,70 @@ def _native_newton_stages(
     )
 
 
+class _Replay(NamedTuple):
+    """One replay: the Newton stages, each stage's label target and its sensitivity ``norm(dx*/dt)``."""
+
+    stages: _NewtonStages
+    area_target: float
+    area_target_sensitivity: float
+    flux_target_sensitivity: float
+
+
+def _stage_x(outcome: BoozerStageOutcome) -> np.ndarray:
+    """A stage's end state as the solver's variable vector (surface dofs, iota, G)."""
+    return np.concatenate(
+        (
+            np.asarray(outcome.state.surface_dofs, dtype=np.float64),
+            np.asarray([outcome.state.iota, outcome.state.G], dtype=np.float64),
+        )
+    )
+
+
+def _target_sensitivity(jacobian: np.ndarray, constraint_weight: float) -> float:
+    """``norm(dx*/dt)`` of a penalty solve from one lane's own Jacobian at its end state.
+
+    The label row (row -2) is ``sqrt(cw) (l(x) - t)``, so ``db/dt = -sqrt(cw) J[l]^T``
+    and, with the Gauss-Newton ``H = J^T J``, ``dx*/dt = sqrt(cw) H^-1 J[l]^T``
+    (PLAN.md amendment 7, B1'').
+    """
+    return float(
+        np.linalg.norm(
+            np.sqrt(constraint_weight)
+            * np.linalg.solve(jacobian.T @ jacobian, jacobian[-2])
+        )
+    )
+
+
 def _native_replay(
     configuration: Mapping[str, object], start: BoozerStageState
-) -> _NewtonStages:
+) -> _Replay:
     """The native Newton stages from ``start`` on fresh objects (the area target is the initial surface's)."""
     _, native_field, field, surface, _ = _problem(configuration)
+    constraint_weight = _configuration_float(configuration, "constraint_weight")
     area = Area(surface)
-    solver = BoozerSurface(native_field, surface, area, float(area.J()))
-    return _native_newton_stages(
+    area_target = float(area.J())
+    solver = BoozerSurface(native_field, surface, area, area_target)
+    stages = _native_newton_stages(
         configuration, solver, area, surface, native_field, field, start
+    )
+    flux_solver = BoozerSurface(
+        native_field, surface, ToroidalFlux(surface, field), stages.flux_target
+    )
+    return _Replay(
+        stages=stages,
+        area_target=area_target,
+        area_target_sensitivity=_target_sensitivity(
+            solver._get_residual_vector_and_jacobian(
+                _stage_x(stages.area), constraint_weight, True, True
+            )[1],
+            constraint_weight,
+        ),
+        flux_target_sensitivity=_target_sensitivity(
+            flux_solver._get_residual_vector_and_jacobian(
+                _stage_x(stages.flux), constraint_weight, True, True
+            )[1],
+            constraint_weight,
+        ),
     )
 
 
@@ -715,23 +773,70 @@ def _jax_options(configuration: Mapping[str, object]):
     )
 
 
+def _jax_penalty_jacobian(
+    solver, field, surface, outcome: BoozerStageOutcome, constraint_weight: float
+) -> np.ndarray:
+    """The JAX lane's own penalty Jacobian at a stage's end state, on the host."""
+    surface.set_dofs(np.asarray(outcome.state.surface_dofs, dtype=np.float64))
+    kernels = solver._get_penalty_kernel_bundle(
+        optimize_G=True,
+        weight_inv_modB=True,
+        constraint_weight=constraint_weight,
+    )
+    return np.asarray(
+        jax.device_get(
+            kernels.jacobian(jax.device_put(_stage_x(outcome)), field.coil_set_spec())
+        ),
+        dtype=np.float64,
+    )
+
+
 def _jax_replay(
     configuration: Mapping[str, object], start: BoozerStageState
-) -> _NewtonStages:
+) -> _Replay:
     """The JAX Newton stages from ``start`` on fresh objects (the area target is the initial surface's)."""
     _, native_field, field, surface, _ = _problem(configuration)
     options = _jax_options(configuration)
+    constraint_weight = _configuration_float(configuration, "constraint_weight")
     area = Area(surface)
+    area_target = float(area.J())
+    area_field = BiotSavartJAX(native_field.coils)
     solver = BoozerSurfaceJAX(
-        BiotSavartJAX(native_field.coils),
+        area_field,
         surface,
         area,
-        float(area.J()),
-        constraint_weight=_configuration_float(configuration, "constraint_weight"),
+        area_target,
+        constraint_weight=constraint_weight,
         options=options,
     )
-    return _jax_newton_stages(
+    stages = _jax_newton_stages(
         configuration, options, solver, area, surface, native_field, field, start
+    )
+    flux_field = BiotSavartJAX(native_field.coils)
+    flux_solver = BoozerSurfaceJAX(
+        flux_field,
+        surface,
+        ToroidalFlux(surface, field),
+        stages.flux_target,
+        constraint_weight=constraint_weight,
+        options=options,
+        surface_runtime_state=solver.surface_runtime_state,
+    )
+    return _Replay(
+        stages=stages,
+        area_target=area_target,
+        area_target_sensitivity=_target_sensitivity(
+            _jax_penalty_jacobian(
+                solver, area_field, surface, stages.area, constraint_weight
+            ),
+            constraint_weight,
+        ),
+        flux_target_sensitivity=_target_sensitivity(
+            _jax_penalty_jacobian(
+                flux_solver, flux_field, surface, stages.flux, constraint_weight
+            ),
+            constraint_weight,
+        ),
     )
 
 
@@ -931,17 +1036,19 @@ def _values(
     }
 
 
-def _solution_row(outcome: BoozerStageOutcome) -> np.ndarray:
-    """One ``replay:*_solution`` row: the solved state, norm(J^T r), lambda_min(J^T J)."""
+def _solution_row(
+    outcome: BoozerStageOutcome, target: float, target_sensitivity: float
+) -> np.ndarray:
+    """One ``replay:*_solution`` row: state, label target, norm(J^T r), lambda_min(J^T J), norm(dx*/dt)."""
     return np.concatenate(
         (
-            np.asarray(outcome.state.surface_dofs, dtype=np.float64),
+            _stage_x(outcome),
             np.asarray(
                 [
-                    outcome.state.iota,
-                    outcome.state.G,
+                    target,
                     outcome.gradient_norm,
                     outcome.normal_matrix_min_eigenvalue,
+                    target_sensitivity,
                 ],
                 dtype=np.float64,
             ),
@@ -950,7 +1057,7 @@ def _solution_row(outcome: BoozerStageOutcome) -> np.ndarray:
 
 
 def _replay_values(
-    starts: tuple[BoozerStageState, ...], replays: tuple[_NewtonStages, ...]
+    starts: tuple[BoozerStageState, ...], replays: tuple[_Replay, ...]
 ) -> dict[str, np.ndarray]:
     """The ``replay:*`` keys: one entry per start, in ``REPLAY_STARTS`` order."""
 
@@ -967,16 +1074,34 @@ def _replay_values(
         "replay:start_iota": floats(start.iota for start in starts),
         "replay:start_G": floats(start.G for start in starts),
         "replay:area_solution": np.stack(
-            [_solution_row(replay.area) for replay in replays]
+            [
+                _solution_row(
+                    replay.stages.area,
+                    replay.area_target,
+                    replay.area_target_sensitivity,
+                )
+                for replay in replays
+            ]
         ),
-        "replay:area_label": floats(replay.area_label for replay in replays),
-        "replay:area_solver_success": flags(replay.area.success for replay in replays),
-        "replay:flux_target": floats(replay.flux_target for replay in replays),
+        "replay:area_label": floats(replay.stages.area_label for replay in replays),
+        "replay:area_solver_success": flags(
+            replay.stages.area.success for replay in replays
+        ),
+        "replay:flux_target": floats(replay.stages.flux_target for replay in replays),
         "replay:flux_solution": np.stack(
-            [_solution_row(replay.flux) for replay in replays]
+            [
+                _solution_row(
+                    replay.stages.flux,
+                    replay.stages.flux_target,
+                    replay.flux_target_sensitivity,
+                )
+                for replay in replays
+            ]
         ),
-        "replay:flux_label": floats(replay.flux_label for replay in replays),
-        "replay:flux_solver_success": flags(replay.flux.success for replay in replays),
+        "replay:flux_label": floats(replay.stages.flux_label for replay in replays),
+        "replay:flux_solver_success": flags(
+            replay.stages.flux.success for replay in replays
+        ),
     }
 
 
@@ -997,13 +1122,13 @@ def _observation(
         # Upstream's own success rule, norm(J^T r) <= tol, on every replayed solve.
         and bool(
             np.all(
-                values["replay:area_solution"][:, -2]
+                values["replay:area_solution"][:, -3]
                 <= _configuration_float(bundle.configuration, "solver_tolerance")
             )
         )
         and bool(
             np.all(
-                values["replay:flux_solution"][:, -2]
+                values["replay:flux_solution"][:, -3]
                 <= _configuration_float(bundle.configuration, "solver_tolerance")
             )
         )

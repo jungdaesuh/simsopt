@@ -492,19 +492,25 @@ def _require_fp64(lane: str, value_key: str, value: np.ndarray) -> None:
 def stopping_bound_gaps(
     left: np.ndarray, right: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-row solved-state gap and its stopping-radius bound (PLAN.md amendment 6, B1').
+    """Per-row solved-state gap and its bound (PLAN.md amendments 6 and 7, B1', B1'').
 
-    Each row of ``left`` and ``right`` is one lane's solution of one least-squares
-    solve: the state x, then that solve's end ``norm(J^T r)``, then
-    ``lambda_min(J^T J)`` at x, both from the lane's own run. With ``b = J^T r``
-    the gradient of ``f = 1/2 |r|^2`` and ``mu`` a lower bound on the curvature
-    along the segment to the root x*, ``|x - x*| <= |b| / mu`` for each lane, so
-    by the triangle inequality ``|x_l - x_r| <= (|b_l| + |b_r|) / mu``; ``mu`` is
-    the smaller Gauss-Newton curvature ``min(lambda_l, lambda_r)``. Returns the
-    Euclidean gap per row and that bound per row.
+    Each row of ``left`` and ``right`` is one lane's solution of one penalty
+    least-squares solve: the state x, the solve's label target t, its end
+    ``norm(J^T r)``, ``lambda_min(J^T J)`` at x and ``s = norm(dx*/dt)``, all
+    from the lane's own run. With ``b = J^T r`` the gradient of
+    ``f_t = 1/2 |r(x, t)|^2`` and ``mu`` a lower bound on the curvature along the
+    segment to the root, each lane lies within ``|b| / mu`` of its own root
+    x*(t); the two lanes' roots differ by at most ``s |t_l - t_r|`` to first
+    order; so ``|x_l - x_r| <= (|b_l| + |b_r|) / mu + s |t_l - t_r|`` with ``mu``
+    the smaller Gauss-Newton curvature and ``s`` the larger sensitivity.
+    Returns the Euclidean gap per row and that bound per row.
     """
-    gap = np.linalg.norm(left[..., :-2] - right[..., :-2], axis=-1)
-    bound = (left[..., -2] + right[..., -2]) / np.minimum(left[..., -1], right[..., -1])
+    gap = np.linalg.norm(left[..., :-4] - right[..., :-4], axis=-1)
+    bound = (left[..., -3] + right[..., -3]) / np.minimum(
+        left[..., -2], right[..., -2]
+    ) + np.maximum(left[..., -1], right[..., -1]) * np.abs(
+        left[..., -4] - right[..., -4]
+    )
     return gap, bound
 
 
@@ -532,7 +538,7 @@ def _compare(
         return bool(np.all(right <= upper_bound)), f"not_worse rtol={rtol} atol={atol}"
     if route.comparator == "stopping_bound":
         gap, bound = stopping_bound_gaps(left, right)
-        curvature = np.minimum(left[..., -1], right[..., -1])
+        curvature = np.minimum(left[..., -2], right[..., -2])
         passed = bool(np.all(curvature > 0.0) and np.all(gap <= bound))
         ratio = np.where(
             gap == 0.0,

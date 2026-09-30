@@ -133,12 +133,13 @@ def test_boozer_observation_requires_both_solver_stages(
             [True] * (len(REPLAY_STARTS) - 1) + [replay_success]
         ),
         "replay:flux_solver_success": np.asarray([True] * len(REPLAY_STARTS)),
-        # Rows: state (one dof, iota, G), norm(J^T r) within tol, lambda_min.
+        # Rows: state (one dof, iota, G), target, norm(J^T r) within tol, lambda_min,
+        # norm(dx*/dt).
         "replay:area_solution": np.tile(
-            [1.0, -0.4, 1.0, 1.0e-11, 0.05], (len(REPLAY_STARTS), 1)
+            [1.0, -0.4, 1.0, 5.86, 1.0e-11, 0.05, 1.0], (len(REPLAY_STARTS), 1)
         ),
         "replay:flux_solution": np.tile(
-            [1.0, -0.4, 1.0, 1.0e-11, 0.05], (len(REPLAY_STARTS), 1)
+            [1.0, -0.4, 1.0, 0.037, 1.0e-11, 0.05, 1.0], (len(REPLAY_STARTS), 1)
         ),
     }
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
@@ -213,7 +214,8 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
     # B1'): the starts exactly -- including the native first-stage end the JAX
     # lane reran --, upstream's success rule norm(J^T r) <= tol on every
     # replayed solve, and each pair of solved states within the sum of the two
-    # lanes' stopping radii, from each lane's own norm(J^T r) and lambda_min.
+    # lanes' stopping radii, from each lane's own norm(J^T r) and lambda_min,
+    # plus the carry-over of the two lanes' label targets (amendment 7, B1'').
     assert native.values["replay:start_surface_dofs"].shape[0] == len(REPLAY_STARTS)
     for observable in REPLAY_EXACT_OBSERVABLES:
         np.testing.assert_array_equal(
@@ -230,8 +232,8 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
         )
         assert np.all(gap <= bound), (observable, gap / bound)
         for observation in (native, jax):
-            assert np.all(observation.values[observable][:, -2] <= tolerance)
-            assert np.all(observation.values[observable][:, -1] > 0.0)
+            assert np.all(observation.values[observable][:, -3] <= tolerance)
+            assert np.all(observation.values[observable][:, -2] > 0.0)
     for observation in (native, jax):
         assert bool(np.all(observation.values["replay:area_solver_success"]))
         assert bool(np.all(observation.values["replay:flux_solver_success"]))

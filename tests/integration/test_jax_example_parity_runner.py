@@ -3661,7 +3661,7 @@ def test_run_parity_records_and_the_audit_recomputes_a_stage_wise_contract(
         audit_published_run(published, repo_root=repo_root)
 
 
-# ------------------------------------------------ stopping-bound comparator (PLAN.md amendment 6, B1')
+# ------------------------------------------------ stopping-bound comparator (PLAN.md amendments 6, 7)
 _SOLUTION_KEY = "replay:area_solution"
 
 
@@ -3674,8 +3674,10 @@ def _solution_routes() -> tuple[ComparisonRoute, ...]:
     )
 
 
-def _solution_observations(rows: dict[str, list[float]]) -> dict[str, LaneObservation]:
-    """Each lane's solution rows: state (two entries), norm(J^T r), lambda_min(J^T J)."""
+def _solution_observations(
+    rows: dict[str, list[float]],
+) -> dict[str, LaneObservation]:
+    """Solution rows: state (two entries), target, norm(J^T r), lambda_min, norm(dx*/dt)."""
     return {
         lane: dataclasses.replace(
             observation,
@@ -3696,9 +3698,9 @@ def test_stopping_bound_passes_a_gap_inside_the_sum_of_the_stopping_radii() -> N
         _solution_routes(),
         _solution_observations(
             {
-                "native-cpu": [1.0, -0.2, 1.0e-11, 0.05],
-                "jax-cpu": [1.0 + 6.0e-10, -0.2, 2.0e-11, 0.04],
-                "jax-gpu": [1.0, -0.2 + 3.0e-10, 1.0e-11, 0.05],
+                "native-cpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 1.0],
+                "jax-cpu": [1.0 + 6.0e-10, -0.2, 0.5, 2.0e-11, 0.04, 1.0],
+                "jax-gpu": [1.0, -0.2 + 3.0e-10, 0.5, 1.0e-11, 0.05, 1.0],
             }
         ),
     )
@@ -3710,11 +3712,24 @@ def test_stopping_bound_passes_a_gap_inside_the_sum_of_the_stopping_radii() -> N
     )
 
 
+def test_stopping_bound_carries_the_lanes_target_difference() -> None:
+    """A gap beyond the radii passes only by the target carry-over s |t_l - t_r| (amendment 7)."""
+    rows = {
+        "native-cpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 2.0],
+        "jax-cpu": [1.0 + 1.0e-9, -0.2, 0.5 + 4.0e-10, 1.0e-11, 0.05, 1.0],
+        "jax-gpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 2.0],
+    }
+    # native-jax-cpu: radii 4e-10 + max(s) 2.0 x 4e-10 = 1.2e-9 >= gap 1e-9.
+    assert arbitrate(_solution_routes(), _solution_observations(rows)).verdict == "pass"
+    rows["jax-cpu"][2] = 0.5 + 2.0e-10  # carry-over 4e-10: bound 8e-10 < gap 1e-9
+    assert arbitrate(_solution_routes(), _solution_observations(rows)).verdict == "fail"
+
+
 @pytest.mark.parametrize(
     ("jax_row", "why"),
     (
-        ([1.0 + 8.0e-10, -0.2, 2.0e-11, 0.04], "gap beyond the radii"),
-        ([1.0, -0.2, 1.0e-11, 0.0], "no curvature"),
+        ([1.0 + 8.0e-10, -0.2, 0.5, 2.0e-11, 0.04, 1.0], "gap beyond the radii"),
+        ([1.0, -0.2, 0.5, 1.0e-11, 0.0, 1.0], "no curvature"),
     ),
 )
 def test_stopping_bound_fails_outside_the_radii_or_without_curvature(
@@ -3724,9 +3739,9 @@ def test_stopping_bound_fails_outside_the_radii_or_without_curvature(
         _solution_routes(),
         _solution_observations(
             {
-                "native-cpu": [1.0, -0.2, 1.0e-11, 0.05],
+                "native-cpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 1.0],
                 "jax-cpu": jax_row,
-                "jax-gpu": [1.0, -0.2, 1.0e-11, 0.05],
+                "jax-gpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 1.0],
             }
         ),
     )
