@@ -66,7 +66,9 @@ def test_traceable_cache_state_accepts_device_quadrature_under_transfer_guard():
         _traceable_solve_state_token = "solve-token"
 
         def _resolve_optimizer_method(self):
-            return "lm-minpack-ondevice"
+            # The ondevice default: traced objectives refuse the dense
+            # lm-minpack inner solve at setup (c127ba818).
+            return "bfgs-ondevice"
 
         def _collect_optimizer_options(self, *, method):
             del method
