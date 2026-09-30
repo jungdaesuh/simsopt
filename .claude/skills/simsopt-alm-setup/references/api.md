@@ -169,8 +169,9 @@ def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
   of each outer iteration (e.g. to refresh something the physics reads, then
   `cache_clear()`).
 - `snapshot_accepted_state_fn`, `restore_incumbent_state_fn`: stateful physics.
-- `initial_multipliers` (nonnegative, one per row), `initial_penalty`: warm
-  start from an earlier result; not with `resume_from`.
+- `initial_multipliers` (nonnegative, one per row), `initial_penalty` (one
+  positive scalar, shared by every row): warm start from an earlier result;
+  not with `resume_from`.
 - `constraint_blocks`: one group label per row (reports only).
 - `base_bounds`: box bounds on x, a sequence of `(lower, upper)` pairs or an
   object with `lb`/`ub`. x0 is projected onto the box (as L-BFGS-B does); a
