@@ -14,17 +14,17 @@
   "simsopt_alm/checkpoint.py": "9a4f453d0dbbc4e83834dee6e961bf007af63907",
   "simsopt_alm/continuation.py": "b327f33031c63bfaaf1bd9dbc615fb10b40013ea",
   "simsopt_alm/control.py": "9076d796b0fce3f218d9b766c7871f1396a8f530",
-  "simsopt_alm/core.py": "06829ca7cd2cea556fd057641faf6498ce5fb9da",
+  "simsopt_alm/core.py": "5e33f4b5d406006cdea31339976ce4175b67bdc2",
   "simsopt_alm/evaluation.py": "4ccd8ca842282ed4797d509bf1d961ae855ad8fb",
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
   "simsopt_alm/history.py": "d83a19e1377b4a9e4d9c3627350fd1a21aeed92d",
-  "simsopt_alm/hybrid.py": "d1574700bcaee83d36ffbe243ec462c0eba66049",
+  "simsopt_alm/hybrid.py": "38ea723be129746c1bcc4d00b9db2ed438f30aa8",
   "simsopt_alm/inner.py": "19317666a8c6a34aad554f8cc79161768f411696",
   "simsopt_alm/policy.py": "50e4b921f2cbe303b6845883968a7fcff678f76e",
   "simsopt_alm/problem.py": "1e145040b215ac60c6c7264fd59a7807b0ac3013",
   "simsopt_alm/taylor.py": "1128723b36bd64c5f50f788c66053a89d55d5f9d",
-  "alm_golden_scenarios.py": "f1b0be87ff199a8466240214d9af6a629e6eaedc",
-  "generate_alm_golden.py": "44eb1d774504e51b5a3366117f69e4dffc662e17",
+  "alm_golden_scenarios.py": "a2c5929fe4794e94ee98bb028a0a110f5a9c0e7b",
+  "generate_alm_golden.py": "53b2b380127b0621fdb2ff5c0c3cc351f0652211",
   "measure_alm_golden_sensitivity.py": "434f817334fe11f58e8ff9311db6bca2570a7fed"
  },
  "outcome_union": [
@@ -37,7 +37,6 @@
   "action:penalty_increase",
   "action:process_budget_exhausted",
   "action:signal_mismatch_penalty_increase",
-  "action:signal_mismatch_stall",
   "action:signal_mismatch_subproblem_limit_penalty_increase",
   "action:subproblem_continue",
   "action:subproblem_limit",
@@ -75,7 +74,6 @@
   "termination:penalty_cap_reached_restored_best_feasible",
   "termination:plateau_stall",
   "termination:process_budget_exhausted",
-  "termination:signal_mismatch_stall",
   "termination:subproblem_continue"
  ],
  "scenarios": [
@@ -110,10 +108,10 @@
    "bytes": 46562
   },
   {
-   "scenario": "hybrid_mismatch_stall",
-   "fixture": "hybrid_mismatch_stall.json",
-   "sha256": "3c621dca39a32795c04a18d10afb739272b3e58a21f740a11cdfa35a220aa811",
-   "bytes": 30978
+   "scenario": "hybrid_zero_shift_split",
+   "fixture": "hybrid_zero_shift_split.json",
+   "sha256": "6283ecf7c926807be12f54b14f9d5b99785b1b8ad7a449ce2d272705cf577d1b",
+   "bytes": 66648
   },
   {
    "scenario": "constraints_inactive_stall",

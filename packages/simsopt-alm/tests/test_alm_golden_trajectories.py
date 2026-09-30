@@ -296,7 +296,7 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
             with self.subTest(scenario=name):
                 observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
                 self.assertIsNone(outcome_replay_failure(name, observed, exact=False))
-                for extra in ("termination:converged", "action:signal_mismatch_stall"):
+                for extra in ("termination:converged", "action:constraints_inactive_stall"):
                     if extra in observed:
                         continue
                     self.assertIn(
@@ -435,8 +435,8 @@ class AlmGoldenReplayTests(unittest.TestCase):
     def test_hybrid_mismatch_penalty_increase(self):
         self.assert_replays_bitwise("hybrid_mismatch_penalty_increase")
 
-    def test_hybrid_mismatch_stall(self):
-        self.assert_replays_bitwise("hybrid_mismatch_stall")
+    def test_hybrid_zero_shift_split(self):
+        self.assert_replays_bitwise("hybrid_zero_shift_split")
 
     def test_constraints_inactive_stall(self):
         self.assert_replays_bitwise("constraints_inactive_stall")

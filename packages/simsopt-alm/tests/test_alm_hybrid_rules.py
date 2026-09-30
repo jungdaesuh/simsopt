@@ -2,8 +2,7 @@
 the hybrid quartet.
 
 The hybrid module owns what a hard-feasible step does while the surrogate and
-hard constraint signals disagree (repair, subproblem limit, stall, penalty
-raise). Only ``DefaultContinuationPolicy`` calls it, and only on a signal
+hard constraint signals disagree (repair, subproblem limit, penalty raise). Only ``DefaultContinuationPolicy`` calls it, and only on a signal
 mismatch, which needs an evaluator that returns the hybrid quartet. So an
 evaluator without the quartet never reaches a hybrid rule: with every hybrid
 function made to fail, the non-quartet goldens still replay.
@@ -82,7 +81,7 @@ class AlmHybridInertnessTests(unittest.TestCase):
         with ExitStack() as stack:
             _all_hybrid_rules_fail(stack)
             with self.assertRaises(HybridRuleReached):
-                golden.SCENARIOS_BY_NAME["hybrid_mismatch_stall"].run()
+                golden.SCENARIOS_BY_NAME["hybrid_mismatch_penalty_increase"].run()
 
 
 def _imported_modules(path: Path) -> Set[str]:

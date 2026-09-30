@@ -997,7 +997,7 @@ def run_hybrid_mismatch_penalty_increase() -> dict:
     ).trajectory
 
 
-def run_hybrid_mismatch_stall() -> dict:
+def run_hybrid_zero_shift_split() -> dict:
     return execute(
         _hybrid_band_run(
             surrogate_bias=-0.05,
@@ -1379,10 +1379,13 @@ SCENARIOS: tuple[Scenario, ...] = (
         run_hybrid_mismatch_penalty_increase,
     ),
     Scenario(
-        "hybrid_mismatch_stall",
+        "hybrid_zero_shift_split",
         "Hybrid signals, hard row active and surrogate row inactive with zero "
-        "surrogate shift: the signal-mismatch stall termination.",
-        run_hybrid_mismatch_stall,
+        "surrogate shift: no signal mismatch (no multiplier rides on the row), "
+        "so the subproblem continues until the surrogate's gap leaves the "
+        "iterate hard-infeasible, and max-outer exhaustion restores the best "
+        "hard-feasible one.",
+        run_hybrid_zero_shift_split,
     ),
     Scenario(
         "constraints_inactive_stall",

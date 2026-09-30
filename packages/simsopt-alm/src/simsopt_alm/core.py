@@ -723,8 +723,6 @@ def _constraint_routing_state(
         activity_tolerances,
         feasibility_gate,
     )
-    masks_disagree = not np.array_equal(hard_activity_mask, surrogate_activity_mask)
-    signal_mismatch_active = signal_state.explicit_hybrid_signals and masks_disagree
     hard_positive_shift = _positive_shift(
         multipliers,
         penalty,
@@ -738,20 +736,20 @@ def _constraint_routing_state(
     hard_feasible_under_gate = _max_value(signal_state.hard_violation_values) <= float(
         feasibility_gate
     )
-    # Hard-feasible, yet a row whose surrogate still pushes (positive shift)
-    # has a surrogate signal more than the gate away from its hard signal.
-    # Identical channels never mismatch, even at an active boundary.
+    # The only mismatch: hard-feasible, yet a row whose surrogate still pushes
+    # (positive shift) has a surrogate signal more than the gate away from its
+    # hard signal, so a multiplier rides on a row the channels disagree on.
+    # Activity masks that differ on a zero-shift row, or on channels within
+    # the gate of each other, carry no multiplier: no mismatch.
     signals_differ = np.abs(
         signal_state.surrogate_signed_constraint_values
         - signal_state.hard_signed_constraint_values
     ) > float(feasibility_gate)
-    direct_boundary_mismatch = (
+    signal_mismatch_active = (
         signal_state.explicit_hybrid_signals
         and hard_feasible_under_gate
         and np.any((surrogate_positive_shift > 0.0) & signals_differ)
     )
-    if direct_boundary_mismatch:
-        signal_mismatch_active = True
     return ALMConstraintRoutingState(
         signal_state=signal_state,
         hard_activity_mask=hard_activity_mask,

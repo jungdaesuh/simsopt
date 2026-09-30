@@ -12,42 +12,27 @@ from __future__ import annotations
 
 from typing import Union
 
-from .continuation import ALMContinue, ALMPostInnerView, ALMRaisePenalty, ALMStop
+from .continuation import ALMContinue, ALMPostInnerView, ALMRaisePenalty
 
 
 def signal_mismatch_step(
     view: ALMPostInnerView,
-) -> Union[ALMStop, ALMRaisePenalty, ALMContinue]:
-    """The step after an inner solve that ends hard-feasible under mismatch.
+) -> Union[ALMRaisePenalty, ALMContinue]:
+    """The step after an inner solve that ends hard-feasible under mismatch
+    (which always has a live surrogate shift).
 
-    A stalled mismatch (no progress, or any continuation) stops when the
-    surrogate shift is zero and raises the penalty otherwise, unless
-    ``continue_on_signal_mismatch`` repairs a live shift. A repaired or
+    A stalled mismatch (no progress, or any continuation) raises the penalty,
+    unless ``continue_on_signal_mismatch`` repairs it. A repaired or
     progressing mismatch resets the stall count and continues the subproblem
     up to its limit, where it raises the penalty.
     """
     settings = view.settings
-    routing_state = view.inner.measured.routing_state
     stalled = not view.inner.meaningful_progress or view.continuation_iteration > 0
-    # Opt-in repair keeps a stalled mismatch with a live surrogate shift on
-    # the bounded continuation path instead of raising the penalty.
-    repair = (
-        stalled
-        and settings.continue_on_signal_mismatch
-        and not routing_state.surrogate_positive_shift_zero
-    )
+    # Opt-in repair keeps a stalled mismatch on the bounded continuation path
+    # instead of raising the penalty.
+    repair = stalled and settings.continue_on_signal_mismatch
     if stalled and not repair:
-        # These two exits keep the stall count the step came with.
-        if routing_state.surrogate_positive_shift_zero:
-            return ALMStop(
-                action="signal_mismatch_stall",
-                termination_reason="signal_mismatch_stall",
-                message_prefix=(
-                    "ALM stopped after hard-feasible and surrogate-active "
-                    "signals repeated without corrective progress"
-                ),
-                feasible_stall_count=view.feasible_stall_count,
-            )
+        # This exit keeps the stall count the step came with.
         return ALMRaisePenalty(
             action="signal_mismatch_penalty_increase",
             max_outer_termination="max_outer_after_signal_mismatch_penalty_increase",

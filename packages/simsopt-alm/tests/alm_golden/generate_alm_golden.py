@@ -124,9 +124,10 @@ INTENDED_OUTCOMES = {
         "action:signal_mismatch_penalty_increase",
         "termination:max_outer_after_signal_mismatch_penalty_increase",
     ),
-    "hybrid_mismatch_stall": (
-        "action:signal_mismatch_stall",
-        "termination:signal_mismatch_stall",
+    "hybrid_zero_shift_split": (
+        "action:penalty_increase",
+        "restored:final_iterate_infeasible",
+        "termination:max_outer_restored_best_feasible",
     ),
     "constraints_inactive_stall": (
         "action:constraints_inactive_stall",

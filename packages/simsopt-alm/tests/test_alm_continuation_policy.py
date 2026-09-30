@@ -293,8 +293,9 @@ CONVERGED = _plain(0.0, 0.0)
 CONSTRAINTS_INACTIVE = _hybrid((0.0, 1.0), surrogate_bias=0.05, stationarity_norm=0.0)
 # Hard-feasible, surrogate-active (live surrogate shift): signal mismatch.
 MISMATCH_LIVE_SHIFT = _hybrid((0.99, 1.0), surrogate_bias=0.05)
-# Hard-active, surrogate-inactive (zero surrogate shift): signal mismatch.
-MISMATCH_ZERO_SHIFT = _hybrid(
+# Hard-active, surrogate-inactive (zero surrogate shift): the activity masks
+# differ, but no multiplier rides on the row in either channel, so no mismatch.
+ZERO_SHIFT_SPLIT = _hybrid(
     (0.99, 1.0), surrogate_bias=-0.05, activity_tolerance=0.02
 )
 # Feasible, far from stationary.
@@ -452,35 +453,26 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
         self.assertEqual(decision.action, "signal_mismatch_penalty_increase")
         self.assertEqual(decision.feasible_stall_count, 1)
 
-    def test_repair_flag_with_a_zero_shift_stops_on_the_mismatch(self):
-        # Golden gap: continue_on_signal_mismatch=True cannot repair a
-        # mismatch whose surrogate shift is zero.
-        settings = dataclasses.replace(SETTINGS, continue_on_signal_mismatch=True)
-        measured = _measure(
-            MISMATCH_ZERO_SHIFT, settings=settings, update_stationarity_tol=1.0e-6
-        )
-        self.assertTrue(measured.signal_mismatch_active)
+    def test_a_zero_shift_activity_split_is_no_mismatch(self):
+        # Grok G1: the masks differ (the hard row is in its activity band, the
+        # surrogate row is not) but no multiplier rides on the row, so the
+        # step is the constraints-inactive one, not a mismatch stop.
+        measured = _measure(ZERO_SHIFT_SPLIT, update_stationarity_tol=1.0e-6)
+        self.assertFalse(np.array_equal(
+            measured.routing_state.hard_activity_mask,
+            measured.routing_state.surrogate_activity_mask,
+        ))
         self.assertTrue(measured.routing_state.surrogate_positive_shift_zero)
+        self.assertFalse(measured.signal_mismatch_active)
         decision = self.after_inner(
             _view(
                 measured,
-                settings=settings,
+                continuation_iteration=1,
                 meaningful_progress=False,
                 feasible_stall_count=1,
             )
         )
-        self.assertEqual(
-            decision,
-            ALMStop(
-                action="signal_mismatch_stall",
-                termination_reason="signal_mismatch_stall",
-                message_prefix=(
-                    "ALM stopped after hard-feasible and surrogate-active "
-                    "signals repeated without corrective progress"
-                ),
-                feasible_stall_count=1,
-            ),
-        )
+        self.assertEqual(decision.action, "constraints_inactive_stall")
 
     def test_repaired_mismatch_continues_then_raises_at_the_limit(self):
         settings = dataclasses.replace(SETTINGS, continue_on_signal_mismatch=True)

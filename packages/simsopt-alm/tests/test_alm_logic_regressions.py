@@ -13,6 +13,7 @@ import simsopt_alm as alm
 from simsopt_alm import ALMSettings, augmented_inequality_objective, minimize_alm
 from simsopt_alm.checkpoint import resume_boundary, transition_snapshot
 from simsopt_alm.continuation import ALMInnerPlan, ALMStalledTrialView
+from simsopt_alm.core import _constraint_routing_state
 from simsopt_alm.policy import DefaultContinuationPolicy
 
 
@@ -68,6 +69,61 @@ class DualUpdateGateTests(unittest.TestCase):
         self.assertEqual(result.termination_reason, "converged", result.message)
         np.testing.assert_allclose(result.x, [0.0, 0.0], atol=1.0e-6)
         np.testing.assert_allclose(shifted_multipliers(result), [0.0, 1.0], atol=1.0e-6)
+
+
+def straddling_hybrid(hard, surrogate):
+    """min (x - 1)^2 with one constant row whose hard and surrogate values are
+    ``hard`` and ``surrogate``, both feasible to ``feasibility_tol``."""
+
+    def evaluate(x, multipliers, penalty):
+        physics = alm.ALMPhysics(
+            base_value=float((x[0] - 1.0) ** 2),
+            base_grad=np.array([2.0 * (x[0] - 1.0)]),
+            constraint_values=np.array([surrogate]),
+            constraint_grads=(np.array([1.0]),),
+            extras={
+                "dual_update_values": np.array([hard]),
+                "feasibility_values": np.array([max(hard, 0.0)]),
+                "hard_signed_constraint_values": np.array([hard]),
+                "hard_violation_values": np.array([max(hard, 0.0)]),
+                "surrogate_signed_constraint_values": np.array([surrogate]),
+                "hard_dual_update_values": np.array([hard]),
+            },
+        )
+        return physics.evaluation(multipliers, penalty)
+
+    return evaluate
+
+
+class SignalMismatchTests(unittest.TestCase):
+    """G1 (core.py): the mismatch flag came from unequal activity masks, so a
+    hybrid pair straddling 0 within the tolerance never converged."""
+
+    def test_channels_straddling_zero_within_the_tolerance_converge(self):
+        for hard, surrogate in ((-5.0e-7, 5.0e-7), (-1.0e-8, 1.0e-9)):
+            with self.subTest(hard=hard, surrogate=surrogate):
+                result = minimize_alm(
+                    [1.0], ["g"], straddling_hybrid(hard, surrogate),
+                    ALMSettings(max_outer_iterations=2), {"maxiter": 5},
+                )
+                self.assertEqual(result.termination_reason, "converged", result.message)
+                self.assertTrue(result.success)
+
+    def test_a_zero_shift_activity_split_is_no_mismatch(self):
+        # Hard row on its boundary (active), surrogate 0.05 inside it
+        # (inactive, zero shift): no multiplier rides on the row in either
+        # channel, so the KKT conditions of both problems agree.
+        evaluation = straddling_hybrid(0.0, -0.05)(np.array([1.0]), np.zeros(1), 10.0)
+        evaluation["constraint_activity_tolerances"] = np.array([0.02])
+        routing = _constraint_routing_state(evaluation, np.zeros(1), 10.0, 1.0e-6)
+        self.assertTrue(routing.hard_activity_mask[0])
+        self.assertFalse(routing.surrogate_activity_mask[0])
+        self.assertFalse(routing.signal_mismatch_active)
+
+    def test_a_live_shift_beyond_the_gate_is_still_a_mismatch(self):
+        evaluation = straddling_hybrid(-0.05, 0.001)(np.array([1.0]), np.zeros(1), 10.0)
+        routing = _constraint_routing_state(evaluation, np.zeros(1), 10.0, 1.0e-6)
+        self.assertTrue(routing.signal_mismatch_active)
 
 
 class FlaggedFiniteTrialTests(unittest.TestCase):
