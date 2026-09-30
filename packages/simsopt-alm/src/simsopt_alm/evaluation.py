@@ -147,6 +147,7 @@ def _nonfinite_evaluation_fields(evaluation: dict) -> Tuple[str, ...]:
         "max_violation",
         "base_value",
         "base_total",
+        "physics_total",
     )
     for field_name in optional_scalar_fields:
         if field_name not in evaluation:

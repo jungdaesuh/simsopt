@@ -15,7 +15,7 @@
   "simsopt_alm/continuation.py": "d38d2e3162b371a6700ef2df00399b603e4c2d13",
   "simsopt_alm/control.py": "b63439d390ed60077caee2207c68eebf94c66323",
   "simsopt_alm/core.py": "e2a5214a18f99a321184b5074943302d3e7b9859",
-  "simsopt_alm/evaluation.py": "f02386aa8e00de1132b46bf6a9fa5fcb8670a89a",
+  "simsopt_alm/evaluation.py": "a9c06b1560b2be2b7a0bfcaca2b8f23cc31838b2",
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
   "simsopt_alm/history.py": "d83a19e1377b4a9e4d9c3627350fd1a21aeed92d",
   "simsopt_alm/hybrid.py": "d1574700bcaee83d36ffbe243ec462c0eba66049",
