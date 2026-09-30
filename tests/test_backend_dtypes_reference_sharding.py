@@ -50,8 +50,8 @@ def test_reference_sharding_short_circuits_on_tracer():
 
 
 def test_reference_sharding_still_probes_concrete_array():
-    """A concrete (non-traced) array is unaffected: it is still probed."""
-    arr = jnp.zeros(3)
+    """A concrete (non-traced) committed array is unaffected: it is still probed."""
+    arr = jax.device_put(np.zeros(3), jax.local_devices()[0])
     with mock.patch.object(
         dtypes,
         "_compatible_reference_sharding",
@@ -285,7 +285,7 @@ def test_explicit_device_array_preserves_single_device_reference(monkeypatch):
     but the sharding form pins a put staged inside ``jit`` to one device (see
     ``dtypes._single_device_placement``).
     """
-    reference = jnp.zeros(3)
+    reference = jax.device_put(np.zeros(3), jax.local_devices()[0])
     (reference_device,) = reference.sharding.device_set
     placements: list[object | None] = []
 
@@ -309,3 +309,126 @@ def test_explicit_device_array_preserves_single_device_reference(monkeypatch):
     assert isinstance(array, np.ndarray)
     assert placement is reference_device
     assert placements == [reference_device]
+
+
+def test_unplaced_values_stay_uncommitted_like_jax_leaves_them(monkeypatch):
+    """A value no caller placed is uncommitted on the runtime device, as JAX leaves it.
+
+    Committing it (the old rule) claimed a placement no caller made, so it
+    refused every computation with data committed elsewhere. A value placed
+    with an uncommitted reference is unplaced too; a committed reference's
+    placement is still used.
+    """
+    default_device = jax.local_devices()[0]
+    monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: default_device)
+
+    unplaced = dtypes.runtime_device_put(np.ones(3))
+    unplaced_tree = dtypes.runtime_device_put_tree({"a": np.ones(3)})["a"]
+    with_uncommitted_reference = dtypes.as_runtime_float64(
+        np.ones(3), reference=jnp.zeros(3)
+    )
+    with_uncommitted_explicit_reference = dtypes.explicit_device_array(
+        np.ones(3), dtype=jnp.float64, reference=jnp.zeros(3)
+    )
+    with_committed_reference = dtypes.explicit_device_array(
+        np.ones(3),
+        dtype=jnp.float64,
+        reference=jax.device_put(np.zeros(3), default_device),
+    )
+
+    for array in (
+        unplaced,
+        unplaced_tree,
+        with_uncommitted_reference,
+        with_uncommitted_explicit_reference,
+    ):
+        assert not array.committed
+        assert array.devices() == {default_device}
+    assert with_committed_reference.committed
+    assert with_committed_reference.devices() == {default_device}
+
+
+def test_runtime_device_put_commits_a_runtime_device_jax_would_not_choose(monkeypatch):
+    """A runtime device other than JAX's default is still an explicit placement."""
+    runtime_device = object()
+    placements: list[object | None] = []
+
+    def _device_put(array, placement=None):
+        placements.append(placement)
+        return array, placement
+
+    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
+    monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: runtime_device)
+    monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
+
+    _, placement = dtypes.runtime_device_put_tree({"a": np.ones(3)})
+
+    assert placement is runtime_device
+    assert placements == [runtime_device]
+
+
+_UNPLACED_JOINS_COMMITTED_CHILD = """
+import sys
+from pathlib import Path
+
+repo_root = sys.argv[1]
+sys.path.insert(0, repo_root)
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(Path(repo_root) / "src")
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+from simsopt_jax.backend import dtypes
+
+first, second = jax.devices("cpu")[:2]
+assert dtypes.get_runtime_jax_device() == first
+elsewhere = jax.device_put(np.arange(3.0), second)
+unplaced = dtypes.runtime_device_put(np.ones(3))
+with_uncommitted_reference = dtypes.as_runtime_float64(
+    np.ones(3), reference=jnp.zeros(3)
+)
+assert (unplaced + elsewhere).devices() == {second}
+assert (with_uncommitted_reference * elsewhere).devices() == {second}
+with jax.default_device(second):
+    scoped = dtypes.runtime_device_put(np.ones(3))
+assert scoped.devices() == {second}, scoped.devices()
+moved = dtypes.runtime_device_put(elsewhere)
+assert moved.committed and moved.devices() == {first}, moved.devices()
+"""
+
+
+def test_unplaced_values_join_data_committed_to_another_device():
+    """A constant nobody placed joins data committed to another device.
+
+    The committed-to-the-runtime-device rule refused this combination: a
+    Boozer instance built under ``with_cpu_device_for_construction`` (or on
+    an active mesh) met constants committed to the runtime device. A
+    ``jax.default_device`` scope is honoured as well, and an array committed
+    elsewhere is still moved onto the runtime device.
+    """
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "JAX_PLATFORMS": "cpu",
+            "JAX_ENABLE_X64": "1",
+            "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        }
+    )
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            _UNPLACED_JOINS_COMMITTED_CHILD,
+            str(Path(__file__).resolve().parents[1]),
+        ),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr

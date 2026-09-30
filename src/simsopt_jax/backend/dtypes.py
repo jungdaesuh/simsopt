@@ -115,19 +115,29 @@ def _reference_placement(reference, *, ndim: int | None = None):
     if _is_jax_tracer(reference):
         return None
     if isinstance(reference, jax.Array):
-        sharding = getattr(reference, "sharding", None)
-        if isinstance(sharding, NamedSharding):
-            return _compatible_reference_sharding(sharding, ndim=ndim)
-        return _single_device_placement(sharding)
+        return _committed_placement(reference, ndim=ndim)
     if isinstance(reference, (list, tuple)):
         for leaf in jax.tree.leaves(reference):
             if isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf):
-                sharding = getattr(leaf, "sharding", None)
-                if sharding is not None:
-                    if isinstance(sharding, NamedSharding):
-                        return _compatible_reference_sharding(sharding, ndim=ndim)
-                    return _single_device_placement(sharding)
+                placement = _committed_placement(leaf, ndim=ndim)
+                if placement is not None:
+                    return placement
     return None
+
+
+def _committed_placement(array: jax.Array, *, ndim: int | None):
+    """The placement a concrete array claims, or ``None`` if it claims none.
+
+    An uncommitted array (placed by nobody, JAX's default device) makes no
+    claim, so a value placed with it stays unplaced too
+    (``_unplaced_device_put``) and joins whatever committed data it meets.
+    """
+    if not array.committed:
+        return None
+    sharding = array.sharding
+    if isinstance(sharding, NamedSharding):
+        return _compatible_reference_sharding(sharding, ndim=ndim)
+    return _single_device_placement(sharding)
 
 
 def _single_device_placement(sharding):
@@ -281,6 +291,35 @@ def _runtime_device_put_dtype(
     return None
 
 
+def _contains_committed_jax_leaves(value) -> bool:
+    return any(
+        isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf) and leaf.committed
+        for leaf in jax.tree.leaves(value)
+    )
+
+
+def _unplaced_device_put(value):
+    """Place a value (or pytree) its caller did not place, as JAX itself would.
+
+    JAX leaves such a value uncommitted on its default device (an active
+    ``jax.default_device`` scope included), and an uncommitted value joins the
+    committed data it meets.  Committing it to the runtime device would claim
+    a placement no caller made and refuse every computation with data
+    committed elsewhere: a Boozer instance built under
+    ``with_cpu_device_for_construction``, an active mesh on other devices.
+    The runtime device is still committed when JAX would not choose it by
+    itself, and a committed array is still moved onto it (an explicit
+    transfer, as before).
+    """
+    runtime_device = get_runtime_jax_device()
+    if runtime_device is None or (
+        runtime_device == jax.local_devices()[0]
+        and not _contains_committed_jax_leaves(value)
+    ):
+        return jax.device_put(value)
+    return jax.device_put(value, runtime_device)
+
+
 def _device_put(
     value,
     *,
@@ -303,10 +342,7 @@ def _device_put(
         array = np.asarray(value, dtype=resolved_dtype)
     maybe_initialize_distributed_jax()
     if placement is None:
-        runtime_device = get_runtime_jax_device()
-        if runtime_device is None:
-            return jax.device_put(array)
-        return jax.device_put(array, runtime_device)
+        return _unplaced_device_put(array)
     return jax.device_put(array, placement)
 
 
@@ -331,9 +367,7 @@ def runtime_device_put_tree(
     placement = _device_put_target(target, device)
     maybe_initialize_distributed_jax()
     if placement is None:
-        placement = get_runtime_jax_device()
-    if placement is None:
-        return jax.device_put(value)
+        return _unplaced_device_put(value)
     return jax.device_put(value, placement)
 
 

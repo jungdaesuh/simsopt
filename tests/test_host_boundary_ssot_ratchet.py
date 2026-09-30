@@ -136,13 +136,16 @@ _NON_JAX_BINDING = "non-jax"
 # Re-pinned 2026-09-29, no new site: carrying lm-minpack's Jacobian count in
 # ``dispatch._public_result`` moved the four ``_run_scipy_minimize``
 # coordinates below it. Baseline: 30.
+# Removed 2026-09-30, no new site: the unplaced-value rule moved the runtime
+# placement of ``dtypes._device_put`` and ``dtypes.runtime_device_put_tree``
+# into their shared owner ``dtypes._unplaced_device_put`` (two sites there),
+# leaving one explicit-placement site in each caller. Baseline: 29.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
-        "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::308:19",
-        "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::309:15",
-        "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::310:11",
-        "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree::device_put::336:15",
-        "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree::device_put::337:11",
+        "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::346:11",
+        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put::device_put::319:15",
+        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put::device_put::320:11",
+        "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree::device_put::371:11",
         "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_device_to_device::255:13",
         "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_host_to_device::254:9",
         "src/simsopt_jax/core/sharding.py::replicate_tree_on_mesh::transfer_guard_device_to_device::249:13",
