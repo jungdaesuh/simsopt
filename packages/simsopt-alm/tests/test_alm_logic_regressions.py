@@ -12,7 +12,7 @@ import numpy as np
 import simsopt_alm as alm
 from simsopt_alm import ALMSettings, augmented_inequality_objective, minimize_alm
 from simsopt_alm.checkpoint import resume_boundary, transition_snapshot
-from simsopt_alm.continuation import ALMStalledTrialView
+from simsopt_alm.continuation import ALMInnerPlan, ALMStalledTrialView
 from simsopt_alm.policy import DefaultContinuationPolicy
 
 
@@ -68,6 +68,42 @@ class TaylorOwnershipTests(unittest.TestCase):
 
         result = alm.run_directional_taylor_test(evaluate, [1.0], [], 1.0, direction=[1.0])
         self.assertEqual(result["status"], "failed", result)
+
+
+class InnerPlanBudgetTests(unittest.TestCase):
+    """B6 (inner.py): a custom plan's maxiter ran past the call's budget."""
+
+    def test_a_plan_cannot_raise_maxiter_past_the_call_budget(self):
+        class GenerousPlan(DefaultContinuationPolicy):
+            def inner_plan(self, view):
+                return ALMInnerPlan("custom", dict(super().inner_plan(view).options, maxiter=100))
+
+        def evaluate(x, multipliers, penalty):
+            return augmented_inequality_objective(
+                x[0] ** 2 + 10.0 * x[1] ** 2, [2.0 * x[0], 20.0 * x[1]], [], [], multipliers, penalty
+            )
+
+        result = minimize_alm(
+            [1.0, 1.0], [], evaluate, ALMSettings(), {"maxiter": 1}, continuation_policy=GenerousPlan()
+        )
+        self.assertLessEqual(result.nit, 1)
+
+    def test_a_plan_without_maxiter_gets_the_call_budget(self):
+        class UncappedPlan(DefaultContinuationPolicy):
+            def inner_plan(self, view):
+                options = dict(super().inner_plan(view).options)
+                options.pop("maxiter", None)
+                return ALMInnerPlan("custom", options)
+
+        def evaluate(x, multipliers, penalty):
+            return augmented_inequality_objective(
+                x[0] ** 2 + 10.0 * x[1] ** 2, [2.0 * x[0], 20.0 * x[1]], [], [], multipliers, penalty
+            )
+
+        result = minimize_alm(
+            [1.0, 1.0], [], evaluate, ALMSettings(), {"maxiter": 1}, continuation_policy=UncappedPlan()
+        )
+        self.assertLessEqual(result.nit, 1)
 
 
 class PhysicsTotalValidationTests(unittest.TestCase):

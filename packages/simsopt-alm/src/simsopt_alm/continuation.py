@@ -96,8 +96,8 @@ class ALMInnerPlanView:
 
 @dataclass(frozen=True)
 class ALMInnerPlan:
-    """L-BFGS-B ``options`` for one attempt (read-only) and the ``profile``
-    name the step publishes for them."""
+    """L-BFGS-B ``options`` for one attempt (read-only; a call budget caps
+    their ``maxiter`` at the view's) and the ``profile`` the step publishes."""
 
     profile: str
     options: Mapping[str, object]

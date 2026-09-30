@@ -380,7 +380,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
             )
         )
         self.assertLessEqual(
-            line_count, 5731, f"the core package has {line_count} lines; budget is 5731"
+            line_count, 5738, f"the core package has {line_count} lines; budget is 5738"
         )
 
 

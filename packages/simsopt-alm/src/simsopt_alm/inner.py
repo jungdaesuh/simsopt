@@ -43,6 +43,7 @@ from .policy import (
     DEFAULT_CONTINUATION_POLICY,
     ALMContinuationPolicy,
     _dual_update_gate_satisfied,
+    _positive_alm_integer,
 )
 
 def _inner_options_with_remaining_maxiter(
@@ -619,6 +620,12 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             )
         )
         inner_attempt_options = dict(plan.options)
+        if process_inner_maxiter is not None:
+            # A plan may lower the call's remaining budget, never exceed it.
+            plan_maxiter = inner_attempt_options.get("maxiter", remaining_maxiter)
+            inner_attempt_options["maxiter"] = min(
+                _positive_alm_integer("inner plan maxiter", plan_maxiter), remaining_maxiter
+            )
         attempt_bounds = _build_box_bounds(
             request.x,
             attempt_radius,
