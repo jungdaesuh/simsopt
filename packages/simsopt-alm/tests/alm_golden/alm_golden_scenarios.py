@@ -285,6 +285,23 @@ HISTORY_FLAGS = (
 )
 
 
+# The termination reasons of a run its spent inner maxiter budget ended: the
+# latest step's action, one that ends a step without returning (the "Inner
+# budget spent" table of the skill's termination.md). A best-feasible
+# restore renames it max_outer_restored_best_feasible, which the outer limit
+# returns too.
+BUDGET_SPENT_TERMINATIONS = frozenset((
+    "dual_update",
+    "penalty_increase",
+    "sufficient_decrease_hold",
+    "infeasible_stall_penalty_increase",
+    "subproblem_limit_penalty_increase",
+    "signal_mismatch_penalty_increase",
+    "signal_mismatch_subproblem_limit_penalty_increase",
+    "subproblem_continue",
+))
+
+
 def _decoded_field(result: dict, name: str):
     value = result["fields"][name]
     return token_to_float(value) if is_float_token(value) else value
@@ -315,16 +332,7 @@ def run_outcomes(trajectory: dict) -> set[str]:
             outcomes.add(
                 f"restored:{_decoded_field(result, 'restored_best_feasible_reason')}"
             )
-        # The run counts an outer iteration that took no step: the process's
-        # inner maxiter was spent when that outer iteration began.
-        step_outers = [
-            event["outer_iteration"]
-            for event in trajectory["events"]
-            if event["event"] == "on_outer_step"
-        ]
-        if "history" in trajectory and max(step_outers, default=0) < _decoded_field(
-            result, "outer_iterations"
-        ):
+        if _decoded_field(result, "termination_reason") in BUDGET_SPENT_TERMINATIONS:
             outcomes.add("inner_maxiter_budget_spent")
     return outcomes
 
@@ -1424,7 +1432,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         "inner_iteration_budget",
-        "The inner maxiter process budget runs out at an outer boundary.",
+        "The inner maxiter budget of the call runs out at an outer boundary.",
         run_inner_iteration_budget,
     ),
     Scenario(
@@ -1441,8 +1449,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         "zero_inner_budget",
-        "inner maxiter 0: every inner solve is an exhausted placeholder (no "
-        "move), so the feasible start plateaus.",
+        "inner maxiter 0: the first step's inner solve is an exhausted "
+        "placeholder (no move), and the spent budget ends the run after it.",
         run_zero_inner_budget,
     ),
 )

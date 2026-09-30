@@ -421,7 +421,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.999999999999ap-4",
     "trust_radius": "0x1.4e4430b178b37p-6",
-    "inner_maxiter": 500,
+    "inner_maxiter": 499,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -544,7 +544,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.999999999999ap-4",
     "trust_radius": "0x1.519be9800bd3fp-6",
-    "inner_maxiter": 500,
+    "inner_maxiter": 498,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -873,7 +873,7 @@
     "action": "subproblem_continue",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "b110c1ede1bd6ecbeca817ab85423ed591d6b3a9d8b4c29daf37c59101ff1597"
+    "event_sha256": "daf90304ebd0cbb7de3c2d6ff7c5b5f9f69c3424a30b0465c13b406dfe56d26e"
    },
    {
     "event": "evaluate_problem",
@@ -993,7 +993,7 @@
     "action": "signal_mismatch_stall",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "94d8eb0daa0fb9c503c57688563212b8322331be3e86db672fa9fa1b61fab78e"
+    "event_sha256": "83d4e61417f3c3da18b734bdc0cd8d710d845d66896afb168dfe9b3e94d014e5"
    },
    {
     "event": "snapshot_accepted_state",

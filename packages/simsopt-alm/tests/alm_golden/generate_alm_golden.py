@@ -177,8 +177,9 @@ INTENDED_OUTCOMES = {
         "termination:converged",
     ),
     "zero_inner_budget": (
-        "action:subproblem_limit",
-        "termination:plateau_stall",
+        "action:subproblem_continue",
+        "inner_maxiter_budget_spent",
+        "termination:subproblem_continue",
     ),
 }
 

@@ -1,15 +1,15 @@
 {
  "format": "alm_library_golden_trajectory_v1",
  "scenario": "zero_inner_budget",
- "description": "inner maxiter 0: every inner solve is an exhausted placeholder (no move), so the feasible start plateaus.",
+ "description": "inner maxiter 0: the first step's inner solve is an exhausted placeholder (no move), and the spent budget ends the run after it.",
  "outcomes": [
   "action:subproblem_continue",
-  "action:subproblem_limit",
   "callback:evaluate_problem",
   "callback:on_outer_boundary",
   "callback:on_outer_step",
   "callback:outer_state_callback",
-  "termination:plateau_stall"
+  "inner_maxiter_budget_spent",
+  "termination:subproblem_continue"
  ],
  "trajectory": {
   "result": {
@@ -26,8 +26,8 @@
      ]
     },
     "success": false,
-    "termination_reason": "plateau_stall",
-    "message": "ALM stopped after repeated feasible stationarity plateau without meaningful progress: max_violation=0.000e+00, stationarity=4.472e+00",
+    "termination_reason": "subproblem_continue",
+    "message": "ALM spent the inner maxiter budget: max_violation=0.000e+00, stationarity=4.472e+00",
     "objective": "0x1.4000000000000p+2",
     "constraint_names": {
      "$tuple": [
@@ -325,146 +325,6 @@
     "block_positive_shift_norm": null,
     "blocking_constraint_name": null,
     "blocking_constraint_block": null
-   },
-   {
-    "outer_iteration": 1,
-    "continuation_iteration": 1,
-    "constraint_names": [
-     "sum_cap",
-     "x0_floor"
-    ],
-    "inner_iterations": 0,
-    "inner_success": true,
-    "inner_message": "inner maxiter exhausted",
-    "penalty": "0x1.4000000000000p+3",
-    "penalty_values": [
-     "0x1.4000000000000p+3",
-     "0x1.4000000000000p+3"
-    ],
-    "block_penalties": null,
-    "max_violation": "0x0.0p+0",
-    "stationarity_norm": "0x1.1e3779b97f4a8p+2",
-    "raw_stationarity_norm": "0x1.1e3779b97f4a8p+2",
-    "kkt_stationarity_norm": "0x1.1e3779b97f4a8p+2",
-    "constraint_values": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "solver_constraint_values": [
-     "-0x1.0000000000000p+1",
-     "-0x0.0p+0"
-    ],
-    "hard_signed_constraint_values": [
-     "-0x1.0000000000000p+1",
-     "-0x0.0p+0"
-    ],
-    "hard_violation_values": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "surrogate_signed_constraint_values": [
-     "-0x1.0000000000000p+1",
-     "-0x0.0p+0"
-    ],
-    "hard_max_violation": "0x0.0p+0",
-    "surrogate_max_value": "-0x0.0p+0",
-    "hard_positive_shift_zero": true,
-    "signal_mismatch_active": false,
-    "multipliers": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "post_update_multipliers": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "feasibility_tolerance": "0x1.96b230bcdc434p-1",
-    "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
-    "stationarity_tolerance": "0x1.999999999999ap-4",
-    "trust_radius": null,
-    "inner_maxiter": 0,
-    "inner_maxls": null,
-    "inner_maxfun": null,
-    "inner_profile": null,
-    "inner_lbfgsb_projected_gradient_norm": "0x1.0000000000000p+2",
-    "inner_attempts": 1,
-    "accepted_move_norm": "0x0.0p+0",
-    "accepted_move_norm_scaled": "0x0.0p+0",
-    "infeasible_stall_move_tolerance": "0x1.5798ee2308c3ap-27",
-    "objective_delta": "0x0.0p+0",
-    "feasibility_delta": "0x0.0p+0",
-    "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x0.0p+0",
-    "meaningful_progress": false,
-    "feasible_stall_count": 2,
-    "infeasible_stall": false,
-    "inner_false_success": false,
-    "inner_stall_reason": null,
-    "active_violation_index": null,
-    "active_constraint_name": null,
-    "nonfinite_candidate_evaluation": false,
-    "nonfinite_candidate_fields": null,
-    "multiplier_cap_binding": false,
-    "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.4000000000000p+2",
-    "conditioning_penalty_objective": "0x0.0p+0",
-    "conditioning_penalty_objective_ratio": "0x0.0p+0",
-    "conditioning_total_grad_norm": "0x1.1e3779b97f4a8p+2",
-    "conditioning_base_grad_norm": "0x1.1e3779b97f4a8p+2",
-    "conditioning_penalty_grad_norm": "0x0.0p+0",
-    "conditioning_penalty_grad_ratio": "0x0.0p+0",
-    "penalty_gradient_norm": "0x0.0p+0",
-    "sufficient_decrease_measure": "0x0.0p+0",
-    "subproblem_limit_reason": "plateau_stall",
-    "action": "subproblem_limit",
-    "raw_signed_constraint_values": null,
-    "normalized_signed_constraint_values": [
-     "-0x1.0000000000000p+1",
-     "-0x0.0p+0"
-    ],
-    "raw_hard_violation_values": null,
-    "normalized_feasibility_values": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "constraint_scales": null,
-    "constraint_blocks": null,
-    "normalized_multipliers": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "raw_dual_estimates": null,
-    "positive_shift_values": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "augmented_term_by_constraint": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "active_pressure_by_constraint": [
-     "-0x0.0p+0",
-     "-0x0.0p+0"
-    ],
-    "surrogate_minus_hard_normalized_gap": [
-     "0x0.0p+0",
-     "0x0.0p+0"
-    ],
-    "surrogate_hard_sign_mismatch_by_constraint": [
-     false,
-     false
-    ],
-    "objective_to_augmented_term_ratio": null,
-    "augmented_gradient_norm": "0x1.1e3779b97f4a8p+2",
-    "surrogate_kkt_stationarity_norm": "0x1.1e3779b97f4a8p+2",
-    "multiplier_interpretation": "differentiable_alm_multipliers",
-    "max_raw_hard_violation": null,
-    "block_max_raw_hard_violation": null,
-    "block_max_normalized_violation": null,
-    "block_augmented_term": null,
-    "block_positive_shift_norm": null,
-    "blocking_constraint_name": null,
-    "blocking_constraint_block": null
    }
   ],
   "events": [
@@ -518,44 +378,10 @@
     "event_sha256": "f6c0bfbf6d80cd83fdb8abd7ab0c3dfb9ae1920ff64a8e0cacbc57eef9248b43"
    },
    {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x0.0p+0",
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.4000000000000p+3",
-    "total_finite": true
-   },
-   {
-    "event": "on_outer_step",
-    "outer_iteration": 1,
-    "continuation_iteration": 1,
-    "action": "subproblem_limit",
-    "dual_update_penalty_reason": null,
-    "outer_termination": null,
-    "event_sha256": "6231a56fe1ddbc34089ae65b9f3efaba878fe6e727dff2d38fb0b0ddef527a84"
-   },
-   {
     "event": "on_outer_boundary",
     "completed_outer_iterations": 1,
-    "completed_action": "subproblem_limit",
-    "termination_reason": "plateau_stall",
+    "completed_action": "subproblem_continue",
+    "termination_reason": "subproblem_continue",
     "resume_eligible": false
    }
   ],
@@ -764,8 +590,8 @@
        "geometry_identity": null
       }
      },
-     "completed_action": "subproblem_limit",
-     "termination_reason": "plateau_stall",
+     "completed_action": "subproblem_continue",
+     "termination_reason": "subproblem_continue",
      "resume_eligible": false,
      "total_inner_iterations": 0,
      "cap_binding_detected": false,

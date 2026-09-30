@@ -192,7 +192,7 @@
      "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
      "stationarity_tolerance": "0x1.0000000000000p+0",
      "trust_radius": "0x1.2000000000000p-1",
-     "inner_maxiter": 50,
+     "inner_maxiter": 49,
      "inner_maxls": 20,
      "inner_maxfun": null,
      "inner_profile": "boxed",
@@ -315,7 +315,7 @@
      "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
      "stationarity_tolerance": "0x1.999999999999ap-4",
      "trust_radius": "0x1.b000000000000p-1",
-     "inner_maxiter": 50,
+     "inner_maxiter": 48,
      "inner_maxls": 20,
      "inner_maxfun": null,
      "inner_profile": "boxed",
@@ -632,7 +632,7 @@
      "action": "subproblem_continue",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "2d5cf00bb8dbeac846bb71772483c4454872b237059006c43172ee3800fcfdfc"
+     "event_sha256": "63a0c8de65296fa69d085482c924e6444de645178f8237151afbcd3d6acdf9c6"
     },
     {
      "event": "evaluate_problem",
@@ -763,7 +763,7 @@
      "action": "subproblem_limit_penalty_increase",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "1c4534b58587edff9740698ea42120ec7f35714c32124ba26250a7f6d417aa25"
+     "event_sha256": "5192ebd03968abce1541d3a01f74cc71fe98ed10414d62a7f6639717106bb94d"
     },
     {
      "event": "snapshot_accepted_state",
@@ -1313,7 +1313,7 @@
      "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
      "stationarity_tolerance": "0x1.999999999999ap-4",
      "trust_radius": "0x1.b000000000000p-1",
-     "inner_maxiter": 50,
+     "inner_maxiter": 49,
      "inner_maxls": 20,
      "inner_maxfun": null,
      "inner_profile": "boxed",
@@ -1822,7 +1822,7 @@
      "action": "subproblem_limit",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "5f1ea179483641481ccc961526380dd70cf1cd9d2f46dc7322c81b9fddb5028b"
+     "event_sha256": "ed4a1aaeb72d6107e1fdaf05cd02a75e3cc9b15c15d185d498a6a5930174c71f"
     },
     {
      "event": "restore_incumbent_state",

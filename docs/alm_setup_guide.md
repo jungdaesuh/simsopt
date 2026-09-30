@@ -463,8 +463,9 @@ last), `success`, `termination_reason` ([Termination reasons](#termination-reaso
 `objective` (f without penalty terms), `constraint_names`,
 `constraint_values` (signed g in name order), `max_violation`, `multipliers`,
 `penalty`, `stationarity_norm`, `kkt_stationarity_norm` (None when
-unavailable, e.g. no active row), `nit` (all L-BFGS-B iterations), `outer_iterations`,
-`restored_best_feasible`, `restored_best_feasible_reason`, `evaluation`
+unavailable, e.g. no active row), `nit` (all L-BFGS-B iterations),
+`outer_iterations` (the outer iterations that ran a step; a checkpoint's
+`completed_outer_iterations` counts the same way), `restored_best_feasible`, `restored_best_feasible_reason`, `evaluation`
 (read-only copy of the final evaluator dict), `inner_result`.
 
 ### Problem-module contract
@@ -705,10 +706,12 @@ iterations.
 The fifth `minimize_alm` argument is the options dict of scipy's L-BFGS-B:
 
 - `maxiter`: the L-BFGS-B iteration budget of the **whole** `minimize_alm`
-  call, over all subproblems, checked at every outer iteration (the
-  continuation steps of one outer iteration share what was left at its start).
-  When it runs out the run stops and `termination_reason` is the last step's
-  action (see [Termination reasons](#termination-reasons)). A resumed run gets the budget minus the
+  call, over all subproblems: every step's inner solve gets what the call has
+  left, so the call never runs more. When it runs out the run stops before
+  the next step, inside an outer iteration or between two, and
+  `termination_reason` is the last step's action (see
+  [Termination reasons](#termination-reasons)); `result.outer_iterations` counts the
+  outer iterations that ran a step. A resumed run gets the budget minus the
   checkpoint's `total_inner_iterations` (`run_alm.py --resume` does this).
 - `gtol`: raised to at least min(1e-4, 0.1 x the scheduled stationarity
   tolerance), so each subproblem stops near the current target.
@@ -779,9 +782,13 @@ or start a new `minimize_alm` at `result.x` with
 ### Inner budget spent
 
 `inner_options["maxiter"]` is the L-BFGS-B iteration budget of the whole
-`minimize_alm` call. When it is used up the run stops before the next outer
-iteration and the reason is the **action name of the last step** (unless a
+`minimize_alm` call, never exceeded (`result.nit <= maxiter`). When it is
+used up the run stops before the next step, between two outer iterations or
+inside one, and the reason is the **action name of the last step** (unless a
 better feasible iterate is restored: then `max_outer_restored_best_feasible`).
+A run stopped inside an outer iteration writes no `outer_NNN.pkl` for it:
+raise `maxiter` and resume from the one before (`run_alm.py --resume`), which
+redoes that outer iteration.
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
@@ -792,7 +799,7 @@ better feasible iterate is restored: then `max_outer_restored_best_feasible`).
 | `subproblem_limit_penalty_increase` | no | Budget spent; the last subproblem hit `max_subproblem_continuations`. | As `dual_update`. |
 | `signal_mismatch_penalty_increase` | no | Hybrid quartet only; budget spent after a stalled signal mismatch. | As `dual_update`; see `signal_mismatch_stall`. |
 | `signal_mismatch_subproblem_limit_penalty_increase` | no | Hybrid quartet only; budget spent after a mismatch subproblem hit its limit. | As `dual_update`. |
-| `subproblem_continue` | no | Budget spent right after a subproblem continuation (only a custom continuation policy ends an outer iteration this way). | As `dual_update`. |
+| `subproblem_continue` | no | Budget spent right after a subproblem continuation, inside an outer iteration. | As `dual_update`. |
 
 ### Never returned
 
@@ -835,9 +842,11 @@ Each entry: the symptom, the cause, the fix.
    cannot represent stalls instead.
 3. **`maxiter` is a whole-run budget.** `inner_options["maxiter"]` counts
    L-BFGS-B iterations over every subproblem of one `minimize_alm` call, not
-   per subproblem. A small value ends the run early with the last step's
-   action as the termination reason (`dual_update`, `penalty_increase`, ...,
-   see [Termination reasons](#termination-reasons)).
+   per subproblem, and the call never runs more (`result.nit <= maxiter`). A
+   small value ends the run early, possibly inside an outer iteration, with
+   the last step's action as the termination reason (`dual_update`,
+   `penalty_increase`, `subproblem_continue`, ..., see
+   [Termination reasons](#termination-reasons)).
 4. **Cached evaluator with stateful physics.** `cached_alm_evaluator` returns
    the physics of the first evaluation at a bitwise-equal x. A warm-started
    inner solve (Boozer surface, VMEC restart) can land elsewhere on a second

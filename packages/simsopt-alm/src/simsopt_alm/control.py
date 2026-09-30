@@ -181,6 +181,24 @@ class ALMProcessBudgetExhausted(Exception):
     ``accepted_iterations > runtime_maxiter``.
     """
 
+def _call_inner_options(
+    inner_options: Optional[dict],
+    run_state: ALMRunState,
+    call_start_inner_iterations: int,
+) -> Optional[dict]:
+    """``inner_options`` with ``maxiter`` what this ``minimize_alm`` call's
+    L-BFGS-B budget has left, computed before each step so that the whole
+    call never runs more than ``maxiter`` iterations."""
+    return _inner_options_with_remaining_maxiter(
+        inner_options,
+        int(run_state.total_inner_iterations) - int(call_start_inner_iterations),
+    )
+
+def _inner_budget_spent(step_inner_options: Optional[dict]) -> bool:
+    """Whether the call's budget is spent: a spent budget ends the run before
+    any step but the first of a fresh call (which measures the start)."""
+    return step_inner_options is not None and int(step_inner_options.get("maxiter", -1)) == 0
+
 def _effective_feasibility_gate(
     settings: ALMSettings,
     update_feasibility_tol: float,
@@ -348,7 +366,8 @@ class ALMResult:
     evaluation used; ``evaluation`` an owned copy of the evaluator's dict,
     read-only all the way down as in an event. ``nit`` counts L-BFGS-B
     iterations over all subproblems (a resumed run's earlier ones included)
-    and ``outer_iterations`` outer iterations; evaluations are not counted.
+    and ``outer_iterations`` the outer iterations that ran a step;
+    evaluations are not counted.
     ``inner_result`` is L-BFGS-B's
     result for the latest subproblem behind ``x`` (None when there is none,
     e.g. an incumbent restored from a checkpoint). ``x``, ``constraint_values``
@@ -664,6 +683,7 @@ class _ALMOuterDecision(str, Enum):
     RETURN = "return"
     NEXT_OUTER = "next_outer"
     EXHAUST = "exhaust"
+    BUDGET_SPENT = "budget_spent"
 
 @dataclass(frozen=True)
 class _ALMContinuationStepResult(Generic[AcceptedStateT]):
@@ -679,7 +699,6 @@ class _ALMContinuationStepResult(Generic[AcceptedStateT]):
     final_multipliers: np.ndarray
     final_penalty: float
     best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]]
-    inner_options: Optional[dict]
 
 @dataclass(frozen=True)
 class _ALMOuterIterationResult(Generic[AcceptedStateT]):
@@ -694,7 +713,6 @@ class _ALMOuterIterationResult(Generic[AcceptedStateT]):
     final_multipliers: np.ndarray
     final_penalty: float
     best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]]
-    inner_options: Optional[dict]
 
 @dataclass(frozen=True)
 class _ContinuationContext(Generic[AcceptedStateT]):
@@ -721,7 +739,7 @@ class _ContinuationContext(Generic[AcceptedStateT]):
 
 @dataclass
 class _ContinuationStepState(Generic[AcceptedStateT]):
-    """Mutable carrier for the 11 sticky locals threaded through every
+    """Mutable carrier for the 10 sticky locals threaded through every
     `_run_alm_continuation_step` return.
 
     Each field mirrors a kwarg on `_run_alm_continuation_step` that may be
@@ -742,7 +760,6 @@ class _ContinuationStepState(Generic[AcceptedStateT]):
     final_multipliers: np.ndarray
     final_penalty: float
     best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]]
-    inner_options: Optional[dict]
 
 def _finalize_continuation_step(
     state: _ContinuationStepState[AcceptedStateT],
@@ -750,7 +767,7 @@ def _finalize_continuation_step(
     result: Optional[object],
 ) -> _ALMContinuationStepResult[AcceptedStateT]:
     """Package the mutable continuation-step carrier into the frozen public
-    result dataclass. Single source of truth for the 13-field shape."""
+    result dataclass. Single source of truth for the 12-field shape."""
     return _ALMContinuationStepResult(
         decision=decision,
         result=result,
@@ -764,7 +781,6 @@ def _finalize_continuation_step(
         final_multipliers=state.final_multipliers,
         final_penalty=state.final_penalty,
         best_feasible=state.best_feasible,
-        inner_options=state.inner_options,
     )
 
 def _publish_outer_step(
@@ -1178,7 +1194,6 @@ def _run_alm_continuation_step(
         final_multipliers=final_multipliers,
         final_penalty=final_penalty,
         best_feasible=best_feasible,
-        inner_options=inner_options,
     )
     start_x = run_state.x.copy()
     penalty_argument = float(state.penalty)
@@ -1278,7 +1293,7 @@ def _run_alm_continuation_step(
             multipliers=state.multipliers,
             penalty_argument=penalty_argument,
             evaluate_problem=evaluate_problem,
-            inner_options=state.inner_options,
+            inner_options=inner_options,
             settings=settings,
             continuation_iteration=continuation_iteration,
             trust_radius=run_state.trust_radius,
@@ -1385,11 +1400,9 @@ def _run_alm_continuation_step(
                 ),
             )
 
-    # Keep ``state.inner_options`` as the user's untouched anchor. Each
-    # inner plan built from ``state.inner_options`` re-derives
-    # the staged values (gtol, profile caps) from the user's original base;
-    # writing ``inner_attempt.last_inner_options`` back would ratchet ``gtol``
-    # monotonically looser. The published ``inner.inner_options`` are the
+    # Every inner plan re-derives the staged values (gtol, profile caps)
+    # from this step's ``inner_options`` (the caller's, with the call's
+    # remaining maxiter); the published ``inner.inner_options`` are the
     # options the inner solve actually used.
     context = replace(
         context,
@@ -1456,7 +1469,6 @@ def _finalize_outer_iteration(
         final_multipliers=step.final_multipliers,
         final_penalty=step.final_penalty,
         best_feasible=step.best_feasible,
-        inner_options=step.inner_options,
     )
 
 def _run_alm_outer_iteration(
@@ -1473,6 +1485,7 @@ def _run_alm_outer_iteration(
     final_penalty: float,
     best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]],
     inner_options: Optional[dict],
+    call_start_inner_iterations: int,
     outer_iteration: int,
     is_final_outer: bool,
     evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
@@ -1504,7 +1517,9 @@ def _run_alm_outer_iteration(
             final_multipliers=final_multipliers,
             final_penalty=final_penalty,
             best_feasible=best_feasible,
-            inner_options=inner_options,
+            inner_options=_call_inner_options(
+                inner_options, run_state, call_start_inner_iterations
+            ),
             outer_iteration=outer_iteration,
             continuation_iteration=continuation_iteration,
             is_final_outer=is_final_outer,
@@ -1529,7 +1544,6 @@ def _run_alm_outer_iteration(
         final_multipliers = step.final_multipliers
         final_penalty = step.final_penalty
         best_feasible = step.best_feasible
-        inner_options = step.inner_options
         if step.decision == _ALMContinuationDecision.RETURN:
             return _finalize_outer_iteration(
                 step, _ALMOuterDecision.RETURN, step.result
@@ -1538,6 +1552,13 @@ def _run_alm_outer_iteration(
             break
         if step.decision != _ALMContinuationDecision.CONTINUE_CONTINUATION:
             raise AssertionError(f"unhandled continuation decision {step.decision!r}")
+        # A spent budget ends the run before the outer's next step.
+        if continuation_iteration < settings.max_subproblem_continuations and (
+            _inner_budget_spent(
+                _call_inner_options(inner_options, run_state, call_start_inner_iterations)
+            )
+        ):
+            return _finalize_outer_iteration(step, _ALMOuterDecision.BUDGET_SPENT, None)
     # The continuation range is never empty (max_subproblem_continuations >= 0),
     # so ``step`` holds the latest carrier.
     exhaust_decision = (
@@ -1740,27 +1761,23 @@ def minimize_alm(
         )
 
     inner_iterations_at_start = int(run_state.total_inner_iterations)
+    # Whether the run ends because the call's maxiter budget is spent; then
+    # its termination reason is the latest step's action.
+    budget_spent = False
 
     for outer_iteration in range(
         first_outer_iteration, settings.max_outer_iterations + 1
     ):
-        last_outer_iteration = outer_iteration
         is_final_outer = outer_iteration == settings.max_outer_iterations
-        consumed_this_process = (
-            int(run_state.total_inner_iterations) - inner_iterations_at_start
-        )
-        outer_inner_options = _inner_options_with_remaining_maxiter(
-            inner_options,
-            consumed_this_process,
-        )
-        # A spent budget ends the run before any outer after the first, in
-        # this call or before the boundary it resumed from.
-        if (
-            outer_inner_options is not None
-            and int(outer_inner_options.get("maxiter", -1)) == 0
-            and outer_iteration > 1
+        # Only a fresh call's first outer starts on a spent budget (maxiter=0).
+        if outer_iteration > 1 and _inner_budget_spent(
+            _call_inner_options(inner_options, run_state, inner_iterations_at_start)
         ):
+            budget_spent = True
             break
+        # An outer counts once it runs a step (the result's outer_iterations
+        # and the boundaries' completed count).
+        last_outer_iteration = outer_iteration
         outcome = _run_alm_outer_iteration(
             settings=settings,
             run_state=run_state,
@@ -1773,7 +1790,8 @@ def minimize_alm(
             final_multipliers=final_multipliers,
             final_penalty=final_penalty,
             best_feasible=best_feasible,
-            inner_options=outer_inner_options,
+            inner_options=inner_options,
+            call_start_inner_iterations=inner_iterations_at_start,
             outer_iteration=outer_iteration,
             is_final_outer=is_final_outer,
             evaluate_problem=evaluate_problem,
@@ -1815,6 +1833,9 @@ def minimize_alm(
             return outcome.result
         if outcome.decision == _ALMOuterDecision.EXHAUST:
             break
+        if outcome.decision == _ALMOuterDecision.BUDGET_SPENT:
+            budget_spent = True
+            break
         if outcome.decision != _ALMOuterDecision.NEXT_OUTER:
             raise AssertionError(f"unhandled outer decision {outcome.decision!r}")
         _publish_outer_boundary(
@@ -1852,17 +1873,23 @@ def minimize_alm(
         last_outer_iteration=last_outer_iteration,
         best_feasible=best_feasible,
         restore_incumbent_state_fn=restore_incumbent_state_fn,
-        termination_reason=run_state.exhausted_termination,
+        termination_reason=(
+            run_state.last_action if budget_spent else run_state.exhausted_termination
+        ),
         evaluation=final_eval,
         multipliers_state=final_multipliers,
         penalty_state=final_penalty,
         inner_result=last_result,
         message_prefix=(
-            "ALM exhausted outer iterations (max outer iterations reached)"
+            "ALM spent the inner maxiter budget"
+            if budget_spent
+            else "ALM exhausted outer iterations (max outer iterations reached)"
         ),
         restored_message_prefix=(
-            "ALM exhausted outer iterations after restoring best feasible iterate "
-            "(max outer iterations reached)"
+            "ALM spent the inner maxiter budget after restoring best feasible iterate"
+            if budget_spent
+            else "ALM exhausted outer iterations after restoring best feasible "
+            "iterate (max outer iterations reached)"
         ),
         restored_termination_reason="max_outer_restored_best_feasible",
     )

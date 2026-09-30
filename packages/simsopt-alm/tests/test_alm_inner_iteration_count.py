@@ -8,8 +8,9 @@ callbacks a caller sees are the optimizer's iterations: ``nit``, each step's
 them, whether an inner solve ended on its own or at the gate.
 
 The problem is SciPy's Rosenbrock with one constraint that is never active, so
-every inner solve ends at the gate after several iterations, and continuations
-are off, so no documented continuation overshoot is involved.
+every inner solve ends at the gate after several iterations. Continuations are
+off in the count tests; with them on, the continuation steps of one outer
+iteration must also keep within the call's budget.
 """
 
 import unittest
@@ -37,7 +38,7 @@ def inactive_rosenbrock(x) -> ALMPhysics:
 class _CountedRun:
     """One minimize_alm call with its callback count at every step and boundary."""
 
-    def __init__(self, inner_maxiter: int, resume_from=None):
+    def __init__(self, inner_maxiter: int, resume_from=None, settings=SETTINGS):
         self.callbacks = 0
         self.step_iterations: list = []
         self.callbacks_at_boundary: list = []
@@ -65,7 +66,7 @@ class _CountedRun:
             np.array(x0, dtype=float),
             ["inactive"],
             cached_alm_evaluator(inactive_rosenbrock),
-            SETTINGS,
+            settings,
             {"maxiter": int(inner_maxiter)},
             resume_from=resume_from,
             inner_callback=on_inner,
@@ -151,6 +152,25 @@ class GateStoppedInnerSolveCountTests(unittest.TestCase):
                 )
                 self.assertEqual(resumed.result.nit, full.result.nit)
                 self.assertEqual(resumed.result.x.tobytes(), full.result.x.tobytes())
+
+
+class ContinuationBudgetTests(unittest.TestCase):
+    def test_continuation_steps_keep_within_the_call_budget(self):
+        # Grok's reproduction: maxiter=8 with 5 continuations ran 41
+        # iterations, every continuation step getting the 8 left at the
+        # outer's start.
+        settings = ALMSettings(
+            max_outer_iterations=3, max_subproblem_continuations=5, stationarity_tol=1e-12
+        )
+        unbounded = _CountedRun(10_000, settings=settings)
+        continuations = [reported for reported, _ in unbounded.step_iterations[1:]]
+        self.assertGreater(len(continuations), 0, "the fixture needs continuation steps")
+        for budget in (1, 8, 20, 35):
+            with self.subTest(maxiter=budget):
+                self.assertLess(budget, unbounded.callbacks)
+                run = _CountedRun(budget, settings=settings)
+                self.assertEqual(run.result.nit, run.callbacks)
+                self.assertLessEqual(run.callbacks, budget)
 
 
 if __name__ == "__main__":

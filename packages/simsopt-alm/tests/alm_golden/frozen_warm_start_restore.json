@@ -383,7 +383,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.0000000000000p+0",
     "trust_radius": "0x1.2000000000000p-1",
-    "inner_maxiter": 50,
+    "inner_maxiter": 49,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -506,7 +506,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.999999999999ap-4",
     "trust_radius": "0x1.b000000000000p-1",
-    "inner_maxiter": 50,
+    "inner_maxiter": 48,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -1699,7 +1699,7 @@
     "action": "subproblem_continue",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "786035a2ee6ca48a8c37483a95b3169315ea91a2376f54280f8f9f0f09dc9383"
+    "event_sha256": "c7c751658d50f215bc12ef9949b34fd72599f4ea58b895f062df197113c38d59"
    },
    {
     "event": "evaluate_problem",
@@ -1904,7 +1904,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": "hard_feasibility_not_improved_after_dual_update",
     "outer_termination": null,
-    "event_sha256": "af20079149c60f11601640e4f9a77ec2136e7d5c9ae1f8891d0fedb2561c3029"
+    "event_sha256": "f937030f5e606e58b0f6708ccd302aa9c9b02fadc48b5a05ddafa3e85078d047"
    },
    {
     "event": "snapshot_accepted_state",

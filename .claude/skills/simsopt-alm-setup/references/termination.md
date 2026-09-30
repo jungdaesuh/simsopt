@@ -53,9 +53,13 @@ or start a new `minimize_alm` at `result.x` with
 ## Inner budget spent
 
 `inner_options["maxiter"]` is the L-BFGS-B iteration budget of the whole
-`minimize_alm` call. When it is used up the run stops before the next outer
-iteration and the reason is the **action name of the last step** (unless a
+`minimize_alm` call, never exceeded (`result.nit <= maxiter`). When it is
+used up the run stops before the next step, between two outer iterations or
+inside one, and the reason is the **action name of the last step** (unless a
 better feasible iterate is restored: then `max_outer_restored_best_feasible`).
+A run stopped inside an outer iteration writes no `outer_NNN.pkl` for it:
+raise `maxiter` and resume from the one before (`run_alm.py --resume`), which
+redoes that outer iteration.
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
@@ -66,7 +70,7 @@ better feasible iterate is restored: then `max_outer_restored_best_feasible`).
 | `subproblem_limit_penalty_increase` | no | Budget spent; the last subproblem hit `max_subproblem_continuations`. | As `dual_update`. |
 | `signal_mismatch_penalty_increase` | no | Hybrid quartet only; budget spent after a stalled signal mismatch. | As `dual_update`; see `signal_mismatch_stall`. |
 | `signal_mismatch_subproblem_limit_penalty_increase` | no | Hybrid quartet only; budget spent after a mismatch subproblem hit its limit. | As `dual_update`. |
-| `subproblem_continue` | no | Budget spent right after a subproblem continuation (only a custom continuation policy ends an outer iteration this way). | As `dual_update`. |
+| `subproblem_continue` | no | Budget spent right after a subproblem continuation, inside an outer iteration. | As `dual_update`. |
 
 ## Never returned
 

@@ -114,7 +114,7 @@ class GenericProblem:
             max_outer_iterations=20,
         )
         # maxiter is the L-BFGS-B iteration budget of the whole minimize_alm
-        # call (all subproblems), not a per-subproblem limit.
+        # call (all subproblems; never exceeded), not a per-subproblem limit.
         self.inner_options = {"maxiter": 200 if smoke else 2000}
 
     def physics(self, x) -> ALMPhysics:

@@ -223,7 +223,8 @@ class Stage2Problem:
             stationarity_tol=1e-4,
         )
         # maxiter is the L-BFGS-B budget of the whole minimize_alm call (all
-        # subproblems), not a per-subproblem limit; maxcor as in stage_two_optimization.py.
+        # subproblems; never exceeded), not a per-subproblem limit; maxcor as in
+        # stage_two_optimization.py.
         self.inner_options = {"maxiter": 40 if smoke else 4000, "maxcor": 300}
 
     def _row_specs(self) -> Tuple[RowSpec, ...]:

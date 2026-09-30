@@ -1,7 +1,7 @@
 {
  "format": "alm_library_golden_trajectory_v1",
  "scenario": "inner_iteration_budget",
- "description": "The inner maxiter process budget runs out at an outer boundary.",
+ "description": "The inner maxiter budget of the call runs out at an outer boundary.",
  "outcomes": [
   "action:dual_update",
   "callback:accepted_callback",
@@ -31,7 +31,7 @@
     },
     "success": false,
     "termination_reason": "dual_update",
-    "message": "ALM exhausted outer iterations (max outer iterations reached): max_violation=9.091e-02, stationarity=1.286e+01",
+    "message": "ALM spent the inner maxiter budget: max_violation=9.091e-02, stationarity=1.286e+01",
     "objective": "0x1.a723f78985492p-2",
     "constraint_names": {
      "$tuple": [
@@ -64,7 +64,7 @@
     "stationarity_norm": "0x1.9b68574794fdep+3",
     "kkt_stationarity_norm": "0x1.6a09e667f3bcdp-53",
     "nit": 6,
-    "outer_iterations": 2,
+    "outer_iterations": 1,
     "restored_best_feasible": false,
     "restored_best_feasible_reason": null,
     "evaluation": {
@@ -813,7 +813,7 @@
    },
    {
     "event": "on_outer_boundary",
-    "completed_outer_iterations": 2,
+    "completed_outer_iterations": 1,
     "completed_action": "dual_update",
     "termination_reason": "dual_update",
     "resume_eligible": false
@@ -899,7 +899,7 @@
       ]
      },
      "constraint_blocks": null,
-     "completed_outer_iterations": 2,
+     "completed_outer_iterations": 1,
      "multipliers": {
       "$tuple": [
        "0x1.d1745d1745d60p-1",

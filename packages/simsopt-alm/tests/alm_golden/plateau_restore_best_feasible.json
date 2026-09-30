@@ -378,7 +378,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.0000000000000p+0",
     "trust_radius": "0x1.2000000000000p-1",
-    "inner_maxiter": 50,
+    "inner_maxiter": 49,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -501,7 +501,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.999999999999ap-4",
     "trust_radius": "0x1.b000000000000p-1",
-    "inner_maxiter": 50,
+    "inner_maxiter": 48,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -747,7 +747,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.999999999999ap-4",
     "trust_radius": "0x1.b000000000000p-1",
-    "inner_maxiter": 47,
+    "inner_maxiter": 46,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -1064,7 +1064,7 @@
     "action": "subproblem_continue",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "2d5cf00bb8dbeac846bb71772483c4454872b237059006c43172ee3800fcfdfc"
+    "event_sha256": "63a0c8de65296fa69d085482c924e6444de645178f8237151afbcd3d6acdf9c6"
    },
    {
     "event": "evaluate_problem",
@@ -1195,7 +1195,7 @@
     "action": "subproblem_limit_penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "1c4534b58587edff9740698ea42120ec7f35714c32124ba26250a7f6d417aa25"
+    "event_sha256": "5192ebd03968abce1541d3a01f74cc71fe98ed10414d62a7f6639717106bb94d"
    },
    {
     "event": "snapshot_accepted_state",
@@ -1635,7 +1635,7 @@
     "action": "subproblem_limit",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "60c7099372d544c63368da8f6f546354f741cbbd31c8c886b3ad5ba73109cdd5"
+    "event_sha256": "5f1a76c32fb2d8ec94e1bfa78f663f3f9f8cfad94ca1c7cf481c449d3e5e7256"
    },
    {
     "event": "restore_incumbent_state",

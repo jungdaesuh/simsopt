@@ -1,15 +1,18 @@
 """A resume from an outer boundary continues exactly as the uninterrupted run.
 
 ``inner_options["maxiter"]`` budgets one ``minimize_alm`` call's L-BFGS-B
-iterations, so a caller resuming from a boundary passes the run's budget minus
-the boundary's ``state.total_inner_iterations``, floored at 0 (the continuation
-steps of one outer share the budget left at its start, so the spent count can
-pass the budget). With that budget the resumed call must make the same
-decisions, publish the same boundaries and return the same result as the
-uninterrupted run from every non-terminal boundary, including one where the
-budget ran out at the boundary (a remaining budget of 0). The only field
-allowed to differ is ``inner_result``: a resumed process that runs no inner
-solve has no L-BFGS-B result (``None``).
+iterations: every step's inner solve gets what the call has left, so the
+call never runs more, and a spent budget ends the run before its next step,
+with the latest step's action as the termination reason. A budget spent
+inside an outer iteration ends the run there, and that outer publishes only
+the terminal boundary. A caller resuming from a boundary passes the run's
+budget minus the boundary's ``state.total_inner_iterations``. With that
+budget the resumed call must make the same decisions, publish the same
+boundaries and return the same result as the uninterrupted run from every
+non-terminal boundary, including one where the budget ran out at the
+boundary (a remaining budget of 0). The only field allowed to differ is
+``inner_result``: a resumed process that runs no inner solve has no L-BFGS-B
+result (``None``).
 """
 
 import unittest
@@ -115,12 +118,12 @@ class ResumeContinuesTheUninterruptedRunTests(unittest.TestCase):
             for boundary in full_boundaries
             if boundary.termination_reason is None
         ]
-        self.assertTrue(resumable, "the run published no resumable boundary")
         exhausted_boundaries = 0
         for boundary in resumable:
             completed = boundary.completed_outer_iterations
             spent = int(boundary.state.total_inner_iterations)
-            remaining = max(run_maxiter - spent, 0)
+            self.assertLessEqual(spent, run_maxiter)
+            remaining = run_maxiter - spent
             exhausted_boundaries += remaining == 0
             with self.subTest(completed_outer=completed, remaining_maxiter=remaining):
                 resumed_result, resumed_steps, resumed_boundaries = _run(
@@ -148,20 +151,50 @@ class ResumeContinuesTheUninterruptedRunTests(unittest.TestCase):
                 )
         return exhausted_boundaries
 
-    def test_budget_spent_at_a_boundary(self):
-        # Each budget runs out at a boundary (the uninterrupted run stops
-        # before the next outer, and so must a resume with 0 remaining) after
-        # a different decision: penalty increase (1-5), dual update (6, 8, 9)
-        # and subproblem-limit penalty increase (7), some of them ending in a
-        # best-feasible restore.
-        for run_maxiter in range(1, 10):
+    def test_budget_spent_at_a_boundary_or_inside_an_outer(self):
+        # Budgets 3-6 and 10-12 run out at the end of an outer iteration
+        # (after a penalty increase or a dual update), so the uninterrupted
+        # run stops before the next outer, and so must a resume with 0
+        # remaining; 1-2 and 7-9 run out after a subproblem continuation,
+        # inside an outer, which then publishes only the terminal boundary.
+        spent_where = {}
+        for run_maxiter in range(1, 13):
             with self.subTest(run_maxiter=run_maxiter):
-                self.assertGreaterEqual(
-                    self.assert_every_boundary_resumes_identically(run_maxiter), 1
+                result, steps, boundaries = _run(run_maxiter)
+                self.assertEqual(result.nit, run_maxiter)
+                self.assertEqual(result.termination_reason, steps[-1][2])
+                exhausted = self.assert_every_boundary_resumes_identically(run_maxiter)
+                spent_where[run_maxiter] = (
+                    "boundary" if exhausted else "inside_outer",
+                    steps[-1][2],
                 )
+        self.assertEqual(
+            spent_where,
+            {
+                **{budget: ("inside_outer", "subproblem_continue") for budget in (1, 2, 7, 8, 9)},
+                **{budget: ("boundary", "penalty_increase") for budget in (3, 4, 5)},
+                **{budget: ("boundary", "dual_update") for budget in (6, 10, 11, 12)},
+            },
+        )
 
     def test_budget_left_at_every_boundary(self):
         self.assertEqual(self.assert_every_boundary_resumes_identically(200), 0)
+
+
+class OuterCountTests(unittest.TestCase):
+    def test_an_outer_counts_once_it_runs_a_step(self):
+        # Astra's reproduction: with maxiter=1 only outer 1 ran a step, yet
+        # the result and the terminal boundary counted 2 completed outers.
+        for run_maxiter in (1, 2, 5, 9, 200):
+            with self.subTest(run_maxiter=run_maxiter):
+                result, steps, boundaries = _run(run_maxiter)
+                ran = max(step[0] for step in steps)
+                self.assertEqual(result.outer_iterations, ran)
+                self.assertEqual(boundaries[-1].completed_outer_iterations, ran)
+                self.assertEqual(
+                    [b.completed_outer_iterations for b in boundaries[:-1]],
+                    sorted({step[0] for step in steps})[: len(boundaries) - 1],
+                )
 
 
 if __name__ == "__main__":

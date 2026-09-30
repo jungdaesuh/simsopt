@@ -33,9 +33,11 @@ Each entry: the symptom, the cause, the fix.
    cannot represent stalls instead.
 3. **`maxiter` is a whole-run budget.** `inner_options["maxiter"]` counts
    L-BFGS-B iterations over every subproblem of one `minimize_alm` call, not
-   per subproblem. A small value ends the run early with the last step's
-   action as the termination reason (`dual_update`, `penalty_increase`, ...,
-   see [termination.md](termination.md)).
+   per subproblem, and the call never runs more (`result.nit <= maxiter`). A
+   small value ends the run early, possibly inside an outer iteration, with
+   the last step's action as the termination reason (`dual_update`,
+   `penalty_increase`, `subproblem_continue`, ..., see
+   [termination.md](termination.md)).
 4. **Cached evaluator with stateful physics.** `cached_alm_evaluator` returns
    the physics of the first evaluation at a bitwise-equal x. A warm-started
    inner solve (Boozer surface, VMEC restart) can land elsewhere on a second

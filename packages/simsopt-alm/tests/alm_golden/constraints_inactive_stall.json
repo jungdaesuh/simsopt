@@ -424,7 +424,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.999999999999ap-4",
     "trust_radius": null,
-    "inner_maxiter": 500,
+    "inner_maxiter": 496,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "unbounded",
@@ -984,7 +984,7 @@
     "action": "constraints_inactive_stall",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "a9abc984dd55fadae495f5c54eb1aa553900966029bcebb008ab9c89a914f1de"
+    "event_sha256": "91a8e4ab6493a45c4151fb69af9140306c63334bb85c44dc6da5902e367bc889"
    },
    {
     "event": "snapshot_accepted_state",

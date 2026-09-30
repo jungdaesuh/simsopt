@@ -13,7 +13,7 @@
   "simsopt_alm/boundary.py": "db9146d9081b35713b0af84209e020703920ba5a",
   "simsopt_alm/checkpoint.py": "c9b709aed669761b88cde367496aa3cdc56bc18d",
   "simsopt_alm/continuation.py": "d38d2e3162b371a6700ef2df00399b603e4c2d13",
-  "simsopt_alm/control.py": "fd035d72dbe8b70f3addee80e736728354cfc876",
+  "simsopt_alm/control.py": "b63439d390ed60077caee2207c68eebf94c66323",
   "simsopt_alm/core.py": "e2a5214a18f99a321184b5074943302d3e7b9859",
   "simsopt_alm/evaluation.py": "f02386aa8e00de1132b46bf6a9fa5fcb8670a89a",
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
@@ -23,8 +23,8 @@
   "simsopt_alm/policy.py": "87a17cf53f8f958be1562ae755cb22be5156285d",
   "simsopt_alm/problem.py": "1e145040b215ac60c6c7264fd59a7807b0ac3013",
   "simsopt_alm/taylor.py": "fcca80ac15f617e806a2a1d4d5acdc4d3d5c0e2c",
-  "alm_golden_scenarios.py": "96d3e7a1a5d17e3cc473d3f0129f9388c53e7ce5",
-  "generate_alm_golden.py": "7acb9133ef0a76ff599adf9d5e0daaccd503e991",
+  "alm_golden_scenarios.py": "7101fc8116112f9caef54faf47e5feac29372c69",
+  "generate_alm_golden.py": "543a0135ccdd49ead76e8fd7aca0023b478259a0",
   "measure_alm_golden_sensitivity.py": "434f817334fe11f58e8ff9311db6bca2570a7fed"
  },
  "outcome_union": [
@@ -75,7 +75,8 @@
   "termination:penalty_cap_reached_restored_best_feasible",
   "termination:plateau_stall",
   "termination:process_budget_exhausted",
-  "termination:signal_mismatch_stall"
+  "termination:signal_mismatch_stall",
+  "termination:subproblem_continue"
  ],
  "scenarios": [
   {
@@ -99,37 +100,37 @@
   {
    "scenario": "hybrid_mismatch_repair",
    "fixture": "hybrid_mismatch_repair.json",
-   "sha256": "7199bdc85f7f581dadec904fc4469ef87433e70c966bf4ff067dbc718d0922f1",
+   "sha256": "1e26be7162a3f2f46b209cd89c86ce6c0ff4cd629f8b87bfc1b7d6c389ec4f42",
    "bytes": 67233
   },
   {
    "scenario": "hybrid_mismatch_penalty_increase",
    "fixture": "hybrid_mismatch_penalty_increase.json",
-   "sha256": "003a44f3aa125efab4b9becff563e7e7015c30de92547fd2ebec7324edc5d9a3",
+   "sha256": "28ea9ad7ef49eb2e3794728abebc7c5b7e327ad3b4cbdf69961aaf80a450426d",
    "bytes": 46317
   },
   {
    "scenario": "hybrid_mismatch_stall",
    "fixture": "hybrid_mismatch_stall.json",
-   "sha256": "97ed02f3843e6f58968292657cf6c0d25ca00f9a0e7eab02e0a483f892c73c97",
+   "sha256": "777b48d4aad45e01dd5e2bcd4bf4ef67c4affc209acba215a786106a3aa0809f",
    "bytes": 30792
   },
   {
    "scenario": "constraints_inactive_stall",
    "fixture": "constraints_inactive_stall.json",
-   "sha256": "e6e74abc54d798b1bf767c892d91589163b78cfa3d3c83fae905998b81b0c7c7",
+   "sha256": "1fa8b822db2a5c34b84c4c182d6f3f1e2f7bef96f822b1d398f78e1a0e8ee0f3",
    "bytes": 28052
   },
   {
    "scenario": "plateau_restore_best_feasible",
    "fixture": "plateau_restore_best_feasible.json",
-   "sha256": "92349eba92295735a28a0c2124e8772d8402f6afdf4188ca52c52befd0044540",
+   "sha256": "6ff21d4b6a81450a13c7fc16cbb025c8f40f945315ea1e50bfc4389733d750bd",
    "bytes": 50661
   },
   {
    "scenario": "resume_plateau_best_feasible",
    "fixture": "resume_plateau_best_feasible.json",
-   "sha256": "61a9acae2c35267394753736e9c5bfc1f83de05c42935d86cd39d5f1e59cc2a8",
+   "sha256": "3ec8338f06d5e99edd1c11468bc72bc04a5edd21843a19e4e50ab59181262b0c",
    "bytes": 51547
   },
   {
@@ -141,7 +142,7 @@
   {
    "scenario": "frozen_warm_start_restore",
    "fixture": "frozen_warm_start_restore.json",
-   "sha256": "85b4337333cdea2dac0d5150fb27fe639483a9b5d44e4759be84f7c51cace70d",
+   "sha256": "b039cad4177813923c8fbfde044b9c857e1e710fc33ae420279039cd845af77c",
    "bytes": 147620
   },
   {
@@ -159,8 +160,8 @@
   {
    "scenario": "inner_iteration_budget",
    "fixture": "inner_iteration_budget.json",
-   "sha256": "818ab4adc1cbab8588bcfab62bf2b776d3f1fb2056d094b7338cb2d3fcbc8bb8",
-   "bytes": 20194
+   "sha256": "284989e018402a444bead3f0770d4c99e166920ab07aee1b98351f49e2a8ae0f",
+   "bytes": 20171
   },
   {
    "scenario": "dual_update_penalty_cap",
@@ -177,8 +178,8 @@
   {
    "scenario": "zero_inner_budget",
    "fixture": "zero_inner_budget.json",
-   "sha256": "602ab252e6ccd290785d38ff21f7a17c1696c7c75cf8944e9fd972beab500116",
-   "bytes": 18922
+   "sha256": "263a3effe0851751af286af9d2eec262a34d4f8e100ed89fd7277228ea0b14c0",
+   "bytes": 13985
   }
  ]
 }

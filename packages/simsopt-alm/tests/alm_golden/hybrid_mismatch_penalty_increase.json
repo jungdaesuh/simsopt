@@ -412,7 +412,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.47ae147ae147bp-7",
     "trust_radius": "0x1.4e4430b178b37p-6",
-    "inner_maxiter": 500,
+    "inner_maxiter": 499,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -658,7 +658,7 @@
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
     "stationarity_tolerance": "0x1.0624dd2f1a9fcp-10",
     "trust_radius": "0x1.54fc30f486d38p-6",
-    "inner_maxiter": 496,
+    "inner_maxiter": 495,
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
@@ -1086,7 +1086,7 @@
     "action": "signal_mismatch_penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "0d56e4117f5feff40a515870a385cbae0311631003540a57289cf826110bab7b"
+    "event_sha256": "7136b3b1c591a0f502e69ca138cd952aeb4ea89637edd8cdcc89841bdb1a3c81"
    },
    {
     "event": "snapshot_accepted_state",
@@ -1384,7 +1384,7 @@
     "action": "signal_mismatch_penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": "max_outer",
-    "event_sha256": "69f7719e7cf982d7af8478f76ecc0e536466719ecb72aa1a4249b62b1040c202"
+    "event_sha256": "f4c08f260a6f0c84b70d73c38c701cbc30b7dc04048cc3c4d90c815c12347133"
    },
    {
     "event": "snapshot_accepted_state",

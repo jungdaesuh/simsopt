@@ -41,10 +41,12 @@ iterations.
 The fifth `minimize_alm` argument is the options dict of scipy's L-BFGS-B:
 
 - `maxiter`: the L-BFGS-B iteration budget of the **whole** `minimize_alm`
-  call, over all subproblems, checked at every outer iteration (the
-  continuation steps of one outer iteration share what was left at its start).
-  When it runs out the run stops and `termination_reason` is the last step's
-  action (see [termination.md](termination.md)). A resumed run gets the budget minus the
+  call, over all subproblems: every step's inner solve gets what the call has
+  left, so the call never runs more. When it runs out the run stops before
+  the next step, inside an outer iteration or between two, and
+  `termination_reason` is the last step's action (see
+  [termination.md](termination.md)); `result.outer_iterations` counts the
+  outer iterations that ran a step. A resumed run gets the budget minus the
   checkpoint's `total_inner_iterations` (`run_alm.py --resume` does this).
 - `gtol`: raised to at least min(1e-4, 0.1 x the scheduled stationarity
   tolerance), so each subproblem stops near the current target.

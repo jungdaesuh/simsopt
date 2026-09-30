@@ -334,7 +334,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
             "boundary.py": 290,
             "checkpoint.py": 623,
             "continuation.py": 225,
-            "control.py": 1883,
+            "control.py": 1910,
             "core.py": 929,
             "evaluation.py": 384,
             "events.py": 339,
@@ -352,7 +352,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
         budgets = (
             ("control.py", "_run_alm_continuation_step", 296),
             ("control.py", "_execute_step_decision", 211),
-            ("control.py", "minimize_alm", 276),
+            ("control.py", "minimize_alm", 282),
             ("checkpoint.py", "ALMTransitionSnapshot", 132),
         )
         for filename, name, budget in budgets:

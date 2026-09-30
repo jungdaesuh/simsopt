@@ -189,8 +189,9 @@ last), `success`, `termination_reason` ([termination.md](termination.md)), `mess
 `objective` (f without penalty terms), `constraint_names`,
 `constraint_values` (signed g in name order), `max_violation`, `multipliers`,
 `penalty`, `stationarity_norm`, `kkt_stationarity_norm` (None when
-unavailable, e.g. no active row), `nit` (all L-BFGS-B iterations), `outer_iterations`,
-`restored_best_feasible`, `restored_best_feasible_reason`, `evaluation`
+unavailable, e.g. no active row), `nit` (all L-BFGS-B iterations),
+`outer_iterations` (the outer iterations that ran a step; a checkpoint's
+`completed_outer_iterations` counts the same way), `restored_best_feasible`, `restored_best_feasible_reason`, `evaluation`
 (read-only copy of the final evaluator dict), `inner_result`.
 
 ## Problem-module contract
