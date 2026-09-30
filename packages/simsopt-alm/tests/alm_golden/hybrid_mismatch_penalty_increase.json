@@ -1192,6 +1192,30 @@
       "0x0.0p+0"
      ]
     },
+    "penalty": "0x1.4000000000000p+3",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.f0be0ded288cfp-1",
+      "0x1.f5a858793dd98p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
     "penalty": "0x1.9000000000000p+6",
     "total_finite": true
    },

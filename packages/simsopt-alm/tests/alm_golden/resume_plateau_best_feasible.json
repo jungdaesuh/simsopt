@@ -1104,48 +1104,90 @@
      "restored_best_feasible_reason": "final_iterate_worse_than_best_feasible",
      "evaluation": {
       "$mappingproxy": {
-       "augmented_term_by_constraint": {
-        "$tuple": [
-         "-0x1.7fae147ae14dbp+0"
-        ]
-       },
+       "total": "0x1.419d70a3d70a4p+6",
+       "base_value": "0x1.479c28f5c28f7p+6",
        "base_grad": {
-        "$tuple": [
+        "$ndarray": "<f8",
+        "shape": [
+         2
+        ],
+        "data": [
          "-0x1.219999999999ap+4",
          "0x0.0p+0"
         ]
        },
-       "base_value": "0x1.479c28f5c28f7p+6",
-       "constraint_values": {
-        "$tuple": [
-         "-0x1.99999999999a0p-5"
-        ]
-       },
-       "dual_update_values": {
-        "$tuple": [
-         "-0x1.99999999999a0p-5"
-        ]
-       },
-       "feasibility_values": {
-        "$tuple": [
-         "0x0.0p+0"
-        ]
-       },
        "grad": {
-        "$tuple": [
+        "$ndarray": "<f8",
+        "shape": [
+         2
+        ],
+        "data": [
          "0x1.7b33333333332p+3",
          "0x0.0p+0"
         ]
        },
-       "max_feasibility_violation": "0x0.0p+0",
-       "max_violation": "0x0.0p+0",
-       "positive_shift_values": {
+       "constraint_values": {
+        "$ndarray": "<f8",
+        "shape": [
+         1
+        ],
+        "data": [
+         "-0x1.99999999999a0p-5"
+        ]
+       },
+       "constraint_grads": {
         "$tuple": [
+         {
+          "$ndarray": "<f8",
+          "shape": [
+           2
+          ],
+          "data": [
+           "0x1.0000000000000p+0",
+           "0x0.0p+0"
+          ]
+         }
+        ]
+       },
+       "dual_update_values": {
+        "$ndarray": "<f8",
+        "shape": [
+         1
+        ],
+        "data": [
+         "-0x1.99999999999a0p-5"
+        ]
+       },
+       "feasibility_values": {
+        "$ndarray": "<f8",
+        "shape": [
+         1
+        ],
+        "data": [
+         "0x0.0p+0"
+        ]
+       },
+       "max_violation": "0x0.0p+0",
+       "max_feasibility_violation": "0x0.0p+0",
+       "stationarity_norm": "0x1.7b33333333332p+3",
+       "positive_shift_values": {
+        "$ndarray": "<f8",
+        "shape": [
+         1
+        ],
+        "data": [
          "0x1.df33333333333p+4"
         ]
        },
-       "stationarity_norm": "0x1.7b33333333332p+3",
-       "total": "0x1.419d70a3d70a4p+6"
+       "augmented_term_by_constraint": {
+        "$ndarray": "<f8",
+        "shape": [
+         1
+        ],
+        "data": [
+         "-0x1.7fae147ae14dbp+0"
+        ]
+       }
       }
      },
      "inner_result": null
@@ -1458,6 +1500,69 @@
      "total_finite": true
     },
     {
+     "event": "snapshot_accepted_state",
+     "x": {
+      "$ndarray": "<f8",
+      "shape": [
+       2
+      ],
+      "data": [
+       "-0x1.e666666666668p-3",
+       "0x1.0000000000000p+0"
+      ]
+     }
+    },
+    {
+     "event": "restore_incumbent_state",
+     "x": {
+      "$ndarray": "<f8",
+      "shape": [
+       2
+      ],
+      "data": [
+       "0x1.e666666666666p-1",
+       "0x1.0000000000000p+0"
+      ]
+     }
+    },
+    {
+     "event": "evaluate_problem",
+     "x": {
+      "$ndarray": "<f8",
+      "shape": [
+       2
+      ],
+      "data": [
+       "0x1.e666666666666p-1",
+       "0x1.0000000000000p+0"
+      ]
+     },
+     "multipliers": {
+      "$ndarray": "<f8",
+      "shape": [
+       1
+      ],
+      "data": [
+       "0x1.e000000000000p+4"
+      ]
+     },
+     "penalty": "0x1.0000000000000p+0",
+     "total_finite": true
+    },
+    {
+     "event": "restore_incumbent_state",
+     "x": {
+      "$ndarray": "<f8",
+      "shape": [
+       2
+      ],
+      "data": [
+       "-0x1.e666666666668p-3",
+       "0x1.0000000000000p+0"
+      ]
+     }
+    },
+    {
      "event": "evaluate_problem",
      "x": {
       "$ndarray": "<f8",
@@ -1634,7 +1739,7 @@
      "action": "subproblem_continue",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "859a987e408deab440f92b0b230f664401843454643bcd7581703178e0aca6ff"
+     "event_sha256": "9351916794dfd27f176e53ffa8b78cef8db14d4238c483619625d4567cbb74bc"
     },
     {
      "event": "evaluate_problem",
@@ -1837,7 +1942,7 @@
      "action": "subproblem_limit",
      "dual_update_penalty_reason": null,
      "outer_termination": null,
-     "event_sha256": "68bdbbba5ae5dc6803ef86c0d6fa1758f1c200aa209d22d382010f666eaa0eb0"
+     "event_sha256": "9f82c066452303d05f15275bc42667c8cc78f11fd0f2bd9f1254a52e9fb2b6f2"
     },
     {
      "event": "restore_incumbent_state",

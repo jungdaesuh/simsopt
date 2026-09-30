@@ -192,6 +192,74 @@ class FeasibleStartIncumbentTests(unittest.TestCase):
         self.assertEqual(result.max_violation, 0.0)
 
 
+class RefreshedProblemIncumbentTests(unittest.TestCase):
+    """B2 (control.py): an incumbent recorded before an outer_state_callback
+    changed the problem was restored with its old certificate."""
+
+    def test_a_restored_or_returned_point_is_judged_under_the_final_problem(self):
+        threshold = [2.0]
+
+        def evaluate(x, multipliers, penalty):
+            return augmented_inequality_objective(
+                (x[0] - 1.0) ** 2, [2.0 * (x[0] - 1.0)], [x[0] - threshold[0]], [[1.0]],
+                multipliers, penalty,
+            )
+
+        def refresh(outer_iteration, multipliers, penalty):
+            threshold[0] = 2.0 if outer_iteration == 1 else 0.0
+
+        result = minimize_alm(
+            [0.0], ["g"], evaluate,
+            ALMSettings(max_outer_iterations=2, max_subproblem_continuations=0, trust_radius_init=0.1),
+            {"maxiter": 100}, outer_state_callback=refresh,
+        )
+        true_violation = max(float(result.x[0]) - threshold[0], 0.0)
+        self.assertEqual(result.max_violation, true_violation)
+        np.testing.assert_allclose(result.constraint_values, [float(result.x[0]) - threshold[0]])
+        if result.restored_best_feasible:
+            self.assertLessEqual(true_violation, ALMSettings().feasibility_tol)
+
+    def test_a_stateful_incumbent_is_judged_in_its_own_state(self):
+        # min (x - 3)^2 s.t. x <= cap: the feasible start x = 0 is the
+        # incumbent when outer 1 ends at 7/3 (infeasible). Outer 2 moves the
+        # cap; the evaluator follows the accepted x, so the incumbent is
+        # evaluated in its restored state and the live state is put back.
+        for cap_after, incumbent_survives in ((-0.5, False), (0.5, True)):
+            with self.subTest(cap_after=cap_after):
+                cap = [1.0]
+                live = {"x": np.zeros(1)}
+                calls = []
+
+                def evaluate(x, multipliers, penalty):
+                    calls.append((float(x[0]), float(live["x"][0])))
+                    return augmented_inequality_objective(
+                        (x[0] - 3.0) ** 2, [2.0 * (x[0] - 3.0)], [x[0] - cap[0]], [[1.0]],
+                        multipliers, penalty,
+                    )
+
+                def refresh(outer_iteration, multipliers, penalty):
+                    cap[0] = 1.0 if outer_iteration == 1 else cap_after
+                    calls.append(("outer", outer_iteration))
+
+                result = minimize_alm(
+                    [0.0], ["g"], evaluate, ALMSettings(max_outer_iterations=2), {"maxiter": 100},
+                    outer_state_callback=refresh,
+                    accepted_callback=lambda x: live.__setitem__("x", np.array(x, dtype=float)),
+                    snapshot_accepted_state_fn=lambda: float(live["x"][0]),
+                    restore_incumbent_state_fn=lambda state: live.__setitem__("x", np.array([state])),
+                )
+                outer_2 = calls[calls.index(("outer", 2)) + 1:]
+                start_x = outer_2[0][0]
+                self.assertAlmostEqual(start_x, 7.0 / 3.0)
+                self.assertEqual(outer_2[1], (0.0, 0.0))
+                self.assertEqual(outer_2[2], (start_x, start_x))
+                true_violation = max(float(result.x[0]) - cap_after, 0.0)
+                self.assertEqual(result.max_violation, true_violation)
+                self.assertEqual(result.restored_best_feasible, incumbent_survives)
+                if incumbent_survives:
+                    np.testing.assert_array_equal(result.x, [0.0])
+
+
 class FlaggedFiniteTrialTests(unittest.TestCase):
     """B4 (inner.py): a trial flagged ``nonfinite_evaluation`` with finite data
     was not sanitized, so L-BFGS-B took its made-up total and gradient."""

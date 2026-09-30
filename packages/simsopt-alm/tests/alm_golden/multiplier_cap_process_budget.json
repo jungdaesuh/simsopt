@@ -1082,6 +1082,31 @@
       2
      ],
      "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.4000000000000p+3",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
       "0x1.8ba2e8ba2e8bcp+0",
       "0x1.1745d1745d179p-1"
      ]
@@ -1603,6 +1628,31 @@
       2
      ],
      "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.4000000000000p+3",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
       "0x1.80a237c32b16ep+0",
       "0x1.01446f86562d8p-1"
      ]
@@ -1712,6 +1762,31 @@
      ]
     },
     "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.4000000000000p+3",
     "total_finite": true
    },
    {
@@ -1841,6 +1916,31 @@
       2
      ],
      "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.4000000000000p+3",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
       "0x1.80a237c32b16ep+0",
       "0x1.01446f86562d8p-1"
      ]
@@ -1937,6 +2037,31 @@
      ]
     },
     "penalty": "0x1.f400000000000p+9",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x0.0p+0",
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.4000000000000p+3",
     "total_finite": true
    },
    {

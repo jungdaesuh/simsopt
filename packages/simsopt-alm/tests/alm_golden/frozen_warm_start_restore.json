@@ -1997,6 +1997,69 @@
     "total_finite": true
    },
    {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3000000000000p+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.3000000000000p+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",
@@ -2221,6 +2284,69 @@
     },
     "penalty": "0x1.9000000000000p+6",
     "total_finite": true
+   },
+   {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.b040000000000p+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.b040000000000p+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
    },
    {
     "event": "evaluate_problem",
@@ -2532,6 +2658,69 @@
     },
     "penalty": "0x1.9000000000000p+6",
     "total_finite": true
+   },
+   {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
    },
    {
     "event": "evaluate_problem",
@@ -3007,6 +3196,69 @@
     },
     "penalty": "0x1.f400000000000p+9",
     "total_finite": true
+   },
+   {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
    },
    {
     "event": "evaluate_problem",
@@ -3508,6 +3760,69 @@
     "total_finite": true
    },
    {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",
@@ -3983,6 +4298,69 @@
     "total_finite": true
    },
    {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",
@@ -4456,6 +4834,69 @@
     },
     "penalty": "0x1.e848000000000p+19",
     "total_finite": true
+   },
+   {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p-1",
+      "0x1.4000000000000p-1"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2cfp+0",
+      "0x1.0000000000000p+0"
+     ]
+    }
    },
    {
     "event": "evaluate_problem",

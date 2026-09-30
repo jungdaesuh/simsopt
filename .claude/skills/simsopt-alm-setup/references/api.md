@@ -177,7 +177,10 @@ def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
   accepted subproblem result.
 - `outer_state_callback(outer_iteration, multipliers, penalty)`: at the start
   of each outer iteration (e.g. to refresh something the physics reads, then
-  `cache_clear()`).
+  `cache_clear()`). The solver then evaluates its best-feasible incumbent
+  again under the refreshed problem (stateful physics: in the incumbent's
+  restored state, the live state put back after) and drops it if it is no
+  longer hard-feasible, so a restored result is judged by the final problem.
 - `snapshot_accepted_state_fn`, `restore_incumbent_state_fn`: stateful physics.
 - `initial_multipliers` (nonnegative, one per row), `initial_penalty` (one
   positive scalar, shared by every row): warm start from an earlier result;

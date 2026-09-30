@@ -13,7 +13,7 @@
   "simsopt_alm/boundary.py": "fd388e4c3c7ef7967291b63af01fb2c0c3448c2e",
   "simsopt_alm/checkpoint.py": "9a4f453d0dbbc4e83834dee6e961bf007af63907",
   "simsopt_alm/continuation.py": "b327f33031c63bfaaf1bd9dbc615fb10b40013ea",
-  "simsopt_alm/control.py": "c266d655987e61e5beaab3130be37a0f85cd4787",
+  "simsopt_alm/control.py": "72d440c96e83ce617a6aad425d51992e52f9513f",
   "simsopt_alm/core.py": "5e33f4b5d406006cdea31339976ce4175b67bdc2",
   "simsopt_alm/evaluation.py": "4ccd8ca842282ed4797d509bf1d961ae855ad8fb",
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
@@ -98,20 +98,20 @@
   {
    "scenario": "hybrid_mismatch_repair",
    "fixture": "hybrid_mismatch_repair.json",
-   "sha256": "d2f38476e7b6b263776cc8b9b83be95b393d132f05cd837500f681b23a9f05d3",
-   "bytes": 67866
+   "sha256": "86b99823ce9609346780282d8acb5f96bee01296b80be2148a82f125661e18e5",
+   "bytes": 68252
   },
   {
    "scenario": "hybrid_mismatch_penalty_increase",
    "fixture": "hybrid_mismatch_penalty_increase.json",
-   "sha256": "ca6833c91ef50a0843c761dc9f746c80f1bb4bee874897f12b53466128e179ed",
-   "bytes": 46767
+   "sha256": "a331cecdca5fb2634356ff2c3e1f9853402ff83815a01ef7b87f0ff9ab258482",
+   "bytes": 47153
   },
   {
    "scenario": "hybrid_zero_shift_split",
    "fixture": "hybrid_zero_shift_split.json",
-   "sha256": "6ca5a06c87894aa1787cae91a54eb0825bf7a3518410ecf047da905250d48bfa",
-   "bytes": 66853
+   "sha256": "42ffb2ae85879820178158ae26fa5e0bf6ad09f8e6cbcc89928eb8592f7aa20c",
+   "bytes": 68855
   },
   {
    "scenario": "constraints_inactive_stall",
@@ -122,14 +122,14 @@
   {
    "scenario": "plateau_restore_best_feasible",
    "fixture": "plateau_restore_best_feasible.json",
-   "sha256": "a8074b9604d5b051911614eb84a820bd630cafd31a4e83cbbe60ce23ef9b5864",
-   "bytes": 50064
+   "sha256": "7a4575e74c2dedbccf797169e5a3547243f9b2d6d19e8b86296d5c46b5cdef7d",
+   "bytes": 51079
   },
   {
    "scenario": "resume_plateau_best_feasible",
    "fixture": "resume_plateau_best_feasible.json",
-   "sha256": "52d5c8441a4d2f36ef04b2ae41064e53889381f3764f92d09e26767584288f4f",
-   "bytes": 51872
+   "sha256": "a979ba27506612975d0c76a5c35aa0bef6746148d6de45a0f8284ae3bd7cafb4",
+   "bytes": 53668
   },
   {
    "scenario": "trust_radius_retries",
@@ -140,8 +140,8 @@
   {
    "scenario": "frozen_warm_start_restore",
    "fixture": "frozen_warm_start_restore.json",
-   "sha256": "a0758d8908dc133a52218b37d9021e2a73a34c8c4ac5e523a8d0f0933fed8418",
-   "bytes": 147429
+   "sha256": "b6a3861a71c83f7e69abb3123a4d4e9db1c656b8a0c0ff4cd49948fd4d39edbc",
+   "bytes": 154436
   },
   {
    "scenario": "cached_physics_smoothing",
@@ -152,8 +152,8 @@
   {
    "scenario": "multiplier_cap_process_budget",
    "fixture": "multiplier_cap_process_budget.json",
-   "sha256": "a4fd46155ab757a9344605d9168f849e72dd506b5f33623161bb2a3d90681399",
-   "bytes": 75218
+   "sha256": "275548acae0021e5e7b761d6fc19addb7da8f9cfb73b04fe90edf2326a8edb4e",
+   "bytes": 77118
   },
   {
    "scenario": "inner_iteration_budget",

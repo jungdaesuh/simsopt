@@ -15,7 +15,9 @@ objective (`result.restored_best_feasible_reason` says which). A restored
 from outside, so a run from a feasible start that stops before converging can
 return that start; the last iterate is in the last outer-step event
 (`event.after.x`), and rerunning from it with a larger `max_outer_iterations`
-or `maxiter` continues the progress.
+or `maxiter` continues the progress. With an `outer_state_callback` that
+changes the problem, the incumbent is judged again under the changed problem
+at the start of each outer iteration.
 
 ## Converged
 

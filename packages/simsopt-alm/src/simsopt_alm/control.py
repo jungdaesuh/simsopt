@@ -1151,6 +1151,73 @@ def _improved_incumbent(
         ),
     )
 
+def _incumbent_at_step_start(
+    best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]],
+    *,
+    start: ALMIterateMeasurement,
+    live_x: np.ndarray,
+    problem_refreshed: bool,
+    last_result: Optional[object],
+    settings: ALMSettings,
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
+    constraint_names_tuple: Tuple[str, ...],
+    constraint_blocks_tuple: Optional[Tuple[str, ...]],
+    snapshot_accepted_state_fn: Optional[Callable[[], AcceptedStateT]],
+    restore_incumbent_state_fn: Optional[Callable[[AcceptedStateT], None]],
+) -> Optional[ALMFeasibleIncumbent[AcceptedStateT]]:
+    """The incumbent a step's inner solve starts from. After an
+    ``outer_state_callback`` (``problem_refreshed``), which may have changed
+    the problem, ``best_feasible`` is evaluated again at its x, multipliers
+    and penalty (the start's evaluation when those are the start's; away from
+    the live x, in its own restored state, the live state put back after) and
+    kept only while hard-feasible. Then the measured start itself competes (a
+    feasible x0 above all), before an inner solve can leave it."""
+    if problem_refreshed and best_feasible is not None:
+        at_live_x = np.array_equal(best_feasible.x, live_x)
+        if (
+            at_live_x
+            and np.array_equal(best_feasible.multipliers, start.multipliers)
+            and best_feasible.penalty == start.penalty
+        ):
+            evaluation = start.evaluation
+        else:
+            swap_state = (
+                not at_live_x
+                and restore_incumbent_state_fn is not None
+                and best_feasible.incumbent_state is not None
+            )
+            if swap_state:
+                live_state = snapshot_accepted_state_fn()
+                _validate_geometry_identity_pair(
+                    accepted_state=best_feasible.incumbent_state,
+                    geometry_identity=best_feasible.geometry_identity,
+                    context="ALM best-feasible re-evaluation",
+                )
+                restore_incumbent_state_fn(best_feasible.incumbent_state)
+            evaluation = _checked_evaluation(
+                evaluate_problem,
+                best_feasible.x,
+                best_feasible.multipliers,
+                best_feasible.penalty,
+                constraint_names_tuple=constraint_names_tuple,
+                constraint_blocks_tuple=constraint_blocks_tuple,
+                context="ALM best-feasible re-evaluation",
+            )
+            if swap_state:
+                restore_incumbent_state_fn(live_state)
+        still_feasible = _constraint_routing_state(
+            evaluation, best_feasible.multipliers, best_feasible.penalty, settings.feasibility_tol
+        ).hard_max_violation <= settings.feasibility_tol
+        best_feasible = replace(best_feasible, evaluation=evaluation) if still_feasible else None
+    return _improved_incumbent(
+        best_feasible,
+        x=live_x,
+        measured=start,
+        inner_result=last_result,
+        settings=settings,
+        snapshot_accepted_state_fn=snapshot_accepted_state_fn,
+    )
+
 def _inner_solve_outcome(
     attempt: ALMInnerAttemptResult,
     *,
@@ -1211,9 +1278,13 @@ def _run_alm_continuation_step(
     restore_incumbent_state_fn: Optional[Callable[[AcceptedStateT], None]],
     constraint_names_tuple: Tuple[str, ...],
     constraint_blocks_tuple: Optional[Tuple[str, ...]],
+    problem_refreshed: bool,
     base_bounds=None,
     continuation_policy: ALMContinuationPolicy = DEFAULT_CONTINUATION_POLICY,
 ) -> _ALMContinuationStepResult[AcceptedStateT]:
+    """One continuation step. ``problem_refreshed``: an
+    ``outer_state_callback`` ran since the step before, so the best-feasible
+    incumbent is judged again under the current problem."""
     state = _ContinuationStepState[AcceptedStateT](
         multipliers=multipliers,
         penalty=penalty,
@@ -1317,15 +1388,18 @@ def _run_alm_continuation_step(
             ),
         )
 
-    # The start is a candidate too (a feasible x0 above all), before an inner
-    # solve can leave it.
-    state.best_feasible = _improved_incumbent(
+    state.best_feasible = _incumbent_at_step_start(
         state.best_feasible,
-        x=run_state.x,
-        measured=start,
-        inner_result=state.last_result,
+        start=start,
+        live_x=run_state.x,
+        problem_refreshed=problem_refreshed,
+        last_result=state.last_result,
         settings=settings,
+        evaluate_problem=evaluate_problem,
+        constraint_names_tuple=constraint_names_tuple,
+        constraint_blocks_tuple=constraint_blocks_tuple,
         snapshot_accepted_state_fn=snapshot_accepted_state_fn,
+        restore_incumbent_state_fn=restore_incumbent_state_fn,
     )
     inner_attempt = _run_alm_inner_attempts(
         ALMInnerAttemptRequest(
@@ -1556,6 +1630,7 @@ def _run_alm_outer_iteration(
             restore_incumbent_state_fn=restore_incumbent_state_fn,
             constraint_names_tuple=constraint_names_tuple,
             constraint_blocks_tuple=constraint_blocks_tuple,
+            problem_refreshed=outer_state_callback is not None and continuation_iteration == 0,
             base_bounds=base_bounds,
             continuation_policy=continuation_policy,
         )

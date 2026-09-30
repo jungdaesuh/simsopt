@@ -1221,6 +1221,69 @@
     "total_finite": true
    },
    {
+    "event": "snapshot_accepted_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "-0x1.e666666666668p-3",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.e666666666666p-1",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.e666666666666p-1",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x1.e000000000000p+4"
+     ]
+    },
+    "penalty": "0x1.0000000000000p+0",
+    "total_finite": true
+   },
+   {
+    "event": "restore_incumbent_state",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "-0x1.e666666666668p-3",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",
