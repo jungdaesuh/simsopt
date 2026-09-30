@@ -4,18 +4,19 @@
 returning an :class:`ALMEvaluation`; keys in the package docstring) is the
 loop's only view of the problem. This module owns what the loop assumes about
 that dict: its schema and the check of it where each evaluation enters
-(:func:`_contract_checked_evaluation`), which of its arrays the solver copies
-to own (:data:`_OWNED_EVALUATION_ARRAY_FIELDS`,
-:func:`_clone_evaluation_dict`), which fields must be finite (:func:`_nonfinite_evaluation_fields`), the
-constraint metadata it attaches, the objective that ranks best-feasible
-incumbents (:func:`_incumbent_objective_value`), and the measurement of an
-evaluated iterate that the loop and the continuation policy read
+(:func:`_contract_checked_evaluation`), which of its arrays the solver
+snapshots there to own them (:data:`_OWNED_EVALUATION_ARRAY_FIELDS`,
+:func:`_owned_evaluation_snapshot`), which fields must be finite
+(:func:`_nonfinite_evaluation_fields`), the constraint metadata it attaches,
+the objective that ranks best-feasible incumbents
+(:func:`_incumbent_objective_value`), and the measurement of an evaluated
+iterate that the loop and the continuation policy read
 (:func:`_measure_iterate`).
 """
 
 # Eager annotations: on Python 3.8 a TypedDict subclass defined in another
 # module resolves inherited string annotations in that module's namespace.
-from typing import Callable, FrozenSet, List, Optional, Protocol, Sequence, Tuple, TypedDict, Union
+from typing import Callable, List, Mapping, Optional, Protocol, Sequence, Tuple, TypedDict, Union
 
 import numpy as np
 
@@ -187,34 +188,21 @@ def _require_finite_evaluation(evaluation: dict, *, context: str) -> None:
         invalid_summary = ", ".join(invalid_fields)
         raise ValueError(f"{context} produced non-finite ALM data: {invalid_summary}")
 
-def _clone_evaluation_dict(
-    evaluation: dict,
-    *,
-    owned_keys: Optional[FrozenSet[str]] = None,
-) -> dict:
-    """Copy evaluation arrays.
-
-    ``owned_keys is None`` copies every ndarray and both grad lists.
-    A set copies only those keys. The inner cache omits
-    ``raw_constraint_grads``, so that list stays aliased.
-    """
+def _owned_evaluation_snapshot(evaluation: Mapping[str, object]) -> dict:
+    """A dict of ``evaluation`` in which the solver owns what it reads: every
+    :data:`_OWNED_EVALUATION_ARRAY_FIELDS` value (None means absent) as a new
+    float array and ``constraint_grads`` as a new list of new float rows.
+    Other values are shared. An evaluator may therefore return the same
+    buffers on every call (a cache that fills one array in place): a later
+    evaluation cannot change one the solver kept."""
     snapshot = dict(evaluation)
-    for key, value in snapshot.items():
-        if isinstance(value, np.ndarray) and (
-            owned_keys is None or key in owned_keys
-        ):
-            snapshot[key] = value.copy()
-    for grad_key in ("constraint_grads", "raw_constraint_grads"):
-        if owned_keys is not None and grad_key not in owned_keys:
-            continue
-        grads = snapshot.get(grad_key)
-        if isinstance(grads, list):
-            snapshot[grad_key] = [
-                grad.copy()
-                if isinstance(grad, np.ndarray)
-                else np.asarray(grad, dtype=float).copy()
-                for grad in grads
-            ]
+    for key in _OWNED_EVALUATION_ARRAY_FIELDS:
+        value = snapshot.get(key)
+        if value is not None:
+            snapshot[key] = np.array(value, dtype=float)
+    snapshot["constraint_grads"] = [
+        np.array(row, dtype=float) for row in evaluation["constraint_grads"]
+    ]
     return snapshot
 
 def _incumbent_objective_value(evaluation: dict) -> float:
@@ -249,8 +237,9 @@ def _contract_checked_evaluation(
     constraint_count: int,
     context: str,
 ) -> dict:
-    """An owned shallow copy of the evaluator's dict at ``x``, checked where
-    it enters the solver: every required key present and not None, ``grad``
+    """The solver's snapshot (:func:`_owned_evaluation_snapshot`) of the
+    evaluator's dict at ``x``, checked where it enters the solver, the one
+    place every evaluation passes: every required key present and not None, ``grad``
     and each ``constraint_grads`` row of shape ``(x.size,)``, one row and one
     ``constraint_values`` entry per constraint, nonnegative
     ``constraint_activity_tolerances`` (optional), and ``search_step_success``
@@ -288,7 +277,7 @@ def _contract_checked_evaluation(
         np.asarray(activity_tolerances, dtype=float) < 0.0
     ):
         raise ValueError(f"{context}: constraint_activity_tolerances must be nonnegative")
-    checked = dict(evaluation)
+    checked = _owned_evaluation_snapshot(evaluation)
     if "search_step_success" in checked:
         flag = checked["search_step_success"]
         if not isinstance(flag, (bool, np.bool_)):

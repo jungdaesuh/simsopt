@@ -330,7 +330,6 @@ class AlmEvaluationSchemaCompletenessTests(unittest.TestCase):
     def test_every_field_the_solver_copies_or_strips_is_declared(self):
         for label, fields in (
             ("evaluation._OWNED_EVALUATION_ARRAY_FIELDS", evaluation._OWNED_EVALUATION_ARRAY_FIELDS),
-            ("inner._INNER_CACHE_OWNED_KEYS", inner._INNER_CACHE_OWNED_KEYS),
             ("checkpoint._TRANSITION_OMITTED_JACOBIAN_KEYS",
              checkpoint._TRANSITION_OMITTED_JACOBIAN_KEYS),
         ):

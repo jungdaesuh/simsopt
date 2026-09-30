@@ -311,8 +311,8 @@ def _build_augmented_evaluation(
     feasibility_array = np.asarray(feasibility_values, dtype=float)
     stationarity_norm = float(np.linalg.norm(np.asarray(total_grad, dtype=float)))
     max_feasibility_violation = _max_value(feasibility_array)
-    # Stored ndarrays are copied, except constraint_grads. A float
-    # ndarray there aliases the caller; the inner cache copies that list.
+    # Stored ndarrays are copied, except constraint_grads. A float ndarray
+    # there aliases the caller; the solver snapshots it on entry.
     # `np.asarray` keeps the alias when the dtype already matches.
     result = {
         "total": float(total_value),

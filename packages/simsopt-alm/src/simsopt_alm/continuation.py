@@ -25,9 +25,9 @@ class ALMIterateMeasurement:
     """One evaluation of the problem and the solver quantities derived from it.
 
     ``evaluation`` is the evaluation at (x, ``multipliers``, ``penalty``). Inside
-    the loop the arrays alias the evaluator's dict; in an outer-step event all
-    of it is an owned read-only copy, in a policy view a borrowed read-only
-    view. The tolerances are the ones this iterate was judged with.
+    the loop it is the solver's snapshot of the evaluator's dict, whose arrays
+    no later evaluation changes; in an outer-step event all of it is an owned
+    read-only copy, in a policy view a borrowed read-only view. The tolerances are the ones this iterate was judged with.
     """
 
     evaluation: Mapping[str, object]

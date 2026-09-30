@@ -33,9 +33,7 @@ from .core import (
     _stationarity_metrics,
 )
 from .evaluation import (
-    _OWNED_EVALUATION_ARRAY_FIELDS,
     _attach_alm_constraint_metadata,
-    _clone_evaluation_dict,
     _contract_checked_evaluation,
     _nonfinite_evaluation_fields,
     _search_step_rejected,
@@ -162,13 +160,6 @@ class _ALMInnerAttemptEvaluator:
     def fun(self, inner_x):
         evaluation = self._fresh_evaluation(inner_x)
         self.cached_x = np.asarray(inner_x, dtype=float).copy()
-        # Finite sanitize already returned one owned snapshot. The nonfinite
-        # branch copies only the owned fields, so that dict is cloned once.
-        if evaluation.get("nonfinite_evaluation"):
-            evaluation = _clone_evaluation_dict(
-                evaluation,
-                owned_keys=_INNER_CACHE_OWNED_KEYS,
-            )
         self.cached_evaluation = evaluation
         grad = np.asarray(evaluation["grad"], dtype=float)
         return float(evaluation["total"]), grad.copy()
@@ -278,40 +269,21 @@ def _elevated_rejection_total(reference_total: float) -> float:
         + _ACCEPTANCE_TOTAL_ATOL
     )
 
-_INNER_CACHE_OWNED_KEYS = frozenset(
-    (*_OWNED_EVALUATION_ARRAY_FIELDS, "constraint_grads")
-)
-
 def _sanitize_nonfinite_inner_evaluation(
     evaluation: dict,
     *,
     fallback_evaluation: dict,
 ) -> dict:
+    """``evaluation`` (the solver's snapshot) when every field the loop
+    reads is finite; otherwise the solver-owned ``fallback_evaluation`` with
+    an elevated total (:func:`_elevated_rejection_total`), flagged
+    ``nonfinite_evaluation`` with the fields that were not finite."""
     invalid_fields = _nonfinite_evaluation_fields(evaluation)
     if not invalid_fields:
-        # Shallow-copy + per-array clone so the no-invalid-field fast
-        # path matches the contract of the sanitized branch (callers always
-        # get an owned dict).
-        return _clone_evaluation_dict(
-            evaluation,
-            owned_keys=_INNER_CACHE_OWNED_KEYS,
-        )
+        return evaluation
 
     sanitized = dict(fallback_evaluation)
     sanitized["total"] = _elevated_rejection_total(float(fallback_evaluation["total"]))
-    for field in _OWNED_EVALUATION_ARRAY_FIELDS:
-        if field in fallback_evaluation:
-            sanitized[field] = np.asarray(
-                fallback_evaluation[field], dtype=float
-            ).copy()
-    if "constraint_grads" in fallback_evaluation:
-        sanitized["constraint_grads"] = [
-            np.asarray(constraint_grad, dtype=float).copy()
-            for constraint_grad in fallback_evaluation["constraint_grads"]
-        ]
-    for field in ("constraint_names", "constraint_blocks", "constraint_scale_sources"):
-        if field in fallback_evaluation:
-            sanitized[field] = list(fallback_evaluation[field])
     sanitized["nonfinite_evaluation"] = True
     sanitized["nonfinite_fields"] = list(invalid_fields)
     return sanitized
