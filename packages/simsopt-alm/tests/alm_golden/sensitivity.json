@@ -95,7 +95,7 @@
   "simsopt_alm/inner.py": "0638cf308280625b28e4f97c7a3ab3239f3f8261",
   "simsopt_alm/policy.py": "87a17cf53f8f958be1562ae755cb22be5156285d",
   "simsopt_alm/problem.py": "1e145040b215ac60c6c7264fd59a7807b0ac3013",
-  "simsopt_alm/taylor.py": "fcca80ac15f617e806a2a1d4d5acdc4d3d5c0e2c",
+  "simsopt_alm/taylor.py": "1128723b36bd64c5f50f788c66053a89d55d5f9d",
   "alm_golden_scenarios.py": "7101fc8116112f9caef54faf47e5feac29372c69",
   "generate_alm_golden.py": "543a0135ccdd49ead76e8fd7aca0023b478259a0",
   "measure_alm_golden_sensitivity.py": "434f817334fe11f58e8ff9311db6bca2570a7fed"

@@ -12,7 +12,9 @@ error above the floor (1e-10 of max(1, |claimed derivative|)) does not fall
 by ``ratio_threshold`` from the step before; else ``"unavailable"`` when the
 evidence is not finite (base total or gradient, or a total at any step) or
 the steps checked no ratio while some error stayed above the floor; else
-``"passed"``. ``passed`` is ``status == "passed"``.
+``"passed"``. ``passed`` is ``status == "passed"``. The test copies each
+value it reads before the next call, so an evaluator may return a dict or
+gradient buffer it reuses.
 """
 
 from __future__ import annotations
@@ -73,11 +75,9 @@ def _directional_taylor_result(
     previous_error = None
     for epsilon in taylor_epsilons:
         step = float(epsilon) * unit_direction
-        plus_eval = evaluate_problem(x + step, multiplier_array, penalty)
-        minus_eval = evaluate_problem(x - step, multiplier_array, penalty)
-        central_estimate = (float(plus_eval["total"]) - float(minus_eval["total"])) / (
-            2.0 * float(epsilon)
-        )
+        plus_total = float(evaluate_problem(x + step, multiplier_array, penalty)["total"])
+        minus_total = float(evaluate_problem(x - step, multiplier_array, penalty)["total"])
+        central_estimate = (plus_total - minus_total) / (2.0 * float(epsilon))
         error = abs(central_estimate - directional_derivative)
         central_estimates.append(float(central_estimate))
         errors.append(float(error))
@@ -149,7 +149,7 @@ def run_directional_taylor_test(
 
     base_eval = evaluate_problem(x, multiplier_array, float(penalty))
     base_total = float(base_eval["total"])
-    base_grad = np.asarray(base_eval["grad"], dtype=float)
+    base_grad = np.array(base_eval["grad"], dtype=float)
     base_finite = bool(np.isfinite(base_total) and np.all(np.isfinite(base_grad)))
     statuses = {"passed" if base_finite else "unavailable"}
     direction_results = []

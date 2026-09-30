@@ -8,6 +8,7 @@ import unittest
 
 import numpy as np
 
+import simsopt_alm as alm
 from simsopt_alm import ALMSettings, augmented_inequality_objective, minimize_alm
 from simsopt_alm.checkpoint import resume_boundary, transition_snapshot
 
@@ -31,6 +32,31 @@ class FlaggedFiniteTrialTests(unittest.TestCase):
                 result = minimize_alm([0.0], [], evaluate, ALMSettings(), {"maxiter": 100})
                 self.assertEqual(result.termination_reason, "converged", result.message)
                 np.testing.assert_allclose(result.x, [0.4], atol=1.0e-6)
+
+
+class TaylorOwnershipTests(unittest.TestCase):
+    """B5 (taylor.py): the test read the evaluator's reused buffers after the
+    next evaluation had overwritten them."""
+
+    def test_a_right_gradient_in_a_reused_buffer_passes(self):
+        buffer = np.zeros(2)
+
+        def evaluate(x, multipliers, penalty):
+            buffer[:] = 2.0 * x
+            return {"total": float(x @ x), "grad": buffer}
+
+        result = alm.run_directional_taylor_test(evaluate, [1.0, 2.0], [], 1.0, direction_count=2)
+        self.assertEqual(result["status"], "passed", result)
+
+    def test_a_wrong_gradient_in_a_reused_dict_fails(self):
+        shared = {"total": 0.0, "grad": np.zeros(1)}
+
+        def evaluate(x, multipliers, penalty):
+            shared["total"] = float(x @ x)
+            return shared
+
+        result = alm.run_directional_taylor_test(evaluate, [1.0], [], 1.0, direction=[1.0])
+        self.assertEqual(result["status"], "failed", result)
 
 
 class PhysicsTotalValidationTests(unittest.TestCase):
