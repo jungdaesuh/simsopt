@@ -33,6 +33,9 @@ _ALLOWED_CONSTRUCTION_COMPILES = frozenset(
         "reporting_metrics_from_solution",
         "reporting_metrics",
         "run_code_traceable_exact_C2_array_kernel",
+        # Upstream's jitted ``jnp.mean`` in ``CurveLength.J`` (restored by the user's
+        # ruling, PLAN.md amendment 5): the construction's length target calls it once.
+        "curve_length_pure",
     }
 )
 
