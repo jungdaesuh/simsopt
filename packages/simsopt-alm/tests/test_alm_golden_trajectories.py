@@ -69,8 +69,7 @@ _golden = golden.load_golden
 #                                                    signal_mismatch_penalty_increase
 #   plateau_restore_best_feasible,
 #   resume_plateau_best_feasible (an inner retry)    -
-#   trust_radius_retries (a dual-update penalty raise) -
-#   frozen_warm_start_restore (a plain penalty raise) action:infeasible_stall_penalty_increase
+#   frozen_warm_start_restore (an infeasible stall)  action:infeasible_stall_penalty_increase
 #   cached_physics_smoothing (outer-step count)      -
 #
 #   numeric replay, largest tolerance over scenarios:

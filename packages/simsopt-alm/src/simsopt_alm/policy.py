@@ -169,7 +169,6 @@ class DefaultContinuationPolicy:
             max_feasibility_violation=measured.max_feasibility_violation,
             hard_max_violation=measured.routing_state.hard_max_violation,
             stationarity_norm=measured.stationarity_norm,
-            kkt_stationarity_norm=measured.kkt_stationarity_norm,
             update_feasibility_tol=measured.update_feasibility_tol,
             update_stationarity_tol=measured.update_stationarity_tol,
         ):
@@ -320,22 +319,17 @@ def _dual_update_gate_satisfied(
     max_feasibility_violation: float,
     hard_max_violation: float,
     stationarity_norm: float,
-    kkt_stationarity_norm: Optional[float],
     update_feasibility_tol: float,
     update_stationarity_tol: float,
 ) -> bool:
-    dual_update_max_violation = max(
-        float(max_feasibility_violation),
-        float(hard_max_violation),
-    )
-    dual_update_stationarity_norm = (
-        float(kkt_stationarity_norm)
-        if kkt_stationarity_norm is not None
-        else float(stationarity_norm)
-    )
-    return dual_update_max_violation <= float(
+    """Whether ``λ⁺ = max(0, λ + ρg)`` may run: the larger max violation within
+    ``update_feasibility_tol`` and the (bound-reduced) augmented-gradient norm,
+    the subproblem's stationarity at these λ and ρ, within
+    ``update_stationarity_tol``. The fitted active-set residual is only a
+    diagnostic: it can be small where x does not minimize L_A."""
+    return max(float(max_feasibility_violation), float(hard_max_violation)) <= float(
         update_feasibility_tol
-    ) and dual_update_stationarity_norm <= float(update_stationarity_tol)
+    ) and float(stationarity_norm) <= float(update_stationarity_tol)
 
 
 def _constraints_inactive_candidate(

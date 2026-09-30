@@ -152,11 +152,13 @@ class ResumeContinuesTheUninterruptedRunTests(unittest.TestCase):
         return exhausted_boundaries
 
     def test_budget_spent_at_a_boundary_or_inside_an_outer(self):
-        # Budgets 3-6 and 10-12 run out at the end of an outer iteration
+        # Budgets 3-6, 10 and 12 run out at the end of an outer iteration
         # (after a penalty increase or a dual update), so the uninterrupted
         # run stops before the next outer, and so must a resume with 0
-        # remaining; 1-2 and 7-9 run out after a subproblem continuation,
-        # inside an outer, which then publishes only the terminal boundary.
+        # remaining; 1-2, 7-9 and 11 run out after a subproblem continuation,
+        # inside an outer, which then publishes only the terminal boundary
+        # (budget 11 leaves outer 3 one iteration short of the subproblem
+        # minimizer, where the multiplier update may not run).
         spent_where = {}
         for run_maxiter in range(1, 13):
             with self.subTest(run_maxiter=run_maxiter):
@@ -171,9 +173,9 @@ class ResumeContinuesTheUninterruptedRunTests(unittest.TestCase):
         self.assertEqual(
             spent_where,
             {
-                **{budget: ("inside_outer", "subproblem_continue") for budget in (1, 2, 7, 8, 9)},
+                **{budget: ("inside_outer", "subproblem_continue") for budget in (1, 2, 7, 8, 9, 11)},
                 **{budget: ("boundary", "penalty_increase") for budget in (3, 4, 5)},
-                **{budget: ("boundary", "dual_update") for budget in (6, 10, 11, 12)},
+                **{budget: ("boundary", "dual_update") for budget in (6, 10, 12)},
             },
         )
 

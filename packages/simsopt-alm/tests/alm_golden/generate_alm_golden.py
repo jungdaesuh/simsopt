@@ -149,7 +149,6 @@ INTENDED_OUTCOMES = {
         "termination:max_outer_after_dual_update",
     ),
     "frozen_warm_start_restore": (
-        "flag:dual_update_penalty_increase",
         "action:infeasible_stall_penalty_increase",
         "action:penalty_cap_reached",
         "restored:final_iterate_infeasible",

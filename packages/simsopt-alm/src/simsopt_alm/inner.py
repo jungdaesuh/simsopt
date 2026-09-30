@@ -30,7 +30,6 @@ from .core import (
     _constraint_routing_state,
     _extract_constraint_state,
     _nonnegative_alm_integer,
-    _stationarity_metrics,
 )
 from .evaluation import (
     _attach_alm_constraint_metadata,
@@ -187,15 +186,6 @@ class _ALMInnerAttemptEvaluator:
             self.request.penalty_argument,
             self.request.effective_feasibility_tol,
         )
-        (
-            callback_stationarity_norm,
-            callback_kkt_stationarity_norm,
-            _callback_signal_mismatch_active,
-        ) = _stationarity_metrics(
-            evaluation,
-            callback_routing_state,
-            self.request.effective_feasibility_tol,
-        )
         callback_stationarity_norm = _bound_reduced_stationarity_norm(
             evaluation, inner_x_arr, self.base_bounds
         )
@@ -204,7 +194,6 @@ class _ALMInnerAttemptEvaluator:
                 max_feasibility_violation=callback_max_feasibility_violation,
                 hard_max_violation=callback_routing_state.hard_max_violation,
                 stationarity_norm=callback_stationarity_norm,
-                kkt_stationarity_norm=callback_kkt_stationarity_norm,
                 update_feasibility_tol=self.request.update_feasibility_tol,
                 update_stationarity_tol=self.request.update_stationarity_tol,
             ):

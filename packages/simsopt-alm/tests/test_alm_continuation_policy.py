@@ -1564,8 +1564,8 @@ class AlmLibraryTrustRadiusCharacterizationTests(unittest.TestCase):
         "steps": [
             (1, 0, "subproblem_continue", "boxed", 1, "0x1.8000000000000p-2"),
             (1, 1, "subproblem_continue", "boxed", 1, "0x1.2000000000000p-1"),
-            (1, 2, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
-            (2, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
+            (1, 2, "penalty_increase", "boxed", 1, "0x1.b000000000000p-1"),
+            (2, 0, "penalty_increase", "boxed", 1, "0x1.b000000000000p-1"),
             (3, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
             (4, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
             (5, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),

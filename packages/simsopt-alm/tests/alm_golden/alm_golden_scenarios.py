@@ -1411,8 +1411,9 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         "frozen_warm_start_restore",
-        "Boxed dual updates, then every trial step rejected from outer 4 on: "
-        "an infeasible stall, dual updates to the penalty cap, and the "
+        "Boxed steps, then every trial step rejected from outer 4 on: "
+        "infeasible stalls raise the penalty to the cap (the frozen iterate "
+        "is no subproblem minimizer, so no multiplier update), and the "
         "best-feasible restore at the cap.",
         run_frozen_warm_start_restore,
     ),

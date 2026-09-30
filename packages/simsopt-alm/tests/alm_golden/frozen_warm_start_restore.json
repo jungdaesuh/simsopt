@@ -1,11 +1,12 @@
 {
  "format": "alm_library_golden_trajectory_v1",
  "scenario": "frozen_warm_start_restore",
- "description": "Boxed dual updates, then every trial step rejected from outer 4 on: an infeasible stall, dual updates to the penalty cap, and the best-feasible restore at the cap.",
+ "description": "Boxed steps, then every trial step rejected from outer 4 on: infeasible stalls raise the penalty to the cap (the frozen iterate is no subproblem minimizer, so no multiplier update), and the best-feasible restore at the cap.",
  "outcomes": [
   "action:dual_update",
   "action:infeasible_stall_penalty_increase",
   "action:penalty_cap_reached",
+  "action:penalty_increase",
   "action:subproblem_continue",
   "callback:accepted_callback",
   "callback:evaluate_problem",
@@ -15,8 +16,6 @@
   "callback:outer_state_callback",
   "callback:restore_incumbent_state",
   "callback:snapshot_accepted_state",
-  "dual_update_penalty_raise",
-  "flag:dual_update_penalty_increase",
   "flag:infeasible_stall",
   "inner_attempts_retried",
   "restored:final_iterate_infeasible",
@@ -480,8 +479,8 @@
     ],
     "block_penalties": null,
     "max_violation": "0x1.8000000000000p-3",
-    "stationarity_norm": "0x1.f200000000000p+3",
-    "raw_stationarity_norm": "0x1.f200000000000p+3",
+    "stationarity_norm": "0x1.f800000000000p+3",
+    "raw_stationarity_norm": "0x1.f800000000000p+3",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
      "0x1.8000000000000p-3"
@@ -509,7 +508,7 @@
      "0x0.0p+0"
     ],
     "post_update_multipliers": [
-     "0x1.8000000000000p-3"
+     "0x0.0p+0"
     ],
     "feasibility_tolerance": "0x1.96b230bcdc434p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -540,17 +539,15 @@
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
     "conditioning_base_objective": "0x1.36a4000000000p+6",
-    "conditioning_penalty_objective": "0x1.b000000000000p-3",
-    "conditioning_penalty_objective_ratio": "0x1.64033eb23cf54p-9",
-    "conditioning_total_grad_norm": "0x1.f200000000000p+3",
+    "conditioning_penalty_objective": "0x1.6800000000000p-3",
+    "conditioning_penalty_objective_ratio": "0x1.28ad5ee9dd770p-9",
+    "conditioning_total_grad_norm": "0x1.f800000000000p+3",
     "conditioning_base_grad_norm": "0x1.1a00000000000p+4",
-    "conditioning_penalty_grad_norm": "0x1.0800000000000p+1",
-    "conditioning_penalty_grad_ratio": "0x1.df51b3bea3678p-4",
-    "penalty_gradient_norm": "0x1.0800000000000p+1",
+    "conditioning_penalty_grad_norm": "0x1.e000000000000p+0",
+    "conditioning_penalty_grad_ratio": "0x1.b3bea3677d46dp-4",
+    "penalty_gradient_norm": "0x1.e000000000000p+0",
     "sufficient_decrease_measure": "0x1.8000000000000p-3",
-    "dual_update_penalty_increase": true,
-    "dual_update_penalty_increase_reason": "hard_feasibility_not_improved_after_dual_update",
-    "action": "dual_update",
+    "action": "penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
      "0x1.8000000000000p-3"
@@ -562,17 +559,17 @@
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.8000000000000p-3"
+     "0x0.0p+0"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.0800000000000p+1"
+     "0x1.e000000000000p+0"
     ],
     "augmented_term_by_constraint": [
-     "0x1.b000000000000p-3"
+     "0x1.6800000000000p-3"
     ],
     "active_pressure_by_constraint": [
-     "0x1.8c00000000000p-2"
+     "0x1.6800000000000p-2"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -580,8 +577,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.702aaaaaaaaabp+8",
-    "augmented_gradient_norm": "0x1.f200000000000p+3",
+    "objective_to_augmented_term_ratio": "0x1.b9ccccccccccdp+8",
+    "augmented_gradient_norm": "0x1.f800000000000p+3",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -607,8 +604,8 @@
     ],
     "block_penalties": null,
     "max_violation": "0x1.6080000000000p-1",
-    "stationarity_norm": "0x1.da60000000000p+5",
-    "raw_stationarity_norm": "0x1.da60000000000p+5",
+    "stationarity_norm": "0x1.a1cc000000000p+5",
+    "raw_stationarity_norm": "0x1.a1cc000000000p+5",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
      "0x1.6080000000000p-1"
@@ -633,10 +630,10 @@
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.8000000000000p-3"
+     "0x0.0p+0"
     ],
     "post_update_multipliers": [
-     "0x1.c4a0000000000p+2"
+     "0x0.0p+0"
     ],
     "feasibility_tolerance": "0x1.430cd74f6d478p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -651,7 +648,7 @@
     "accepted_move_norm": "0x1.0080000000000p-1",
     "accepted_move_norm_scaled": "0x1.4a710f292efc3p-2",
     "infeasible_stall_move_tolerance": "0x1.0ab64170f95bdp-26",
-    "objective_delta": "0x1.9298e80000000p+2",
+    "objective_delta": "0x1.989be80000000p+2",
     "feasibility_delta": "-0x1.0080000000000p-1",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
     "stationarity_delta": "0x1.80c0000000000p+2",
@@ -667,17 +664,15 @@
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
     "conditioning_base_objective": "0x1.1453604000000p+6",
-    "conditioning_penalty_objective": "0x1.c91afc0000000p+4",
-    "conditioning_penalty_objective_ratio": "0x1.a77b6b607eb20p-2",
-    "conditioning_total_grad_norm": "0x1.da60000000000p+5",
+    "conditioning_penalty_objective": "0x1.7b33320000000p+4",
+    "conditioning_penalty_objective_ratio": "0x1.5f4ea2b5bbbc9p-2",
+    "conditioning_total_grad_norm": "0x1.a1cc000000000p+5",
     "conditioning_base_grad_norm": "0x1.09f8000000000p+4",
-    "conditioning_penalty_grad_norm": "0x1.2fae000000000p+6",
-    "conditioning_penalty_grad_ratio": "0x1.244c28c968390p+2",
-    "penalty_gradient_norm": "0x1.2fae000000000p+6",
+    "conditioning_penalty_grad_norm": "0x1.1364000000000p+6",
+    "conditioning_penalty_grad_ratio": "0x1.09119896dff75p+2",
+    "penalty_gradient_norm": "0x1.1364000000000p+6",
     "sufficient_decrease_measure": "0x1.6080000000000p-1",
-    "dual_update_penalty_increase": true,
-    "dual_update_penalty_increase_reason": "hard_feasibility_not_improved_after_dual_update",
-    "action": "dual_update",
+    "action": "penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
      "0x1.6080000000000p-1"
@@ -689,17 +684,17 @@
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.c4a0000000000p+2"
+     "0x0.0p+0"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.2fae000000000p+6"
+     "0x1.1364000000000p+6"
     ],
     "augmented_term_by_constraint": [
-     "0x1.c91afc0000000p+4"
+     "0x1.7b33320000000p+4"
     ],
     "active_pressure_by_constraint": [
-     "0x1.a227170000000p+5"
+     "0x1.7b33320000000p+5"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -707,8 +702,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.3582978ffefb3p+1",
-    "augmented_gradient_norm": "0x1.da60000000000p+5",
+    "objective_to_augmented_term_ratio": "0x1.7519160a9c6c9p+1",
+    "augmented_gradient_norm": "0x1.a1cc000000000p+5",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -733,37 +728,37 @@
      "0x1.9000000000000p+6"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "stationarity_norm": "0x1.2c00000000000p-42",
-    "raw_stationarity_norm": "0x1.2c00000000000p-42",
+    "max_violation": "0x1.6969696969678p-3",
+    "stationarity_norm": "0x1.8000000000000p-44",
+    "raw_stationarity_norm": "0x1.8000000000000p-44",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "solver_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
-    "hard_max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "surrogate_max_value": "0x1.b6d2d2d2d2c70p-4",
+    "hard_max_violation": "0x1.6969696969678p-3",
+    "surrogate_max_value": "0x1.6969696969678p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.c4a0000000000p+2"
+     "0x0.0p+0"
     ],
     "post_update_multipliers": [
-     "0x1.1c925a5a5a55cp+4"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "feasibility_tolerance": "0x1.430cd74f6d478p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -773,15 +768,15 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.2c00000000000p-42",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.8000000000000p-44",
     "inner_attempts": 1,
-    "accepted_move_norm": "0x1.29a5a5a5a5a72p-1",
-    "accepted_move_norm_scaled": "0x1.2f5a38c39b9d7p-2",
+    "accepted_move_norm": "0x1.0625a5a5a5a62p-1",
+    "accepted_move_norm_scaled": "0x1.0b2c0552052e7p-2",
     "infeasible_stall_move_tolerance": "0x1.512295c35839dp-26",
-    "objective_delta": "0x1.13c6296969698p+4",
-    "feasibility_delta": "0x1.29a5a5a5a5a72p-1",
+    "objective_delta": "0x1.abd438d2d2d30p+3",
+    "feasibility_delta": "0x1.0625a5a5a5a62p-1",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x1.da5ffffffffdap+5",
+    "stationarity_delta": "0x1.a1cbffffffff4p+5",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -793,38 +788,38 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.3c550c23a76b6p+6",
-    "conditioning_penalty_objective": "0x1.54e2307f8e900p+0",
-    "conditioning_penalty_objective_ratio": "0x1.13de69c6f53e6p-6",
-    "conditioning_total_grad_norm": "0x1.2c00000000000p-42",
-    "conditioning_base_grad_norm": "0x1.1c925a5a5a5a7p+4",
-    "conditioning_penalty_grad_norm": "0x1.1c925a5a5a55cp+4",
-    "conditioning_penalty_grad_ratio": "0x1.fffffffffff79p-1",
-    "penalty_gradient_norm": "0x1.1c925a5a5a55cp+4",
-    "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+    "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
+    "conditioning_penalty_objective": "0x1.8e9dacbbcad40p+0",
+    "conditioning_penalty_objective_ratio": "0x1.47ae147ae142cp-6",
+    "conditioning_total_grad_norm": "0x1.8000000000000p-44",
+    "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
+    "conditioning_penalty_grad_norm": "0x1.1a5a5a5a5a58ep+4",
+    "conditioning_penalty_grad_ratio": "0x1.fffffffffffd4p-1",
+    "penalty_gradient_norm": "0x1.1a5a5a5a5a58ep+4",
+    "sufficient_decrease_measure": "0x1.6969696969678p-3",
     "action": "dual_update",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.c4a0000000000p+2"
+     "0x0.0p+0"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.1c925a5a5a55cp+4"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "augmented_term_by_constraint": [
-     "0x1.54e2307f8e909p+0"
+     "0x1.8e9dacbbcad5cp+0"
     ],
     "active_pressure_by_constraint": [
-     "0x1.e7ccc0ff1d265p+0"
+     "0x1.8e9dacbbcad5bp+1"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -832,8 +827,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.db1fd8f641c83p+5",
-    "augmented_gradient_norm": "0x1.2c00000000000p-42",
+    "objective_to_augmented_term_ratio": "0x1.9000000000044p+5",
+    "augmented_gradient_norm": "0x1.8000000000000p-44",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -858,37 +853,37 @@
      "0x1.f400000000000p+9"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "stationarity_norm": "0x1.ac89e1e1e1d52p+6",
-    "raw_stationarity_norm": "0x1.ac89e1e1e1d52p+6",
+    "max_violation": "0x1.6969696969678p-3",
+    "stationarity_norm": "0x1.60f0f0f0f0eeep+7",
+    "raw_stationarity_norm": "0x1.60f0f0f0f0eeep+7",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "solver_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
-    "hard_max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "surrogate_max_value": "0x1.b6d2d2d2d2c70p-4",
+    "hard_max_violation": "0x1.6969696969678p-3",
+    "surrogate_max_value": "0x1.6969696969678p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.1c925a5a5a55cp+4"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "post_update_multipliers": [
-     "0x1.1c925a5a5a55cp+4"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "feasibility_tolerance": "0x1.009b9cf334252p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -898,11 +893,11 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.56d4b4b4b4a22p+3",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.1a5a5a5a5a576p+4",
     "inner_attempts": 1,
     "accepted_move_norm": "0x0.0p+0",
     "accepted_move_norm_scaled": "0x0.0p+0",
-    "infeasible_stall_move_tolerance": "0x1.004e2eff133e0p-26",
+    "infeasible_stall_move_tolerance": "0x1.0943eeafc3efbp-26",
     "objective_delta": "0x0.0p+0",
     "feasibility_delta": "0x0.0p+0",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
@@ -918,38 +913,38 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.3c550c23a76b6p+6",
-    "conditioning_penalty_objective": "0x1.e93d997eabc00p+2",
-    "conditioning_penalty_objective_ratio": "0x1.8bee3ad4ec63ap-4",
-    "conditioning_total_grad_norm": "0x1.ac89e1e1e1d52p+6",
-    "conditioning_base_grad_norm": "0x1.1c925a5a5a5a7p+4",
-    "conditioning_penalty_grad_norm": "0x1.f3ae7878786bcp+6",
-    "conditioning_penalty_grad_ratio": "0x1.c18324fb27253p+2",
-    "penalty_gradient_norm": "0x1.f3ae7878786bcp+6",
-    "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+    "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
+    "conditioning_penalty_objective": "0x1.2af6418cd8204p+4",
+    "conditioning_penalty_objective_ratio": "0x1.eb851eb851e63p-3",
+    "conditioning_total_grad_norm": "0x1.60f0f0f0f0eeep+7",
+    "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
+    "conditioning_penalty_grad_norm": "0x1.843c3c3c3c3a3p+7",
+    "conditioning_penalty_grad_ratio": "0x1.5ffffffffffe2p+3",
+    "penalty_gradient_norm": "0x1.843c3c3c3c3a3p+7",
+    "sufficient_decrease_measure": "0x1.6969696969678p-3",
     "action": "infeasible_stall_penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.1c925a5a5a55cp+4"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.f3ae7878786bcp+6"
+     "0x1.843c3c3c3c3a3p+7"
     ],
     "augmented_term_by_constraint": [
-     "0x1.e93d997eabc00p+2"
+     "0x1.2af6418cd8204p+4"
     ],
     "active_pressure_by_constraint": [
-     "0x1.ac44015ec81b3p+3"
+     "0x1.120c66c11b72fp+5"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -957,8 +952,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.4b0c45083ae2ep+3",
-    "augmented_gradient_norm": "0x1.ac89e1e1e1d52p+6",
+    "objective_to_augmented_term_ratio": "0x1.0aaaaaaaaaad9p+2",
+    "augmented_gradient_norm": "0x1.60f0f0f0f0eeep+7",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -983,37 +978,37 @@
      "0x1.3880000000000p+13"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "stationarity_norm": "0x1.269ecb4b4b434p+10",
-    "raw_stationarity_norm": "0x1.269ecb4b4b434p+10",
+    "max_violation": "0x1.6969696969678p-3",
+    "stationarity_norm": "0x1.b92d2d2d2d2acp+10",
+    "raw_stationarity_norm": "0x1.b92d2d2d2d2acp+10",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "solver_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
-    "hard_max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "surrogate_max_value": "0x1.b6d2d2d2d2c70p-4",
+    "hard_max_violation": "0x1.6969696969678p-3",
+    "surrogate_max_value": "0x1.6969696969678p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.1c925a5a5a55cp+4"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "post_update_multipliers": [
-     "0x1.f3ae7878786bcp+6"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "feasibility_tolerance": "0x1.97a967f7524b3p-2",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -1023,11 +1018,11 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.ac89e1e1e1d52p+6",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.60f0f0f0f0eeep+7",
     "inner_attempts": 1,
     "accepted_move_norm": "0x0.0p+0",
     "accepted_move_norm_scaled": "0x0.0p+0",
-    "infeasible_stall_move_tolerance": "0x1.004e2eff133e0p-26",
+    "infeasible_stall_move_tolerance": "0x1.0943eeafc3efbp-26",
     "objective_delta": "0x0.0p+0",
     "feasibility_delta": "0x0.0p+0",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
@@ -1043,40 +1038,38 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.3c550c23a76b6p+6",
-    "conditioning_penalty_objective": "0x1.1b1701f327cd6p+6",
-    "conditioning_penalty_objective_ratio": "0x1.ca320fd698655p-1",
-    "conditioning_total_grad_norm": "0x1.269ecb4b4b434p+10",
-    "conditioning_base_grad_norm": "0x1.1c925a5a5a5a7p+4",
-    "conditioning_penalty_grad_norm": "0x1.2b1114b4b4acbp+10",
-    "conditioning_penalty_grad_ratio": "0x1.0d0a296caaea3p+6",
-    "penalty_gradient_norm": "0x1.2b1114b4b4acbp+10",
-    "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
-    "dual_update_penalty_increase": true,
-    "dual_update_penalty_increase_reason": "failed_inner_solve_without_feasibility_gain",
-    "action": "dual_update",
+    "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
+    "conditioning_penalty_objective": "0x1.3da5a5a5a5a24p+7",
+    "conditioning_penalty_objective_ratio": "0x1.051eb851eb824p+1",
+    "conditioning_total_grad_norm": "0x1.b92d2d2d2d2acp+10",
+    "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
+    "conditioning_penalty_grad_norm": "0x1.bd96969696943p+10",
+    "conditioning_penalty_grad_ratio": "0x1.93fffffffffddp+6",
+    "penalty_gradient_norm": "0x1.bd96969696943p+10",
+    "sufficient_decrease_measure": "0x1.6969696969678p-3",
+    "action": "infeasible_stall_penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.f3ae7878786bcp+6"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.2b1114b4b4acbp+10"
+     "0x1.bd96969696943p+10"
     ],
     "augmented_term_by_constraint": [
-     "0x1.1b1701f327cd6p+6"
+     "0x1.3da5a5a5a5a23p+7"
     ],
     "active_pressure_by_constraint": [
-     "0x1.0052c1dd3b4bbp+7"
+     "0x1.3a886a4c2e0c9p+8"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -1084,8 +1077,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.1e0faf15d978fp+0",
-    "augmented_gradient_norm": "0x1.269ecb4b4b434p+10",
+    "objective_to_augmented_term_ratio": "0x1.f5f5f5f5f5fb9p-2",
+    "augmented_gradient_norm": "0x1.b92d2d2d2d2acp+10",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -1110,37 +1103,37 @@
      "0x1.86a0000000000p+16"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "stationarity_norm": "0x1.739f91e1e1d7dp+13",
-    "raw_stationarity_norm": "0x1.739f91e1e1d7dp+13",
+    "max_violation": "0x1.6969696969678p-3",
+    "stationarity_norm": "0x1.13bc3c3c3c3acp+14",
+    "raw_stationarity_norm": "0x1.13bc3c3c3c3acp+14",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "solver_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
-    "hard_max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "surrogate_max_value": "0x1.b6d2d2d2d2c70p-4",
+    "hard_max_violation": "0x1.6969696969678p-3",
+    "surrogate_max_value": "0x1.6969696969678p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.f3ae7878786bcp+6"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "post_update_multipliers": [
-     "0x1.2b1114b4b4acbp+10"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "feasibility_tolerance": "0x1.43d136248490fp-2",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -1150,11 +1143,11 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.269ecb4b4b434p+10",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.b92d2d2d2d2acp+10",
     "inner_attempts": 1,
     "accepted_move_norm": "0x0.0p+0",
     "accepted_move_norm_scaled": "0x0.0p+0",
-    "infeasible_stall_move_tolerance": "0x1.004e2eff133e0p-26",
+    "infeasible_stall_move_tolerance": "0x1.0943eeafc3efbp-26",
     "objective_delta": "0x0.0p+0",
     "feasibility_delta": "0x0.0p+0",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
@@ -1170,40 +1163,38 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.3c550c23a76b6p+6",
-    "conditioning_penalty_objective": "0x1.5f06d2b0714f6p+9",
-    "conditioning_penalty_objective_ratio": "0x1.1c13ce4ae64dep+3",
-    "conditioning_total_grad_norm": "0x1.739f91e1e1d7dp+13",
-    "conditioning_base_grad_norm": "0x1.1c925a5a5a5a7p+4",
-    "conditioning_penalty_grad_norm": "0x1.742ddb0f0f050p+13",
-    "conditioning_penalty_grad_ratio": "0x1.4ecfba11cbf32p+9",
-    "penalty_gradient_norm": "0x1.742ddb0f0f050p+13",
-    "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
-    "dual_update_penalty_increase": true,
-    "dual_update_penalty_increase_reason": "failed_inner_solve_without_feasibility_gain",
-    "action": "dual_update",
+    "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
+    "conditioning_penalty_objective": "0x1.860d4985c1f9fp+10",
+    "conditioning_penalty_objective_ratio": "0x1.40a3d70a3d6d1p+4",
+    "conditioning_total_grad_norm": "0x1.13bc3c3c3c3acp+14",
+    "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
+    "conditioning_penalty_grad_norm": "0x1.1402d2d2d2d15p+14",
+    "conditioning_penalty_grad_ratio": "0x1.f47ffffffffd4p+9",
+    "penalty_gradient_norm": "0x1.1402d2d2d2d15p+14",
+    "sufficient_decrease_measure": "0x1.6969696969678p-3",
+    "action": "infeasible_stall_penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.2b1114b4b4acbp+10"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.742ddb0f0f050p+13"
+     "0x1.1402d2d2d2d15p+14"
     ],
     "augmented_term_by_constraint": [
-     "0x1.5f06d2b0714f6p+9"
+     "0x1.860d4985c1f9fp+10"
     ],
     "active_pressure_by_constraint": [
-     "0x1.3efc7a74c9e5fp+10"
+     "0x1.85a9a21a93075p+11"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -1211,8 +1202,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.cd653b346b60ep-4",
-    "augmented_gradient_norm": "0x1.739f91e1e1d7dp+13",
+    "objective_to_augmented_term_ratio": "0x1.98c84dab2d7ebp-5",
+    "augmented_gradient_norm": "0x1.13bc3c3c3c3acp+14",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -1237,37 +1228,37 @@
      "0x1.e848000000000p+19"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "stationarity_norm": "0x1.d0f298d2d2c65p+16",
-    "raw_stationarity_norm": "0x1.d0f298d2d2c65p+16",
+    "max_violation": "0x1.6969696969678p-3",
+    "stationarity_norm": "0x1.58ab4b4b4b498p+17",
+    "raw_stationarity_norm": "0x1.58ab4b4b4b498p+17",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "solver_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
-    "hard_max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "surrogate_max_value": "0x1.b6d2d2d2d2c70p-4",
+    "hard_max_violation": "0x1.6969696969678p-3",
+    "surrogate_max_value": "0x1.6969696969678p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.2b1114b4b4acbp+10"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "post_update_multipliers": [
-     "0x1.742ddb0f0f050p+13"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "feasibility_tolerance": "0x1.0137987dd704cp-2",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -1277,11 +1268,11 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.739f91e1e1d7dp+13",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.13bc3c3c3c3acp+14",
     "inner_attempts": 1,
     "accepted_move_norm": "0x0.0p+0",
     "accepted_move_norm_scaled": "0x0.0p+0",
-    "infeasible_stall_move_tolerance": "0x1.004e2eff133e0p-26",
+    "infeasible_stall_move_tolerance": "0x1.0943eeafc3efbp-26",
     "objective_delta": "0x0.0p+0",
     "feasibility_delta": "0x0.0p+0",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
@@ -1297,40 +1288,38 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.3c550c23a76b6p+6",
-    "conditioning_penalty_objective": "0x1.b66dc9649d951p+12",
-    "conditioning_penalty_objective_ratio": "0x1.62cf526a38c33p+6",
-    "conditioning_total_grad_norm": "0x1.d0f298d2d2c65p+16",
-    "conditioning_base_grad_norm": "0x1.1c925a5a5a5a7p+4",
-    "conditioning_penalty_grad_norm": "0x1.d10461f8786bfp+16",
-    "conditioning_penalty_grad_ratio": "0x1.a254095f7db9cp+12",
-    "penalty_gradient_norm": "0x1.d10461f8786bfp+16",
-    "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
-    "dual_update_penalty_increase": true,
-    "dual_update_penalty_increase_reason": "failed_inner_solve_without_feasibility_gain",
-    "action": "dual_update",
+    "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
+    "conditioning_penalty_objective": "0x1.e6b0633608d69p+13",
+    "conditioning_penalty_objective_ratio": "0x1.90147ae147a9dp+7",
+    "conditioning_total_grad_norm": "0x1.58ab4b4b4b498p+17",
+    "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
+    "conditioning_penalty_grad_norm": "0x1.58b41e1e1e1c5p+17",
+    "conditioning_penalty_grad_ratio": "0x1.3887fffffffe5p+13",
+    "penalty_gradient_norm": "0x1.58b41e1e1e1c5p+17",
+    "sufficient_decrease_measure": "0x1.6969696969678p-3",
+    "action": "infeasible_stall_penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.742ddb0f0f050p+13"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.d10461f8786bfp+16"
+     "0x1.58b41e1e1e1c5p+17"
     ],
     "augmented_term_by_constraint": [
-     "0x1.b66dc9649d951p+12"
+     "0x1.e6b0633608d69p+13"
     ],
     "active_pressure_by_constraint": [
-     "0x1.8e8e3a1604586p+13"
+     "0x1.e6a3ee48a2f84p+14"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -1338,8 +1327,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.716a2e703471fp-7",
-    "augmented_gradient_norm": "0x1.d0f298d2d2c65p+16",
+    "objective_to_augmented_term_ratio": "0x1.479d4e5f1c526p-8",
+    "augmented_gradient_norm": "0x1.58ab4b4b4b498p+17",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -1364,37 +1353,37 @@
      "0x1.e848000000000p+19"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "stationarity_norm": "0x1.b9b89fb4b4a8dp+17",
-    "raw_stationarity_norm": "0x1.b9b89fb4b4a8dp+17",
+    "max_violation": "0x1.6969696969678p-3",
+    "stationarity_norm": "0x1.58ab4b4b4b498p+17",
+    "raw_stationarity_norm": "0x1.58ab4b4b4b498p+17",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "solver_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "hard_violation_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
-    "hard_max_violation": "0x1.b6d2d2d2d2c70p-4",
-    "surrogate_max_value": "0x1.b6d2d2d2d2c70p-4",
+    "hard_max_violation": "0x1.6969696969678p-3",
+    "surrogate_max_value": "0x1.6969696969678p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.742ddb0f0f050p+13"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "post_update_multipliers": [
-     "0x1.d10461f8786bfp+16"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "feasibility_tolerance": "0x1.0137987dd704cp-2",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -1404,11 +1393,11 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.d0f298d2d2c65p+16",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.58ab4b4b4b498p+17",
     "inner_attempts": 1,
     "accepted_move_norm": "0x0.0p+0",
     "accepted_move_norm_scaled": "0x0.0p+0",
-    "infeasible_stall_move_tolerance": "0x1.004e2eff133e0p-26",
+    "infeasible_stall_move_tolerance": "0x1.0943eeafc3efbp-26",
     "objective_delta": "0x0.0p+0",
     "feasibility_delta": "0x0.0p+0",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
@@ -1424,38 +1413,38 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.3c550c23a76b6p+6",
-    "conditioning_penalty_objective": "0x1.20f2c7bcdcf31p+14",
-    "conditioning_penalty_objective_ratio": "0x1.d3ad856a4172ep+7",
-    "conditioning_total_grad_norm": "0x1.b9b89fb4b4a8dp+17",
-    "conditioning_base_grad_norm": "0x1.1c925a5a5a5a7p+4",
-    "conditioning_penalty_grad_norm": "0x1.b9c18447877bap+17",
-    "conditioning_penalty_grad_ratio": "0x1.8d670dbe60fa9p+13",
-    "penalty_gradient_norm": "0x1.b9c18447877bap+17",
-    "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+    "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
+    "conditioning_penalty_objective": "0x1.e6b0633608d69p+13",
+    "conditioning_penalty_objective_ratio": "0x1.90147ae147a9dp+7",
+    "conditioning_total_grad_norm": "0x1.58ab4b4b4b498p+17",
+    "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
+    "conditioning_penalty_grad_norm": "0x1.58b41e1e1e1c5p+17",
+    "conditioning_penalty_grad_ratio": "0x1.3887fffffffe5p+13",
+    "penalty_gradient_norm": "0x1.58b41e1e1e1c5p+17",
+    "sufficient_decrease_measure": "0x1.6969696969678p-3",
     "action": "penalty_cap_reached",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.b6d2d2d2d2c70p-4"
+     "0x1.6969696969678p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.d10461f8786bfp+16"
+     "0x1.1a5a5a5a5a58ep+4"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.b9c18447877bap+17"
+     "0x1.58b41e1e1e1c5p+17"
     ],
     "augmented_term_by_constraint": [
-     "0x1.20f2c7bcdcf31p+14"
+     "0x1.e6b0633608d69p+13"
     ],
     "active_pressure_by_constraint": [
-     "0x1.7a9e726eb7ba0p+14"
+     "0x1.e6a3ee48a2f84p+14"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -1463,8 +1452,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.1842e58a946adp-8",
-    "augmented_gradient_norm": "0x1.b9b89fb4b4a8dp+17",
+    "objective_to_augmented_term_ratio": "0x1.479d4e5f1c526p-8",
+    "augmented_gradient_norm": "0x1.58ab4b4b4b498p+17",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -1921,7 +1910,7 @@
       1
      ],
      "data": [
-      "0x1.8000000000000p-3"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.4000000000000p+3",
@@ -1931,10 +1920,10 @@
     "event": "on_outer_step",
     "outer_iteration": 1,
     "continuation_iteration": 2,
-    "action": "dual_update",
-    "dual_update_penalty_reason": "hard_feasibility_not_improved_after_dual_update",
+    "action": "penalty_increase",
+    "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "f937030f5e606e58b0f6708ccd302aa9c9b02fadc48b5a05ddafa3e85078d047"
+    "event_sha256": "1beed8b5aec057dd1296a84bd0a98304be91691d02ceb61df1918f028d089138"
    },
    {
     "event": "snapshot_accepted_state",
@@ -1952,7 +1941,7 @@
    {
     "event": "on_outer_boundary",
     "completed_outer_iterations": 1,
-    "completed_action": "dual_update",
+    "completed_action": "penalty_increase",
     "termination_reason": null,
     "resume_eligible": true
    },
@@ -1965,7 +1954,7 @@
       1
      ],
      "data": [
-      "0x1.8000000000000p-3"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.4000000000000p+3"
@@ -1988,7 +1977,7 @@
       1
      ],
      "data": [
-      "0x1.8000000000000p-3"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.4000000000000p+3",
@@ -2012,7 +2001,7 @@
       1
      ],
      "data": [
-      "0x1.8000000000000p-3"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.4000000000000p+3",
@@ -2036,7 +2025,7 @@
       1
      ],
      "data": [
-      "0x1.8000000000000p-3"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.4000000000000p+3",
@@ -2073,7 +2062,7 @@
       1
      ],
      "data": [
-      "0x1.8000000000000p-3"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.4000000000000p+3",
@@ -2097,7 +2086,7 @@
       1
      ],
      "data": [
-      "0x1.8000000000000p-3"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.4000000000000p+3",
@@ -2147,7 +2136,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2157,10 +2146,10 @@
     "event": "on_outer_step",
     "outer_iteration": 2,
     "continuation_iteration": 0,
-    "action": "dual_update",
-    "dual_update_penalty_reason": "hard_feasibility_not_improved_after_dual_update",
+    "action": "penalty_increase",
+    "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "a1e9aafa34d14ba7a9401034d5e1c242248a7b2de07226eb7651ed1bce2cb0f8"
+    "event_sha256": "5585e3f1bc71c5fb0da4696c05aef47f61c645b6a668c86d45f2c4e740b27371"
    },
    {
     "event": "snapshot_accepted_state",
@@ -2178,7 +2167,7 @@
    {
     "event": "on_outer_boundary",
     "completed_outer_iterations": 2,
-    "completed_action": "dual_update",
+    "completed_action": "penalty_increase",
     "termination_reason": null,
     "resume_eligible": true
    },
@@ -2191,7 +2180,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6"
@@ -2214,7 +2203,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2238,7 +2227,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2262,7 +2251,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2289,7 +2278,7 @@
       2
      ],
      "data": [
-      "0x1.c0ea1230fcc65p-1",
+      "0x1.ce038e4bac1bap-1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2299,7 +2288,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2313,7 +2302,7 @@
       2
      ],
      "data": [
-      "0x1.e76b2d7a77efcp+0",
+      "0x1.041571de97228p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2323,7 +2312,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2337,7 +2326,7 @@
       2
      ],
      "data": [
-      "0x1.1530b67758ebep+0",
+      "0x1.21684c0896902p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2347,7 +2336,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2361,7 +2350,7 @@
       2
      ],
      "data": [
-      "0x1.1530b67758ebep+0",
+      "0x1.21684c0896902p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2374,7 +2363,7 @@
       2
      ],
      "data": [
-      "0x1.274709efafffap+0",
+      "0x1.4cf61e18486f3p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2384,7 +2373,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2398,7 +2387,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2408,7 +2397,7 @@
       1
      ],
      "data": [
-      "0x1.c4a0000000000p+2"
+      "0x0.0p+0"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2422,7 +2411,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2435,7 +2424,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2448,7 +2437,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2458,7 +2447,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2471,7 +2460,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "e4de2f865dbbe669918848e1608a8c17759e2c802fd0a6e5192e50b9f3433fbe"
+    "event_sha256": "d027c6a5c4f35c6f2a1bba282196e2b19c4aab606edef1bbebd0b2a9ba6e5131"
    },
    {
     "event": "snapshot_accepted_state",
@@ -2481,7 +2470,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2502,7 +2491,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6"
@@ -2515,7 +2504,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2525,7 +2514,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2539,7 +2528,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2549,7 +2538,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2563,7 +2552,7 @@
       2
      ],
      "data": [
-      "0x1.cc91696969680p-5",
+      "0x1.e9696969696a0p-5",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2573,7 +2562,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2587,7 +2576,7 @@
       2
      ],
      "data": [
-      "0x1.15df7e2b8a7f7p+0",
+      "0x1.23ad11b588229p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2597,7 +2586,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2611,7 +2600,7 @@
       2
      ],
      "data": [
-      "0x1.1b6c80bde4eddp+0",
+      "0x1.2d29fb1972158p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2621,7 +2610,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2635,7 +2624,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2aa18p+0",
+      "0x1.2d2d2d2cd0017p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2645,7 +2634,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2659,7 +2648,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2669,7 +2658,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2683,7 +2672,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2be70p+0",
+      "0x1.2d2d2d2cfe973p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2693,7 +2682,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2707,7 +2696,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2717,7 +2706,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2731,7 +2720,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2c89bp+0",
+      "0x1.2d2d2d2d15e21p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2741,7 +2730,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2755,7 +2744,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2765,7 +2754,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2779,7 +2768,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2cdb1p+0",
+      "0x1.2d2d2d2d21878p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2789,7 +2778,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2803,7 +2792,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2813,7 +2802,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2827,7 +2816,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d03cp+0",
+      "0x1.2d2d2d2d275a4p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2837,7 +2826,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2851,7 +2840,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2861,7 +2850,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2875,7 +2864,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d182p+0",
+      "0x1.2d2d2d2d2a439p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2885,7 +2874,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2899,7 +2888,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2909,7 +2898,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2923,7 +2912,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2933,7 +2922,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -2946,7 +2935,7 @@
     "action": "infeasible_stall_penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "8fad22bbd206a3d7c461b786fabead0f6928b24e134630d2afbd3dd32a9912e1"
+    "event_sha256": "77e6514467e1e24c48fcb09c024d3098c3e9c175e4a76da4aaad861a164a0cef"
    },
    {
     "event": "snapshot_accepted_state",
@@ -2956,7 +2945,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2977,7 +2966,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9"
@@ -2990,7 +2979,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3000,7 +2989,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3014,7 +3003,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3024,7 +3013,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3038,7 +3027,7 @@
       2
      ],
      "data": [
-      "0x1.cc91696969680p-5",
+      "0x1.e9696969696a0p-5",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3048,7 +3037,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3062,7 +3051,7 @@
       2
      ],
      "data": [
-      "0x1.fe3d464749f77p-1",
+      "0x1.087cc57491638p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3072,7 +3061,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3086,7 +3075,7 @@
       2
      ],
      "data": [
-      "0x1.1ad900afe0434p+0",
+      "0x1.2bdc1d7a194edp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3096,7 +3085,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3110,7 +3099,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d1b8f655a7p+0",
+      "0x1.2d2ca705b0948p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3120,7 +3109,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3134,7 +3123,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2cec9p+0",
+      "0x1.2d2d2d2d17c1fp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3144,7 +3133,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3158,7 +3147,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3168,7 +3157,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3182,7 +3171,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d0c8p+0",
+      "0x1.2d2d2d2d22777p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3192,7 +3181,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3206,7 +3195,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3216,7 +3205,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3230,7 +3219,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d1c7p+0",
+      "0x1.2d2d2d2d27d23p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3240,7 +3229,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3254,7 +3243,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3264,7 +3253,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3278,7 +3267,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d247p+0",
+      "0x1.2d2d2d2d2a7f9p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3288,7 +3277,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3302,7 +3291,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3312,7 +3301,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3326,7 +3315,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d287p+0",
+      "0x1.2d2d2d2d2bd64p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3336,7 +3325,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3350,7 +3339,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3360,7 +3349,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3374,7 +3363,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2a7p+0",
+      "0x1.2d2d2d2d2c819p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3384,7 +3373,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3398,7 +3387,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3408,7 +3397,7 @@
       1
      ],
      "data": [
-      "0x1.1c925a5a5a55cp+4"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.f400000000000p+9",
@@ -3422,7 +3411,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3432,7 +3421,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3442,10 +3431,10 @@
     "event": "on_outer_step",
     "outer_iteration": 5,
     "continuation_iteration": 0,
-    "action": "dual_update",
-    "dual_update_penalty_reason": "failed_inner_solve_without_feasibility_gain",
+    "action": "infeasible_stall_penalty_increase",
+    "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "2ad9bb4ecd822e400e417dc85da607fa17975e4a0ffa1ce6eef4a0f497c51da7"
+    "event_sha256": "cbfde2ed2b083e6a87ad23e7a1b3ed0caf589ff53a56c3250335cdc0b00b6fd3"
    },
    {
     "event": "snapshot_accepted_state",
@@ -3455,7 +3444,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3463,7 +3452,7 @@
    {
     "event": "on_outer_boundary",
     "completed_outer_iterations": 5,
-    "completed_action": "dual_update",
+    "completed_action": "infeasible_stall_penalty_increase",
     "termination_reason": null,
     "resume_eligible": true
    },
@@ -3476,7 +3465,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13"
@@ -3489,7 +3478,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3499,7 +3488,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3513,7 +3502,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3523,7 +3512,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3537,7 +3526,7 @@
       2
      ],
      "data": [
-      "0x1.cc91696969680p-5",
+      "0x1.e9696969696a0p-5",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3547,7 +3536,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3561,7 +3550,7 @@
       2
      ],
      "data": [
-      "0x1.d517d349d4c75p-1",
+      "0x1.f25d01d066f1dp-1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3571,7 +3560,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3585,7 +3574,7 @@
       2
      ],
      "data": [
-      "0x1.15ea3e083e3cbp+0",
+      "0x1.274a7c9289c39p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3595,7 +3584,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3609,7 +3598,7 @@
       2
      ],
      "data": [
-      "0x1.1b4a437e5c12ap+0",
+      "0x1.2d077ca999d95p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3619,7 +3608,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3633,7 +3622,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d26f521bf9p+0",
+      "0x1.2d2d264e388efp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3643,7 +3632,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3657,7 +3646,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2cf9cp+0",
+      "0x1.2d2d2d2d2cf24p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3667,7 +3656,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3681,7 +3670,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3691,7 +3680,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3705,7 +3694,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d131p+0",
+      "0x1.2d2d2d2d2d0fap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3715,7 +3704,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3729,7 +3718,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3739,7 +3728,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3753,7 +3742,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d1fcp+0",
+      "0x1.2d2d2d2d2d1e4p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3763,7 +3752,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3777,7 +3766,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3787,7 +3776,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3801,7 +3790,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d262p+0",
+      "0x1.2d2d2d2d2d25ap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3811,7 +3800,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3825,7 +3814,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3835,7 +3824,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3849,7 +3838,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d294p+0",
+      "0x1.2d2d2d2d2d294p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3859,7 +3848,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3873,7 +3862,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3883,7 +3872,7 @@
       1
      ],
      "data": [
-      "0x1.f3ae7878786bcp+6"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.3880000000000p+13",
@@ -3897,7 +3886,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3907,7 +3896,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -3917,10 +3906,10 @@
     "event": "on_outer_step",
     "outer_iteration": 6,
     "continuation_iteration": 0,
-    "action": "dual_update",
-    "dual_update_penalty_reason": "failed_inner_solve_without_feasibility_gain",
+    "action": "infeasible_stall_penalty_increase",
+    "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "6edc6de0ab221d9d4d19dbc526e838027c9651c175d32ed6c963d008c2da06c4"
+    "event_sha256": "c211ad123abcad9c35415c723a852f6c686374848eaa811a8e28d04879c89274"
    },
    {
     "event": "snapshot_accepted_state",
@@ -3930,7 +3919,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3938,7 +3927,7 @@
    {
     "event": "on_outer_boundary",
     "completed_outer_iterations": 6,
-    "completed_action": "dual_update",
+    "completed_action": "infeasible_stall_penalty_increase",
     "termination_reason": null,
     "resume_eligible": true
    },
@@ -3951,7 +3940,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16"
@@ -3964,7 +3953,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3974,7 +3963,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -3988,7 +3977,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3998,7 +3987,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4012,7 +4001,7 @@
       2
      ],
      "data": [
-      "0x1.cc91696969680p-5",
+      "0x1.e9696969696a0p-5",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4022,7 +4011,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4036,7 +4025,7 @@
       2
      ],
      "data": [
-      "0x1.ce077f51e1ff4p-1",
+      "0x1.edbd4f112a387p-1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4046,7 +4035,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4060,7 +4049,7 @@
       2
      ],
      "data": [
-      "0x1.13a9bf0b2ea16p+0",
+      "0x1.25e846f682df3p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4070,7 +4059,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4084,7 +4073,7 @@
       2
      ],
      "data": [
-      "0x1.1afe60531335ep+0",
+      "0x1.2ce17153b1220p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4094,7 +4083,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4108,7 +4097,7 @@
       2
      ],
      "data": [
-      "0x1.1b6cb60ce3639p+0",
+      "0x1.2d2d055c78bc1p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4118,7 +4107,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4132,7 +4121,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2ca0888p+0",
+      "0x1.2d2d2d2d220eap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4142,7 +4131,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4156,7 +4145,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4166,7 +4155,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4180,7 +4169,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2ce6da8p+0",
+      "0x1.2d2d2d2d279ddp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4190,7 +4179,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4204,7 +4193,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4214,7 +4203,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4228,7 +4217,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d0a037p+0",
+      "0x1.2d2d2d2d2a656p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4238,7 +4227,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4252,7 +4241,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4262,7 +4251,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4276,7 +4265,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d1b97fp+0",
+      "0x1.2d2d2d2d2bc92p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4286,7 +4275,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4300,7 +4289,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4310,7 +4299,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4324,7 +4313,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d24623p+0",
+      "0x1.2d2d2d2d2c7b1p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4334,7 +4323,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4348,7 +4337,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4358,7 +4347,7 @@
       1
      ],
      "data": [
-      "0x1.2b1114b4b4acbp+10"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.86a0000000000p+16",
@@ -4372,7 +4361,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4382,7 +4371,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4392,10 +4381,10 @@
     "event": "on_outer_step",
     "outer_iteration": 7,
     "continuation_iteration": 0,
-    "action": "dual_update",
-    "dual_update_penalty_reason": "failed_inner_solve_without_feasibility_gain",
+    "action": "infeasible_stall_penalty_increase",
+    "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "e2e64c44a5b10251cfc4f776dea64d15b817e380f1d2d38cdd2f66234060e903"
+    "event_sha256": "5cc00562fc85bd0d95fda8b53bfc47b10b24531ebf5ff76abdd2b2a29bbf7734"
    },
    {
     "event": "snapshot_accepted_state",
@@ -4405,7 +4394,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -4413,7 +4402,7 @@
    {
     "event": "on_outer_boundary",
     "completed_outer_iterations": 7,
-    "completed_action": "dual_update",
+    "completed_action": "infeasible_stall_penalty_increase",
     "termination_reason": null,
     "resume_eligible": true
    },
@@ -4426,7 +4415,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19"
@@ -4439,7 +4428,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4449,7 +4438,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4463,7 +4452,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4473,7 +4462,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4487,7 +4476,7 @@
       2
      ],
      "data": [
-      "0x1.cc91696969680p-5",
+      "0x1.e9696969696a0p-5",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4497,7 +4486,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4511,7 +4500,7 @@
       2
      ],
      "data": [
-      "0x1.cd45070ec2e38p-1",
+      "0x1.ed40b49ea5250p-1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4521,7 +4510,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4535,7 +4524,7 @@
       2
      ],
      "data": [
-      "0x1.135f238e14da6p+0",
+      "0x1.25be873d03845p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4545,7 +4534,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4559,7 +4548,7 @@
       2
      ],
      "data": [
-      "0x1.1aeeab8d0301bp+0",
+      "0x1.2cdb77620818ap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4569,7 +4558,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4583,7 +4572,7 @@
       2
      ],
      "data": [
-      "0x1.1b6c82f25e480p+0",
+      "0x1.2d2cfcbc5d1c1p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4593,7 +4582,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4607,7 +4596,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2bf0ac6p+0",
+      "0x1.2d2d2d2d1bf3bp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4617,7 +4606,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4631,7 +4620,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4641,7 +4630,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4655,7 +4644,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2c8eec6p+0",
+      "0x1.2d2d2d2d24905p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4665,7 +4654,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4679,7 +4668,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4689,7 +4678,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4703,7 +4692,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2cde0c7p+0",
+      "0x1.2d2d2d2d28deap+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4713,7 +4702,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4727,7 +4716,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4737,7 +4726,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4751,7 +4740,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d059c7p+0",
+      "0x1.2d2d2d2d2b05dp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4761,7 +4750,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4775,7 +4764,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4785,7 +4774,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4799,7 +4788,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d19647p+0",
+      "0x1.2d2d2d2d2c196p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4809,7 +4798,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4823,7 +4812,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4833,7 +4822,7 @@
       1
      ],
      "data": [
-      "0x1.742ddb0f0f050p+13"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4847,7 +4836,7 @@
       2
      ],
      "data": [
-      "0x1.1b6d2d2d2d2c7p+0",
+      "0x1.2d2d2d2d2d2cfp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -4857,7 +4846,7 @@
       1
      ],
      "data": [
-      "0x1.d10461f8786bfp+16"
+      "0x1.1a5a5a5a5a58ep+4"
      ]
     },
     "penalty": "0x1.e848000000000p+19",
@@ -4868,9 +4857,9 @@
     "outer_iteration": 8,
     "continuation_iteration": 0,
     "action": "penalty_cap_reached",
-    "dual_update_penalty_reason": "failed_inner_solve_without_feasibility_gain",
+    "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "8fe47abff404c7425945a9cbd07235b2c9b65334eca343d4b087ad4045785687"
+    "event_sha256": "fd32e103ee9689d83c5032ad7c70e71aea4dda1c1ceef1150b1a94a79ba997f0"
    },
    {
     "event": "restore_incumbent_state",
@@ -4937,7 +4926,7 @@
      "completed_outer_iterations": 1,
      "multipliers": {
       "$tuple": [
-       "0x1.8000000000000p-3"
+       "0x0.0p+0"
       ]
      },
      "penalty": "0x1.4000000000000p+3",
@@ -5122,7 +5111,7 @@
        "geometry_identity": null
       }
      },
-     "completed_action": "dual_update",
+     "completed_action": "penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
      "total_inner_iterations": 5,
@@ -5192,7 +5181,7 @@
      "completed_outer_iterations": 2,
      "multipliers": {
       "$tuple": [
-       "0x1.c4a0000000000p+2"
+       "0x0.0p+0"
       ]
      },
      "penalty": "0x1.9000000000000p+6",
@@ -5203,7 +5192,7 @@
      "sufficient_decrease_measure": "0x1.6080000000000p-1",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.8000000000000p-3"
+       "0x0.0p+0"
       ]
      },
      "sufficient_decrease_penalty": "0x1.4000000000000p+3",
@@ -5377,7 +5366,7 @@
        "geometry_identity": null
       }
      },
-     "completed_action": "dual_update",
+     "completed_action": "penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
      "total_inner_iterations": 7,
@@ -5422,7 +5411,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.1b6d2d2d2d2c7p+0",
+       "0x1.2d2d2d2d2d2cfp+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -5431,7 +5420,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.1b6d2d2d2d2c7p+0",
+         "0x1.2d2d2d2d2d2cfp+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -5447,7 +5436,7 @@
      "completed_outer_iterations": 3,
      "multipliers": {
       "$tuple": [
-       "0x1.1c925a5a5a55cp+4"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "penalty": "0x1.9000000000000p+6",
@@ -5455,10 +5444,10 @@
      "update_stationarity_tol": "0x1.0624dd2f1a9fcp-10",
      "trust_radius": "0x1.e600000000000p-1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+     "sufficient_decrease_measure": "0x1.6969696969678p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.c4a0000000000p+2"
+       "0x0.0p+0"
       ]
      },
      "sufficient_decrease_penalty": "0x1.9000000000000p+6",
@@ -5677,7 +5666,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.1b6d2d2d2d2c7p+0",
+       "0x1.2d2d2d2d2d2cfp+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -5686,7 +5675,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.1b6d2d2d2d2c7p+0",
+         "0x1.2d2d2d2d2d2cfp+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -5702,7 +5691,7 @@
      "completed_outer_iterations": 4,
      "multipliers": {
       "$tuple": [
-       "0x1.1c925a5a5a55cp+4"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "penalty": "0x1.f400000000000p+9",
@@ -5710,10 +5699,10 @@
      "update_stationarity_tol": "0x1.0624dd2f1a9fcp-10",
      "trust_radius": "0x1.e600000000000p-1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+     "sufficient_decrease_measure": "0x1.6969696969678p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.1c925a5a5a55cp+4"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "sufficient_decrease_penalty": "0x1.9000000000000p+6",
@@ -5932,7 +5921,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.1b6d2d2d2d2c7p+0",
+       "0x1.2d2d2d2d2d2cfp+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -5941,7 +5930,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.1b6d2d2d2d2c7p+0",
+         "0x1.2d2d2d2d2d2cfp+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -5957,7 +5946,7 @@
      "completed_outer_iterations": 5,
      "multipliers": {
       "$tuple": [
-       "0x1.f3ae7878786bcp+6"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "penalty": "0x1.3880000000000p+13",
@@ -5965,10 +5954,10 @@
      "update_stationarity_tol": "0x1.a36e2eb1c432dp-14",
      "trust_radius": "0x1.e600000000000p-1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+     "sufficient_decrease_measure": "0x1.6969696969678p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.1c925a5a5a55cp+4"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "sufficient_decrease_penalty": "0x1.f400000000000p+9",
@@ -6142,7 +6131,7 @@
        "geometry_identity": null
       }
      },
-     "completed_action": "dual_update",
+     "completed_action": "infeasible_stall_penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
      "total_inner_iterations": 10,
@@ -6187,7 +6176,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.1b6d2d2d2d2c7p+0",
+       "0x1.2d2d2d2d2d2cfp+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -6196,7 +6185,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.1b6d2d2d2d2c7p+0",
+         "0x1.2d2d2d2d2d2cfp+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -6212,7 +6201,7 @@
      "completed_outer_iterations": 6,
      "multipliers": {
       "$tuple": [
-       "0x1.2b1114b4b4acbp+10"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "penalty": "0x1.86a0000000000p+16",
@@ -6220,10 +6209,10 @@
      "update_stationarity_tol": "0x1.4f8b588e368f1p-17",
      "trust_radius": "0x1.e600000000000p-1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+     "sufficient_decrease_measure": "0x1.6969696969678p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.f3ae7878786bcp+6"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "sufficient_decrease_penalty": "0x1.3880000000000p+13",
@@ -6397,7 +6386,7 @@
        "geometry_identity": null
       }
      },
-     "completed_action": "dual_update",
+     "completed_action": "infeasible_stall_penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
      "total_inner_iterations": 10,
@@ -6442,7 +6431,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.1b6d2d2d2d2c7p+0",
+       "0x1.2d2d2d2d2d2cfp+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -6451,7 +6440,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.1b6d2d2d2d2c7p+0",
+         "0x1.2d2d2d2d2d2cfp+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -6467,7 +6456,7 @@
      "completed_outer_iterations": 7,
      "multipliers": {
       "$tuple": [
-       "0x1.742ddb0f0f050p+13"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "penalty": "0x1.e848000000000p+19",
@@ -6475,10 +6464,10 @@
      "update_stationarity_tol": "0x1.0c6f7a0b5ed8dp-20",
      "trust_radius": "0x1.e600000000000p-1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+     "sufficient_decrease_measure": "0x1.6969696969678p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.2b1114b4b4acbp+10"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "sufficient_decrease_penalty": "0x1.86a0000000000p+16",
@@ -6652,7 +6641,7 @@
        "geometry_identity": null
       }
      },
-     "completed_action": "dual_update",
+     "completed_action": "infeasible_stall_penalty_increase",
      "termination_reason": null,
      "resume_eligible": true,
      "total_inner_iterations": 10,
@@ -6730,10 +6719,10 @@
      "update_stationarity_tol": "0x1.0c6f7a0b5ed8dp-20",
      "trust_radius": "0x1.e600000000000p-1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.b6d2d2d2d2c70p-4",
+     "sufficient_decrease_measure": "0x1.6969696969678p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.742ddb0f0f050p+13"
+       "0x1.1a5a5a5a5a58ep+4"
       ]
      },
      "sufficient_decrease_penalty": "0x1.e848000000000p+19",

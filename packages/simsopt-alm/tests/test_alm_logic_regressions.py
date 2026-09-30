@@ -16,12 +16,58 @@ from simsopt_alm.continuation import ALMInnerPlan, ALMStalledTrialView
 from simsopt_alm.policy import DefaultContinuationPolicy
 
 
+def shifted_multipliers(result):
+    """The multipliers ``converged`` certifies: max(0, lambda + rho g)."""
+    return np.maximum(0.0, result.multipliers + result.penalty * result.constraint_values)
+
+
 def pulled_out(x, multipliers, penalty):
     """min (x - 3)^2 s.t. x - 1 <= 0: x* = 1, lambda* = 4. At lambda = 0 and
     rho = 1 the augmented Lagrangian's minimizer 7/3 violates the row by 4/3."""
     return augmented_inequality_objective(
         (x[0] - 3.0) ** 2, [2.0 * (x[0] - 3.0)], [x[0] - 1.0], [[1.0]], multipliers, penalty
     )
+
+
+class DualUpdateGateTests(unittest.TestCase):
+    """G2 = B3 (policy.py): the multiplier update was gated on the fitted
+    active-set residual instead of the augmented-gradient norm, so it ran at
+    points that do not minimize L_A, or skipped a multiplier that must move."""
+
+    def test_no_multiplier_update_away_from_a_subproblem_minimizer(self):
+        # min (x - 2)^2 s.t. x - 1 <= 0 at x = 1.2, rho = 1, no inner work:
+        # ||grad L_A|| = 1.4 exceeds the update tolerance max(1e-6, 1/rho) = 1.
+        def evaluate(x, multipliers, penalty):
+            return augmented_inequality_objective(
+                (x[0] - 2.0) ** 2, [2.0 * (x[0] - 2.0)], [x[0] - 1.0], [[1.0]],
+                multipliers, penalty,
+            )
+
+        events = []
+        minimize_alm(
+            [1.2], ["g"], evaluate, ALMSettings(max_outer_iterations=1), {"maxiter": 0},
+            on_outer_step=events.append,
+        )
+        self.assertEqual(len(events), 1)
+        self.assertNotEqual(events[0].action, "dual_update")
+        np.testing.assert_array_equal(events[0].after.multipliers, [0.0])
+
+    def test_an_excess_multiplier_on_an_inactive_row_is_updated(self):
+        # Astra B3: min x0^2/2 - x1 s.t. x0 - 1 <= 0, x1 <= 0 from the exact
+        # subproblem minimizer; KKT point x* = (0, 0), lambda* = (0, 1).
+        def evaluate(x, multipliers, penalty):
+            return augmented_inequality_objective(
+                x[0] ** 2 / 2.0 - x[1], [x[0], -1.0], [x[0] - 1.0, x[1]],
+                [[1.0, 0.0], [0.0, 1.0]], multipliers, penalty,
+            )
+
+        result = minimize_alm(
+            [0.0, 0.0], ["inactive", "active"], evaluate, ALMSettings(penalty_init=10.0),
+            {"maxiter": 100}, initial_multipliers=np.array([20.0, 1.0]),
+        )
+        self.assertEqual(result.termination_reason, "converged", result.message)
+        np.testing.assert_allclose(result.x, [0.0, 0.0], atol=1.0e-6)
+        np.testing.assert_allclose(shifted_multipliers(result), [0.0, 1.0], atol=1.0e-6)
 
 
 class FlaggedFiniteTrialTests(unittest.TestCase):

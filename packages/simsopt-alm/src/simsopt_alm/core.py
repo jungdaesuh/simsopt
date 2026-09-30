@@ -875,12 +875,12 @@ def _stationarity_metrics(
 ) -> Tuple[float, Optional[float], bool]:
     """Return ``(stationarity_norm, kkt_stationarity_norm, signal_mismatch_active)``.
 
-    ``stationarity_norm`` is the raw augmented-Lagrangian gradient norm used as
-    the inner-solve convergence trigger; callers that need the same value under
-    the ``raw_stationarity_norm`` history-schema key alias it locally.
-    ``kkt_stationarity_norm`` is the active-set KKT residual used for the inner
-    stationarity gate. Hybrid evaluations compute it on the surrogate channel, the
-    differentiable subproblem; mismatch remains a separate success guard.
+    ``stationarity_norm`` is the raw augmented-Lagrangian gradient norm (the
+    loop bound-reduces it; that norm gates the multiplier update); callers that
+    need the same value under the ``raw_stationarity_norm`` history-schema key
+    alias it locally. ``kkt_stationarity_norm`` is the active-set KKT residual,
+    a diagnostic that gates nothing. Hybrid evaluations compute it on the
+    surrogate channel, the differentiable subproblem.
     """
     stationarity_norm = _augmented_stationarity_norm(evaluation)
     if routing_state.signal_state.explicit_hybrid_signals:

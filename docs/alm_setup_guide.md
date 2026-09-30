@@ -475,8 +475,9 @@ def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
 last), `success`, `termination_reason` ([Termination reasons](#termination-reasons)), `message`,
 `objective` (f without penalty terms), `constraint_names`,
 `constraint_values` (signed g in name order), `max_violation`, `multipliers`,
-`penalty`, `stationarity_norm`, `kkt_stationarity_norm` (None when
-unavailable, e.g. no active row), `nit` (all L-BFGS-B iterations),
+`penalty`, `stationarity_norm`, `kkt_stationarity_norm` (the fitted
+active-set residual, a diagnostic no decision reads; None when unavailable,
+e.g. no active row), `nit` (all L-BFGS-B iterations),
 `outer_iterations` (the outer iterations that ran a step; a checkpoint's
 `completed_outer_iterations` counts the same way), `restored_best_feasible`, `restored_best_feasible_reason`, `evaluation`
 (read-only copy of the final evaluator dict), `inner_result`.
@@ -708,9 +709,10 @@ tolerances.
 | `penalty_sufficient_decrease_tau` | 0.5 | ALGENCAN's tau: an infeasible step holds the penalty when the infeasibility measure fell to <= tau x its previous value. | Rarely; smaller raises the penalty sooner. |
 
 The loop also schedules looser tolerances early: at penalty rho the
-multiplier-update test uses max(`feasibility_tol`, rho^-0.1) and
-max(`stationarity_tol`, 1/rho), each divided by `penalty_scale` after every
-multiplier update. So with the default `penalty_init=1` the first subproblems
+multiplier-update test holds the max violation to max(`feasibility_tol`,
+rho^-0.1) and the augmented-gradient norm (the subproblem's stationarity, as
+in `stationarity_tol`) to max(`stationarity_tol`, 1/rho), each divided by
+`penalty_scale` after every multiplier update. So with the default `penalty_init=1` the first subproblems
 stop after very few L-BFGS-B iterations; convergence needs several outer
 iterations.
 

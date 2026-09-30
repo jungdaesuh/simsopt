@@ -199,8 +199,9 @@ def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
 last), `success`, `termination_reason` ([termination.md](termination.md)), `message`,
 `objective` (f without penalty terms), `constraint_names`,
 `constraint_values` (signed g in name order), `max_violation`, `multipliers`,
-`penalty`, `stationarity_norm`, `kkt_stationarity_norm` (None when
-unavailable, e.g. no active row), `nit` (all L-BFGS-B iterations),
+`penalty`, `stationarity_norm`, `kkt_stationarity_norm` (the fitted
+active-set residual, a diagnostic no decision reads; None when unavailable,
+e.g. no active row), `nit` (all L-BFGS-B iterations),
 `outer_iterations` (the outer iterations that ran a step; a checkpoint's
 `completed_outer_iterations` counts the same way), `restored_best_feasible`, `restored_best_feasible_reason`, `evaluation`
 (read-only copy of the final evaluator dict), `inner_result`.
