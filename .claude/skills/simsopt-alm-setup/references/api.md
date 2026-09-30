@@ -98,7 +98,11 @@ complementarity gap uses each row's actual slack
 must be a `bool` or `numpy.bool_`: 0, None or any other type raises
 `ValueError`. A non-finite value, or `nonfinite_evaluation=True`, at a trial
 point rejects the trial (the line search backtracks); at an outer iterate
-either raises `ValueError`.
+either raises `ValueError`. Where the dict enters, the solver also takes its
+own copy of every array it reads (`grad`, the constraint, feasibility and
+dual-update values, the hybrid quartet, each `constraint_grads` row), so an
+evaluator may return arrays it reuses or refills in place (simsopt's cached
+`J()`/`dJ()` results, one buffer per call): no `.copy()` is needed.
 
 - **Stateless physics** (depends on x alone): `cached_alm_evaluator(physics)`.
   Call its `cache_clear()` whenever anything else the physics reads changes

@@ -147,7 +147,9 @@ Run each from any directory; all three must pass before the real run.
      anything in float32 (your own JAX code without x64, float32 NumPy
      arrays, a GPU or ML-surrogate term), check gradients with it in float64.
      simsopt itself runs JAX in float64.
-   - `NONFINITE`: the value or the claimed gradient at x0 is not finite.
+   - `NONFINITE`: the value or the claimed gradient at x0 is not finite, or
+     the physics flags x0 unusable (`nonfinite_evaluation=True`, which
+     `minimize_alm` refuses as a start).
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a

@@ -7,7 +7,8 @@
 ``--smoke`` builds the problem at its smoke size (small resolution, small
 ``maxiter``) to exercise the whole pipeline in seconds or minutes. The opt-ins:
 ``--history FILE`` writes one JSON entry per outer-step decision
-(``ALMHistoryRecorder``); ``--checkpoints DIR`` pickles an
+(``ALMHistoryRecorder``; an entry's ``constraint_values`` is the signed g and
+``violation_values`` the per-row violation); ``--checkpoints DIR`` pickles an
 ``ALMTransitionSnapshot`` after every outer iteration (``outer_NNN.pkl``) and
 at the end (``final.pkl``); ``--resume FILE`` continues a run from one such
 non-final snapshot with the rest of the ``maxiter`` budget (load only

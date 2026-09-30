@@ -72,6 +72,11 @@ converge to different values, so then it does not decide. Per direction:
 A nonzero claim never passes through a floor: the round-off floor and the
 scatter only withhold a FAIL.
 
+NONFINITE, for every quantity, when the physics at x0 flags the point unusable
+(``nonfinite_evaluation=True`` in its extras): ``minimize_alm`` raises
+``ValueError`` at such a start. Otherwise NONFINITE when the quantity's value
+or claimed gradient at x0 is not finite.
+
 Before any sweep, ``problem.constraint_names`` must be unique non-empty
 strings, one per row (value and gradient) of ``problem.physics(x0)``
 (``problem_contract.py``); otherwise it raises ``ValueError``.
@@ -335,12 +340,18 @@ def judge_direction(sweep: Sweep, steps: np.ndarray, gradient_scale: float, obje
                      "inspect the quantity")}
 
 
-def judge(label: str, value: float, steps: np.ndarray, sweeps: List[Sweep], objective_scale: float) -> dict:
+def judge(label: str, value: float, steps: np.ndarray, sweeps: List[Sweep], objective_scale: float,
+          flagged: bool) -> dict:
     """The quantity's verdict from its directions; ``objective_scale`` is the
-    objective's largest claimed directional derivative (see ``main``)."""
+    objective's largest claimed directional derivative (see ``main``);
+    ``flagged``: the physics at x0 flags the point unusable."""
     report = {"quantity": label, "value": value,
               "directional_derivatives": [sweep.claimed for sweep in sweeps],
               "finite_differences": [sweep.differences.tolist() for sweep in sweeps]}
+    if flagged:
+        return {**report, "passed": False, "verdict": "nonfinite",
+                "note": "the physics flags x0 unusable (nonfinite_evaluation=True); minimize_alm raises there",
+                "directions": []}
     if not (np.isfinite(value) and all(np.isfinite(sweep.claimed) for sweep in sweeps)):
         return {**report, "passed": False, "verdict": "nonfinite",
                 "note": "the value or the claimed gradient at x0 is not finite", "directions": []}
@@ -437,7 +448,8 @@ def main(argv=None) -> int:
     # The problem's derivative scale is the objective's (not the largest row's:
     # one huge row must not hide errors in the others).
     objective_scale = max((abs(sweep.claimed) for sweep in sweeps[0] if np.isfinite(sweep.claimed)), default=0.0)
-    outcomes = [judge(label, quantity_value(memo(x0), index), steps, row, objective_scale)
+    flagged = bool(memo(x0).extras.get("nonfinite_evaluation", False))
+    outcomes = [judge(label, quantity_value(memo(x0), index), steps, row, objective_scale, flagged)
                 for label, index, row in zip(labels, indices, sweeps)]
     passed = all(outcome["passed"] for outcome in outcomes)
     status_names = {"passed": "PASS", "failed": "FAIL", "not_tested": "NOT TESTED", "nonfinite": "NONFINITE"}

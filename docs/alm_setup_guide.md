@@ -160,7 +160,9 @@ Run each from any directory; all three must pass before the real run.
      anything in float32 (your own JAX code without x64, float32 NumPy
      arrays, a GPU or ML-surrogate term), check gradients with it in float64.
      simsopt itself runs JAX in float64.
-   - `NONFINITE`: the value or the claimed gradient at x0 is not finite.
+   - `NONFINITE`: the value or the claimed gradient at x0 is not finite, or
+     the physics flags x0 unusable (`nonfinite_evaluation=True`, which
+     `minimize_alm` refuses as a start).
 2. `PYTHONPATH=<dir> <python> $SKILL_DIR/scripts/sign_check.py --smoke` must
    exit 0. On a failure, fix the named row's sign or its probe expectation.
    Fix scale warnings by rescaling rows or f. For coverage warnings, add a
@@ -372,7 +374,11 @@ complementarity gap uses each row's actual slack
 must be a `bool` or `numpy.bool_`: 0, None or any other type raises
 `ValueError`. A non-finite value, or `nonfinite_evaluation=True`, at a trial
 point rejects the trial (the line search backtracks); at an outer iterate
-either raises `ValueError`.
+either raises `ValueError`. Where the dict enters, the solver also takes its
+own copy of every array it reads (`grad`, the constraint, feasibility and
+dual-update values, the hybrid quartet, each `constraint_grads` row), so an
+evaluator may return arrays it reuses or refills in place (simsopt's cached
+`J()`/`dJ()` results, one buffer per call): no `.copy()` is needed.
 
 - **Stateless physics** (depends on x alone): `cached_alm_evaluator(physics)`.
   Call its `cache_clear()` whenever anything else the physics reads changes
@@ -1083,7 +1089,8 @@ Run the ALM problem of ``alm_problem.py`` (this directory) with
 ``--smoke`` builds the problem at its smoke size (small resolution, small
 ``maxiter``) to exercise the whole pipeline in seconds or minutes. The opt-ins:
 ``--history FILE`` writes one JSON entry per outer-step decision
-(``ALMHistoryRecorder``); ``--checkpoints DIR`` pickles an
+(``ALMHistoryRecorder``; an entry's ``constraint_values`` is the signed g and
+``violation_values`` the per-row violation); ``--checkpoints DIR`` pickles an
 ``ALMTransitionSnapshot`` after every outer iteration (``outer_NNN.pkl``) and
 at the end (``final.pkl``); ``--resume FILE`` continues a run from one such
 non-final snapshot with the rest of the ``maxiter`` budget (load only
@@ -1151,8 +1158,8 @@ the install check that follows ``check_env.py``.
    solution is x = (1.5, 0.5) with multipliers (1, 0): one active and one
    inactive row.
 
-Each must end ``converged`` within ``feasibility_tol`` of feasibility, within
-1e-4 of the solution and, for problem 2, with multipliers within 1e-3 of
+Each must end ``converged`` within ``feasibility_tol`` of feasibility (the
+largest violation and the largest signed g), within 1e-4 of the solution and, for problem 2, with multipliers within 1e-3 of
 (1, 0). The last line printed is ``SMOKE_TOY {json}`` (which Python ran, the
 file ``simsopt_alm`` imports from, and each problem's outcome); the exit
 status is 0 when both pass. It needs only the package, not simsopt.
@@ -1232,6 +1239,11 @@ converge to different values, so then it does not decide. Per direction:
 A nonzero claim never passes through a floor: the round-off floor and the
 scatter only withhold a FAIL.
 
+NONFINITE, for every quantity, when the physics at x0 flags the point unusable
+(``nonfinite_evaluation=True`` in its extras): ``minimize_alm`` raises
+``ValueError`` at such a start. Otherwise NONFINITE when the quantity's value
+or claimed gradient at x0 is not finite.
+
 Before any sweep, ``problem.constraint_names`` must be unique non-empty
 strings, one per row (value and gradient) of ``problem.physics(x0)``
 (``problem_contract.py``); otherwise it raises ``ValueError``.
@@ -1247,7 +1259,9 @@ every row at ``problem.x0``.
 Signs: ``problem.sign_probes()`` gives points where rows are known, from the
 physics and independently of the row code, to be violated or satisfied. Each
 listed row must have ``g > 0`` (violated) or ``g <= 0`` (satisfied) there; a
-mismatch, a non-finite value or a probe naming an unknown row fails. A row
+mismatch, a non-finite value, a probe point the physics flags unusable
+(``nonfinite_evaluation=True``, which ``minimize_alm`` never accepts) or a
+probe naming an unknown row fails. A row
 never probed on one side is reported as a coverage warning. A row in
 ``problem.shared_source_rows`` has probe expectations that read the same
 source as the row (e.g. the Boozer template's iota from the solve itself):

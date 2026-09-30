@@ -685,6 +685,33 @@ class SkillDocumentsThePackageTests(unittest.TestCase):
         self.assertIn("divide it by a positive scale: |f(x0)|, or a chosen positive reference "
                       "scale when f(x0) = 0", termination)
 
+    def test_docs_state_the_review_round_fixes(self):
+        """The cross-lab review of the package: converged needs both hybrid
+        channels within feasibility_tol; maxiter is an exact whole-call
+        budget; the history's constraint_values is the signed g; the penalty
+        is one scalar; an outer evaluation flagged nonfinite_evaluation
+        raises; an evaluator may reuse its arrays."""
+        markdown = skill_markdown()
+        texts = {**markdown, "guide": (REPO_ROOT / "docs" / "alm_setup_guide.md").read_text()}
+        for name, text in texts.items():
+            with self.subTest(file=name):
+                self.assertNotIn("that row's entry when the penalty is per row", text)
+                self.assertNotIn("share what was left at its start", text)
+                self.assertNotIn("only a custom continuation policy ends an outer iteration this way", text)
+        termination = markdown["references/termination.md"]
+        self.assertIn("the positive part of the g that L uses", termination)
+        self.assertIn("No hybrid signal mismatch judged at `feasibility_tol`", termination)
+        self.assertIn("ρ = `result.penalty` (one scalar penalty shared by every row)", termination)
+        self.assertIn("never exceeded (`result.nit <= maxiter`)", termination)
+        self.assertIn("so the call never runs more", markdown["references/settings.md"])
+        self.assertIn("the call never runs more (`result.nit <= maxiter`)", markdown["references/pitfalls.md"])
+        api = markdown["references/api.md"]
+        self.assertIn("`violation_values` the per-row violation", api)
+        self.assertIn("no `.copy()` is needed", api)
+        self.assertIn("A non-finite value, or `nonfinite_evaluation=True`, at a trial", api)
+        self.assertIn("`success` needs both channels within\n`feasibility_tol`", api)
+        self.assertIn("`converged` needs\n   the smooth and the hard rows within `feasibility_tol`", markdown["SKILL.md"])
+
     def test_equations_name_the_quantities_in_use(self):
         """R16-06: the complementarity gap is f minus the ordinary Lagrangian
         at the shifted multipliers (core._complementarity_gap), and the Boozer
@@ -1309,6 +1336,24 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertEqual(summary["scales"]["warnings"], [])
         self.assertEqual(summary["shared_source_rows"], [])
 
+    def test_checks_refuse_a_point_the_physics_flags_unusable(self):
+        # minimize_alm raises at an outer evaluation flagged
+        # nonfinite_evaluation=True; the checks refuse such a start or probe.
+        source = replaced_once((TEMPLATES_DIR / "generic.py").read_text(),
+                               "            constraint_grads=tuple(grad for _value, grad in rows),\n",
+                               "            constraint_grads=tuple(grad for _value, grad in rows),\n"
+                               "            extras={\"nonfinite_evaluation\": bool(np.array_equal(x, [3.0, 2.0]))},\n")
+        generate_problem(self.scratch, "generic", source)
+        gradient = run_python([str(SCRIPTS_DIR / "gradient_check.py")], cwd=self.scratch,
+                              problem_dir=self.scratch)
+        self.assertEqual(gradient.returncode, 1)
+        self.assertEqual(set(self.verdicts(gradient).values()), {"nonfinite"})
+        sign = run_python([str(SCRIPTS_DIR / "sign_check.py")], cwd=self.scratch, problem_dir=self.scratch)
+        summary = result_line(sign, "SIGN_CHECK ")
+        self.assertEqual(sign.returncode, 1)
+        self.assertEqual([probe["failures"][:1] for probe in summary["probes"]],
+                         [["the physics flags this point unusable (nonfinite_evaluation=True)"], []])
+
     def test_sign_check_fails_on_a_flipped_row(self):
         source = replaced_once((TEMPLATES_DIR / "generic.py").read_text(),
                                'sense=LOWER_BOUND, bound=0.25', 'sense=UPPER_BOUND, bound=0.25')
@@ -1525,6 +1570,11 @@ class TemplateSmokeTests(unittest.TestCase):
         entries = json.loads((self.scratch / "history.json").read_text())
         self.assertGreaterEqual(len(entries), full["outer_iterations"])
         self.assertEqual(entries[-1]["action"], "converged")
+        # The history's constraint_values is the result's signed g; the
+        # clipped per-row violations are violation_values.
+        self.assertEqual(entries[-1]["constraint_values"], list(full["constraint_values"].values()))
+        self.assertEqual(entries[-1]["violation_values"],
+                         [max(value, 0.0) for value in full["constraint_values"].values()])
         self.assertTrue((self.scratch / "checkpoints" / "final.pkl").exists())
         resumed = self.run_template("generic", "--smoke", "--resume", "checkpoints/outer_003.pkl")
         for key in ("termination_reason", "outer_iterations", "inner_iterations", "multipliers", "finish"):

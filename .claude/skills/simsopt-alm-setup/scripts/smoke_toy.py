@@ -10,8 +10,8 @@ the install check that follows ``check_env.py``.
    solution is x = (1.5, 0.5) with multipliers (1, 0): one active and one
    inactive row.
 
-Each must end ``converged`` within ``feasibility_tol`` of feasibility, within
-1e-4 of the solution and, for problem 2, with multipliers within 1e-3 of
+Each must end ``converged`` within ``feasibility_tol`` of feasibility (the
+largest violation and the largest signed g), within 1e-4 of the solution and, for problem 2, with multipliers within 1e-3 of
 (1, 0). The last line printed is ``SMOKE_TOY {json}`` (which Python ran, the
 file ``simsopt_alm`` imports from, and each problem's outcome); the exit
 status is 0 when both pass. It needs only the package, not simsopt.
@@ -61,6 +61,7 @@ def solve_and_judge(name, physics, x0, constraint_names, solution, multipliers) 
     passed = (
         result.termination_reason == "converged"
         and result.max_violation <= settings.feasibility_tol
+        and float(np.max(result.constraint_values)) <= settings.feasibility_tol
         and x_error <= X_TOLERANCE
         and (multiplier_error is None or multiplier_error <= MULTIPLIER_TOLERANCE)
     )

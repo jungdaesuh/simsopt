@@ -8,7 +8,9 @@ every row at ``problem.x0``.
 Signs: ``problem.sign_probes()`` gives points where rows are known, from the
 physics and independently of the row code, to be violated or satisfied. Each
 listed row must have ``g > 0`` (violated) or ``g <= 0`` (satisfied) there; a
-mismatch, a non-finite value or a probe naming an unknown row fails. A row
+mismatch, a non-finite value, a probe point the physics flags unusable
+(``nonfinite_evaluation=True``, which ``minimize_alm`` never accepts) or a
+probe naming an unknown row fails. A row
 never probed on one side is reported as a coverage warning. A row in
 ``problem.shared_source_rows`` has probe expectations that read the same
 source as the row (e.g. the Boozer template's iota from the solve itself):
@@ -47,6 +49,8 @@ ORDER_ONE_LIMIT = 1e3
 def check_probe(probe, physics, constraint_names) -> dict:
     values = dict(zip(constraint_names, checked_constraint_values(physics, constraint_names).tolist()))
     failures = []
+    if physics.extras.get("nonfinite_evaluation", False):
+        failures.append("the physics flags this point unusable (nonfinite_evaluation=True)")
     for name in probe.violated + probe.satisfied:
         if name not in values:
             failures.append(f"{name}: not a row of this problem")

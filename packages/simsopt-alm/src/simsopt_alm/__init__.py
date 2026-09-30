@@ -25,9 +25,14 @@ x0 is projected onto the box (as L-BFGS-B does), and a ``resume_from`` whose
 x lies outside it raises ``ValueError``.
 :class:`ALMEvaluation` declares these and the other keys the solver owns (the
 builder's summaries, raw and normalized rows); an application types its own
-keys by subclassing it. Any other key is kept as a diagnostic. The solver copies the mappings, lists and
-tuples in an evaluation, so none may contain itself (a ``ValueError`` names
-the path; a shared subtree is fine); other objects pass by reference.
+keys by subclassing it. Any other key is kept as a diagnostic. Where an
+evaluation enters, the solver copies every array it reads (``grad``, the
+constraint, feasibility and dual-update values, the hybrid quartet, each
+``constraint_grads`` row and the other declared value arrays), so an
+evaluator may return buffers it reuses or refills in place. Events and the
+result copy the mappings, lists and tuples in an evaluation, so none may
+contain itself (a ``ValueError`` names the path; a shared subtree is fine);
+other objects pass by reference.
 
 Hybrid signals: an evaluator that smooths g returns all four of
 ``hard_signed_constraint_values``, ``hard_violation_values``,
