@@ -210,8 +210,8 @@ class ALMHold:
 
 @dataclass(frozen=True)
 class ALMContinue:
-    """Solve the subproblem again with this trust radius and update
-    stationarity tolerance."""
+    """Solve the subproblem again with this trust radius (None: no box, else
+    positive) and update stationarity tolerance."""
 
     trust_radius: Optional[float]
     update_stationarity_tol: float

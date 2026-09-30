@@ -203,7 +203,12 @@ class AlmResumeBoundaryValidationTests(unittest.TestCase):
             (
                 "negative trust radius",
                 dataclasses.replace(state, trust_radius=-1.0),
-                "trust_radius must be finite and nonnegative",
+                "trust_radius must be finite and positive",
+            ),
+            (
+                "zero trust radius (None is no box)",
+                dataclasses.replace(state, trust_radius=0.0),
+                "trust_radius must be finite and positive",
             ),
             (
                 "multiplier length differs from the constraint names",

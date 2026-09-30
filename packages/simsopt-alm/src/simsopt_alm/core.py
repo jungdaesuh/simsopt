@@ -68,7 +68,7 @@ _ALM_SETTINGS_BOUNDS = (
     ("penalty_sufficient_decrease_tau", _finite_alm_value, _IN_OPEN_UNIT_INTERVAL),
     ("feasibility_tol", _finite_alm_value, _MUST_BE_POSITIVE),
     ("stationarity_tol", _finite_alm_value, _MUST_BE_POSITIVE),
-    ("trust_radius_init", _finite_alm_value_or_none, _MUST_BE_NONNEGATIVE),
+    ("trust_radius_init", _finite_alm_value_or_none, _POSITIVE_WHEN_PROVIDED),
     ("trust_radius_min", _finite_alm_value, _MUST_BE_POSITIVE),
     ("trust_radius_shrink", _finite_alm_value, _IN_OPEN_UNIT_INTERVAL),
     ("trust_radius_grow", _finite_alm_value, _MUST_EXCEED_ONE),

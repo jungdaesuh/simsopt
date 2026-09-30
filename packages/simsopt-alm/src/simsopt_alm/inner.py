@@ -445,13 +445,17 @@ def _classify_infeasible_inner_stall(
         return True, True, "successful_inner_solve_without_feasibility_gain"
     return True, False, "failed_inner_solve_without_feasibility_gain"
 
-def _normalize_trust_radius(trust_radius: Optional[float]) -> Optional[float]:
+def _checked_trust_radius(trust_radius: Optional[float]) -> Optional[float]:
+    """``trust_radius`` as a float: None means no box; any other radius (the
+    settings', a checkpoint's or a policy's) must be finite and positive."""
     if trust_radius is None:
         return None
-    normalized = float(trust_radius)
-    if normalized <= 0.0:
-        return None
-    return normalized
+    radius = float(trust_radius)
+    if not np.isfinite(radius) or radius <= 0.0:
+        raise ValueError(
+            f"ALM trust radius must be finite and positive (None: no box); got {trust_radius!r}"
+        )
+    return radius
 
 def _normalize_base_bounds(base_bounds, size: int):
     if base_bounds is None:
@@ -546,12 +550,12 @@ def _build_box_bounds(
         base_bounds,
         center_array.size,
     )
-    normalized_trust_radius = _normalize_trust_radius(trust_radius)
-    if normalized_trust_radius is None:
+    checked_trust_radius = _checked_trust_radius(trust_radius)
+    if checked_trust_radius is None:
         return normalized_base_bounds
     # This is a lightweight trust-region proxy implemented with L-BFGS-B bounds:
     # each continuation centers a symmetric box around the current iterate.
-    widths = normalized_trust_radius * np.maximum(1.0, np.abs(center_array))
+    widths = checked_trust_radius * np.maximum(1.0, np.abs(center_array))
     trust_bounds = [
         (float(value - width), float(value + width))
         for value, width in zip(center_array, widths)
@@ -609,7 +613,7 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
                 settings=request.settings,
                 inner_options=_borrowed_read_only_value(attempt_inner_options, {}),
                 update_stationarity_tol=request.update_stationarity_tol,
-                attempt_radius=_normalize_trust_radius(attempt_radius),
+                attempt_radius=_checked_trust_radius(attempt_radius),
                 continuation_iteration=request.continuation_iteration,
                 start_feasible=current_feasible_enough,
             )

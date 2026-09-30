@@ -58,8 +58,8 @@ class ALMContinuationPolicy(Protocol):
         """L-BFGS-B options and profile name for one inner attempt."""
 
     def retry_stalled_trial(self, view: ALMStalledTrialView) -> Optional[float]:
-        """A trust radius to retry a stalled trial with; None keeps the start
-        iterate and forces a penalty cycle."""
+        """A trust radius (positive) to retry a stalled trial with; None keeps
+        the start iterate and forces a penalty cycle."""
 
     def before_inner(self, view: ALMPreInnerView) -> Optional[ALMConverge]:
         """Convergence at the start iterate; None runs the inner solve."""

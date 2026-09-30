@@ -68,7 +68,7 @@ from .inner import (
     _inner_options_with_remaining_maxiter,
     _made_meaningful_inner_progress,
     _normalize_base_bounds,
-    _normalize_trust_radius,
+    _checked_trust_radius,
     _project_onto_bounds,
     _run_alm_inner_attempts,
 )
@@ -280,7 +280,7 @@ def _normalize_alm_run_inputs(
         penalty=penalty,
         constraint_names_tuple=constraint_names_tuple,
         constraint_blocks_tuple=constraint_blocks_tuple,
-        trust_radius=_normalize_trust_radius(settings.trust_radius_init),
+        trust_radius=_checked_trust_radius(settings.trust_radius_init),
         update_feasibility_tol=update_feasibility_tol,
         update_stationarity_tol=update_stationarity_tol,
         base_bounds=base_bounds,

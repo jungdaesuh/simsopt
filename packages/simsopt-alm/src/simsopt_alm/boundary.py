@@ -165,7 +165,7 @@ def _validate_alm_boundary_fields(
     _positive_transition_float(update_feasibility_tol, "update_feasibility_tol")
     _positive_transition_float(update_stationarity_tol, "update_stationarity_tol")
     if trust_radius is not None:
-        _nonnegative_transition_float(trust_radius, "trust_radius")
+        _positive_transition_float(trust_radius, "trust_radius")
     if isinstance(completed_outer_iterations, bool) or not isinstance(
         completed_outer_iterations, Integral
     ):
