@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import jax
 import jax.numpy as jnp
@@ -38,9 +38,20 @@ def device_one(reference: jax.Array) -> jax.Array:
     return jax.lax.stop_gradient(jnp.exp(jnp.sum(reference - reference)))
 
 
+@partial(jax.jit, keep_unused=True)
+def _placed_zero(reference: jax.Array) -> jax.Array:
+    """A literal 0.0 of ``reference``'s dtype, computed where ``reference`` lives.
+
+    No arithmetic reads ``reference``'s values: the zero is a constant of the
+    compiled program, and the unused argument (kept) only places the program
+    on ``reference``'s device, so no host-to-device transfer creates it.
+    """
+    return jnp.zeros((), dtype=reference.dtype)
+
+
 @jax.custom_jvp
 def placement_zero(reference: jax.Array) -> jax.Array:
-    """A 0.0 placed and typed like ``reference`` whose tangent is also a placed 0.0.
+    """An exact 0.0 placed and typed like ``reference`` whose tangent is also a placed 0.0.
 
     Adding it to a value that does not depend on ``reference`` (a fixed coil
     current) gives that value a tangent on ``reference``'s device, so
@@ -49,23 +60,23 @@ def placement_zero(reference: jax.Array) -> jax.Array:
     its tangent is that symbolic zero. Nor can a tangent that ignores the input
     tangent, which linearization also treats as a symbolic zero.
 
-    Left differentiable, ``sum(r) - sum(r)`` does keep the tangent on device,
-    but it couples every entry of ``r`` into every sum it joins: a non-finite
-    tangent or cotangent becomes ``inf - inf = nan`` everywhere. Here the
-    tangent is a select of the placed primal zero over the input tangent's sum,
-    so it depends on the input tangent (stays on device) while its value is
-    exactly 0.0 for any tangent, and its transpose sends exactly 0.0 back.
+    The zero reads no value of ``reference`` (PLAN.md amendment 9, F5):
+    ``sum(r) - sum(r)`` overflows to NaN for finite ``r = [1e308, 1e308]``
+    and couples every entry of ``r`` into every sum it joins. The tangent is a
+    select of the zero over the input tangent's sum: it depends on the input
+    tangent (so it stays on device), its value is exactly 0.0 for any tangent,
+    NaN and infinities included, and its transpose sends exactly 0.0 back.
     """
-    total = jnp.sum(reference)
-    return total - total
+    return _placed_zero(reference)
 
 
 @placement_zero.defjvp
 def _placement_zero_jvp(primals, tangents):
     (reference,), (tangent,) = primals, tangents
     zero = placement_zero(reference)
-    # The mask is False wherever the zero is a number, so the select always
-    # yields the zero; it exists only to make the tangent depend on ``tangent``.
+    # ``zero`` is exactly 0.0 by construction, so the mask is a placed False and
+    # the select always yields the zero; it exists only to make the tangent
+    # depend on ``tangent``.
     return zero, jnp.where(jnp.isnan(zero), jnp.sum(tangent), zero)
 
 
