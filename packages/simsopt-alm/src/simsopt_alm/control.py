@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+from functools import partial
 from typing import Callable, Dict, Generic, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -1169,9 +1170,10 @@ def _incumbent_at_step_start(
     ``outer_state_callback`` (``problem_refreshed``), which may have changed
     the problem, ``best_feasible`` is evaluated again at its x, multipliers
     and penalty (the start's evaluation when those are the start's; away from
-    the live x, in its own restored state, the live state put back after) and
-    kept only while hard-feasible. Then the measured start itself competes (a
-    feasible x0 above all), before an inner solve can leave it."""
+    the live x, in its own restored state, the live state put back after,
+    also when the evaluation raises) and kept only while hard-feasible. Then
+    the measured start itself competes (a feasible x0 above all), before an
+    inner solve can leave it."""
     if problem_refreshed and best_feasible is not None:
         at_live_x = np.array_equal(best_feasible.x, live_x)
         if (
@@ -1186,15 +1188,8 @@ def _incumbent_at_step_start(
                 and restore_incumbent_state_fn is not None
                 and best_feasible.incumbent_state is not None
             )
-            if swap_state:
-                live_state = snapshot_accepted_state_fn()
-                _validate_geometry_identity_pair(
-                    accepted_state=best_feasible.incumbent_state,
-                    geometry_identity=best_feasible.geometry_identity,
-                    context="ALM best-feasible re-evaluation",
-                )
-                restore_incumbent_state_fn(best_feasible.incumbent_state)
-            evaluation = _checked_evaluation(
+            reevaluate = partial(
+                _checked_evaluation,
                 evaluate_problem,
                 best_feasible.x,
                 best_feasible.multipliers,
@@ -1204,7 +1199,20 @@ def _incumbent_at_step_start(
                 context="ALM best-feasible re-evaluation",
             )
             if swap_state:
-                restore_incumbent_state_fn(live_state)
+                live_state = snapshot_accepted_state_fn()
+                _validate_geometry_identity_pair(
+                    accepted_state=best_feasible.incumbent_state,
+                    geometry_identity=best_feasible.geometry_identity,
+                    context="ALM best-feasible re-evaluation",
+                )
+                try:
+                    restore_incumbent_state_fn(best_feasible.incumbent_state)
+                    evaluation = reevaluate()
+                finally:
+                    # The live state comes back even when the evaluation raises.
+                    restore_incumbent_state_fn(live_state)
+            else:
+                evaluation = reevaluate()
         still_feasible = _constraint_routing_state(
             evaluation, best_feasible.multipliers, best_feasible.penalty, settings.feasibility_tol
         ).hard_max_violation <= settings.feasibility_tol

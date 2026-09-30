@@ -273,6 +273,58 @@ class RefreshedProblemIncumbentTests(unittest.TestCase):
                     np.testing.assert_array_equal(result.x, [0.0])
 
 
+class FailedIncumbentReevaluationTests(unittest.TestCase):
+    """R2 (control.py): the re-evaluation of a stateful incumbent after an
+    outer_state_callback swaps the evaluator to the incumbent's state; an
+    evaluation that raises must still put the live state back."""
+
+    def assert_raises_with_the_live_state_back(self, evaluate, refresh, message):
+        # The feasible start x = 0 is the incumbent when outer 1 ends at 7/3.
+        live = {"x": np.zeros(1)}
+        with self.assertRaisesRegex(ValueError, message):
+            minimize_alm(
+                [0.0], ["g"], evaluate, ALMSettings(max_outer_iterations=2), {"maxiter": 100},
+                outer_state_callback=refresh,
+                accepted_callback=lambda x: live.__setitem__("x", np.array(x, dtype=float)),
+                snapshot_accepted_state_fn=lambda: float(live["x"][0]),
+                restore_incumbent_state_fn=lambda state: live.__setitem__("x", np.array([state])),
+            )
+        self.assertAlmostEqual(float(live["x"][0]), 7.0 / 3.0, places=12)
+
+    def test_a_nonfinite_total_at_the_incumbent(self):
+        # Astra's reproduction.
+        outer = [1]
+
+        def evaluate(x, multipliers, penalty):
+            built = pulled_out(x, multipliers, penalty)
+            return dict(built, total=float("nan")) if outer[0] == 2 and x[0] == 0.0 else built
+
+        self.assert_raises_with_the_live_state_back(
+            evaluate,
+            lambda k, multipliers, penalty: outer.__setitem__(0, k),
+            "ALM best-feasible re-evaluation produced non-finite ALM data: total",
+        )
+
+    def test_a_nonfinite_physics_total_under_the_moved_cap(self):
+        # Grok's reproduction: outer 2 moves the cap to -1.
+        cap = [1.0]
+
+        def evaluate(x, multipliers, penalty):
+            built = augmented_inequality_objective(
+                (x[0] - 3.0) ** 2, [2.0 * (x[0] - 3.0)], [x[0] - cap[0]], [[1.0]],
+                multipliers, penalty,
+            )
+            if cap[0] < 0.0 and abs(x[0]) < 1.0e-12:
+                return dict(built, physics_total=float("nan"))
+            return built
+
+        self.assert_raises_with_the_live_state_back(
+            evaluate,
+            lambda k, multipliers, penalty: cap.__setitem__(0, 1.0 if k == 1 else -1.0),
+            "ALM best-feasible re-evaluation produced non-finite ALM data: physics_total",
+        )
+
+
 class FlaggedFiniteTrialTests(unittest.TestCase):
     """B4 (inner.py): a trial flagged ``nonfinite_evaluation`` with finite data
     was not sanitized, so L-BFGS-B took its made-up total and gradient."""
