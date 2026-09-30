@@ -73,6 +73,19 @@ class FeasibleStartWithAnInfeasibleSubproblemMinimizerTests(unittest.TestCase):
         )
         self.assert_kkt(result)
 
+    def test_a_retry_the_budget_cannot_run_keeps_the_candidate(self):
+        # Astra R1: attempts and radius are left, but the call's 3 iterations
+        # are spent on the first attempt (7/3, beyond the slack), so no
+        # smaller-box retry can run; the candidate stands and the penalty
+        # rises instead of a continuation back at x = 0.
+        events = []
+        minimize_alm(
+            [0.0], ["g"], pulled_out, ALMSettings(trust_radius_init=4.0, max_inner_attempts=3),
+            {"maxiter": 3}, on_outer_step=events.append,
+        )
+        self.assertEqual(events[-1].action, "penalty_increase")
+        np.testing.assert_allclose(events[-1].after.x, [7.0 / 3.0], atol=1.0e-12)
+
 
 class DualUpdateGateTests(unittest.TestCase):
     """G2 = B3 (policy.py): the multiplier update was gated on the fitted

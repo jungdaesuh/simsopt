@@ -676,15 +676,18 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             move_tolerance,
             request.effective_feasibility_tol,
         )
+        # A retry in a smaller box needs a box to shrink, an attempt and
+        # inner iterations left to run it.
         smaller_box_left = (
             attempt_radius is not None
             and attempt_radius > request.settings.trust_radius_min
             and attempt_index < request.settings.max_inner_attempts
+            and (process_inner_maxiter is None or attempt_iterations < process_inner_maxiter)
         )
         # A step beyond the feasibility slack retries in a smaller box while
-        # one is left. Without one (no box, or the last) the subproblem's
-        # solution stands: the outer policy sees its violation and raises
-        # the penalty, where a rollback to the start would only stall.
+        # one is left. Without one (no box, or no retry left to run) the
+        # subproblem's solution stands: the outer policy sees its violation
+        # and raises the penalty, where a rollback to the start would stall.
         if acceptable and not infeasible_inner_stall and (
             within_slack or not smaller_box_left
         ):
