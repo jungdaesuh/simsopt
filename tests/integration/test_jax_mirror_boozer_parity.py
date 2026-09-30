@@ -13,10 +13,11 @@ from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import (
     LaneObservation,
     stopping_bound_gaps,
+    stopping_bound_precondition,
     upstream_branch_representatives,
     upstream_end_state_matches,
 )
-from examples.jax.parity.cases import get_case
+from examples.jax.parity.cases import get_case, native_boozer
 from examples.jax.parity.cases.native_boozer import (
     FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER,
     JAX_DRIVER,
@@ -133,6 +134,8 @@ def test_boozer_observation_requires_both_solver_stages(
             [True] * (len(REPLAY_STARTS) - 1) + [replay_success]
         ),
         "replay:flux_solver_success": np.asarray([True] * len(REPLAY_STARTS)),
+        "replay:flux_target": np.full(len(REPLAY_STARTS), 0.037),
+        "replay:flux_target_reference": np.full(len(REPLAY_STARTS), 0.037),
         # Rows: state (one dof, iota, G), target, norm(J^T r) within tol, lambda_min,
         # norm(dx*/dt).
         "replay:area_solution": np.tile(
@@ -230,11 +233,22 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
         gap, bound = stopping_bound_gaps(
             jax.values[observable], native.values[observable]
         )
+        assert np.all(
+            stopping_bound_precondition(
+                jax.values[observable], native.values[observable]
+            )
+        ), observable
         assert np.all(gap <= bound), (observable, gap / bound)
         for observation in (native, jax):
             assert np.all(observation.values[observable][:, -3] <= tolerance)
             assert np.all(observation.values[observable][:, -2] > 0.0)
     for observation in (native, jax):
+        # Amendment 8, F1: each flux target is the native recomputation at the
+        # lane's own published area state.
+        np.testing.assert_array_equal(
+            observation.values["replay:flux_target"],
+            observation.values["replay:flux_target_reference"],
+        )
         assert bool(np.all(observation.values["replay:area_solver_success"]))
         assert bool(np.all(observation.values["replay:flux_solver_success"]))
     assert float(native.values["flux:residual_norm"]) < float(
@@ -649,4 +663,40 @@ def test_boozer_initial_plain_residual_is_the_official_definition(
         float(observation.values["initial:residual_norm"]),
         rtol=0.0,
         atol=0.0,
+    )
+
+
+def test_a_jax_only_flux_target_offset_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Amendment 8, F1: a flux-target construction error cannot buy its own allowance.
+
+    The JAX lane's flux stage takes its target through ``_flux_target``; a
+    JAX-only offset there moves the JAX flux root by about ``s * offset``,
+    exactly what the replay bound's carry-over term would otherwise admit. The
+    lane's flux targets must equal the independent native recomputation at its
+    published area states, so the offset fails the lane instead.
+    """
+    case = get_case("native-boozer")
+    input_root = tmp_path / "inputs"
+    bundle = case.create_input(input_root, "bounded")
+    _, arrays = load_input_bundle(input_root, bundle)
+    target_of = native_boozer._flux_target
+    monkeypatch.setattr(
+        native_boozer,
+        "_flux_target",
+        lambda configuration, toroidal_flux: (
+            target_of(configuration, toroidal_flux) + 1.0e-12
+        ),
+    )
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
+    monkeypatch.setenv("JAX_ENABLE_X64", "1")
+
+    observation = case.execute("jax-cpu", bundle, arrays)
+
+    assert observation.success is False
+    assert np.all(
+        observation.values["replay:flux_target"]
+        != observation.values["replay:flux_target_reference"]
     )

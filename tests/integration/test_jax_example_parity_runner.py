@@ -26,6 +26,8 @@ from examples.jax.parity.arbiter import (
     LaneObservation,
     LaneOutcomeRejection,
     arbitrate,
+    stopping_bound_gaps,
+    stopping_bound_precondition,
     upstream_branch_representatives,
     upstream_end_state_matches,
 )
@@ -3692,15 +3694,15 @@ def _solution_observations(
 
 
 def test_stopping_bound_passes_a_gap_inside_the_sum_of_the_stopping_radii() -> None:
-    # native-jax-cpu: gap 6e-10 <= (1e-11 + 2e-11) / 0.04 = 7.5e-10; native-jax-gpu:
-    # gap 3e-10 <= (1e-11 + 1e-11) / 0.05 = 4e-10; jax-cpu-jax-gpu: gap 6.7e-10 <= 7.5e-10.
+    # native-jax-cpu: gap 5e-10 <= (1e-11 + 2e-11) / 0.048 = 6.25e-10; native-jax-gpu:
+    # gap 1e-10 <= (1e-11 + 1e-11) / 0.05 = 4e-10; jax-cpu-jax-gpu: gap 5.1e-10 <= 6.25e-10.
     result = arbitrate(
         _solution_routes(),
         _solution_observations(
             {
                 "native-cpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 1.0],
-                "jax-cpu": [1.0 + 6.0e-10, -0.2, 0.5, 2.0e-11, 0.04, 1.0],
-                "jax-gpu": [1.0, -0.2 + 3.0e-10, 0.5, 1.0e-11, 0.05, 1.0],
+                "jax-cpu": [1.0 + 5.0e-10, -0.2, 0.5, 2.0e-11, 0.048, 1.0],
+                "jax-gpu": [1.0, -0.2 + 1.0e-10, 0.5, 1.0e-11, 0.05, 1.0],
             }
         ),
     )
@@ -3708,7 +3710,7 @@ def test_stopping_bound_passes_a_gap_inside_the_sum_of_the_stopping_radii() -> N
     assert result.verdict == "pass"
     judged = [item for item in result.comparisons if item.observable == "area_solution"]
     assert judged and all(
-        item.diagnostic.startswith("stopping_bound") for item in judged
+        item.diagnostic.startswith("stopping_bound: ") for item in judged
     )
 
 
@@ -3716,7 +3718,7 @@ def test_stopping_bound_carries_the_lanes_target_difference() -> None:
     """A gap beyond the radii passes only by the target carry-over s |t_l - t_r| (amendment 7)."""
     rows = {
         "native-cpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 2.0],
-        "jax-cpu": [1.0 + 1.0e-9, -0.2, 0.5 + 4.0e-10, 1.0e-11, 0.05, 1.0],
+        "jax-cpu": [1.0 + 1.0e-9, -0.2, 0.5 + 4.0e-10, 1.0e-11, 0.05, 1.9],
         "jax-gpu": [1.0, -0.2, 0.5, 1.0e-11, 0.05, 2.0],
     }
     # native-jax-cpu: radii 4e-10 + max(s) 2.0 x 4e-10 = 1.2e-9 >= gap 1e-9.
@@ -3728,11 +3730,13 @@ def test_stopping_bound_carries_the_lanes_target_difference() -> None:
 @pytest.mark.parametrize(
     ("jax_row", "why"),
     (
-        ([1.0 + 8.0e-10, -0.2, 0.5, 2.0e-11, 0.04, 1.0], "gap beyond the radii"),
+        ([1.0 + 8.0e-10, -0.2, 0.5, 2.0e-11, 0.048, 1.0], "gap beyond the radii"),
         ([1.0, -0.2, 0.5, 1.0e-11, 0.0, 1.0], "no curvature"),
+        ([1.0, -0.2, 0.5, 1.0e-11, 0.03, 1.0], "endpoint curvatures disagree"),
+        ([1.0, -0.2, 0.5, 1.0e-11, 0.05, 1.5], "endpoint sensitivities disagree"),
     ),
 )
-def test_stopping_bound_fails_outside_the_radii_or_without_curvature(
+def test_stopping_bound_fails_outside_the_radii_or_its_precondition(
     jax_row: list[float], why: str
 ) -> None:
     result = arbitrate(
@@ -3747,3 +3751,55 @@ def test_stopping_bound_fails_outside_the_radii_or_without_curvature(
     )
 
     assert result.verdict == "fail", why
+
+
+def test_stopping_bound_refuses_codexs_cubic_counterexample() -> None:
+    """r(x, t) = x + x^3/3 - t: exact roots +-a, both endpoint gradients zero.
+
+    With J = 1 + x^2 the endpoint curvature (1 + a^2)^2 and sensitivity 1/(1 + a^2)
+    agree at both roots, yet the first-order allowance 2a(1 + a^2/3)/(1 + a^2) is
+    below the true gap 2a: endpoint data do not bound a finite step. The step is
+    not small against the state, so the precondition refuses the row instead of
+    admitting it (PLAN.md amendment 8, F2).
+    """
+    a = 0.5
+    target = a + a**3 / 3.0
+    curvature, sensitivity = (1.0 + a * a) ** 2, 1.0 / (1.0 + a * a)
+    native_row = [a, target, 0.0, curvature, sensitivity]
+    jax_row = [-a, -target, 0.0, curvature, sensitivity]
+    gap, bound = stopping_bound_gaps(np.asarray([native_row]), np.asarray([jax_row]))
+    assert gap[0] == 2.0 * a
+    assert bound[0] < gap[0]
+    assert not stopping_bound_precondition(
+        np.asarray([native_row]), np.asarray([jax_row])
+    )[0]
+    result = arbitrate(
+        (
+            *_routes(),
+            *_judged_routes(
+                _SOLUTION_KEY, comparator="stopping_bound", bucket="native_workflow"
+            ),
+        ),
+        {
+            lane: dataclasses.replace(
+                observation,
+                values={
+                    "initial:objective_sum_squares": np.asarray(1.0, dtype=np.float64),
+                    _SOLUTION_KEY: np.asarray([row], dtype=np.float64),
+                },
+                applicability={},
+            )
+            for (lane, observation), row in zip(
+                _observations().items(), (native_row, jax_row, native_row), strict=True
+            )
+        },
+    )
+    assert result.verdict == "fail"
+    refused = [
+        item
+        for item in result.comparisons
+        if item.observable == "area_solution" and not item.passed
+    ]
+    assert refused and all(
+        item.diagnostic.startswith("stopping_bound refused") for item in refused
+    )

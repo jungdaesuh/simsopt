@@ -207,11 +207,13 @@ REPLAY_STARTS: Final[tuple[str, ...]] = (
     "native",
     *(f"k{k}" for k in PRE_REGISTERED_DRAWS),
 )
-#: The replay keys compared exactly: the shared starts and the solves' success flags.
+#: The replay keys compared exactly: the shared starts, the area stage's label target (which must be
+#: bitwise shared, PLAN.md amendment 8, F1) and the solves' success flags.
 REPLAY_EXACT_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:start_surface_dofs",
     "replay:start_iota",
     "replay:start_G",
+    "replay:area_target",
     "replay:area_solver_success",
     "replay:flux_solver_success",
 )
@@ -227,6 +229,7 @@ REPLAY_SOLUTION_OBSERVABLES: Final[tuple[str, ...]] = (
 REPLAY_DERIVED_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:area_label",
     "replay:flux_target",
+    "replay:flux_target_reference",
     "replay:flux_label",
 )
 #: Integer code of each normalized stopping reason, for publication as a parity
@@ -448,6 +451,29 @@ def _residual_norm(surface, iota: float, G: float, field) -> float:
     return float(np.linalg.norm(np.asarray(residual, dtype=np.float64)))
 
 
+def _flux_target(configuration: Mapping[str, object], toroidal_flux) -> float:
+    """The flux stage's label target: ``flux_multiplier`` times the toroidal flux at the area result."""
+    return _configuration_float(configuration, "flux_multiplier") * float(
+        toroidal_flux.J()
+    )
+
+
+def _reference_flux_target(
+    configuration: Mapping[str, object], area_surface_dofs: np.ndarray
+) -> float:
+    """The flux target recomputed at a PUBLISHED area state, on fresh native objects.
+
+    Deliberately not :func:`_flux_target`: it is the independent check a lane's
+    own flux target must equal bitwise before the replay bound may admit the
+    two lanes' flux-target difference (PLAN.md amendment 8, F1).
+    """
+    _, _, field, surface, _ = _problem(configuration)
+    surface.set_dofs(np.asarray(area_surface_dofs, dtype=np.float64))
+    return _configuration_float(configuration, "flux_multiplier") * float(
+        ToroidalFlux(surface, field).J()
+    )
+
+
 class _NewtonStages(NamedTuple):
     """The official Newton stages from one start: the area solve, then the flux solve."""
 
@@ -489,9 +515,7 @@ def _native_newton_stages(
         native_field,
     )
     toroidal_flux = ToroidalFlux(surface, field)
-    flux_target = _configuration_float(configuration, "flux_multiplier") * float(
-        toroidal_flux.J()
-    )
+    flux_target = _flux_target(configuration, toroidal_flux)
     flux_solver = BoozerSurface(
         native_field,
         surface,
@@ -529,6 +553,7 @@ class _Replay(NamedTuple):
     area_target: float
     area_target_sensitivity: float
     flux_target_sensitivity: float
+    flux_target_reference: float
 
 
 def _stage_x(outcome: BoozerStageOutcome) -> np.ndarray:
@@ -574,6 +599,9 @@ def _native_replay(
     return _Replay(
         stages=stages,
         area_target=area_target,
+        flux_target_reference=_reference_flux_target(
+            configuration, stages.area.state.surface_dofs
+        ),
         area_target_sensitivity=_target_sensitivity(
             solver._get_residual_vector_and_jacobian(
                 _stage_x(stages.area), constraint_weight, True, True
@@ -728,9 +756,7 @@ def _jax_newton_stages(
         native_field,
     )
     toroidal_flux = ToroidalFlux(surface, field)
-    flux_target = _configuration_float(configuration, "flux_multiplier") * float(
-        toroidal_flux.J()
-    )
+    flux_target = _flux_target(configuration, toroidal_flux)
     flux_solver = BoozerSurfaceJAX(
         BiotSavartJAX(native_field.coils),
         surface,
@@ -825,6 +851,9 @@ def _jax_replay(
     return _Replay(
         stages=stages,
         area_target=area_target,
+        flux_target_reference=_reference_flux_target(
+            configuration, stages.area.state.surface_dofs
+        ),
         area_target_sensitivity=_target_sensitivity(
             _jax_penalty_jacobian(
                 solver, area_field, surface, stages.area, constraint_weight
@@ -1087,7 +1116,11 @@ def _replay_values(
         "replay:area_solver_success": flags(
             replay.stages.area.success for replay in replays
         ),
+        "replay:area_target": floats(replay.area_target for replay in replays),
         "replay:flux_target": floats(replay.stages.flux_target for replay in replays),
+        "replay:flux_target_reference": floats(
+            replay.flux_target_reference for replay in replays
+        ),
         "replay:flux_solution": np.stack(
             [
                 _solution_row(
@@ -1119,6 +1152,11 @@ def _observation(
         and bool(values["flux:solver_success"])
         and bool(np.all(values["replay:area_solver_success"]))
         and bool(np.all(values["replay:flux_solver_success"]))
+        # Each flux target is the reference recomputation at the lane's own
+        # published area state, bitwise (PLAN.md amendment 8, F1).
+        and np.array_equal(
+            values["replay:flux_target"], values["replay:flux_target_reference"]
+        )
         # Upstream's own success rule, norm(J^T r) <= tol, on every replayed solve.
         and bool(
             np.all(
