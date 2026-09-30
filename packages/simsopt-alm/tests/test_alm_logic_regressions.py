@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 
 from simsopt_alm import ALMSettings, augmented_inequality_objective, minimize_alm
+from simsopt_alm.checkpoint import resume_boundary, transition_snapshot
 
 
 class FlaggedFiniteTrialTests(unittest.TestCase):
@@ -45,6 +46,24 @@ class PhysicsTotalValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-finite ALM data: physics_total"):
             minimize_alm([0.0], [], evaluate, ALMSettings(), {"maxiter": 100})
+
+
+class ScalarArrayDiagnosticCheckpointTests(unittest.TestCase):
+    """B8 (checkpoint.py): a 0-d ndarray diagnostic crashed transition_snapshot."""
+
+    def test_a_zero_dimensional_diagnostic_round_trips_as_a_scalar(self):
+        def evaluate(x, multipliers, penalty):
+            return dict(
+                augmented_inequality_objective(x[0] ** 2, [2.0 * x[0]], [], [], multipliers, penalty),
+                diagnostic=np.array(1.5),
+            )
+
+        boundaries = []
+        minimize_alm([0.0], [], evaluate, ALMSettings(), {"maxiter": 100}, on_outer_boundary=boundaries.append)
+        snapshot = transition_snapshot(boundaries[0], {"maxiter": 100})
+        self.assertEqual(dict(snapshot.best_feasible.evaluation)["diagnostic"], 1.5)
+        restored = resume_boundary(snapshot)
+        self.assertEqual(restored.state.best_feasible.evaluation["diagnostic"], 1.5)
 
 
 if __name__ == "__main__":

@@ -244,6 +244,9 @@ def _encoded_transition_value(
 ) -> ALMTransitionValue:
     """:func:`_transition_json_value` below ``path``; ``open_paths`` holds the
     containers being encoded around it (a hit is a cycle)."""
+    if isinstance(value, np.generic) or (isinstance(value, np.ndarray) and value.ndim == 0):
+        # A numpy scalar or 0-d array is its Python scalar.
+        return _encoded_transition_value(value.item(), path, open_paths)
     if isinstance(value, np.ndarray):
         # ``tolist`` builds fresh lists, which cannot hold themselves.
         return (
@@ -253,8 +256,6 @@ def _encoded_transition_value(
                 for item in value.tolist()
             ),
         )
-    if isinstance(value, np.generic):
-        return _encoded_transition_value(value.item(), path, open_paths)
     if isinstance(value, (Mapping, list, tuple)):
         if id(value) in open_paths:
             raise _cyclic_container_error(

@@ -84,7 +84,7 @@
  "source_blob_ids": {
   "simsopt_alm/__init__.py": "c9264db28c7fa8ad2e81539635368862c748b586",
   "simsopt_alm/boundary.py": "db9146d9081b35713b0af84209e020703920ba5a",
-  "simsopt_alm/checkpoint.py": "c9b709aed669761b88cde367496aa3cdc56bc18d",
+  "simsopt_alm/checkpoint.py": "9a4f453d0dbbc4e83834dee6e961bf007af63907",
   "simsopt_alm/continuation.py": "d38d2e3162b371a6700ef2df00399b603e4c2d13",
   "simsopt_alm/control.py": "b63439d390ed60077caee2207c68eebf94c66323",
   "simsopt_alm/core.py": "e2a5214a18f99a321184b5074943302d3e7b9859",
