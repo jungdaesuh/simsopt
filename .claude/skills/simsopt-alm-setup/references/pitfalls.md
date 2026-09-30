@@ -33,7 +33,9 @@ Each entry: the symptom, the cause, the fix.
    cannot represent stalls instead.
 3. **`maxiter` is a whole-run budget.** `inner_options["maxiter"]` counts
    L-BFGS-B iterations over every subproblem of one `minimize_alm` call, not
-   per subproblem, and the call never runs more (`result.nit <= maxiter`). A
+   per subproblem, and the call never runs more (`result.nit` minus the
+   resumed checkpoint's `total_inner_iterations`, 0 when not resumed, is at
+   most `maxiter`). A
    small value ends the run early, possibly inside an outer iteration, with
    the last step's action as the termination reason (`dual_update`,
    `penalty_increase`, `subproblem_continue`, ..., see

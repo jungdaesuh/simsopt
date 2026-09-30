@@ -42,7 +42,7 @@ or start a new `minimize_alm` at `result.x` with
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
 | `max_outer` | no | The last outer iteration ended on a subproblem continuation (or a hybrid subproblem-limit penalty raise). | Raise `max_outer_iterations`; if every outer ends this way, raise `max_subproblem_continuations` or `inner_options["maxiter"]`. |
-| `max_outer_after_dual_update` | no | The last outer iteration updated the multipliers: the method was still converging normally. | Raise `max_outer_iterations` (or continue as above). |
+| `max_outer_after_dual_update` | no | The last outer iteration updated the multipliers: without the hybrid quartet the method was still converging normally. With the quartet, check first whether an active row's surrogate stays more than `feasibility_tol` from its hard value (a fixed smoothing gap): then no number of outer iterations converges (see [api.md](api.md), Hybrid quartet). | Without that gap, raise `max_outer_iterations` (or continue as above). With it, raising `max_outer_iterations` does not help: lower the smoothing temperature (smaller T, a smaller smoothing error) or use smooth rows only. |
 | `max_outer_after_sufficient_decrease_hold` | no | The last outer iteration held the penalty because infeasibility was shrinking fast enough. | Raise `max_outer_iterations`; the violation is decreasing. |
 | `max_outer_after_infeasible_stall` | no | The last inner solve stalled while infeasible (no move, no feasibility gain), forcing a penalty raise. | Run `gradient_check.py` and `sign_check.py`; a far infeasible start may need a larger `penalty_init`. |
 | `max_outer_after_penalty_increase` | no | The last outer iteration raised the penalty: infeasibility did not shrink enough. | Check for conflicting constraints (relax a threshold), row scales, then raise `max_outer_iterations` or `penalty_init`. |
@@ -53,7 +53,10 @@ or start a new `minimize_alm` at `result.x` with
 ## Inner budget spent
 
 `inner_options["maxiter"]` is the L-BFGS-B iteration budget of the whole
-`minimize_alm` call, never exceeded (`result.nit <= maxiter`). When it is
+`minimize_alm` call, never exceeded: `result.nit - total_inner_iterations <=
+maxiter`, where `total_inner_iterations` is that of the checkpoint the call
+resumed from (`resume_from.state.total_inner_iterations`; 0 for a fresh call),
+because `result.nit` counts the iterations before the resume too. When it is
 used up the run stops before the next step, between two outer iterations or
 inside one, and the reason is the **action name of the last step** (unless a
 better feasible iterate is restored: then `max_outer_restored_best_feasible`).

@@ -409,7 +409,13 @@ boundary a disagreement means a row with a live surrogate shift whose
 surrogate value is more than the feasibility gate away from its hard value
 (for `success` the gate is `feasibility_tol`; earlier steps are routed with
 the relaxed gate of [Settings](#settings)); identical channels never
-disagree, so a hybrid run can converge with rows active. As `ALMPhysics`
+disagree, so a hybrid run can converge with rows active. Usage requirement:
+a hybrid problem can converge only where, at every active row, the
+surrogate is within `feasibility_tol` of the hard value. A fixed smoothing
+gap above that ends in `max_outer_*` or `signal_mismatch_*` reasons, and
+raising `max_outer_iterations` does not help: lower the smoothing
+temperature (smaller T, a smaller smoothing error) until the gap at the
+active rows is below `feasibility_tol`, or use smooth rows only. As `ALMPhysics`
 extras (the Stage-2 template's `HYBRID_QUARTET = True` path):
 
 ```python
@@ -778,7 +784,7 @@ or start a new `minimize_alm` at `result.x` with
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
 | `max_outer` | no | The last outer iteration ended on a subproblem continuation (or a hybrid subproblem-limit penalty raise). | Raise `max_outer_iterations`; if every outer ends this way, raise `max_subproblem_continuations` or `inner_options["maxiter"]`. |
-| `max_outer_after_dual_update` | no | The last outer iteration updated the multipliers: the method was still converging normally. | Raise `max_outer_iterations` (or continue as above). |
+| `max_outer_after_dual_update` | no | The last outer iteration updated the multipliers: without the hybrid quartet the method was still converging normally. With the quartet, check first whether an active row's surrogate stays more than `feasibility_tol` from its hard value (a fixed smoothing gap): then no number of outer iterations converges (see [API](#api), Hybrid quartet). | Without that gap, raise `max_outer_iterations` (or continue as above). With it, raising `max_outer_iterations` does not help: lower the smoothing temperature (smaller T, a smaller smoothing error) or use smooth rows only. |
 | `max_outer_after_sufficient_decrease_hold` | no | The last outer iteration held the penalty because infeasibility was shrinking fast enough. | Raise `max_outer_iterations`; the violation is decreasing. |
 | `max_outer_after_infeasible_stall` | no | The last inner solve stalled while infeasible (no move, no feasibility gain), forcing a penalty raise. | Run `gradient_check.py` and `sign_check.py`; a far infeasible start may need a larger `penalty_init`. |
 | `max_outer_after_penalty_increase` | no | The last outer iteration raised the penalty: infeasibility did not shrink enough. | Check for conflicting constraints (relax a threshold), row scales, then raise `max_outer_iterations` or `penalty_init`. |
@@ -789,7 +795,10 @@ or start a new `minimize_alm` at `result.x` with
 ### Inner budget spent
 
 `inner_options["maxiter"]` is the L-BFGS-B iteration budget of the whole
-`minimize_alm` call, never exceeded (`result.nit <= maxiter`). When it is
+`minimize_alm` call, never exceeded: `result.nit - total_inner_iterations <=
+maxiter`, where `total_inner_iterations` is that of the checkpoint the call
+resumed from (`resume_from.state.total_inner_iterations`; 0 for a fresh call),
+because `result.nit` counts the iterations before the resume too. When it is
 used up the run stops before the next step, between two outer iterations or
 inside one, and the reason is the **action name of the last step** (unless a
 better feasible iterate is restored: then `max_outer_restored_best_feasible`).
@@ -849,7 +858,9 @@ Each entry: the symptom, the cause, the fix.
    cannot represent stalls instead.
 3. **`maxiter` is a whole-run budget.** `inner_options["maxiter"]` counts
    L-BFGS-B iterations over every subproblem of one `minimize_alm` call, not
-   per subproblem, and the call never runs more (`result.nit <= maxiter`). A
+   per subproblem, and the call never runs more (`result.nit` minus the
+   resumed checkpoint's `total_inner_iterations`, 0 when not resumed, is at
+   most `maxiter`). A
    small value ends the run early, possibly inside an outer iteration, with
    the last step's action as the termination reason (`dual_update`,
    `penalty_increase`, `subproblem_continue`, ..., see

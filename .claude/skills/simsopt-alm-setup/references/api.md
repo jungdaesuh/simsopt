@@ -133,7 +133,13 @@ boundary a disagreement means a row with a live surrogate shift whose
 surrogate value is more than the feasibility gate away from its hard value
 (for `success` the gate is `feasibility_tol`; earlier steps are routed with
 the relaxed gate of [settings.md](settings.md)); identical channels never
-disagree, so a hybrid run can converge with rows active. As `ALMPhysics`
+disagree, so a hybrid run can converge with rows active. Usage requirement:
+a hybrid problem can converge only where, at every active row, the
+surrogate is within `feasibility_tol` of the hard value. A fixed smoothing
+gap above that ends in `max_outer_*` or `signal_mismatch_*` reasons, and
+raising `max_outer_iterations` does not help: lower the smoothing
+temperature (smaller T, a smaller smoothing error) until the gap at the
+active rows is below `feasibility_tol`, or use smooth rows only. As `ALMPhysics`
 extras (the Stage-2 template's `HYBRID_QUARTET = True` path):
 
 ```python
