@@ -38,6 +38,37 @@ def device_one(reference: jax.Array) -> jax.Array:
     return jax.lax.stop_gradient(jnp.exp(jnp.sum(reference - reference)))
 
 
+@jax.custom_jvp
+def placement_zero(reference: jax.Array) -> jax.Array:
+    """A 0.0 placed and typed like ``reference`` whose tangent is also a placed 0.0.
+
+    Adding it to a value that does not depend on ``reference`` (a fixed coil
+    current) gives that value a tangent on ``reference``'s device, so
+    ``jax.linearize`` never materializes a symbolic-zero tangent from a host
+    literal under the strict transfer guard. ``stop_gradient`` cannot do this:
+    its tangent is that symbolic zero. Nor can a tangent that ignores the input
+    tangent, which linearization also treats as a symbolic zero.
+
+    Left differentiable, ``sum(r) - sum(r)`` does keep the tangent on device,
+    but it couples every entry of ``r`` into every sum it joins: a non-finite
+    tangent or cotangent becomes ``inf - inf = nan`` everywhere. Here the
+    tangent is a select of the placed primal zero over the input tangent's sum,
+    so it depends on the input tangent (stays on device) while its value is
+    exactly 0.0 for any tangent, and its transpose sends exactly 0.0 back.
+    """
+    total = jnp.sum(reference)
+    return total - total
+
+
+@placement_zero.defjvp
+def _placement_zero_jvp(primals, tangents):
+    (reference,), (tangent,) = primals, tangents
+    zero = placement_zero(reference)
+    # The mask is False wherever the zero is a number, so the select always
+    # yields the zero; it exists only to make the tangent depend on ``tangent``.
+    return zero, jnp.where(jnp.isnan(zero), jnp.sum(tangent), zero)
+
+
 def two_pi(reference: jax.Array) -> jax.Array:
     pi = jnp.arccos(-device_one(reference))
     return pi + pi

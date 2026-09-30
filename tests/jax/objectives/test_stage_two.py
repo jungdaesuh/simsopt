@@ -265,3 +265,57 @@ def test_stage_two_geometric_penalty_includes_linking_number() -> None:
     )
 
     np.testing.assert_allclose(value, 3.0)
+
+
+def test_stage_two_placement_zero_adds_no_derivative_path() -> None:
+    """``parameter_zero`` places the currents with the parameters and adds no derivative path.
+
+    Left differentiable, the zero ``sum(p) - sum(p)`` coupled every parameter
+    into every current (PLAN.md amendment 8, B; the defect ``device_one`` had):
+    finite contributions cancel exactly, but a non-finite geometry tangent made
+    the currents' tangent ``inf - inf = nan``, and a non-finite current
+    cotangent made every geometry cotangent ``nan``. The currents do not depend
+    on the geometry, so both must be exactly zero whatever the other holds.
+    ``stop_gradient`` is not the fix: its symbolic-zero tangent is what
+    ``test_stage_two_current_linearization_avoids_host_zero_tangents`` forbids.
+    """
+    surface = SurfaceRZFourier(nfp=2, stellsym=True, mpol=1, ntor=0)
+    curves = create_equally_spaced_curves(
+        2,
+        surface.nfp,
+        surface.stellsym,
+        R0=1.0,
+        R1=0.25,
+        order=1,
+        numquadpoints=8,
+        use_jax_curve=False,
+    )
+    currents = [Current(1.0e5), Current(1.0e5)]
+    currents[0].fix_all()
+    field = BiotSavartJAX(
+        coils_via_symmetries(curves, currents, surface.nfp, surface.stellsym)
+    )
+    extraction = field.coil_dof_extraction_spec()
+    parameters = jax.device_put(jnp.asarray(field.x, dtype=jnp.float64))
+    geometry_entries = [
+        index
+        for index, name in enumerate(field.dof_names)
+        if name.startswith(tuple(f"{curve.name}:" for curve in curves))
+    ]
+    assert len(geometry_entries) == parameters.size - 1
+
+    def coil_currents(values: jax.Array) -> jax.Array:
+        return stage_two_coil_geometry(extraction, values)[3]
+
+    tangent = np.zeros(parameters.size)
+    tangent[geometry_entries[0]] = np.inf
+    _, current_tangent = jax.jvp(
+        coil_currents, (parameters,), (jax.device_put(jnp.asarray(tangent)),)
+    )
+    np.testing.assert_array_equal(np.asarray(current_tangent), 0.0)
+
+    currents_out, pullback = jax.vjp(coil_currents, parameters)
+    (parameter_cotangent,) = pullback(jnp.full_like(currents_out, np.inf))
+    np.testing.assert_array_equal(
+        np.asarray(parameter_cotangent)[geometry_entries], 0.0
+    )

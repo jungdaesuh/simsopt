@@ -9,6 +9,7 @@ from typing import Literal, Protocol, cast
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.core._device_scalars import placement_zero
 from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core.curve_geometry import (
     curve_geometry_from_spec,
@@ -249,8 +250,10 @@ def stage_two_coil_geometry(
     parameters: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
-    parameter_sum = jnp.sum(parameters)
-    parameter_zero = parameter_sum - parameter_sum
+    # Places every current's tangent on the parameters' device (a fixed
+    # current's would otherwise be a symbolic zero) without coupling any
+    # parameter's tangent or cotangent into the currents.
+    parameter_zero = placement_zero(parameters)
     geometry: list[tuple[jax.Array, jax.Array, jax.Array, jax.Array]] = []
     geometry_by_curve: dict[
         int,
