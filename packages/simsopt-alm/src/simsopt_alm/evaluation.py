@@ -6,8 +6,9 @@ loop's only view of the problem. This module owns what the loop assumes about
 that dict: its schema and the check of it where each evaluation enters
 (:func:`_contract_checked_evaluation`), which of its arrays the solver
 snapshots there to own them (:data:`_OWNED_EVALUATION_ARRAY_FIELDS`,
-:func:`_owned_evaluation_snapshot`), which fields must be finite
-(:func:`_nonfinite_evaluation_fields`), the constraint metadata it attaches,
+:func:`_owned_evaluation_snapshot`), what makes it unusable (a field that
+is not finite, or the ``nonfinite_evaluation`` flag:
+:func:`_unusable_evaluation_fields`), the constraint metadata it attaches,
 the objective that ranks best-feasible incumbents
 (:func:`_incumbent_objective_value`), and the measurement of an evaluated
 iterate that the loop and the continuation policy read
@@ -131,7 +132,10 @@ _OWNED_EVALUATION_ARRAY_FIELDS = (
     "augmented_term_by_constraint",
 )
 
-def _nonfinite_evaluation_fields(evaluation: dict) -> Tuple[str, ...]:
+def _unusable_evaluation_fields(evaluation: dict) -> Tuple[str, ...]:
+    """The fields the loop reads that are not finite, then
+    ``nonfinite_evaluation`` when the evaluator flagged the point unusable
+    (whatever its values); empty for a usable evaluation."""
     invalid_fields: List[str] = []
 
     if not np.isfinite(float(evaluation["total"])):
@@ -181,6 +185,8 @@ def _nonfinite_evaluation_fields(evaluation: dict) -> Tuple[str, ...]:
             if not np.all(np.isfinite(constraint_grad_array)):
                 invalid_fields.append(f"constraint_grads[{grad_index}]")
 
+    if evaluation.get("nonfinite_evaluation"):
+        invalid_fields.append("nonfinite_evaluation")
     return tuple(invalid_fields)
 
 def _require_finite_evaluation(evaluation: dict, *, context: str) -> None:
@@ -188,9 +194,7 @@ def _require_finite_evaluation(evaluation: dict, *, context: str) -> None:
     not finite or the evaluator flagged the point unusable
     (``nonfinite_evaluation``): an evaluation the loop keeps as an iterate
     may be neither."""
-    invalid_fields = _nonfinite_evaluation_fields(evaluation) + (
-        ("nonfinite_evaluation",) if evaluation.get("nonfinite_evaluation") else ()
-    )
+    invalid_fields = _unusable_evaluation_fields(evaluation)
     if invalid_fields:
         invalid_summary = ", ".join(invalid_fields)
         raise ValueError(f"{context} produced non-finite ALM data: {invalid_summary}")

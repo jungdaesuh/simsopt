@@ -336,7 +336,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
             "continuation.py": 225,
             "control.py": 1910,
             "core.py": 929,
-            "evaluation.py": 384,
+            "evaluation.py": 385,
             "events.py": 339,
             "history.py": 900,
             "hybrid.py": 69,

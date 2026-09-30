@@ -35,7 +35,7 @@ from .core import (
 from .evaluation import (
     _attach_alm_constraint_metadata,
     _contract_checked_evaluation,
-    _nonfinite_evaluation_fields,
+    _unusable_evaluation_fields,
     _search_step_rejected,
 )
 from .events import _borrowed_read_only_value, _require_acyclic_containers
@@ -275,10 +275,12 @@ def _sanitize_nonfinite_inner_evaluation(
     fallback_evaluation: dict,
 ) -> dict:
     """``evaluation`` (the solver's snapshot) when every field the loop
-    reads is finite; otherwise the solver-owned ``fallback_evaluation`` with
-    an elevated total (:func:`_elevated_rejection_total`), flagged
-    ``nonfinite_evaluation`` with the fields that were not finite."""
-    invalid_fields = _nonfinite_evaluation_fields(evaluation)
+    reads is finite and the evaluator did not flag it
+    ``nonfinite_evaluation``; otherwise the solver-owned
+    ``fallback_evaluation`` with an elevated total
+    (:func:`_elevated_rejection_total`), flagged ``nonfinite_evaluation``
+    with the unusable fields (:func:`_unusable_evaluation_fields`)."""
+    invalid_fields = _unusable_evaluation_fields(evaluation)
     if not invalid_fields:
         return evaluation
 
