@@ -81,7 +81,8 @@ before the answers arrive.
    stateless; (b) yes: stateful.
 5. Distance and curvature rows: (a) smooth rows only (default, conservative);
    (b) hybrid quartet: the hard values (extrema over the sampled points)
-   decide feasibility and drive the multiplier update.
+   decide feasibility and drive the multiplier update; `converged` needs
+   the smooth and the hard rows within `feasibility_tol`.
 6. Opt-ins: (a) none; (b) per-step history JSON; (c) checkpoints to resume
    from; (d) both.
 7. Where to put `<dir>` (default: a new `alm_<name>/` next to the user's

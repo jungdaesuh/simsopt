@@ -1584,5 +1584,124 @@ class AlmLibraryTrustRadiusCharacterizationTests(unittest.TestCase):
         )
 
 
+
+def _offset_hybrid_physics(surrogate_offset, hard_offset):
+    """min x^2 / 2 s.t. the row offset - x <= 0, with the hybrid quartet as
+    the documented recipe returns it (api.md: ``feasibility_values`` is the
+    hard violation): L uses g_s = surrogate_offset - x, feasibility and the
+    multiplier update use g_h = hard_offset - x."""
+
+    def physics(x):
+        x0 = float(np.asarray(x, dtype=float)[0])
+        surrogate = np.array([surrogate_offset - x0])
+        hard = np.array([hard_offset - x0])
+        hard_violation = np.maximum(hard, 0.0)
+        return alm.ALMPhysics(
+            base_value=0.5 * x0 * x0,
+            base_grad=np.array([x0]),
+            constraint_values=surrogate,
+            constraint_grads=(np.array([-1.0]),),
+            extras={
+                "dual_update_values": hard,
+                "feasibility_values": hard_violation,
+                "hard_signed_constraint_values": hard,
+                "hard_violation_values": hard_violation,
+                "surrogate_signed_constraint_values": surrogate,
+                "hard_dual_update_values": hard,
+            },
+        )
+
+    return physics
+
+
+class AlmHybridConvergenceTests(unittest.TestCase):
+    """A converged hybrid point meets ``feasibility_tol`` in both channels:
+    the hard violation and the positive part of the surrogate g that L uses,
+    with no signal mismatch judged at ``feasibility_tol``. The relaxed early
+    gate (up to ``relaxed_feasibility_gate_cap``) only routes steps and the
+    dual update; it once let a surrogate violated by up to 1e-2 converge."""
+
+    def assert_not_certified_with_the_surrogate_violated(self, result, settings):
+        self.assertFalse(
+            result.success and float(np.max(result.constraint_values)) > settings.feasibility_tol,
+            f"{result.termination_reason} with the surrogate g = {result.constraint_values}",
+        )
+
+    def test_astra_reproduction_does_not_converge_on_the_violated_surrogate(self):
+        def physics(x):
+            hard = np.asarray(x, dtype=float).copy()
+            surrogate = hard + 0.005
+            violation = np.maximum(hard, 0.0)
+            return alm.ALMPhysics(
+                float(0.5 * x[0] ** 2 - 0.005 * x[0]), np.asarray(x, dtype=float) - 0.005,
+                surrogate, (np.ones(1),),
+                extras=dict(
+                    feasibility_values=violation, dual_update_values=hard,
+                    hard_signed_constraint_values=hard, hard_violation_values=violation,
+                    surrogate_signed_constraint_values=surrogate, hard_dual_update_values=hard,
+                ),
+            )
+
+        settings = alm.ALMSettings()
+        result = alm.minimize_alm(
+            np.zeros(1), ["g"], alm.cached_alm_evaluator(physics), settings, {"maxiter": 200}
+        )
+        self.assertNotEqual(result.termination_reason, "converged")
+        self.assert_not_certified_with_the_surrogate_violated(result, settings)
+
+    def test_a_cold_start_does_not_converge_on_the_violated_surrogate(self):
+        # Grok's reproduction: g_s = 0.01 - x, g_h = 0.005 - x from x = 0
+        # converged at x = 0.005 with g_s = 0.005.
+        settings = alm.ALMSettings(max_outer_iterations=6)
+        result = alm.minimize_alm(
+            np.zeros(1), ["g"], alm.cached_alm_evaluator(_offset_hybrid_physics(0.01, 0.005)),
+            settings, {"maxiter": 40},
+        )
+        self.assertFalse(result.success, result.termination_reason)
+        self.assert_not_certified_with_the_surrogate_violated(result, settings)
+
+    def test_a_start_on_the_hard_boundary_does_not_converge_on_the_surrogate(self):
+        # Grok's sweep: at x = gap, g_h = 0 and g_s = gap; every gap up to the
+        # relaxed gate's cap (1e-2) converged.
+        settings = alm.ALMSettings(max_outer_iterations=3)
+        for gap in (1.0e-4, 1.0e-3, 9.9e-3, 1.0e-2):
+            with self.subTest(gap=gap):
+                result = alm.minimize_alm(
+                    np.array([gap]), ["g"],
+                    alm.cached_alm_evaluator(_offset_hybrid_physics(2.0 * gap, gap)),
+                    settings, {"maxiter": 20},
+                )
+                self.assertFalse(result.success, result.termination_reason)
+
+    def test_the_decisions_refuse_a_hard_feasible_violated_surrogate(self):
+        # Hard row exactly on its boundary, surrogate 5e-3 above it, KKT by
+        # construction otherwise; the relaxed gate is at its 1e-2 cap.
+        physics = _offset_hybrid_physics(0.01, 0.005)(np.array([0.005]))
+        measured = _measure(
+            physics.evaluation(np.zeros(1), 10.0),
+            multipliers=(0.0,),
+            update_feasibility_tol=1.0e-2,
+        )
+        measured = dataclasses.replace(measured, stationarity_norm=0.0)
+        self.assertEqual(measured.routing_state.hard_max_violation, 0.0)
+        self.assertEqual(measured.effective_feasibility_tol, 1.0e-2)
+        policy = DefaultContinuationPolicy()
+        self.assertIsNone(policy.before_inner(_view(measured, after_inner=False)))
+        self.assertNotIsInstance(policy.after_inner(_view(measured)), ALMConverge)
+
+    def test_a_surrogate_within_the_tolerance_still_converges_with_the_row_active(self):
+        # g_s - g_h = 5e-7 < feasibility_tol: the channels agree to the
+        # tolerance, so the active row is certified.
+        settings = alm.ALMSettings(max_outer_iterations=20)
+        result = alm.minimize_alm(
+            np.zeros(1), ["g"],
+            alm.cached_alm_evaluator(_offset_hybrid_physics(0.5 + 5.0e-7, 0.5)),
+            settings, {"maxiter": 200},
+        )
+        self.assertEqual(result.termination_reason, "converged")
+        self.assertLessEqual(float(result.constraint_values[0]), settings.feasibility_tol)
+        self.assertGreater(float(result.multipliers[0]), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

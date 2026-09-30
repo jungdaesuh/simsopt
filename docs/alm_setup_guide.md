@@ -94,7 +94,8 @@ Ask these multiple-choice questions in one message and wait for the answers.
    stateless; (b) yes: stateful.
 5. Distance and curvature rows: (a) smooth rows only (default, conservative);
    (b) hybrid quartet: the hard values (extrema over the sampled points)
-   decide feasibility and drive the multiplier update.
+   decide feasibility and drive the multiplier update; `converged` needs
+   the smooth and the hard rows within `feasibility_tol`.
 6. Opt-ins: (a) none; (b) per-step history JSON; (c) checkpoints to resume
    from; (d) both.
 7. Where to put `<dir>` (default: a new `alm_<name>/` next to the user's
@@ -394,12 +395,16 @@ drive the multiplier update, return the four keys
 `hard_signed_constraint_values`, `hard_violation_values`,
 `surrogate_signed_constraint_values`, `hard_dual_update_values`, all or none
 (a missing member raises `KeyError`). The augmented Lagrangian uses the
-surrogate (smooth) values; a disagreement between the channels blocks
-`success` and can end in `signal_mismatch_*` reasons. At an active boundary
-a disagreement means a row with a live surrogate shift whose surrogate
-value is more than the feasibility gate away from its hard value; identical
-channels never disagree, so a hybrid run can converge with rows active. As `ALMPhysics` extras
-(the Stage-2 template's `HYBRID_QUARTET = True` path):
+surrogate (smooth) values; `success` needs both channels within
+`feasibility_tol` (the hard violation and the surrogate's positive part,
+whatever `feasibility_values` holds), and a disagreement between the
+channels blocks it and can end in `signal_mismatch_*` reasons. At an active
+boundary a disagreement means a row with a live surrogate shift whose
+surrogate value is more than the feasibility gate away from its hard value
+(for `success` the gate is `feasibility_tol`; earlier steps are routed with
+the relaxed gate of [Settings](#settings)); identical channels never
+disagree, so a hybrid run can converge with rows active. As `ALMPhysics`
+extras (the Stage-2 template's `HYBRID_QUARTET = True` path):
 
 ```python
 import numpy as np
@@ -407,7 +412,7 @@ from simsopt_alm import ALMPhysics
 
 
 def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
-    """ALMPhysics whose L uses ``surrogate`` and whose feasibility and
+    """ALMPhysics whose L uses ``surrogate`` and whose feasibility values and
     multiplier update use ``hard`` (both arrays of scaled row values)."""
     hard_violation = np.maximum(hard, 0.0)
     return ALMPhysics(
@@ -682,7 +687,7 @@ tolerances.
 | `trust_radius_shrink` | 0.5 | Radius factor after a rejected attempt, in (0, 1). | Rarely. |
 | `trust_radius_grow` | 1.5 | Radius factor after an accepted step that used at least half the radius (> 1). | Rarely. |
 | `max_inner_attempts` | 4 | L-BFGS-B attempts per subproblem; a rejected attempt retries with a shrunk radius (only with a trust radius). | Rarely; with a trust radius, more attempts tolerate more rejected trials. |
-| `relaxed_feasibility_gate_cap` | 0.01 | Cap on the loose early feasibility gate that classifies active rows: max(`feasibility_tol`, min(scheduled tolerance, cap)). | Rarely. |
+| `relaxed_feasibility_gate_cap` | 0.01 | Cap on the loose early feasibility gate that classifies active rows for routing and the dual update: max(`feasibility_tol`, min(scheduled tolerance, cap)). Convergence is judged at `feasibility_tol`, not this gate. | Rarely. |
 | `multiplier_max` | 1e6 | Largest multiplier; a clamped update blocks convergence until a later update is not clamped. | Multipliers pin at the cap with O(1) rows: a row is nearly infeasible or conflicting; fix the problem first. |
 | `history_max_entries` | 512 | Entries `ALMHistoryRecorder.from_settings` keeps (None: all); `minimize_alm` itself keeps no history. | Long runs whose full history you want. |
 | `continue_on_signal_mismatch` | False | Hybrid quartet only: a stalled mismatch with a live surrogate shift keeps re-solving the subproblem instead of raising the penalty. | `signal_mismatch_*` reasons with a smooth surrogate you trust. |
@@ -738,7 +743,7 @@ templates does).
 
 | Reason | Success | Meaning | Action |
 |---|---|---|---|
-| `converged` | yes | An approximate KKT point at the returned point (not global optimality, not descent from the start; see [Pitfalls](#pitfalls) on offsets), at the stated tolerances, with the shifted multipliers λ⁺ = max(0, λ + ρg): max violation <= `feasibility_tol` (solver and hard channels); augmented-gradient norm <= `stationarity_tol` (with `base_bounds`, components on an active bound that point out of the box do not count); and the complementarity gap Σ_i λ⁺_i max(0, -g_i) <= `feasibility_tol`, absolute in f's units (nonnegative per-row terms, so rows cannot cancel; unchanged when a row is rescaled, g -> Mg, λ -> λ/M, ρ -> ρ/M²; activity bands play no part). No hybrid signal mismatch, no binding multiplier cap. Limit: a nonconvex row steep enough that λ⁺_i x slack stays under the tolerance while λ⁺_i ∇g_i cancels ∇f can still pass; no finite tolerance excludes it. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
+| `converged` | yes | An approximate KKT point at the returned point (not global optimality, not descent from the start; see [Pitfalls](#pitfalls) on offsets), at the stated tolerances, with the shifted multipliers λ⁺ = max(0, λ + ρg): max violation <= `feasibility_tol` (the evaluator's `feasibility_values`, the hard channel, and the positive part of the g that L uses, which for the hybrid quartet is the surrogate); augmented-gradient norm <= `stationarity_tol` (with `base_bounds`, components on an active bound that point out of the box do not count); and the complementarity gap Σ_i λ⁺_i max(0, -g_i) <= `feasibility_tol`, absolute in f's units (nonnegative per-row terms, so rows cannot cancel; unchanged when a row is rescaled, g -> Mg, λ -> λ/M, ρ -> ρ/M²; activity bands play no part). No hybrid signal mismatch judged at `feasibility_tol` (the relaxed early gate only routes steps), no binding multiplier cap. Limit: a nonconvex row steep enough that λ⁺_i x slack stays under the tolerance while λ⁺_i ∇g_i cancels ∇f can still pass; no finite tolerance excludes it. | Accept. Check the physics at `result.x` (the runner's `finish` summary). |
 | `constraints_inactive_converged` | yes | Hybrid quartet only: every hard row is strictly inactive (no surrogate activity, zero shift) and the same approximate-KKT test holds. | Accept. The constraints did not bind; check whether the thresholds are the ones you meant. |
 
 ### Stopped early
@@ -1015,8 +1020,8 @@ before accepting a physical bound. The physics depends on the coil dofs alone,
 so the solver gets ``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET =
 True`` the evaluator also returns the hard row values: the smooth values still
 define the augmented Lagrangian, while the hard ones decide feasibility and
-drive the multiplier update (read the skill's ``references/pitfalls.md``
-first).
+drive the multiplier update; ``converged`` needs both within
+``feasibility_tol`` (read the skill's ``references/pitfalls.md`` first).
 
 ### [templates/boozer_single_stage.py](../.claude/skills/simsopt-alm-setup/templates/boozer_single_stage.py)
 

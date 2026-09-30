@@ -30,8 +30,8 @@ before accepting a physical bound. The physics depends on the coil dofs alone,
 so the solver gets ``cached_alm_evaluator(physics)``. With ``HYBRID_QUARTET =
 True`` the evaluator also returns the hard row values: the smooth values still
 define the augmented Lagrangian, while the hard ones decide feasibility and
-drive the multiplier update (read the skill's ``references/pitfalls.md``
-first).
+drive the multiplier update; ``converged`` needs both within
+``feasibility_tol`` (read the skill's ``references/pitfalls.md`` first).
 """
 
 from __future__ import annotations
@@ -97,7 +97,8 @@ DISTANCE_TEMPERATURE = 0.005   # m
 CURVATURE_TEMPERATURE = 0.05   # 1/m
 
 # SETUP: True returns the hybrid quartet (sampled extrema for feasibility and
-# the multiplier update); False uses the smooth values for everything.
+# the multiplier update; converged needs the smooth rows feasible too); False
+# uses the smooth values for everything.
 HYBRID_QUARTET = False
 
 OUT_DIR = Path("output_alm")
@@ -301,7 +302,9 @@ class Stage2Problem:
             constraint_values=surrogate,
             constraint_grads=tuple(value[1] for value in values),
             extras={
-                # Feasibility and the multiplier update read the hard values.
+                # Feasibility and the multiplier update read the hard values;
+                # ``converged`` also needs the smooth rows L uses (surrogate)
+                # within feasibility_tol, which the solver checks itself.
                 "dual_update_values": hard,
                 "feasibility_values": hard_violation,
                 "max_feasibility_violation": float(np.max(hard_violation)),

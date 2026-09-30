@@ -23,7 +23,7 @@ tolerances.
 | `trust_radius_shrink` | 0.5 | Radius factor after a rejected attempt, in (0, 1). | Rarely. |
 | `trust_radius_grow` | 1.5 | Radius factor after an accepted step that used at least half the radius (> 1). | Rarely. |
 | `max_inner_attempts` | 4 | L-BFGS-B attempts per subproblem; a rejected attempt retries with a shrunk radius (only with a trust radius). | Rarely; with a trust radius, more attempts tolerate more rejected trials. |
-| `relaxed_feasibility_gate_cap` | 0.01 | Cap on the loose early feasibility gate that classifies active rows: max(`feasibility_tol`, min(scheduled tolerance, cap)). | Rarely. |
+| `relaxed_feasibility_gate_cap` | 0.01 | Cap on the loose early feasibility gate that classifies active rows for routing and the dual update: max(`feasibility_tol`, min(scheduled tolerance, cap)). Convergence is judged at `feasibility_tol`, not this gate. | Rarely. |
 | `multiplier_max` | 1e6 | Largest multiplier; a clamped update blocks convergence until a later update is not clamped. | Multipliers pin at the cap with O(1) rows: a row is nearly infeasible or conflicting; fix the problem first. |
 | `history_max_entries` | 512 | Entries `ALMHistoryRecorder.from_settings` keeps (None: all); `minimize_alm` itself keeps no history. | Long runs whose full history you want. |
 | `continue_on_signal_mismatch` | False | Hybrid quartet only: a stalled mismatch with a live surrogate shift keeps re-solving the subproblem instead of raising the penalty. | `signal_mismatch_*` reasons with a smooth surrogate you trust. |

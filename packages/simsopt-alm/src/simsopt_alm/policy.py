@@ -35,6 +35,7 @@ from .continuation import (
 from .core import (
     ALMSettings,
     _complementarity_gap,
+    _constraint_routing_state,
     _finite_alm_integer,
     _finite_alm_value,
 )
@@ -47,8 +48,8 @@ class ALMContinuationPolicy(Protocol):
     ``ALMConverge`` as given and adds no veto of its own. The success
     guarantees (an approximate KKT point at the shifted multipliers
     ``max(0, λ + ρg)``, within the feasibility, stationarity and
-    complementarity-gap tolerances of ``_kkt_point``; no hybrid signal
-    mismatch, no binding multiplier cap) hold for
+    complementarity-gap tolerances of ``_kkt_point``, with no hybrid signal
+    mismatch at ``feasibility_tol``; no binding multiplier cap) hold for
     :class:`DefaultContinuationPolicy` and for policies that keep its vetoes,
     e.g. by delegating their convergence decisions to it.
     """
@@ -95,7 +96,6 @@ class DefaultContinuationPolicy:
         if (
             _kkt_point(start, settings)
             and not _constraints_inactive_candidate(start, settings.feasibility_tol)
-            and not start.signal_mismatch_active
             # Cap-binding multipliers mean the prior dual update was
             # clamped; the KKT residual is held small by the cap, not by
             # convergence. Same guard as both post-inner converged arms; the
@@ -128,7 +128,6 @@ class DefaultContinuationPolicy:
         if (
             _kkt_point(measured, settings)
             and not constraints_inactive
-            and not measured.signal_mismatch_active
             # A clamped dual update holds the KKT residual small.
             and not view.last_cap_binding_active
         ):
@@ -291,32 +290,29 @@ def _feasible_step(view: ALMPostInnerView) -> Union[ALMStop, ALMRaisePenalty, AL
 def _kkt_point(measured: ALMIterateMeasurement, settings: ALMSettings) -> bool:
     """Whether ``measured`` is an approximate KKT point at the shifted
     multipliers ``λ⁺ = max(0, λ + ρg)`` its augmented gradient carries:
-    generic and hard violations within ``feasibility_tol``, the
-    (bound-reduced) augmented gradient, the Lagrangian's at λ⁺, within
-    ``stationarity_tol``, and the complementarity gap
-    ``sum_i λ⁺_i max(0, -g_i)`` within ``feasibility_tol``. Both tolerances
-    are absolute, in f's units (the gap is f - ℓ on the feasible side), so an
-    offset added to f changes nothing; scale f to O(1)."""
-    return (
-        _strict_feasibility_satisfied(
-            measured.max_feasibility_violation,
-            measured.routing_state.hard_max_violation,
-            settings.feasibility_tol,
-        )
-        and measured.stationarity_norm <= settings.stationarity_tol
-        and _complementarity_gap(measured.routing_state) <= settings.feasibility_tol
+    within ``feasibility_tol`` the evaluator's feasibility values, the hard
+    violation and the positive part of the surrogate g that L uses, with no
+    signal mismatch judged at ``feasibility_tol`` (the relaxed gate the loop
+    measured with only routes steps and the dual update); the (bound-reduced)
+    augmented gradient, the Lagrangian's at λ⁺, within ``stationarity_tol``;
+    and the complementarity gap ``sum_i λ⁺_i max(0, -g_i)`` within
+    ``feasibility_tol``. Both tolerances are absolute, in f's units (the gap
+    is f - ℓ on the feasible side), so an offset added to f changes nothing;
+    scale f to O(1)."""
+    strict = _constraint_routing_state(
+        measured.evaluation, measured.multipliers, measured.penalty, settings.feasibility_tol
     )
-
-
-def _strict_feasibility_satisfied(
-    max_feasibility_violation: float,
-    hard_max_violation: float,
-    feasibility_tol: float,
-) -> bool:
-    """Return whether both canonical generic and hard maxima meet the strict gate."""
-    return float(max_feasibility_violation) <= float(feasibility_tol) and float(
-        hard_max_violation
-    ) <= float(feasibility_tol)
+    return (
+        max(
+            measured.max_feasibility_violation,
+            strict.hard_max_violation,
+            strict.surrogate_max_value,
+        )
+        <= settings.feasibility_tol
+        and not strict.signal_mismatch_active
+        and measured.stationarity_norm <= settings.stationarity_tol
+        and _complementarity_gap(strict) <= settings.feasibility_tol
+    )
 
 
 def _dual_update_gate_satisfied(

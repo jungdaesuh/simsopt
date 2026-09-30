@@ -121,12 +121,16 @@ drive the multiplier update, return the four keys
 `hard_signed_constraint_values`, `hard_violation_values`,
 `surrogate_signed_constraint_values`, `hard_dual_update_values`, all or none
 (a missing member raises `KeyError`). The augmented Lagrangian uses the
-surrogate (smooth) values; a disagreement between the channels blocks
-`success` and can end in `signal_mismatch_*` reasons. At an active boundary
-a disagreement means a row with a live surrogate shift whose surrogate
-value is more than the feasibility gate away from its hard value; identical
-channels never disagree, so a hybrid run can converge with rows active. As `ALMPhysics` extras
-(the Stage-2 template's `HYBRID_QUARTET = True` path):
+surrogate (smooth) values; `success` needs both channels within
+`feasibility_tol` (the hard violation and the surrogate's positive part,
+whatever `feasibility_values` holds), and a disagreement between the
+channels blocks it and can end in `signal_mismatch_*` reasons. At an active
+boundary a disagreement means a row with a live surrogate shift whose
+surrogate value is more than the feasibility gate away from its hard value
+(for `success` the gate is `feasibility_tol`; earlier steps are routed with
+the relaxed gate of [settings.md](settings.md)); identical channels never
+disagree, so a hybrid run can converge with rows active. As `ALMPhysics`
+extras (the Stage-2 template's `HYBRID_QUARTET = True` path):
 
 ```python
 import numpy as np
@@ -134,7 +138,7 @@ from simsopt_alm import ALMPhysics
 
 
 def hybrid_physics(base_value, base_grad, surrogate, hard, constraint_grads):
-    """ALMPhysics whose L uses ``surrogate`` and whose feasibility and
+    """ALMPhysics whose L uses ``surrogate`` and whose feasibility values and
     multiplier update use ``hard`` (both arrays of scaled row values)."""
     hard_violation = np.maximum(hard, 0.0)
     return ALMPhysics(

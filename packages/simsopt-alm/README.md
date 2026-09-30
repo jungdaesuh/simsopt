@@ -88,13 +88,15 @@ all strictly inactive), when the returned point `result.x` is an approximate
 KKT point at the shifted multipliers `λ⁺ = max(0, λ + ρ g)`:
 
 - feasibility: the maximum violation is at most `feasibility_tol` (for a
-  hybrid problem, in both the smooth and the exact rows);
+  hybrid problem, in both the smooth rows that L uses and the exact rows);
 - stationarity: the norm of the augmented Lagrangian's gradient, without the
   components that point out of the box at an active `base_bounds` bound, is
   at most `stationarity_tol`;
 - complementarity: the gap `Σ_i λ⁺_i max(0, -g_i)` is at most
   `feasibility_tol` (absolute, in the units of f: scale f to O(1));
-- and no hybrid signal mismatch or binding multiplier cap.
+- and no hybrid signal mismatch (judged at `feasibility_tol`; the relaxed
+  early gate only routes steps and the dual update) or binding multiplier
+  cap.
 
 This certifies the returned point only. It is not global optimality, not a
 guarantee of descent from the start, and not a statement about which basin
