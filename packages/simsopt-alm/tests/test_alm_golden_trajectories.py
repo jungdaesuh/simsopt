@@ -71,6 +71,8 @@ _golden = golden.load_golden
 #   resume_plateau_best_feasible (an inner retry)    -
 #   frozen_warm_start_restore (an infeasible stall)  action:infeasible_stall_penalty_increase
 #   cached_physics_smoothing (outer-step count)      -
+#   constraints_inactive_stall (whether L-BFGS-B
+#       counts an iteration at the frozen start)     -
 #
 #   numeric replay, largest tolerance over scenarios:
 #   x              1.5e-13  (multiplier_cap_process_budget)

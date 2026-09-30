@@ -942,6 +942,7 @@ def _hybrid_band_run(
     max_outer_iterations: int,
     x0: tuple[float, float],
     trust_radius_init: Optional[float],
+    step_norm_limit: Optional[float] = None,
 ) -> ScenarioRun:
     settings = ALMSettings(
         max_outer_iterations=max_outer_iterations,
@@ -967,7 +968,7 @@ def _hybrid_band_run(
         ),
         settings=settings,
         inner_options=_inner_options(500),
-        gate=AcceptedStateGate(accepted_x=start.copy()),
+        gate=AcceptedStateGate(accepted_x=start.copy(), step_norm_limit=step_norm_limit),
     )
 
 
@@ -1019,6 +1020,8 @@ def run_constraints_inactive_stall() -> dict:
             max_outer_iterations=3,
             x0=(0.0, 1.0),
             trust_radius_init=None,
+            # The evaluator rejects every trial step (a frozen warm start).
+            step_norm_limit=0.0,
         )
     ).trajectory
 
@@ -1389,8 +1392,8 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         "constraints_inactive_stall",
-        "Hybrid signals with hard constraints inactive and every inner step "
-        "rejected: the constraints-inactive stall termination.",
+        "Hybrid signals with hard constraints inactive and every trial step "
+        "rejected by the evaluator: the constraints-inactive stall termination.",
         run_constraints_inactive_stall,
     ),
     Scenario(

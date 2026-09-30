@@ -19,11 +19,11 @@
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
   "simsopt_alm/history.py": "d83a19e1377b4a9e4d9c3627350fd1a21aeed92d",
   "simsopt_alm/hybrid.py": "38ea723be129746c1bcc4d00b9db2ed438f30aa8",
-  "simsopt_alm/inner.py": "19317666a8c6a34aad554f8cc79161768f411696",
+  "simsopt_alm/inner.py": "d5423a561b335894e84a7707ddc02b8d79822445",
   "simsopt_alm/policy.py": "50e4b921f2cbe303b6845883968a7fcff678f76e",
   "simsopt_alm/problem.py": "1e145040b215ac60c6c7264fd59a7807b0ac3013",
   "simsopt_alm/taylor.py": "1128723b36bd64c5f50f788c66053a89d55d5f9d",
-  "alm_golden_scenarios.py": "a2c5929fe4794e94ee98bb028a0a110f5a9c0e7b",
+  "alm_golden_scenarios.py": "14ace84c61a505a96045afc040684cf870f9df52",
   "generate_alm_golden.py": "53b2b380127b0621fdb2ff5c0c3cc351f0652211",
   "measure_alm_golden_sensitivity.py": "434f817334fe11f58e8ff9311db6bca2570a7fed"
  },
@@ -116,8 +116,8 @@
   {
    "scenario": "constraints_inactive_stall",
    "fixture": "constraints_inactive_stall.json",
-   "sha256": "6cb674e2b3f19e1721b8fd5eea33b2fc92c099bae4ae34dc5ce6753b69c3c791",
-   "bytes": 28176
+   "sha256": "776ebeb4ff028c7f0b2c162410423bbd2fcc90e4fa5c2b7d6a119fda3c20c0cb",
+   "bytes": 27715
   },
   {
    "scenario": "plateau_restore_best_feasible",
@@ -134,8 +134,8 @@
   {
    "scenario": "trust_radius_retries",
    "fixture": "trust_radius_retries.json",
-   "sha256": "154753f58b242579b69518585b00438261ff304040167b83a026bf99d87f9263",
-   "bytes": 69979
+   "sha256": "b0eb92a46b86c2afbd8803ccd0fb7983fac53926e5e678bca2b9874b3c8342f7",
+   "bytes": 72159
   },
   {
    "scenario": "frozen_warm_start_restore",

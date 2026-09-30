@@ -2,8 +2,9 @@
 
 :func:`_run_alm_inner_attempts` minimizes the augmented Lagrangian at fixed
 multipliers and penalty from the loop's current iterate
-(:class:`ALMInnerAttemptRequest`) and returns the accepted iterate or the
-start iterate (:class:`ALMInnerAttemptResult`). It hides how: the evaluator
+(:class:`ALMInnerAttemptRequest`) and returns the accepted iterate, or the
+start iterate when no attempt produced a usable step
+(:class:`ALMInnerAttemptResult`). It hides how: the evaluator
 cache and its early stop once the dual-update gate holds, the elevated
 fallback for a non-finite trial, the trust box (intersected with the
 caller's bounds), the acceptance and infeasible-stall tests with their
@@ -335,8 +336,10 @@ def _candidate_is_acceptable(
     candidate_eval: dict,
     result,
     moved_norm: float,
-    update_feasibility_tol: float,
 ) -> bool:
+    """Whether a trial is a subproblem step at all: usable (not rejected, not
+    flagged), a step L-BFGS-B took, and no worse on the total than the start
+    (:func:`_acceptable_total_upper_bound`)."""
     if _search_step_rejected(candidate_eval) or candidate_eval.get("nonfinite_evaluation"):
         return False
     if not (
@@ -345,24 +348,25 @@ def _candidate_is_acceptable(
         or float(moved_norm) > _ACCEPTANCE_MOVE_TOL
     ):
         return False
-
-    current_max_feasibility_violation = _extract_constraint_state(current_eval)[3]
-    candidate_max_feasibility_violation = _extract_constraint_state(candidate_eval)[3]
-    allowed_max_feasibility = (
-        max(
-            float(update_feasibility_tol),
-            float(current_max_feasibility_violation),
-        )
-        + _ACCEPTANCE_TOTAL_ATOL
-    )
-    if float(candidate_max_feasibility_violation) > allowed_max_feasibility:
-        return False
-
     candidate_total = float(candidate_eval["total"])
     return candidate_total <= _acceptable_total_upper_bound(
         float(current_eval["total"]),
         float(np.linalg.norm(current_eval["grad"])),
         moved_norm,
+    )
+
+def _within_feasibility_slack(
+    current_eval: dict, candidate_eval: dict, update_feasibility_tol: float
+) -> bool:
+    """Whether the candidate's max violation stays within the scheduled
+    slack, max(``update_feasibility_tol``, the start's) plus
+    ``_ACCEPTANCE_TOTAL_ATOL``: a trust-region preference, which shrinks a
+    box while one is left, never a veto on the subproblem's solution."""
+    current_max_feasibility_violation = _extract_constraint_state(current_eval)[3]
+    candidate_max_feasibility_violation = _extract_constraint_state(candidate_eval)[3]
+    return float(candidate_max_feasibility_violation) <= (
+        max(float(update_feasibility_tol), float(current_max_feasibility_violation))
+        + _ACCEPTANCE_TOTAL_ATOL
     )
 
 def _improvement_and_floor(
@@ -655,11 +659,10 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
                 candidate_eval.get("nonfinite_fields", [])
             )
         acceptable = _candidate_is_acceptable(
-            request.current_eval,
-            candidate_eval,
-            result,
-            moved_norm,
-            request.update_feasibility_tol,
+            request.current_eval, candidate_eval, result, moved_norm
+        )
+        within_slack = acceptable and _within_feasibility_slack(
+            request.current_eval, candidate_eval, request.update_feasibility_tol
         )
         (
             infeasible_inner_stall,
@@ -673,7 +676,18 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             move_tolerance,
             request.effective_feasibility_tol,
         )
-        if acceptable and not infeasible_inner_stall:
+        smaller_box_left = (
+            attempt_radius is not None
+            and attempt_radius > request.settings.trust_radius_min
+            and attempt_index < request.settings.max_inner_attempts
+        )
+        # A step beyond the feasibility slack retries in a smaller box while
+        # one is left. Without one (no box, or the last) the subproblem's
+        # solution stands: the outer policy sees its violation and raises
+        # the penalty, where a rollback to the start would only stall.
+        if acceptable and not infeasible_inner_stall and (
+            within_slack or not smaller_box_left
+        ):
             accepted_result = result
             accepted_eval = _attach_alm_constraint_metadata(
                 candidate_eval,
@@ -688,12 +702,10 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             accepted_x = candidate_x
             accepted_bounds = attempt_bounds
             if attempt_radius is not None:
-                if moved_norm >= 0.5 * float(attempt_radius):
-                    trust_radius = float(attempt_radius) * float(
-                        request.settings.trust_radius_grow
-                    )
-                else:
-                    trust_radius = float(attempt_radius)
+                # Only a step within the slack that used half the box grows it.
+                trust_radius = float(attempt_radius)
+                if within_slack and moved_norm >= 0.5 * trust_radius:
+                    trust_radius *= float(request.settings.trust_radius_grow)
             break
         if infeasible_inner_stall:
             retry_radius = request.continuation_policy.retry_stalled_trial(
@@ -718,25 +730,20 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
             if attempt_radius is not None:
                 trust_radius = float(attempt_radius)
             break
-        if attempt_radius is None:
+        if not smaller_box_left:
+            # No usable step (rejected, flagged, or a higher total): keep the
+            # start iterate.
             accepted_result = result
             accepted_eval = request.current_eval
             accepted_x = request.x.copy()
             accepted_bounds = attempt_bounds
+            if attempt_radius is not None:
+                trust_radius = float(attempt_radius)
             break
-        next_radius = max(
+        attempt_radius = max(
             request.settings.trust_radius_min,
             float(attempt_radius) * float(request.settings.trust_radius_shrink),
         )
-        exhausted_attempts = attempt_index == request.settings.max_inner_attempts
-        if attempt_radius <= request.settings.trust_radius_min or exhausted_attempts:
-            accepted_result = result
-            accepted_eval = request.current_eval
-            accepted_x = request.x.copy()
-            accepted_bounds = attempt_bounds
-            trust_radius = float(attempt_radius)
-            break
-        attempt_radius = float(next_radius)
         trust_radius = float(attempt_radius)
         continue
 

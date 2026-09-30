@@ -30,6 +30,50 @@ def pulled_out(x, multipliers, penalty):
     )
 
 
+class FeasibleStartWithAnInfeasibleSubproblemMinimizerTests(unittest.TestCase):
+    """G3 (inner.py): an inner solution beyond the feasibility slack was rolled
+    back to the start, so two rollbacks stopped as ``plateau_stall`` at x = 0
+    and the penalty never rose."""
+
+    def assert_kkt(self, result):
+        self.assertEqual(result.termination_reason, "converged", result.message)
+        self.assertTrue(result.success)
+        np.testing.assert_allclose(result.x, [1.0], atol=1.0e-6)
+        np.testing.assert_allclose(shifted_multipliers(result), [4.0], atol=1.0e-4)
+
+    def test_default_settings_reach_the_kkt_point(self):
+        for maxiter in (30, 200):
+            with self.subTest(maxiter=maxiter):
+                self.assert_kkt(
+                    minimize_alm([0.0], ["g"], pulled_out, ALMSettings(), {"maxiter": maxiter})
+                )
+
+    def test_a_start_on_the_binding_row_reaches_its_multiplier(self):
+        # Grok's G2 example too: at x = 1 with lambda = 0 the old gate (the
+        # fitted residual, 0) updated lambda by rho * g = 0 on every outer.
+        self.assert_kkt(minimize_alm([1.0], ["g"], pulled_out, ALMSettings(), {"maxiter": 200}))
+
+    def test_the_first_step_raises_the_penalty_instead_of_stalling(self):
+        events = []
+        minimize_alm(
+            [0.0], ["g"], pulled_out, ALMSettings(), {"maxiter": 200},
+            on_outer_step=events.append,
+        )
+        first = events[0]
+        self.assertEqual(first.action, "penalty_increase")
+        np.testing.assert_allclose(first.inner.x, [7.0 / 3.0], atol=1.0e-6)
+
+    def test_a_box_that_cannot_hold_the_step_within_the_slack_raises_the_penalty(self):
+        # One attempt per subproblem: the box around x = 0 contains 7/3, the
+        # step cannot shrink, and the rejected step used to be rolled back
+        # with the same radius on every continuation.
+        result = minimize_alm(
+            [0.0], ["g"], pulled_out,
+            ALMSettings(trust_radius_init=4.0, max_inner_attempts=1), {"maxiter": 200},
+        )
+        self.assert_kkt(result)
+
+
 class DualUpdateGateTests(unittest.TestCase):
     """G2 = B3 (policy.py): the multiplier update was gated on the fitted
     active-set residual instead of the augmented-gradient norm, so it ran at

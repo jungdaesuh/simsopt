@@ -1028,10 +1028,10 @@ class AlmInnerStepOffsetTests(unittest.TestCase):
                  "feasibility_values": np.zeros(1), "dual_update_values": np.array([-1.0])}
         trial = dict(start, total=1.5, nonfinite_evaluation=True)
         result = SimpleNamespace(success=True, nit=1, message="ok")
-        self.assertFalse(alm_inner._candidate_is_acceptable(start, trial, result, 10.0, 1.0e-6))
+        self.assertFalse(alm_inner._candidate_is_acceptable(start, trial, result, 10.0))
         self.assertTrue(
             alm_inner._candidate_is_acceptable(start, dict(trial, nonfinite_evaluation=False),
-                                               result, 10.0, 1.0e-6)
+                                               result, 10.0)
         )
 
 
@@ -1549,21 +1549,21 @@ class AlmLibraryTrustRadiusCharacterizationTests(unittest.TestCase):
     DEFAULT_PINS = {
         "termination_reason": "max_outer_restored_best_feasible",
         "restored": True,
-        "counts": (13, 6),
+        "counts": (14, 6),
         "x": ["0x1.4000000000000p-1", "0x1.4000000000000p-1"],
-        "trust_radius": "0x1.b000000000000p-1",
+        "trust_radius": "0x1.4400000000000p+0",
         "penalty": "0x1.0000000000000p+0",
         "steps": [
             (1, 0, "subproblem_continue", "boxed", 1, "0x1.8000000000000p-2"),
             (1, 1, "subproblem_continue", "boxed", 1, "0x1.2000000000000p-1"),
             (1, 2, "penalty_increase", "boxed", 1, "0x1.b000000000000p-1"),
             (2, 0, "penalty_increase", "boxed", 1, "0x1.b000000000000p-1"),
-            (3, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
-            (4, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
-            (5, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
-            (6, 0, "dual_update", "boxed", 1, "0x1.b000000000000p-1"),
+            (3, 0, "dual_update", "boxed", 1, "0x1.4400000000000p+0"),
+            (4, 0, "dual_update", "boxed", 1, "0x1.4400000000000p+0"),
+            (5, 0, "dual_update", "boxed", 1, "0x1.4400000000000p+0"),
+            (6, 0, "dual_update", "boxed", 1, "0x1.4400000000000p+0"),
         ],
-        "digest": "3bd6fc86d4894a862e8d070793288b3c8dce5e333a526a8189a14bd90ffe8277",
+        "digest": "2466d78a254590567066755e0597e8b0a25b68628ea0632b76f821fe77e2e7c6",
     }
 
     def test_library_radius_without_a_policy_takes_the_default_path(self):

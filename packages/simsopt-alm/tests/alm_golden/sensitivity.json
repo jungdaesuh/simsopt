@@ -92,11 +92,11 @@
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
   "simsopt_alm/history.py": "d83a19e1377b4a9e4d9c3627350fd1a21aeed92d",
   "simsopt_alm/hybrid.py": "38ea723be129746c1bcc4d00b9db2ed438f30aa8",
-  "simsopt_alm/inner.py": "19317666a8c6a34aad554f8cc79161768f411696",
+  "simsopt_alm/inner.py": "d5423a561b335894e84a7707ddc02b8d79822445",
   "simsopt_alm/policy.py": "50e4b921f2cbe303b6845883968a7fcff678f76e",
   "simsopt_alm/problem.py": "1e145040b215ac60c6c7264fd59a7807b0ac3013",
   "simsopt_alm/taylor.py": "1128723b36bd64c5f50f788c66053a89d55d5f9d",
-  "alm_golden_scenarios.py": "a2c5929fe4794e94ee98bb028a0a110f5a9c0e7b",
+  "alm_golden_scenarios.py": "14ace84c61a505a96045afc040684cf870f9df52",
   "generate_alm_golden.py": "53b2b380127b0621fdb2ff5c0c3cc351f0652211",
   "measure_alm_golden_sensitivity.py": "434f817334fe11f58e8ff9311db6bca2570a7fed"
  },
@@ -345,10 +345,11 @@
    }
   },
   "constraints_inactive_stall": {
-   "label_only": null,
+   "label_only": "outcomes change under 1 ulp, seed 1: ['callback:accepted_callback', 'callback:inner_callback']",
    "observed_outcomes": [
     "action:constraints_inactive_stall",
     "action:subproblem_continue",
+    "callback:accepted_callback",
     "callback:evaluate_problem",
     "callback:inner_callback",
     "callback:on_outer_boundary",
@@ -361,7 +362,6 @@
     "action:constraints_inactive_stall",
     "action:subproblem_continue",
     "callback:evaluate_problem",
-    "callback:inner_callback",
     "callback:on_outer_boundary",
     "callback:on_outer_step",
     "callback:outer_state_callback",
@@ -370,8 +370,8 @@
    ],
    "unstable_intended_outcomes": [],
    "spread": {
-    "x": 2.220446049250313e-16,
-    "objective": 8.526512829121202e-16,
+    "x": 0.0,
+    "objective": 0.0,
     "max_violation": 0.0,
     "multipliers": 0.0,
     "penalty": 0.0
@@ -495,10 +495,10 @@
    ],
    "unstable_intended_outcomes": [],
    "spread": {
-    "x": 1.991510404862091e-15,
-    "objective": 1.4602442711798678e-15,
-    "max_violation": 2.4424906541753444e-15,
-    "multipliers": 8.45545855554519e-15,
+    "x": 1.2391620296919675e-14,
+    "objective": 3.6506106779496695e-15,
+    "max_violation": 1.3319640529418919e-14,
+    "multipliers": 7.126743639673813e-14,
     "penalty": 0.0
    }
   },

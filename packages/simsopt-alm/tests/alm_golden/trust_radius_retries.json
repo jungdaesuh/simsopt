@@ -26,7 +26,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a5p+0",
+      "0x1.00e2c4a6886a6p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -45,10 +45,10 @@
       1
      ],
      "data": [
-      "0x1.c5894d10d4a00p-9"
+      "0x1.c5894d10d4c00p-9"
      ]
     },
-    "max_violation": "0x1.c5894d10d4a00p-9",
+    "max_violation": "0x1.c5894d10d4c00p-9",
     "multipliers": {
      "$ndarray": "<f8",
      "shape": [
@@ -59,7 +59,7 @@
      ]
     },
     "penalty": "0x1.9000000000000p+6",
-    "stationarity_norm": "0x1.6253443526280p-2",
+    "stationarity_norm": "0x1.6253443526440p-2",
     "kkt_stationarity_norm": "0x0.0p+0",
     "nit": 17,
     "outer_iterations": 4,
@@ -85,7 +85,7 @@
         2
        ],
        "data": [
-        "0x1.6253443526280p-2",
+        "0x1.6253443526440p-2",
         "0x0.0p+0"
        ]
       },
@@ -95,7 +95,7 @@
         1
        ],
        "data": [
-        "0x1.c5894d10d4a00p-9"
+        "0x1.c5894d10d4c00p-9"
        ]
       },
       "constraint_grads": {
@@ -118,7 +118,7 @@
         1
        ],
        "data": [
-        "0x1.c5894d10d4a00p-9"
+        "0x1.c5894d10d4c00p-9"
        ]
       },
       "feasibility_values": {
@@ -127,19 +127,19 @@
         1
        ],
        "data": [
-        "0x1.c5894d10d4a00p-9"
+        "0x1.c5894d10d4c00p-9"
        ]
       },
-      "max_violation": "0x1.c5894d10d4a00p-9",
-      "max_feasibility_violation": "0x1.c5894d10d4a00p-9",
-      "stationarity_norm": "0x1.6253443526280p-2",
+      "max_violation": "0x1.c5894d10d4c00p-9",
+      "max_feasibility_violation": "0x1.c5894d10d4c00p-9",
+      "stationarity_norm": "0x1.6253443526440p-2",
       "positive_shift_values": {
        "$ndarray": "<f8",
        "shape": [
         1
        ],
        "data": [
-        "0x1.256cf47c038b5p+4"
+        "0x1.256cf47c038bcp+4"
        ]
       },
       "augmented_term_by_constraint": {
@@ -148,7 +148,7 @@
         1
        ],
        "data": [
-        "0x1.0177dac0c0743p-4"
+        "0x1.0177dac0c088cp-4"
        ]
       }
      }
@@ -161,7 +161,7 @@
         2
        ],
        "data": [
-        "0x1.00e2c4a6886a5p+0",
+        "0x1.00e2c4a6886a6p+0",
         "0x1.0000000000000p+0"
        ]
       },
@@ -312,30 +312,30 @@
      "0x1.9000000000000p+6"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.0000000000000p+0",
-    "stationarity_norm": "0x1.5000000000000p+6",
-    "raw_stationarity_norm": "0x1.5000000000000p+6",
+    "max_violation": "0x1.8000000000000p+0",
+    "stationarity_norm": "0x1.0e00000000000p+7",
+    "raw_stationarity_norm": "0x1.0e00000000000p+7",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
     "violation_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
     "solver_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
     "hard_signed_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
     "hard_violation_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
-    "hard_max_violation": "0x1.0000000000000p+0",
-    "surrogate_max_value": "0x1.0000000000000p+0",
+    "hard_max_violation": "0x1.8000000000000p+0",
+    "surrogate_max_value": "0x1.8000000000000p+0",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
@@ -352,16 +352,16 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.8000000000000p+2",
+    "inner_lbfgsb_projected_gradient_norm": "0x0.0p+0",
     "inner_attempts": 2,
-    "accepted_move_norm": "0x0.0p+0",
-    "accepted_move_norm_scaled": "0x0.0p+0",
+    "accepted_move_norm": "0x1.0000000000000p-1",
+    "accepted_move_norm_scaled": "0x1.c9f25c5bfedd9p-3",
     "infeasible_stall_move_tolerance": "0x1.80274f468e3cfp-26",
-    "objective_delta": "0x0.0p+0",
-    "feasibility_delta": "0x0.0p+0",
-    "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x0.0p+0",
-    "meaningful_progress": false,
+    "objective_delta": "0x1.8000000000000p+0",
+    "feasibility_delta": "-0x1.0000000000000p-1",
+    "feasibility_delta_tolerance": "0x1.92a737110e454p-20",
+    "stationarity_delta": "0x1.8000000000000p+2",
+    "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
     "inner_false_success": false,
@@ -372,23 +372,23 @@
     "nonfinite_candidate_fields": null,
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
-    "conditioning_base_objective": "0x1.0000000000000p+6",
-    "conditioning_penalty_objective": "0x1.9000000000000p+5",
-    "conditioning_penalty_objective_ratio": "0x1.9000000000000p-1",
-    "conditioning_total_grad_norm": "0x1.5000000000000p+6",
-    "conditioning_base_grad_norm": "0x1.0000000000000p+4",
-    "conditioning_penalty_grad_norm": "0x1.9000000000000p+6",
-    "conditioning_penalty_grad_ratio": "0x1.9000000000000p+2",
-    "penalty_gradient_norm": "0x1.9000000000000p+6",
-    "sufficient_decrease_measure": "0x1.0000000000000p+0",
+    "conditioning_base_objective": "0x1.c200000000000p+5",
+    "conditioning_penalty_objective": "0x1.c200000000000p+6",
+    "conditioning_penalty_objective_ratio": "0x1.0000000000000p+1",
+    "conditioning_total_grad_norm": "0x1.0e00000000000p+7",
+    "conditioning_base_grad_norm": "0x1.e000000000000p+3",
+    "conditioning_penalty_grad_norm": "0x1.2c00000000000p+7",
+    "conditioning_penalty_grad_ratio": "0x1.4000000000000p+3",
+    "penalty_gradient_norm": "0x1.2c00000000000p+7",
+    "sufficient_decrease_measure": "0x1.8000000000000p+0",
     "action": "penalty_increase",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.0000000000000p+0"
+     "0x1.8000000000000p+0"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
@@ -397,13 +397,13 @@
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.9000000000000p+6"
+     "0x1.2c00000000000p+7"
     ],
     "augmented_term_by_constraint": [
-     "0x1.9000000000000p+5"
+     "0x1.c200000000000p+6"
     ],
     "active_pressure_by_constraint": [
-     "0x1.9000000000000p+6"
+     "0x1.c200000000000p+7"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -411,8 +411,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.47ae147ae147bp+0",
-    "augmented_gradient_norm": "0x1.5000000000000p+6",
+    "objective_to_augmented_term_ratio": "0x1.0000000000000p-1",
+    "augmented_gradient_norm": "0x1.0e00000000000p+7",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -437,37 +437,37 @@
      "0x1.9000000000000p+6"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.6969696969698p-3",
-    "stationarity_norm": "0x1.0000000000000p-48",
-    "raw_stationarity_norm": "0x1.0000000000000p-48",
+    "max_violation": "0x1.6969696969690p-3",
+    "stationarity_norm": "0x1.8000000000000p-46",
+    "raw_stationarity_norm": "0x1.8000000000000p-46",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
     "violation_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
     "solver_constraint_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
     "hard_signed_constraint_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
     "hard_violation_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
-    "hard_max_violation": "0x1.6969696969698p-3",
-    "surrogate_max_value": "0x1.6969696969698p-3",
+    "hard_max_violation": "0x1.6969696969690p-3",
+    "surrogate_max_value": "0x1.6969696969690p-3",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
      "0x0.0p+0"
     ],
     "post_update_multipliers": [
-     "0x1.1a5a5a5a5a5a7p+4"
+     "0x1.1a5a5a5a5a5a0p+4"
     ],
     "feasibility_tolerance": "0x1.430cd74f6d478p-1",
     "effective_feasibility_tolerance": "0x1.47ae147ae147bp-7",
@@ -477,15 +477,15 @@
     "inner_maxls": 20,
     "inner_maxfun": null,
     "inner_profile": "boxed",
-    "inner_lbfgsb_projected_gradient_norm": "0x1.0000000000000p-48",
+    "inner_lbfgsb_projected_gradient_norm": "0x1.8000000000000p-46",
     "inner_attempts": 1,
-    "accepted_move_norm": "0x1.a5a5a5a5a5a5ap-1",
-    "accepted_move_norm_scaled": "0x1.7921f1b52c3dfp-2",
-    "infeasible_stall_move_tolerance": "0x1.80274f468e3cfp-26",
-    "objective_delta": "0x1.14b4b4b4b4b48p+5",
-    "feasibility_delta": "0x1.a5a5a5a5a5a5ap-1",
-    "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x1.5000000000000p+6",
+    "accepted_move_norm": "0x1.52d2d2d2d2d2ep+0",
+    "accepted_move_norm_scaled": "0x1.f757f61ad619fp-2",
+    "infeasible_stall_move_tolerance": "0x1.ce9506c5ff273p-26",
+    "objective_delta": "0x1.655a5a5a5a5a5p+6",
+    "feasibility_delta": "0x1.52d2d2d2d2d2ep+0",
+    "feasibility_delta_tolerance": "0x1.92a737110e454p-20",
+    "stationarity_delta": "0x1.0dfffffffffffp+7",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -498,22 +498,22 @@
     "multiplier_cap_binding": false,
     "multiplier_cap_binding_indices": [],
     "conditioning_base_objective": "0x1.376b2ef2b67a5p+6",
-    "conditioning_penalty_objective": "0x1.8e9dacbbcadc0p+0",
-    "conditioning_penalty_objective_ratio": "0x1.47ae147ae1495p-6",
-    "conditioning_total_grad_norm": "0x1.0000000000000p-48",
+    "conditioning_penalty_objective": "0x1.8e9dacbbcad80p+0",
+    "conditioning_penalty_objective_ratio": "0x1.47ae147ae1461p-6",
+    "conditioning_total_grad_norm": "0x1.8000000000000p-46",
     "conditioning_base_grad_norm": "0x1.1a5a5a5a5a5a6p+4",
-    "conditioning_penalty_grad_norm": "0x1.1a5a5a5a5a5a7p+4",
-    "conditioning_penalty_grad_ratio": "0x1.0000000000001p+0",
-    "penalty_gradient_norm": "0x1.1a5a5a5a5a5a7p+4",
-    "sufficient_decrease_measure": "0x1.6969696969698p-3",
+    "conditioning_penalty_grad_norm": "0x1.1a5a5a5a5a5a0p+4",
+    "conditioning_penalty_grad_ratio": "0x1.ffffffffffff5p-1",
+    "penalty_gradient_norm": "0x1.1a5a5a5a5a5a0p+4",
+    "sufficient_decrease_measure": "0x1.6969696969690p-3",
     "action": "dual_update",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.6969696969698p-3"
+     "0x1.6969696969690p-3"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
@@ -522,13 +522,13 @@
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
-     "0x1.1a5a5a5a5a5a7p+4"
+     "0x1.1a5a5a5a5a5a0p+4"
     ],
     "augmented_term_by_constraint": [
-     "0x1.8e9dacbbcada3p+0"
+     "0x1.8e9dacbbcad8ep+0"
     ],
     "active_pressure_by_constraint": [
-     "0x1.8e9dacbbcada2p+1"
+     "0x1.8e9dacbbcad8fp+1"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -536,8 +536,8 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.8fffffffffffdp+5",
-    "augmented_gradient_norm": "0x1.0000000000000p-48",
+    "objective_to_augmented_term_ratio": "0x1.9000000000012p+5",
+    "augmented_gradient_norm": "0x1.8000000000000p-46",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
     "max_raw_hard_violation": null,
@@ -562,34 +562,34 @@
      "0x1.9000000000000p+6"
     ],
     "block_penalties": null,
-    "max_violation": "0x1.c5894d10d4a00p-9",
+    "max_violation": "0x1.c5894d10d4c00p-9",
     "stationarity_norm": "0x1.8000000000000p-47",
     "raw_stationarity_norm": "0x1.8000000000000p-47",
     "kkt_stationarity_norm": "0x0.0p+0",
     "constraint_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
     "violation_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
     "solver_constraint_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
     "hard_signed_constraint_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
     "hard_violation_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
     "surrogate_signed_constraint_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
-    "hard_max_violation": "0x1.c5894d10d4a00p-9",
-    "surrogate_max_value": "0x1.c5894d10d4a00p-9",
+    "hard_max_violation": "0x1.c5894d10d4c00p-9",
+    "surrogate_max_value": "0x1.c5894d10d4c00p-9",
     "hard_positive_shift_zero": false,
     "signal_mismatch_active": false,
     "multipliers": [
-     "0x1.1a5a5a5a5a5a7p+4"
+     "0x1.1a5a5a5a5a5a0p+4"
     ],
     "post_update_multipliers": [
      "0x1.1fe3a76b2ef2ep+4"
@@ -604,13 +604,13 @@
     "inner_profile": "boxed",
     "inner_lbfgsb_projected_gradient_norm": "0x1.8000000000000p-47",
     "inner_attempts": 1,
-    "accepted_move_norm": "0x1.6253443526170p-3",
-    "accepted_move_norm_scaled": "0x1.caf4d5e9adbc8p-4",
+    "accepted_move_norm": "0x1.6253443526160p-3",
+    "accepted_move_norm_scaled": "0x1.caf4d5e9adbb4p-4",
     "infeasible_stall_move_tolerance": "0x1.0943eeafc3efdp-26",
-    "objective_delta": "0x1.86ccc776dafc0p+0",
-    "feasibility_delta": "0x1.6253443526170p-3",
+    "objective_delta": "0x1.86ccc776daf80p+0",
+    "feasibility_delta": "0x1.6253443526160p-3",
     "feasibility_delta_tolerance": "0x1.0c6f7a0b5ed8dp-20",
-    "stationarity_delta": "0x1.1a5a5a5a5a5a5p+4",
+    "stationarity_delta": "0x1.1a5a5a5a5a597p+4",
     "meaningful_progress": true,
     "feasible_stall_count": 0,
     "infeasible_stall": false,
@@ -630,31 +630,31 @@
     "conditioning_penalty_grad_norm": "0x1.1fe3a76b2ef2ep+4",
     "conditioning_penalty_grad_ratio": "0x1.0000000000003p+0",
     "penalty_gradient_norm": "0x1.1fe3a76b2ef2ep+4",
-    "sufficient_decrease_measure": "0x1.c5894d10d4a00p-9",
+    "sufficient_decrease_measure": "0x1.c5894d10d4c00p-9",
     "action": "dual_update",
     "outer_termination": "max_outer",
     "raw_signed_constraint_values": null,
     "normalized_signed_constraint_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
     "raw_hard_violation_values": null,
     "normalized_feasibility_values": [
-     "0x1.c5894d10d4a00p-9"
+     "0x1.c5894d10d4c00p-9"
     ],
     "constraint_scales": null,
     "constraint_blocks": null,
     "normalized_multipliers": [
-     "0x1.1a5a5a5a5a5a7p+4"
+     "0x1.1a5a5a5a5a5a0p+4"
     ],
     "raw_dual_estimates": null,
     "positive_shift_values": [
      "0x1.1fe3a76b2ef2ep+4"
     ],
     "augmented_term_by_constraint": [
-     "0x1.f920c7fdd158dp-5"
+     "0x1.f920c7fdd1806p-5"
     ],
     "active_pressure_by_constraint": [
-     "0x1.fe083ebfa9221p-5"
+     "0x1.fe083ebfa9461p-5"
     ],
     "surrogate_minus_hard_normalized_gap": [
      "0x0.0p+0"
@@ -662,7 +662,7 @@
     "surrogate_hard_sign_mismatch_by_constraint": [
      false
     ],
-    "objective_to_augmented_term_ratio": "0x1.4827c45979c49p+10",
+    "objective_to_augmented_term_ratio": "0x1.4827c45979aaep+10",
     "augmented_gradient_norm": "0x1.8000000000000p-47",
     "surrogate_kkt_stationarity_norm": "0x0.0p+0",
     "multiplier_interpretation": "differentiable_alm_multipliers",
@@ -2618,6 +2618,19 @@
     }
    },
    {
+    "event": "accepted_callback",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.4000000000000p+1",
+      "0x1.0000000000000p+0"
+     ]
+    }
+   },
+   {
     "event": "evaluate_problem",
     "x": {
      "$ndarray": "<f8",
@@ -2625,7 +2638,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.4000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2648,7 +2661,7 @@
     "action": "penalty_increase",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "baa2fd4369d5d89fbfc197cbe88bbdc0a0fb3bcc671252772003b7f173337e35"
+    "event_sha256": "0ed0f2a9232e5a1462468a98215025ef6d95c14082c7f4fe61ab9beb554c9c9d"
    },
    {
     "event": "snapshot_accepted_state",
@@ -2658,7 +2671,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.4000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2692,7 +2705,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.4000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2716,7 +2729,7 @@
       2
      ],
      "data": [
-      "0x1.0000000000000p+1",
+      "0x1.4000000000000p+1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2740,31 +2753,7 @@
       2
      ],
      "data": [
-      "-0x1.0000000000000p+0",
-      "0x1.0000000000000p+0"
-     ]
-    },
-    "multipliers": {
-     "$ndarray": "<f8",
-     "shape": [
-      1
-     ],
-     "data": [
-      "0x0.0p+0"
-     ]
-    },
-    "penalty": "0x1.9000000000000p+6",
-    "total_finite": true
-   },
-   {
-    "event": "evaluate_problem",
-    "x": {
-     "$ndarray": "<f8",
-     "shape": [
-      2
-     ],
-     "data": [
-      "0x1.d94fb87bc10b8p-1",
+      "-0x1.4000000000000p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2788,7 +2777,7 @@
       2
      ],
      "data": [
-      "0x1.d94fb87bc10b8p-1",
+      "-0x1.4000000000000p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2801,7 +2790,55 @@
       2
      ],
      "data": [
-      "0x1.1d94d309d25b3p+0",
+      "-0x1.6db6db6db6db7p-1",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.6db6db6db6db6p+0",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.09f959c427e5cp-2",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2825,7 +2862,7 @@
       2
      ],
      "data": [
-      "0x1.1d94d309d25b3p+0",
+      "0x1.09f959c427e5cp-2",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2838,7 +2875,79 @@
       2
      ],
      "data": [
-      "0x1.370c52b0958b0p+0",
+      "0x1.9000000000000p+2",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": false
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.80b94e5ba67d3p+0",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.6ff26c0f66740p-1",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.31d4390097a4fp+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2862,7 +2971,7 @@
       2
      ],
      "data": [
-      "0x1.370c52b0958b0p+0",
+      "0x1.31d4390097a4fp+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2875,7 +2984,31 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d3p+0",
+      "0x1.1d0876db19988p+0",
+      "0x1.0000000000000p+0"
+     ]
+    },
+    "multipliers": {
+     "$ndarray": "<f8",
+     "shape": [
+      1
+     ],
+     "data": [
+      "0x0.0p+0"
+     ]
+    },
+    "penalty": "0x1.9000000000000p+6",
+    "total_finite": true
+   },
+   {
+    "event": "evaluate_problem",
+    "x": {
+     "$ndarray": "<f8",
+     "shape": [
+      2
+     ],
+     "data": [
+      "0x1.2d2d2d2d2d2d2p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2899,7 +3032,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d3p+0",
+      "0x1.2d2d2d2d2d2d2p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2912,7 +3045,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d3p+0",
+      "0x1.2d2d2d2d2d2d2p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2925,7 +3058,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d3p+0",
+      "0x1.2d2d2d2d2d2d2p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -2935,7 +3068,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -2948,7 +3081,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": null,
-    "event_sha256": "42e6ee098fea6314c2551aca848e33e9b33e92c134f4c58264565dedff9b413d"
+    "event_sha256": "83bfdd9b6438213b3cddb933f0e0874582792028fc186b519f3e990b3bccfc86"
    },
    {
     "event": "snapshot_accepted_state",
@@ -2958,7 +3091,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d3p+0",
+      "0x1.2d2d2d2d2d2d2p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -2979,7 +3112,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6"
@@ -2992,7 +3125,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d3p+0",
+      "0x1.2d2d2d2d2d2d2p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3002,7 +3135,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3016,7 +3149,7 @@
       2
      ],
      "data": [
-      "0x1.2d2d2d2d2d2d3p+0",
+      "0x1.2d2d2d2d2d2d2p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3026,7 +3159,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3040,7 +3173,7 @@
       2
      ],
      "data": [
-      "-0x1.7878787878787p+0",
+      "-0x1.7878787878786p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3050,7 +3183,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3064,7 +3197,7 @@
       2
      ],
      "data": [
-      "0x1.90e1c9fed7ff4p-1",
+      "0x1.90e1c9fed7ffap-1",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3074,7 +3207,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3098,7 +3231,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3125,7 +3258,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a5p+0",
+      "0x1.00e2c4a6886a6p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3135,7 +3268,7 @@
       1
      ],
      "data": [
-      "0x1.1a5a5a5a5a5a7p+4"
+      "0x1.1a5a5a5a5a5a0p+4"
      ]
     },
     "penalty": "0x1.9000000000000p+6",
@@ -3149,7 +3282,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a5p+0",
+      "0x1.00e2c4a6886a6p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3162,7 +3295,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a5p+0",
+      "0x1.00e2c4a6886a6p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3175,7 +3308,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a5p+0",
+      "0x1.00e2c4a6886a6p+0",
       "0x1.0000000000000p+0"
      ]
     },
@@ -3198,7 +3331,7 @@
     "action": "dual_update",
     "dual_update_penalty_reason": null,
     "outer_termination": "max_outer",
-    "event_sha256": "4d79fce9b7e4651d17eaecec049b69e6e0ddcbb6c7036f17c6fc2e0e9c936efe"
+    "event_sha256": "dab7155f71734555deea6e9cedeca4df72b947ccab97c35a0f3dbd34b481b709"
    },
    {
     "event": "snapshot_accepted_state",
@@ -3208,7 +3341,7 @@
       2
      ],
      "data": [
-      "0x1.00e2c4a6886a5p+0",
+      "0x1.00e2c4a6886a6p+0",
       "0x1.0000000000000p+0"
      ]
     }
@@ -3313,7 +3446,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.0000000000000p+1",
+       "0x1.4000000000000p+1",
        "0x1.0000000000000p+0"
       ]
      },
@@ -3322,7 +3455,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.0000000000000p+1",
+         "0x1.4000000000000p+1",
          "0x1.0000000000000p+0"
         ]
        }
@@ -3346,7 +3479,7 @@
      "update_stationarity_tol": "0x1.47ae147ae147bp-7",
      "trust_radius": "0x1.8000000000000p+0",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.0000000000000p+0",
+     "sufficient_decrease_measure": "0x1.8000000000000p+0",
      "sufficient_decrease_multipliers": {
       "$tuple": [
        "0x0.0p+0"
@@ -3399,7 +3532,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.2d2d2d2d2d2d3p+0",
+       "0x1.2d2d2d2d2d2d2p+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -3408,7 +3541,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.2d2d2d2d2d2d3p+0",
+         "0x1.2d2d2d2d2d2d2p+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -3424,7 +3557,7 @@
      "completed_outer_iterations": 3,
      "multipliers": {
       "$tuple": [
-       "0x1.1a5a5a5a5a5a7p+4"
+       "0x1.1a5a5a5a5a5a0p+4"
       ]
      },
      "penalty": "0x1.9000000000000p+6",
@@ -3432,7 +3565,7 @@
      "update_stationarity_tol": "0x1.0624dd2f1a9fcp-10",
      "trust_radius": "0x1.2000000000000p+1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.6969696969698p-3",
+     "sufficient_decrease_measure": "0x1.6969696969690p-3",
      "sufficient_decrease_multipliers": {
       "$tuple": [
        "0x0.0p+0"
@@ -3485,7 +3618,7 @@
     "fields": {
      "x": {
       "$tuple": [
-       "0x1.00e2c4a6886a5p+0",
+       "0x1.00e2c4a6886a6p+0",
        "0x1.0000000000000p+0"
       ]
      },
@@ -3494,7 +3627,7 @@
       "fields": {
        "x": {
         "$tuple": [
-         "0x1.00e2c4a6886a5p+0",
+         "0x1.00e2c4a6886a6p+0",
          "0x1.0000000000000p+0"
         ]
        }
@@ -3518,10 +3651,10 @@
      "update_stationarity_tol": "0x1.a36e2eb1c432dp-14",
      "trust_radius": "0x1.2000000000000p+1",
      "last_cap_binding_active": false,
-     "sufficient_decrease_measure": "0x1.c5894d10d4a00p-9",
+     "sufficient_decrease_measure": "0x1.c5894d10d4c00p-9",
      "sufficient_decrease_multipliers": {
       "$tuple": [
-       "0x1.1a5a5a5a5a5a7p+4"
+       "0x1.1a5a5a5a5a5a0p+4"
       ]
      },
      "sufficient_decrease_penalty": "0x1.9000000000000p+6",
