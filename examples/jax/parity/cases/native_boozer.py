@@ -87,8 +87,10 @@ native lane's own first-stage end (which each JAX lane recomputes in-process
 by running the native first stage, under the lane's one-thread policy) and
 upstream's nine pre-registered first-stage ends at the case's scale (the
 tracked scatter record, frozen into the input bundle).  The starts are compared
-exactly, the Newton end states at the case's same-state tolerance, and every
-replayed solve must succeed.
+exactly; every replayed solve must meet upstream's success rule
+``norm(J^T r) <= tol``; and the two lanes' solved states must lie within the sum
+of their stopping radii, ``(norm(b_native) + norm(b_jax)) / min(lambda_min)``
+(PLAN.md amendment 6, B1', the arbiter's ``stopping_bound`` comparator).
 """
 
 from __future__ import annotations
@@ -211,18 +213,18 @@ REPLAY_EXACT_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:area_solver_success",
     "replay:flux_solver_success",
 )
-#: The replayed Newton end states, compared at the case's same-state tolerance.  No residual norm:
-#: at an area root the plain residual sits at its own rounding level.
-REPLAY_STATE_OBSERVABLES: Final[tuple[str, ...]] = (
-    "replay:area_iota",
-    "replay:area_G",
+#: The replayed Newton solutions, one row per start: the solved state (surface dofs, iota, G), then
+#: the stage's end norm(J^T r), then lambda_min(J^T J) at that state, each from the lane's own run.
+#: The arbiter's ``stopping_bound`` comparator judges them (PLAN.md amendment 6, B1').
+REPLAY_SOLUTION_OBSERVABLES: Final[tuple[str, ...]] = (
+    "replay:area_solution",
+    "replay:flux_solution",
+)
+#: Functions of the judged solutions, published and recorded, informational.
+REPLAY_DERIVED_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:area_label",
-    "replay:area_surface_dofs",
     "replay:flux_target",
-    "replay:flux_iota",
-    "replay:flux_G",
     "replay:flux_label",
-    "replay:flux_surface_dofs",
 )
 #: Integer code of each normalized stopping reason, for publication as a parity
 #: observable: the arbiter compares numeric arrays only (it calls
@@ -929,6 +931,24 @@ def _values(
     }
 
 
+def _solution_row(outcome: BoozerStageOutcome) -> np.ndarray:
+    """One ``replay:*_solution`` row: the solved state, norm(J^T r), lambda_min(J^T J)."""
+    return np.concatenate(
+        (
+            np.asarray(outcome.state.surface_dofs, dtype=np.float64),
+            np.asarray(
+                [
+                    outcome.state.iota,
+                    outcome.state.G,
+                    outcome.gradient_norm,
+                    outcome.normal_matrix_min_eigenvalue,
+                ],
+                dtype=np.float64,
+            ),
+        )
+    )
+
+
 def _replay_values(
     starts: tuple[BoozerStageState, ...], replays: tuple[_NewtonStages, ...]
 ) -> dict[str, np.ndarray]:
@@ -946,26 +966,16 @@ def _replay_values(
         ),
         "replay:start_iota": floats(start.iota for start in starts),
         "replay:start_G": floats(start.G for start in starts),
-        "replay:area_iota": floats(replay.area.state.iota for replay in replays),
-        "replay:area_G": floats(replay.area.state.G for replay in replays),
-        "replay:area_label": floats(replay.area_label for replay in replays),
-        "replay:area_surface_dofs": np.stack(
-            [
-                np.asarray(replay.area.state.surface_dofs, dtype=np.float64)
-                for replay in replays
-            ]
+        "replay:area_solution": np.stack(
+            [_solution_row(replay.area) for replay in replays]
         ),
+        "replay:area_label": floats(replay.area_label for replay in replays),
         "replay:area_solver_success": flags(replay.area.success for replay in replays),
         "replay:flux_target": floats(replay.flux_target for replay in replays),
-        "replay:flux_iota": floats(replay.flux.state.iota for replay in replays),
-        "replay:flux_G": floats(replay.flux.state.G for replay in replays),
-        "replay:flux_label": floats(replay.flux_label for replay in replays),
-        "replay:flux_surface_dofs": np.stack(
-            [
-                np.asarray(replay.flux.state.surface_dofs, dtype=np.float64)
-                for replay in replays
-            ]
+        "replay:flux_solution": np.stack(
+            [_solution_row(replay.flux) for replay in replays]
         ),
+        "replay:flux_label": floats(replay.flux_label for replay in replays),
         "replay:flux_solver_success": flags(replay.flux.success for replay in replays),
     }
 
@@ -984,6 +994,19 @@ def _observation(
         and bool(values["flux:solver_success"])
         and bool(np.all(values["replay:area_solver_success"]))
         and bool(np.all(values["replay:flux_solver_success"]))
+        # Upstream's own success rule, norm(J^T r) <= tol, on every replayed solve.
+        and bool(
+            np.all(
+                values["replay:area_solution"][:, -2]
+                <= _configuration_float(bundle.configuration, "solver_tolerance")
+            )
+        )
+        and bool(
+            np.all(
+                values["replay:flux_solution"][:, -2]
+                <= _configuration_float(bundle.configuration, "solver_tolerance")
+            )
+        )
         and np.all(np.isfinite(values["flux:surface_dofs"]))
         and np.isfinite(float(values["flux:residual_norm"]))
         and float(values["flux:residual_norm"]) < float(values["initial:residual_norm"])

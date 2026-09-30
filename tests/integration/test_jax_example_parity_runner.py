@@ -251,7 +251,6 @@ def test_native_workflow_tolerance_is_centrally_owned_and_adversarial() -> None:
     (
         ("mirror_boozer_value", 1.0e-3, 1.0e-8),
         ("mirror_boozer_parameters", 0.0, 2.0e-3),
-        ("mirror_boozer_same_start", 1.0e-11, 1.0e-13),
         ("mirror_optimization_5e2", 5.0e-2, 1.0e-9),
         ("mirror_optimization_3e2", 3.0e-2, 1.0e-9),
         ("mirror_optimization_2e2", 2.0e-2, 1.0e-9),
@@ -3660,3 +3659,76 @@ def test_run_parity_records_and_the_audit_recomputes_a_stage_wise_contract(
     _declare(monkeypatch, audit_module, _round_trip_declaration())
     with pytest.raises(ValueError, match="stored stage-wise contract differs"):
         audit_published_run(published, repo_root=repo_root)
+
+
+# ------------------------------------------------ stopping-bound comparator (PLAN.md amendment 6, B1')
+_SOLUTION_KEY = "replay:area_solution"
+
+
+def _solution_routes() -> tuple[ComparisonRoute, ...]:
+    return (
+        *_routes(),
+        *_judged_routes(
+            _SOLUTION_KEY, comparator="stopping_bound", bucket="native_workflow"
+        ),
+    )
+
+
+def _solution_observations(rows: dict[str, list[float]]) -> dict[str, LaneObservation]:
+    """Each lane's solution rows: state (two entries), norm(J^T r), lambda_min(J^T J)."""
+    return {
+        lane: dataclasses.replace(
+            observation,
+            values={
+                "initial:objective_sum_squares": np.asarray(1.0, dtype=np.float64),
+                _SOLUTION_KEY: np.asarray([rows[lane]], dtype=np.float64),
+            },
+            applicability={},
+        )
+        for lane, observation in _observations().items()
+    }
+
+
+def test_stopping_bound_passes_a_gap_inside_the_sum_of_the_stopping_radii() -> None:
+    # native-jax-cpu: gap 6e-10 <= (1e-11 + 2e-11) / 0.04 = 7.5e-10; native-jax-gpu:
+    # gap 3e-10 <= (1e-11 + 1e-11) / 0.05 = 4e-10; jax-cpu-jax-gpu: gap 6.7e-10 <= 7.5e-10.
+    result = arbitrate(
+        _solution_routes(),
+        _solution_observations(
+            {
+                "native-cpu": [1.0, -0.2, 1.0e-11, 0.05],
+                "jax-cpu": [1.0 + 6.0e-10, -0.2, 2.0e-11, 0.04],
+                "jax-gpu": [1.0, -0.2 + 3.0e-10, 1.0e-11, 0.05],
+            }
+        ),
+    )
+
+    assert result.verdict == "pass"
+    judged = [item for item in result.comparisons if item.observable == "area_solution"]
+    assert judged and all(
+        item.diagnostic.startswith("stopping_bound") for item in judged
+    )
+
+
+@pytest.mark.parametrize(
+    ("jax_row", "why"),
+    (
+        ([1.0 + 8.0e-10, -0.2, 2.0e-11, 0.04], "gap beyond the radii"),
+        ([1.0, -0.2, 1.0e-11, 0.0], "no curvature"),
+    ),
+)
+def test_stopping_bound_fails_outside_the_radii_or_without_curvature(
+    jax_row: list[float], why: str
+) -> None:
+    result = arbitrate(
+        _solution_routes(),
+        _solution_observations(
+            {
+                "native-cpu": [1.0, -0.2, 1.0e-11, 0.05],
+                "jax-cpu": jax_row,
+                "jax-gpu": [1.0, -0.2, 1.0e-11, 0.05],
+            }
+        ),
+    )
+
+    assert result.verdict == "fail", why

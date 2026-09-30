@@ -16,7 +16,10 @@ from examples.jax.parity.cases.native_boozer import (
     REPLAY_EXACT_OBSERVABLES as NATIVE_BOOZER_REPLAY_EXACT_OBSERVABLES,
 )
 from examples.jax.parity.cases.native_boozer import (
-    REPLAY_STATE_OBSERVABLES as NATIVE_BOOZER_REPLAY_STATE_OBSERVABLES,
+    REPLAY_DERIVED_OBSERVABLES as NATIVE_BOOZER_REPLAY_DERIVED_OBSERVABLES,
+)
+from examples.jax.parity.cases.native_boozer import (
+    REPLAY_SOLUTION_OBSERVABLES as NATIVE_BOOZER_REPLAY_SOLUTION_OBSERVABLES,
 )
 from examples.jax.parity.cases.native_boozer import (
     create_input as create_native_boozer_input,
@@ -345,10 +348,13 @@ _CASES = {
             StageWiseContract(
                 case_id="native-boozer",
                 scale=scale,
-                informational_observables=NATIVE_BOOZER_END_STATE_OBSERVABLES,
+                informational_observables=(
+                    *NATIVE_BOOZER_END_STATE_OBSERVABLES,
+                    *NATIVE_BOOZER_REPLAY_DERIVED_OBSERVABLES,
+                ),
                 deciding_observables=(
                     *NATIVE_BOOZER_REPLAY_EXACT_OBSERVABLES,
-                    *NATIVE_BOOZER_REPLAY_STATE_OBSERVABLES,
+                    *NATIVE_BOOZER_REPLAY_SOLUTION_OBSERVABLES,
                 ),
                 same_state_tests=(
                     "tests/integration/test_jax_mirror_boozer_official_end_states.py",
@@ -361,9 +367,12 @@ _CASES = {
                     f"pre-registered first-stage ends k = 0..8 at {scale} (9e027eac3, one thread, "
                     "one-ulp protocol; tracked scatter record keys first:surface_dofs, first:iota, "
                     "first:G) -- every lane runs the official area and flux Newton stages; the starts "
-                    "and success flags are compared exactly and the end states at the case's "
-                    "same-state tolerance (rtol 1e-11, atol 1e-13), and every replayed solve must "
-                    "succeed. The chained end state is informational: the first stage's capped, "
+                    "and success flags are compared exactly, every replayed solve must meet upstream's "
+                    "success rule norm(J^T r) <= tol, and the two lanes' solved states must lie "
+                    "within (norm(b_native) + norm(b_jax)) / min(lambda_min(J^T J)) of each other "
+                    "(amendment 6, B1', set post hoc by the user after the 1e-11 rule failed at the "
+                    "bounded k8 start; labels and the flux target informational). The chained end "
+                    "state is informational: the first stage's capped, "
                     "path-dependent L-BFGS end point decides which surface the chain reaches. "
                     "The first stage itself is judged at identical x (x0 and upstream's nine "
                     "first-stage ends) against a derived first-order rounding bound (amendment 5 "

@@ -17,9 +17,10 @@ from examples.jax.parity.arbiter import (
 from examples.jax.parity.cases import get_case, implemented_case_ids
 from examples.jax.parity.cases.native_boozer import (
     END_STATE_OBSERVABLES,
+    REPLAY_DERIVED_OBSERVABLES,
     REPLAY_EXACT_OBSERVABLES,
+    REPLAY_SOLUTION_OBSERVABLES,
     REPLAY_STARTS,
-    REPLAY_STATE_OBSERVABLES,
 )
 from examples.jax.parity.cases.native_boozer import create_input as create_boozer_input
 from examples.jax.parity.input_bundle import load_input_bundle
@@ -360,10 +361,13 @@ def test_boozer_is_judged_stage_wise_with_its_end_state_set_informational(
     contract = case.stage_wise(scale)
     assert contract is not None
 
-    assert contract.informational_observables == END_STATE_OBSERVABLES
+    assert contract.informational_observables == (
+        *END_STATE_OBSERVABLES,
+        *REPLAY_DERIVED_OBSERVABLES,
+    )
     assert contract.deciding_observables == (
         *REPLAY_EXACT_OBSERVABLES,
-        *REPLAY_STATE_OBSERVABLES,
+        *REPLAY_SOLUTION_OBSERVABLES,
     )
     assert contract.same_state_tests == (
         "tests/integration/test_jax_mirror_boozer_official_end_states.py",
@@ -377,9 +381,11 @@ def test_boozer_is_judged_stage_wise_with_its_end_state_set_informational(
     }
     for key in REPLAY_EXACT_OBSERVABLES:
         assert routes[key].applicable and routes[key].comparator == "exact", key
-    for key in REPLAY_STATE_OBSERVABLES:
-        assert routes[key].applicable and routes[key].comparator == "allclose", key
-        assert routes[key].tolerance_bucket == "mirror_boozer_same_start", key
+    for key in REPLAY_SOLUTION_OBSERVABLES:
+        assert routes[key].applicable, key
+        assert routes[key].comparator == "stopping_bound", key
+    for key in REPLAY_DERIVED_OBSERVABLES:
+        assert routes[key].applicable, key
     for key in END_STATE_OBSERVABLES:
         assert routes[key].applicable, key
 

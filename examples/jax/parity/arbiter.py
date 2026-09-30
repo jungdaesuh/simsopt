@@ -489,6 +489,25 @@ def _require_fp64(lane: str, value_key: str, value: np.ndarray) -> None:
         )
 
 
+def stopping_bound_gaps(
+    left: np.ndarray, right: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row solved-state gap and its stopping-radius bound (PLAN.md amendment 6, B1').
+
+    Each row of ``left`` and ``right`` is one lane's solution of one least-squares
+    solve: the state x, then that solve's end ``norm(J^T r)``, then
+    ``lambda_min(J^T J)`` at x, both from the lane's own run. With ``b = J^T r``
+    the gradient of ``f = 1/2 |r|^2`` and ``mu`` a lower bound on the curvature
+    along the segment to the root x*, ``|x - x*| <= |b| / mu`` for each lane, so
+    by the triangle inequality ``|x_l - x_r| <= (|b_l| + |b_r|) / mu``; ``mu`` is
+    the smaller Gauss-Newton curvature ``min(lambda_l, lambda_r)``. Returns the
+    Euclidean gap per row and that bound per row.
+    """
+    gap = np.linalg.norm(left[..., :-2] - right[..., :-2], axis=-1)
+    bound = (left[..., -2] + right[..., -2]) / np.minimum(left[..., -1], right[..., -1])
+    return gap, bound
+
+
 def _compare(
     route: ComparisonRoute, left: np.ndarray, right: np.ndarray
 ) -> tuple[bool, str]:
@@ -511,6 +530,16 @@ def _compare(
         rtol, atol = _route_tolerance(route)
         upper_bound = left + rtol * np.abs(left) + atol
         return bool(np.all(right <= upper_bound)), f"not_worse rtol={rtol} atol={atol}"
+    if route.comparator == "stopping_bound":
+        gap, bound = stopping_bound_gaps(left, right)
+        curvature = np.minimum(left[..., -1], right[..., -1])
+        passed = bool(np.all(curvature > 0.0) and np.all(gap <= bound))
+        ratio = np.where(
+            gap == 0.0,
+            0.0,
+            np.where(bound > 0.0, gap / np.where(bound > 0.0, bound, 1.0), np.inf),
+        )
+        return passed, f"stopping_bound: max gap/bound {float(np.max(ratio)):.3e}"
     raise ArbitrationError(
         "equivalent comparator requires a case-owned invariant: "
         f"{route.phase}:{route.observable}"

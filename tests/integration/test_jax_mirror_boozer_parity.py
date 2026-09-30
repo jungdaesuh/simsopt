@@ -12,6 +12,7 @@ import pytest
 from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import (
     LaneObservation,
+    stopping_bound_gaps,
     upstream_branch_representatives,
     upstream_end_state_matches,
 )
@@ -20,9 +21,10 @@ from examples.jax.parity.cases.native_boozer import (
     FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER,
     JAX_DRIVER,
     NATIVE_DRIVER,
+    REPLAY_DERIVED_OBSERVABLES,
     REPLAY_EXACT_OBSERVABLES,
+    REPLAY_SOLUTION_OBSERVABLES,
     REPLAY_STARTS,
-    REPLAY_STATE_OBSERVABLES,
     STOPPING_REASON_CODES,
     _observation,
     _scale_configuration,
@@ -114,7 +116,7 @@ def test_boozer_observation_requires_both_solver_stages(
         case_id="native-boozer",
         random_seed=0,
         arrays={"surface_dofs": np.asarray([1.0])},
-        configuration={"mpol": 2},
+        configuration={"mpol": 2, "solver_tolerance": 1.0e-10},
     )
     values = {
         "construction:axis_dofs": np.asarray([0.0]),
@@ -131,6 +133,13 @@ def test_boozer_observation_requires_both_solver_stages(
             [True] * (len(REPLAY_STARTS) - 1) + [replay_success]
         ),
         "replay:flux_solver_success": np.asarray([True] * len(REPLAY_STARTS)),
+        # Rows: state (one dof, iota, G), norm(J^T r) within tol, lambda_min.
+        "replay:area_solution": np.tile(
+            [1.0, -0.4, 1.0, 1.0e-11, 0.05], (len(REPLAY_STARTS), 1)
+        ),
+        "replay:flux_solution": np.tile(
+            [1.0, -0.4, 1.0, 1.0e-11, 0.05], (len(REPLAY_STARTS), 1)
+        ),
     }
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
 
@@ -200,10 +209,11 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
     # its input (the first stage stops at its iteration cap, unconverged, and
     # upstream's own script reaches five surfaces from nine one-ulp starts at
     # this scale), so the chained end state is informational and the stages
-    # are judged from shared starts (PLAN.md amendment 5, B1): the starts
-    # exactly -- including the native first-stage end the JAX lane reran --
-    # the replayed Newton end states at the case's same-state tolerance, and
-    # every replayed solve must succeed.
+    # are judged from shared starts (PLAN.md amendment 5, B1, and amendment 6,
+    # B1'): the starts exactly -- including the native first-stage end the JAX
+    # lane reran --, upstream's success rule norm(J^T r) <= tol on every
+    # replayed solve, and each pair of solved states within the sum of the two
+    # lanes' stopping radii, from each lane's own norm(J^T r) and lambda_min.
     assert native.values["replay:start_surface_dofs"].shape[0] == len(REPLAY_STARTS)
     for observable in REPLAY_EXACT_OBSERVABLES:
         np.testing.assert_array_equal(
@@ -213,14 +223,15 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
         native.values["replay:start_surface_dofs"][0],
         native.values["first:surface_dofs"],
     )
-    for observable in REPLAY_STATE_OBSERVABLES:
-        np.testing.assert_allclose(
-            jax.values[observable],
-            native.values[observable],
-            rtol=1.0e-11,
-            atol=1.0e-13,
-            err_msg=observable,
+    tolerance = float(bundle.configuration["solver_tolerance"])
+    for observable in REPLAY_SOLUTION_OBSERVABLES:
+        gap, bound = stopping_bound_gaps(
+            jax.values[observable], native.values[observable]
         )
+        assert np.all(gap <= bound), (observable, gap / bound)
+        for observation in (native, jax):
+            assert np.all(observation.values[observable][:, -2] <= tolerance)
+            assert np.all(observation.values[observable][:, -1] > 0.0)
     for observation in (native, jax):
         assert bool(np.all(observation.values["replay:area_solver_success"]))
         assert bool(np.all(observation.values["replay:flux_solver_success"]))
@@ -424,7 +435,11 @@ def _assert_route_matrix(published: set[str]) -> None:
             assert applicability[key] == {True}, (scale, key)
         assert applicability["initial:boozer_residual"] == {True}
         assert applicability["initial:boozer_jacobian"] == {True}
-        for key in (*REPLAY_EXACT_OBSERVABLES, *REPLAY_STATE_OBSERVABLES):
+        for key in (
+            *REPLAY_EXACT_OBSERVABLES,
+            *REPLAY_SOLUTION_OBSERVABLES,
+            *REPLAY_DERIVED_OBSERVABLES,
+        ):
             assert applicability[key] == {True}, (scale, key)
 
 
@@ -452,6 +467,7 @@ def _first_stage_outcome(
         objective=objective,
         gradient_norm=1.0,
         penalty_residual_norm=None,
+        normal_matrix_min_eigenvalue=None,
     )
 
 
