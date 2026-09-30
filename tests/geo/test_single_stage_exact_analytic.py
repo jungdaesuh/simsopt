@@ -503,8 +503,9 @@ def test_host_construction_seed_and_first_evaluate_match_eager_jax_bake(
       operation-count bound on the gradient gap is derivable (K4), so that gap
       is reported in units of ``u S`` together with ``cond_2(J)``.
     - K6: ``cond_2(J) <= 1e3`` for both lanes at the seed.
-    - K7(ii): a reference gradient entry moved by ten times the observed gap
-      fails the K5 comparison.
+    - K7(ii): a fault injected into the host lane's own evaluation path (a
+      1e-12 relative error in one entry of its adjoint solve) leaves the value
+      bitwise and fails the K5 gradient comparison (PLAN.md amendment 8, B).
     """
     reference, reference_boozer = _jax_evaluator_eager_geometry()
     host, _ = _jax_evaluator()
@@ -579,13 +580,26 @@ def test_host_construction_seed_and_first_evaluate_match_eager_jax_bake(
         f"cond_2(J) host {conditions[0]:.2f} reference {conditions[1]:.2f}"
     )
 
-    entry = int(np.argmax(gap_in_scale))
-    moved = np.array(reference_eval.gradient, copy=True)
-    moved[entry] += 10.0 * max(
-        gradient_gap[entry], UNIT_ROUNDOFF * gradient_scale[entry]
-    )
+    real_lu_solve = single_stage_exact_analytic.lu_solve
+
+    def faulty_lu_solve(factors, rhs, trans=0):
+        return real_lu_solve(factors, rhs, trans=trans).at[0].multiply(1.0 + 1.0e-12)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            single_stage_exact_analytic,
+            "host_analytic_geometry_origin_and_basis",
+            reference_bake,
+        )
+        patch.setattr(single_stage_exact_analytic, "lu_solve", faulty_lu_solve)
+        faulty, faulty_boozer = _shared_seed_host_lane(reference_inner)
+        faulty_eval = assert_shared_seed(faulty, faulty_boozer)
+    _assert_bitwise(faulty_eval.value, reference_eval.value)
     assert not np.array_equal(
-        np.asarray(substituted_eval.gradient).view(np.uint64), moved.view(np.uint64)
+        np.asarray(host_array(faulty_eval.gradient, dtype=np.float64)).view(np.uint64),
+        np.asarray(host_array(reference_eval.gradient, dtype=np.float64)).view(
+            np.uint64
+        ),
     )
 
 
