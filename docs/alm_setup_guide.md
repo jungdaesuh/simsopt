@@ -180,8 +180,8 @@ Then give the user the full-run command,
 1. Look up the run's `termination_reason` in
    [Termination reasons](#termination-reasons) and apply its action. Check
    `restored_best_feasible` too: a restored `x` is feasible and usable, and
-   can be the start itself when no later iterate was feasible (termination.md
-   says where the last iterate is).
+   can be the start itself when no later iterate was feasible;
+   `result.last_iterate` holds the last iterate.
 2. Change one thing per rerun, and name the reason (the table row or the
    pitfall from [Pitfalls](#pitfalls)).
 3. Stop when the run ends `converged` or `constraints_inactive_converged`,
@@ -289,6 +289,7 @@ and the help of each module named below.
 | `minimize_alm` | `simsopt_alm` | The solver: `minimize_alm(x0, constraint_names, evaluate_problem, settings, inner_options, **optional)` returns an `ALMResult`. |
 | `ALMSettings` | `simsopt_alm` | Frozen, validated solver settings ([Settings](#settings)). |
 | `ALMResult` | `simsopt_alm` | Frozen result; fields below. |
+| `ALMLastIterate` | `simsopt_alm` | `ALMResult.last_iterate`: the loop's last iterate (`x`, `objective`, `constraint_values`, `max_violation`, `multipliers`, `penalty`), the point a best-feasible restore replaced. |
 | `ALMPhysics` | `simsopt_alm` | f, grad f, g, grad g (and x-only `extras`) at one x; `.evaluation(multipliers, penalty)` builds the evaluator dict. |
 | `cached_alm_evaluator` | `simsopt_alm` | Wraps `physics(x) -> ALMPhysics` into an evaluator that reuses the physics at a revisited x. Stateless physics only. |
 | `CachedALMEvaluator` | `simsopt_alm` | The type `cached_alm_evaluator` returns (has `cache_clear()`). |
@@ -485,7 +486,11 @@ active-set residual, a diagnostic no decision reads; None when unavailable,
 e.g. no active row), `nit` (all L-BFGS-B iterations),
 `outer_iterations` (the outer iterations that ran a step; a checkpoint's
 `completed_outer_iterations` counts the same way), `restored_best_feasible`, `restored_best_feasible_reason`, `evaluation`
-(read-only copy of the final evaluator dict), `inner_result`.
+(read-only copy of the final evaluator dict), `inner_result`, `last_iterate`
+(an `ALMLastIterate`: the loop's last iterate with its `x`, `objective`,
+`constraint_values`, `max_violation`, `multipliers` and `penalty`; `result.x`
+is that point unless `restored_best_feasible`, when it is the best
+hard-feasible iterate instead).
 
 ### Problem-module contract
 
@@ -762,9 +767,13 @@ objective (`result.restored_best_feasible_reason` says which). A restored
 `result.x` is feasible and usable; set your objects to it before saving
 (`finish` in the templates does). ALM iterates usually approach the boundary
 from outside, so a run from a feasible start that stops before converging can
-return that start; the last iterate is in the last outer-step event
-(`event.after.x`), and rerunning from it with a larger `max_outer_iterations`
-or `maxiter` continues the progress. With an `outer_state_callback` that
+return that start. The last iterate stays in `result.last_iterate` (an
+`ALMLastIterate`: `x`, `objective`, `constraint_values`, `max_violation`,
+`multipliers`, `penalty`; the same point as `result.x` when nothing was
+restored). Rerunning from `result.last_iterate.x` with
+`initial_multipliers=result.last_iterate.multipliers`,
+`initial_penalty=result.last_iterate.penalty` and a larger
+`max_outer_iterations` or `maxiter` continues the progress. With an `outer_state_callback` that
 changes the problem, the incumbent is judged again under the changed problem
 at the start of each outer iteration.
 
@@ -912,7 +921,8 @@ Each entry: the symptom, the cause, the fix.
    `ValueError: ... produced non-finite ALM data`. Make x0 evaluate cleanly.
 10. **The returned x may be an earlier iterate.** On failure the solver can
     return the best hard-feasible iterate (`result.restored_best_feasible`),
-    the start itself when it was feasible and every later iterate was not.
+    the start itself when it was feasible and every later iterate was not;
+    the last iterate stays in `result.last_iterate`.
     Set your objects to `result.x` (and, for stateful physics, re-solve from
     the restored state) before saving; the templates' `finish` does this.
 11. **Callbacks come in pairs.** `snapshot_accepted_state_fn` and

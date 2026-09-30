@@ -241,6 +241,42 @@
        }
       }
      }
+    },
+    "last_iterate": {
+     "$dataclass": "ALMLastIterate",
+     "fields": {
+      "x": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.138a30762defap+0",
+        "0x1.c05f971b198bdp-1"
+       ]
+      },
+      "objective": "0x1.3e96e9ee0e54dp+6",
+      "constraint_values": {
+       "$ndarray": "<f8",
+       "shape": [
+        1
+       ],
+       "data": [
+        "0x1.06ee309c11f5dp-4"
+       ]
+      },
+      "max_violation": "0x1.d10b1e7a29480p-7",
+      "multipliers": {
+       "$ndarray": "<f8",
+       "shape": [
+        1
+       ],
+       "data": [
+        "0x0.0p+0"
+       ]
+      },
+      "penalty": "0x1.f400000000000p+9"
+     }
     }
    }
   },

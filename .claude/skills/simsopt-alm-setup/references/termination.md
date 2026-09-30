@@ -13,9 +13,13 @@ objective (`result.restored_best_feasible_reason` says which). A restored
 `result.x` is feasible and usable; set your objects to it before saving
 (`finish` in the templates does). ALM iterates usually approach the boundary
 from outside, so a run from a feasible start that stops before converging can
-return that start; the last iterate is in the last outer-step event
-(`event.after.x`), and rerunning from it with a larger `max_outer_iterations`
-or `maxiter` continues the progress. With an `outer_state_callback` that
+return that start. The last iterate stays in `result.last_iterate` (an
+`ALMLastIterate`: `x`, `objective`, `constraint_values`, `max_violation`,
+`multipliers`, `penalty`; the same point as `result.x` when nothing was
+restored). Rerunning from `result.last_iterate.x` with
+`initial_multipliers=result.last_iterate.multipliers`,
+`initial_penalty=result.last_iterate.penalty` and a larger
+`max_outer_iterations` or `maxiter` continues the progress. With an `outer_state_callback` that
 changes the problem, the incumbent is judged again under the changed problem
 at the start of each outer iteration.
 

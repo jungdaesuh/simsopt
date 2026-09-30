@@ -166,7 +166,45 @@
       }
      }
     },
-    "inner_result": null
+    "inner_result": null,
+    "last_iterate": {
+     "$dataclass": "ALMLastIterate",
+     "fields": {
+      "x": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.8000000000000p+0",
+        "0x1.0000000000000p-1"
+       ]
+      },
+      "objective": "0x1.0000000000000p-1",
+      "constraint_values": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x0.0p+0",
+        "-0x1.8000000000000p+0"
+       ]
+      },
+      "max_violation": "0x0.0p+0",
+      "multipliers": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.0000000000000p+0",
+        "0x0.0p+0"
+       ]
+      },
+      "penalty": "0x1.4000000000000p+3"
+     }
+    }
    }
   },
   "history": [

@@ -325,6 +325,10 @@ def main():
     final_boozer_res = problem.solve(result.x)
     print(f"Boozer surface of the returned coils solved: {final_boozer_res['success']}")
     problem.report("final", result.objective, result.max_violation, result.constraint_values)
+    if result.restored_best_feasible:
+        last = result.last_iterate
+        problem.report("last iterate (not returned)", last.objective, last.max_violation,
+                       last.constraint_values)
     final_iota = float(problem.iotas.J())
     final_major_radius = float(problem.major_radius.J())
     total_length = sum(J.J() for J in problem.coil_lengths)

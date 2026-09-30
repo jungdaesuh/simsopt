@@ -127,6 +127,16 @@ def run(problem, history: Optional[Path] = None, checkpoints: Optional[Path] = N
         "inner_iterations": int(result.nit),
         "restored_best_feasible": bool(result.restored_best_feasible),
         "restored_best_feasible_reason": result.restored_best_feasible_reason,
+        # The loop's last iterate (result.x unless a best-feasible restore
+        # replaced it).
+        "last_iterate": {
+            "objective": float(result.last_iterate.objective),
+            "max_violation": float(result.last_iterate.max_violation),
+            "constraint_values": dict(zip(result.constraint_names,
+                                          result.last_iterate.constraint_values.tolist())),
+            "multipliers": dict(zip(result.constraint_names, result.last_iterate.multipliers.tolist())),
+            "penalty": float(result.last_iterate.penalty),
+        },
         "finish": problem.finish(result),
     }
 

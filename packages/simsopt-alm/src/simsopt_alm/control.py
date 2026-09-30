@@ -344,6 +344,21 @@ def _apply_alm_penalty_increase(
     )
 
 @dataclass(frozen=True)
+class ALMLastIterate:
+    """The loop's last iterate, the point a best-feasible restore replaces as
+    ``ALMResult.x``, with the :class:`ALMResult` fields of the same names at
+    it: ``objective`` (f without penalty terms), signed ``constraint_values``,
+    ``max_violation``, and the ``multipliers`` and ``penalty`` its final
+    evaluation used. Arrays are read-only copies."""
+
+    x: np.ndarray
+    objective: float
+    constraint_values: np.ndarray
+    max_violation: float
+    multipliers: np.ndarray
+    penalty: float
+
+@dataclass(frozen=True)
 class ALMResult:
     """What :func:`minimize_alm` returns, on success and on failure alike.
 
@@ -371,8 +386,10 @@ class ALMResult:
     evaluations are not counted.
     ``inner_result`` is L-BFGS-B's
     result for the latest subproblem behind ``x`` (None when there is none,
-    e.g. an incumbent restored from a checkpoint). ``x``, ``constraint_values``
-    and ``multipliers`` are read-only copies.
+    e.g. an incumbent restored from a checkpoint). ``last_iterate`` is the
+    loop's last iterate (:class:`ALMLastIterate`), the same point as ``x``
+    unless ``restored_best_feasible``. ``x``, ``constraint_values`` and
+    ``multipliers`` are read-only copies.
     """
 
     x: np.ndarray
@@ -393,11 +410,26 @@ class ALMResult:
     restored_best_feasible_reason: Optional[str]
     evaluation: Mapping[str, object]
     inner_result: Optional[object]
+    last_iterate: ALMLastIterate
 
 def _read_only_float_array(values) -> np.ndarray:
     array = np.array(values, dtype=float)
     array.setflags(write=False)
     return array
+
+def _last_iterate(x, evaluation: Mapping[str, object], multipliers, penalty) -> ALMLastIterate:
+    """The :class:`ALMLastIterate` of ``evaluation`` at ``x``."""
+    solver_constraint_values, _feasibility, _dual, max_violation = _extract_constraint_state(
+        evaluation
+    )
+    return ALMLastIterate(
+        x=_read_only_float_array(x),
+        objective=_incumbent_objective_value(evaluation),
+        constraint_values=_read_only_float_array(solver_constraint_values),
+        max_violation=float(max_violation),
+        multipliers=_read_only_float_array(multipliers),
+        penalty=float(penalty),
+    )
 
 def _build_alm_result(
     *,
@@ -414,8 +446,10 @@ def _build_alm_result(
     stationarity_norm: float,
     kkt_stationarity_norm: Optional[float],
     restored_best_feasible_reason: Optional[str] = None,
+    last_iterate: Optional[ALMLastIterate] = None,
 ) -> ALMResult:
-    """The returned result at ``run_state.x`` (restored when a reason is given)."""
+    """The returned result at ``run_state.x`` (restored when a reason is
+    given); ``last_iterate`` defaults to that point."""
     (
         solver_constraint_values,
         _feasibility_values,
@@ -443,6 +477,11 @@ def _build_alm_result(
         restored_best_feasible_reason=restored_best_feasible_reason,
         evaluation=_frozen_event_value(evaluation, {}),
         inner_result=inner_result,
+        last_iterate=(
+            _last_iterate(run_state.x, evaluation, multipliers, penalty)
+            if last_iterate is None
+            else last_iterate
+        ),
     )
 
 @dataclass(frozen=True)
@@ -543,6 +582,7 @@ def _build_alm_failure_result_with_optional_restore(
     restored_message_prefix: Optional[str] = None,
     restored_termination_reason: Optional[str] = None,
 ) -> ALMResult:
+    last_iterate = _last_iterate(run_state.x, evaluation, multipliers_state, penalty_state)
     restored_state = _restore_alm_best_feasible_on_failure(
         current_x=run_state.x,
         best_feasible=best_feasible,
@@ -605,6 +645,7 @@ def _build_alm_failure_result_with_optional_restore(
         stationarity_norm=restored_stationarity_norm,
         kkt_stationarity_norm=restored_kkt_stationarity_norm,
         restored_best_feasible_reason=restored_state.restored_best_feasible_reason,
+        last_iterate=last_iterate,
     )
 
 def _handle_alm_dual_update_transition(

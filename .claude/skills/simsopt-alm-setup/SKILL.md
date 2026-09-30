@@ -167,8 +167,8 @@ Then give the user the full-run command,
 1. Look up the run's `termination_reason` in
    [termination.md](references/termination.md) and apply its action. Check
    `restored_best_feasible` too: a restored `x` is feasible and usable, and
-   can be the start itself when no later iterate was feasible (termination.md
-   says where the last iterate is).
+   can be the start itself when no later iterate was feasible;
+   `result.last_iterate` holds the last iterate.
 2. Change one thing per rerun, and name the reason (the table row or the
    pitfall from [pitfalls.md](references/pitfalls.md)).
 3. Stop when the run ends `converged` or `constraints_inactive_converged`,

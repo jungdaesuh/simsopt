@@ -1563,7 +1563,8 @@ class AlmLibraryTrustRadiusCharacterizationTests(unittest.TestCase):
             (5, 0, "dual_update", "boxed", 1, "0x1.4400000000000p+0"),
             (6, 0, "dual_update", "boxed", 1, "0x1.4400000000000p+0"),
         ],
-        "digest": "2466d78a254590567066755e0597e8b0a25b68628ea0632b76f821fe77e2e7c6",
+        # The result digest covers every field, last_iterate included.
+        "digest": "d2aad8950fae9d00debdcd32bd1f174324eb016d6ab7a145c939d1c2af46ecfa",
     }
 
     def test_library_radius_without_a_policy_takes_the_default_path(self):

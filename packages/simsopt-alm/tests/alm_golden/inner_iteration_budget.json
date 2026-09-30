@@ -186,6 +186,44 @@
       "success": true,
       "message": "ALM inner solve satisfied the KKT stationarity gate."
      }
+    },
+    "last_iterate": {
+     "$dataclass": "ALMLastIterate",
+     "fields": {
+      "x": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.801d7e8093789p+0",
+        "0x1.003afd0126f10p-1"
+       ]
+      },
+      "objective": "0x1.ff14272aa15dap-2",
+      "constraint_values": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.d7e8093788000p-11",
+        "-0x1.801d7e8093789p+0"
+       ]
+      },
+      "max_violation": "0x1.d7e8093788000p-11",
+      "multipliers": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.ff8a05fdb2190p-1",
+        "0x0.0p+0"
+       ]
+      },
+      "penalty": "0x1.9000000000000p+6"
+     }
     }
    }
   },

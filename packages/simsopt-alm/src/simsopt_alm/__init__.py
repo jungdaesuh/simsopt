@@ -48,7 +48,9 @@ the solver snapshots accepted iterates and restores one when it returns a
 best-feasible incumbent or resumes. The result is a frozen :class:`ALMResult`:
 x, objective, signed g, max violation, multipliers, penalty, success,
 termination reason and message, stationarity norms, iteration counts, the
-restore flag and reason, the final evaluation and the last inner result.
+restore flag and reason, the final evaluation, the last inner result and the
+last iterate (:class:`ALMLastIterate`: the point a best-feasible restore
+replaced, with its objective, g, max violation, multipliers and penalty).
 
 A toy problem, min ||x||^2 s.t. 1 - x0 <= 0 (solution x = (1, 0))::
 
@@ -155,7 +157,7 @@ from __future__ import annotations
 
 from .continuation import ALMInnerSolveOutcome, ALMIterateMeasurement
 from .boundary import ALMOuterBoundary
-from .control import ALMResult, minimize_alm
+from .control import ALMLastIterate, ALMResult, minimize_alm
 from .core import (
     ALMConstraintRoutingState,
     ALMConstraintSignalState,
@@ -190,6 +192,7 @@ __all__ = [
     "ALMFeasibleIncumbent",
     "ALMInnerSolveOutcome",
     "ALMIterateMeasurement",
+    "ALMLastIterate",
     "ALMLoopState",
     "ALMOuterBoundary",
     "ALMOuterStepEvent",

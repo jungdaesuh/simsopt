@@ -325,6 +325,47 @@ class FailedIncumbentReevaluationTests(unittest.TestCase):
         )
 
 
+class LastIterateTests(unittest.TestCase):
+    """R3: ``ALMResult.last_iterate`` is the loop's last iterate, which a
+    best-feasible restore replaces as ``result.x``."""
+
+    def test_a_restored_start_keeps_the_last_iterate(self):
+        # The B1 run: the feasible start x = 0 is restored; the one outer
+        # ended at the subproblem solution 2/3 after a dual update with a
+        # penalty raise (lambda = 2/3, rho = 10).
+        events = []
+        result = minimize_alm(
+            [0.0], ["g"], at_most_zero, ALMSettings(max_outer_iterations=1), {"maxiter": 100},
+            on_outer_step=events.append,
+        )
+        self.assertTrue(result.restored_best_feasible)
+        np.testing.assert_array_equal(result.x, [0.0])
+        last = result.last_iterate
+        np.testing.assert_allclose(last.x, [2.0 / 3.0], atol=1.0e-12)
+        self.assertAlmostEqual(last.max_violation, 2.0 / 3.0, places=12)
+        self.assertAlmostEqual(last.objective, 1.0 / 9.0, places=12)
+        np.testing.assert_allclose(last.constraint_values, [2.0 / 3.0], atol=1.0e-12)
+        np.testing.assert_array_equal(last.x, events[-1].after.x)
+        np.testing.assert_array_equal(last.multipliers, events[-1].after.multipliers)
+        self.assertEqual(last.penalty, events[-1].after.penalty)
+        np.testing.assert_allclose(last.multipliers, [2.0 / 3.0], atol=1.0e-12)
+        self.assertEqual(last.penalty, 10.0)
+        for name in ("x", "constraint_values", "multipliers"):
+            self.assertFalse(getattr(last, name).flags.writeable, name)
+
+    def test_an_unrestored_result_is_its_own_last_iterate(self):
+        result = minimize_alm([0.0], ["g"], pulled_out, ALMSettings(), {"maxiter": 200})
+        self.assertFalse(result.restored_best_feasible)
+        last = result.last_iterate
+        np.testing.assert_array_equal(last.x, result.x)
+        np.testing.assert_array_equal(last.constraint_values, result.constraint_values)
+        np.testing.assert_array_equal(last.multipliers, result.multipliers)
+        self.assertEqual(
+            (last.objective, last.max_violation, last.penalty),
+            (result.objective, result.max_violation, result.penalty),
+        )
+
+
 class FlaggedFiniteTrialTests(unittest.TestCase):
     """B4 (inner.py): a trial flagged ``nonfinite_evaluation`` with finite data
     was not sanitized, so L-BFGS-B took its made-up total and gradient."""

@@ -174,6 +174,9 @@ def main():
     # minimize_alm may return an earlier (best feasible) iterate, so set its dofs:
     JF.x = result.x
     report("final", result.objective, result.max_violation, result.constraint_values)
+    if result.restored_best_feasible:
+        last = result.last_iterate
+        report("last iterate (not returned)", last.objective, last.max_violation, last.constraint_values)
 
     curves_to_vtk(curves, OUT_DIR + "curves_opt_alm")
     pointData = {"B_N": np.sum(bs.B().reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}

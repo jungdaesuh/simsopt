@@ -174,7 +174,45 @@
       }
      }
     },
-    "inner_result": null
+    "inner_result": null,
+    "last_iterate": {
+     "$dataclass": "ALMLastIterate",
+     "fields": {
+      "x": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.80105e1d27a3fp+0",
+        "0x1.0020bc3a4f47ap-1"
+       ]
+      },
+      "objective": "0x1.ff7d1775f4d40p-2",
+      "constraint_values": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.05e1d27a3e000p-11",
+        "-0x1.80105e1d27a3fp+0"
+       ]
+      },
+      "max_violation": "0x1.05e1d27a3e000p-11",
+      "multipliers": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.0000000000000p-1",
+        "0x0.0p+0"
+       ]
+      },
+      "penalty": "0x1.f400000000000p+9"
+     }
+    }
    }
   },
   "history": [

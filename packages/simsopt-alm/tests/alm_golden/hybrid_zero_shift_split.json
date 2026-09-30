@@ -248,6 +248,42 @@
        }
       }
      }
+    },
+    "last_iterate": {
+     "$dataclass": "ALMLastIterate",
+     "fields": {
+      "x": {
+       "$ndarray": "<f8",
+       "shape": [
+        2
+       ],
+       "data": [
+        "0x1.0dcfc490dbfa8p+0",
+        "0x1.fbfc5990664ecp-1"
+       ]
+      },
+      "objective": "0x1.40209bdedbaf5p+6",
+      "constraint_values": {
+       "$ndarray": "<f8",
+       "shape": [
+        1
+       ],
+       "data": [
+        "0x1.07141460b1800p-15"
+       ]
+      },
+      "max_violation": "0x1.99db5e9eb1c60p-5",
+      "multipliers": {
+       "$ndarray": "<f8",
+       "shape": [
+        1
+       ],
+       "data": [
+        "0x0.0p+0"
+       ]
+      },
+      "penalty": "0x1.3880000000000p+13"
+     }
     }
    }
   },

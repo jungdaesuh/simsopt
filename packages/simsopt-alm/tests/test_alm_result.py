@@ -39,6 +39,7 @@ LEAN_FIELDS = (
     "restored_best_feasible_reason",
     "evaluation",
     "inner_result",
+    "last_iterate",
 )
 
 

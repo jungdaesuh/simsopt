@@ -75,7 +75,8 @@ Each entry: the symptom, the cause, the fix.
    `ValueError: ... produced non-finite ALM data`. Make x0 evaluate cleanly.
 10. **The returned x may be an earlier iterate.** On failure the solver can
     return the best hard-feasible iterate (`result.restored_best_feasible`),
-    the start itself when it was feasible and every later iterate was not.
+    the start itself when it was feasible and every later iterate was not;
+    the last iterate stays in `result.last_iterate`.
     Set your objects to `result.x` (and, for stateful physics, re-solve from
     the restored state) before saving; the templates' `finish` does this.
 11. **Callbacks come in pairs.** `snapshot_accepted_state_fn` and
