@@ -218,6 +218,52 @@ class MaxCurvatureSignedConstraintTests(unittest.TestCase):
         np.testing.assert_array_equal(reused[1], reference[1])
 
 
+class FixedGeometryTests(unittest.TestCase):
+    """GEO-02: an objective with no free dofs gets the row's value and an
+    empty gradient from every kernel, as the no-pair path returns, instead
+    of an error from building a gradient over no dofs."""
+
+    def assert_value_kept_and_gradient_empty(self, evaluate, fix, owner):
+        free = evaluate()
+        fix()
+        self.assertEqual(owner.x.size, 0)
+        fixed = evaluate()
+        self.assertEqual(fixed[0], free[0])
+        self.assertEqual(fixed[2], free[2])
+        self.assertEqual(fixed[1].shape, (0,))
+
+    def test_curvature_row_of_a_fixed_curve(self):
+        curve = _circle_with_bump()
+        owner = _JointDofs([curve])
+        self.assert_value_kept_and_gradient_empty(
+            lambda: smooth_max_curvature_signed_constraint(curve, 1.5, 0.05, owner),
+            curve.fix_all,
+            owner,
+        )
+
+    def test_curve_curve_row_of_fixed_curves(self):
+        # The review's reproduction: separated circles, all coefficients fixed.
+        curves = [_circle(1.0, 0.0, 32), _circle(1.0, 2.0, 32)]
+        owner = CurveCurveDistance(curves, 0.1)
+        self.assert_value_kept_and_gradient_empty(
+            lambda: smooth_min_curve_curve_signed_constraint(curves, 0.1, 0.01, owner),
+            lambda: [curve.fix_all() for curve in curves],
+            owner,
+        )
+
+    def test_curve_surface_row_of_fixed_geometry(self):
+        curve = _circle(2.0, 0.0)
+        surface = _torus(1.0, 0.3)
+        owner = _JointDofs([curve, surface])
+        self.assert_value_kept_and_gradient_empty(
+            lambda: smooth_min_curve_surface_signed_constraint(
+                [curve], surface, 0.4, 0.01, owner
+            ),
+            lambda: (curve.fix_all(), surface.fix_all()),
+            owner,
+        )
+
+
 class SignedConstraintTemperatureTests(unittest.TestCase):
     """Every kernel takes a finite positive temperature and rejects any other
     with a ValueError naming it (zero is not the hard limit: the hard signal

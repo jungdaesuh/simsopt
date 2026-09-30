@@ -8,7 +8,8 @@ surrogate at ``temperature`` T over every sample (curvature) or every point pair
 distance ``s(d) = sqrt(d^2 + T^2) - T`` (``d - T <= s(d) <= d``, differentiable
 at coincident points), so ``signed_value`` is a smooth function of the sampled
 points and ``grad = d(signed_value)/dx`` over the free dofs of
-``objective_optimizable`` holds everywhere. The surrogate is conservative:
+``objective_optimizable`` holds everywhere (an empty array when it has
+none). The surrogate is conservative:
 ``hard_signed_value <= signed_value <= hard_signed_value + T log N`` for N
 curvature samples, ``+ T (log N + 1)`` for N distance pairs. Unlike the stock
 hinge objectives, the value keeps the slack when the constraint is inactive.
@@ -172,6 +173,15 @@ def _no_pair_result(minimum_distance, objective_optimizable):
     )
 
 
+def _gradient_over_free_dofs(derivative: Derivative, objective_optimizable) -> np.ndarray:
+    """``derivative`` over the free dofs of ``objective_optimizable``, empty
+    when it has none (as ``_no_pair_result``): simsopt cannot evaluate a
+    ``Derivative`` over no dofs."""
+    if np.size(objective_optimizable.x) == 0:
+        return np.zeros(0)
+    return np.asarray(derivative(objective_optimizable), dtype=float)
+
+
 def _curve_derivative(curves, point_gradients) -> Derivative:
     derivative = Derivative({})
     for curve, point_gradient in zip(curves, point_gradients):
@@ -216,9 +226,8 @@ def smooth_max_curvature_signed_constraint(
     grad = _finite_curvature_output(
         curve,
         "curvature derivative",
-        np.asarray(
-            curve.dkappa_by_dcoeff_vjp(exp_shifted / weight_sum)(objective_optimizable),
-            dtype=float,
+        _gradient_over_free_dofs(
+            curve.dkappa_by_dcoeff_vjp(exp_shifted / weight_sum), objective_optimizable
         ),
     )
     signed_value = smooth_max - float(threshold)
@@ -247,8 +256,8 @@ def smooth_min_curve_curve_signed_constraint(
         [(i, j) for i in range(len(curve_points)) for j in range(i)],
         temperature,
     )
-    grad = np.asarray(
-        _curve_derivative(curves, point_gradients)(objective_optimizable), dtype=float
+    grad = _gradient_over_free_dofs(
+        _curve_derivative(curves, point_gradients), objective_optimizable
     )
     # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
     # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
@@ -289,7 +298,7 @@ def smooth_min_curve_surface_signed_constraint(
             surface,
             surface_gradient.reshape(surface_gamma.shape),
         )
-    grad = np.asarray(derivative(objective_optimizable), dtype=float)
+    grad = _gradient_over_free_dofs(derivative, objective_optimizable)
     # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
     # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
     signed_value = float(minimum_distance) - smooth_min
