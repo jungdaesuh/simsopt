@@ -381,7 +381,8 @@ def test_coil_forces_second_stage_compiles_no_second_graph() -> None:
 # moved the device endpoint by 3.4e-12 relative. Measured per commit with the
 # same test: the L-BFGS-B fix (the unconstrained fast path searches along
 # SciPy's d = z - x) moved the objective 3.30e-12 relative, and device_one
-# carrying no derivative path then moved it a further 6.9e-17 absolute; the
+# carrying no derivative path then moved it a further 3.64e-16 absolute
+# (6.85e-14 relative; an earlier version of this note said 6.9e-17); the
 # CurveLength mean and the arclength VJP restores left it unchanged.
 
 
