@@ -1246,6 +1246,48 @@ def _replay_values(
     }
 
 
+def success_gates(
+    values: Mapping[str, np.ndarray], tolerance: float
+) -> Mapping[str, bool]:
+    """Each gate a lane's ``success`` requires, by name; ``success`` is their conjunction."""
+    return MappingProxyType(
+        {
+            "area:solver_success": bool(values["area:solver_success"]),
+            "flux:solver_success": bool(values["flux:solver_success"]),
+            "replay:area_solver_success": bool(
+                np.all(values["replay:area_solver_success"])
+            ),
+            "replay:flux_solver_success": bool(
+                np.all(values["replay:flux_solver_success"])
+            ),
+            # Each flux target is the reference recomputation at the lane's own
+            # published area state, bitwise (PLAN.md amendment 8, F1).
+            "replay:flux_target": bool(
+                np.array_equal(
+                    values["replay:flux_target"],
+                    values["replay:flux_target_reference"],
+                )
+            ),
+            # Upstream's own success rule, norm(J^T r) <= tol, at every replayed
+            # end state by both implementations (PLAN.md amendment 9).
+            "replay:area_rule_norms": rule_norms_pass(
+                values["replay:area_rule_norms"], tolerance
+            ),
+            "replay:flux_rule_norms": rule_norms_pass(
+                values["replay:flux_rule_norms"], tolerance
+            ),
+            "flux:surface_dofs": bool(np.all(np.isfinite(values["flux:surface_dofs"]))),
+            "flux:residual_norm": bool(
+                np.isfinite(float(values["flux:residual_norm"]))
+                and float(values["flux:residual_norm"])
+                < float(values["initial:residual_norm"])
+            ),
+            "flux:iota": bool(np.isfinite(float(values["flux:iota"]))),
+            "flux:G": bool(np.isfinite(float(values["flux:G"]))),
+        }
+    )
+
+
 def _observation(
     lane: ParityLane,
     bundle: InputBundle,
@@ -1255,31 +1297,10 @@ def _observation(
     precision: str,
     driver: str,
 ) -> LaneObservation:
-    success = bool(
-        bool(values["area:solver_success"])
-        and bool(values["flux:solver_success"])
-        and bool(np.all(values["replay:area_solver_success"]))
-        and bool(np.all(values["replay:flux_solver_success"]))
-        # Each flux target is the reference recomputation at the lane's own
-        # published area state, bitwise (PLAN.md amendment 8, F1).
-        and np.array_equal(
-            values["replay:flux_target"], values["replay:flux_target_reference"]
-        )
-        # Upstream's own success rule, norm(J^T r) <= tol, at every replayed end
-        # state by both implementations (PLAN.md amendment 9).
-        and rule_norms_pass(
-            values["replay:area_rule_norms"],
-            _configuration_float(bundle.configuration, "solver_tolerance"),
-        )
-        and rule_norms_pass(
-            values["replay:flux_rule_norms"],
-            _configuration_float(bundle.configuration, "solver_tolerance"),
-        )
-        and np.all(np.isfinite(values["flux:surface_dofs"]))
-        and np.isfinite(float(values["flux:residual_norm"]))
-        and float(values["flux:residual_norm"]) < float(values["initial:residual_norm"])
-        and np.isfinite(float(values["flux:iota"]))
-        and np.isfinite(float(values["flux:G"]))
+    success = all(
+        success_gates(
+            values, _configuration_float(bundle.configuration, "solver_tolerance")
+        ).values()
     )
     return LaneObservation(
         lane=lane,

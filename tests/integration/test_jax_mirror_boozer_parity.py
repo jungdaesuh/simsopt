@@ -31,6 +31,7 @@ from examples.jax.parity.cases.native_boozer import (
     cross_checked_rule_norms,
     first_stage_stopping_reason,
     rule_norms_pass,
+    success_gates,
 )
 from examples.jax.parity.input_bundle import (
     InputBundle,
@@ -152,15 +153,20 @@ def _faulted_jax_observation(
     )
 
 
-def _assert_area_stages_pass(observation: LaneObservation, tolerance: float) -> None:
-    """Every replay's area stage meets upstream's rule under both implementations.
+def _assert_only_failing_gate(
+    observation: LaneObservation, tolerance: float, gate: str
+) -> None:
+    """``gate`` is the one success gate the lane fails; every other one passes.
 
-    The faults below touch only the flux stage, so this holds exactly when each
-    replay started where the harness starts it (the native first stage at one
-    thread, then upstream's nine), and a lane failure is then the fault's.
+    The faults below touch only the flux stage. Passing area gates rule out
+    failed area solves and failed area rule norms (the bad-start failure mode
+    of a first stage run under a multi-thread OpenMP team); they do not prove
+    each replay started exactly where the harness starts it. The other flux
+    gates passing makes the injected fault the sole reason for rejection.
     """
-    assert np.all(observation.values["replay:area_rule_norms"] <= tolerance)
-    assert np.all(observation.values["replay:area_solver_success"])
+    gates = success_gates(observation.values, tolerance)
+    assert [name for name, passed in gates.items() if not passed] == [gate]
+    assert observation.success is False
 
 
 @pytest.mark.parametrize("lane", ["native-cpu", "jax-cpu"])
@@ -782,10 +788,11 @@ def test_a_jax_only_flux_target_offset_is_rejected(tmp_path: Path) -> None:
         "flux-target-offset", input_root, tmp_path / "jax-observation.pkl"
     )
 
-    _assert_area_stages_pass(
-        observation, float(bundle.configuration["solver_tolerance"])
+    _assert_only_failing_gate(
+        observation,
+        float(bundle.configuration["solver_tolerance"]),
+        "replay:flux_target",
     )
-    assert observation.success is False
     assert np.all(
         observation.values["replay:flux_target"]
         != observation.values["replay:flux_target_reference"]
@@ -907,8 +914,7 @@ def test_a_jax_state_that_fails_natives_rule_is_rejected(tmp_path: Path) -> None
     )
 
     tolerance = float(bundle.configuration["solver_tolerance"])
-    _assert_area_stages_pass(observation, tolerance)
+    _assert_only_failing_gate(observation, tolerance, "replay:flux_rule_norms")
     flux_rule_norms = observation.values["replay:flux_rule_norms"]
     assert np.all(flux_rule_norms[:, 3] <= tolerance)
     assert np.all(flux_rule_norms[:, 1] > tolerance)
-    assert observation.success is False
