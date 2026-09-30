@@ -15,7 +15,7 @@ from examples.jax.parity.arbiter import (
     upstream_branch_representatives,
     upstream_end_state_matches,
 )
-from examples.jax.parity.cases import get_case, native_boozer
+from examples.jax.parity.cases import get_case
 from examples.jax.parity.cases.native_boozer import (
     FIRST_STAGE_STATUS_CONVENTION_BY_DRIVER,
     JAX_DRIVER,
@@ -83,19 +83,84 @@ out_path.write_bytes(pickle.dumps(payload))
 """
 
 
-def _lane_observation(
-    lane: ParityLane, input_root: Path, out_path: Path
+# A fault injected into the JAX lane's child before it executes, as
+# ``monkeypatch`` would inject it in process; ``sys.argv[4]`` names it.
+# Every stage the JAX lane runs, the native first stage and the native replay
+# stages included, then runs in the same one-thread child as the harness's.
+_FAULTED_JAX_LANE_CHILD = (
+    """\
+import sys
+
+import numpy as np
+from examples.jax.parity.cases import native_boozer
+
+fault = sys.argv[4]
+if fault == "flux-target-offset":
+    flux_target_of = native_boozer._flux_target
+
+    def offset_flux_target(configuration, toroidal_flux):
+        return flux_target_of(configuration, toroidal_flux) + 1.0e-12
+
+    native_boozer._flux_target = offset_flux_target
+elif fault == "displaced-flux-state":
+    jax_stages_of = native_boozer._jax_stages
+
+    def displaced_jax_stages(configuration, start):
+        stages, area_target = jax_stages_of(configuration, start)
+        flux = stages.flux
+        dofs = np.array(flux.state.surface_dofs, dtype=np.float64, copy=True)
+        dofs[0] += 1.0e-6
+        displaced = flux._replace(state=flux.state._replace(surface_dofs=dofs))
+        return stages._replace(flux=displaced), area_target
+
+    native_boozer._jax_stages = displaced_jax_stages
+else:
+    raise SystemExit(f"unknown fault {fault!r}")
+"""
+    + _LANE_CHILD
+)
+
+
+def _child_observation(
+    source: str, lane: ParityLane, input_root: Path, out_path: Path, *args: str
 ) -> LaneObservation:
     completed = run_parity_lane_child(
         lane,
-        _LANE_CHILD,
+        source,
         lane,
         str(input_root),
         str(out_path),
+        *args,
         repo_root=_REPO_ROOT,
     )
     assert completed.returncode == 0, completed.stderr
     return LaneObservation(**pickle.loads(out_path.read_bytes()))
+
+
+def _lane_observation(
+    lane: ParityLane, input_root: Path, out_path: Path
+) -> LaneObservation:
+    return _child_observation(_LANE_CHILD, lane, input_root, out_path)
+
+
+def _faulted_jax_observation(
+    fault: str, input_root: Path, out_path: Path
+) -> LaneObservation:
+    """The ``jax-cpu`` lane with ``fault`` injected, in its one-thread lane child."""
+    return _child_observation(
+        _FAULTED_JAX_LANE_CHILD, "jax-cpu", input_root, out_path, fault
+    )
+
+
+def _assert_area_stages_pass(observation: LaneObservation, tolerance: float) -> None:
+    """Every replay's area stage meets upstream's rule under both implementations.
+
+    The faults below touch only the flux stage, so this holds exactly when each
+    replay started where the harness starts it (the native first stage at one
+    thread, then upstream's nine), and a lane failure is then the fault's.
+    """
+    assert np.all(observation.values["replay:area_rule_norms"] <= tolerance)
+    assert np.all(observation.values["replay:area_solver_success"])
 
 
 @pytest.mark.parametrize("lane", ["native-cpu", "jax-cpu"])
@@ -698,9 +763,7 @@ def test_boozer_initial_plain_residual_is_the_official_definition(
     )
 
 
-def test_a_jax_only_flux_target_offset_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_jax_only_flux_target_offset_is_rejected(tmp_path: Path) -> None:
     """Amendment 8, F1: a flux-target construction error fails the lane.
 
     The JAX lane's flux stages take their target through ``_flux_target``; an
@@ -713,21 +776,15 @@ def test_a_jax_only_flux_target_offset_is_rejected(
     case = get_case("native-boozer")
     input_root = tmp_path / "inputs"
     bundle = case.create_input(input_root, "bounded")
-    _, arrays = load_input_bundle(input_root, bundle)
-    target_of = native_boozer._flux_target
-    monkeypatch.setattr(
-        native_boozer,
-        "_flux_target",
-        lambda configuration, toroidal_flux: (
-            target_of(configuration, toroidal_flux) + 1.0e-12
-        ),
+    load_input_bundle(input_root, bundle)
+
+    observation = _faulted_jax_observation(
+        "flux-target-offset", input_root, tmp_path / "jax-observation.pkl"
     )
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
-    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
-    monkeypatch.setenv("JAX_ENABLE_X64", "1")
 
-    observation = case.execute("jax-cpu", bundle, arrays)
-
+    _assert_area_stages_pass(
+        observation, float(bundle.configuration["solver_tolerance"])
+    )
     assert observation.success is False
     assert np.all(
         observation.values["replay:flux_target"]
@@ -827,38 +884,30 @@ def test_cross_check_judges_the_residual_hessian_case() -> None:
     )
 
 
-def test_a_jax_state_that_fails_natives_rule_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_jax_state_that_fails_natives_rule_is_rejected(tmp_path: Path) -> None:
     """Amendment 9: a JAX flux end state is judged by the native library too.
 
     The JAX stages are displaced after their solve while keeping the solve's
     own converged report, as a JAX implementation that stopped at a wrong
     state would publish them. The native evaluation of that state fails
     upstream's rule, so the lane fails.
+
+    The lane runs in its one-thread child: in the pytest process the replay's
+    "native" start is the native first stage under the pytest OpenMP team,
+    which at 8 threads ends on another branch, from which both area solves
+    fail and the JAX flux norm is NaN.
     """
     case = get_case("native-boozer")
     input_root = tmp_path / "inputs"
     bundle = case.create_input(input_root, "bounded")
-    _, arrays = load_input_bundle(input_root, bundle)
-    jax_stages = native_boozer._jax_stages
+    load_input_bundle(input_root, bundle)
 
-    def displaced_jax_stages(configuration, start):
-        stages, area_target = jax_stages(configuration, start)
-        flux = stages.flux
-        dofs = np.array(flux.state.surface_dofs, dtype=np.float64, copy=True)
-        dofs[0] += 1.0e-6
-        displaced = flux._replace(state=flux.state._replace(surface_dofs=dofs))
-        return stages._replace(flux=displaced), area_target
-
-    monkeypatch.setattr(native_boozer, "_jax_stages", displaced_jax_stages)
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
-    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
-    monkeypatch.setenv("JAX_ENABLE_X64", "1")
-
-    observation = case.execute("jax-cpu", bundle, arrays)
+    observation = _faulted_jax_observation(
+        "displaced-flux-state", input_root, tmp_path / "jax-observation.pkl"
+    )
 
     tolerance = float(bundle.configuration["solver_tolerance"])
+    _assert_area_stages_pass(observation, tolerance)
     flux_rule_norms = observation.values["replay:flux_rule_norms"]
     assert np.all(flux_rule_norms[:, 3] <= tolerance)
     assert np.all(flux_rule_norms[:, 1] > tolerance)
