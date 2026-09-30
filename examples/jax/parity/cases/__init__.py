@@ -19,6 +19,9 @@ from examples.jax.parity.cases.native_boozer import (
     REPLAY_DERIVED_OBSERVABLES as NATIVE_BOOZER_REPLAY_DERIVED_OBSERVABLES,
 )
 from examples.jax.parity.cases.native_boozer import (
+    REPLAY_RULE_OBSERVABLES as NATIVE_BOOZER_REPLAY_RULE_OBSERVABLES,
+)
+from examples.jax.parity.cases.native_boozer import (
     REPLAY_SOLUTION_OBSERVABLES as NATIVE_BOOZER_REPLAY_SOLUTION_OBSERVABLES,
 )
 from examples.jax.parity.cases.native_boozer import (
@@ -351,11 +354,10 @@ _CASES = {
                 informational_observables=(
                     *NATIVE_BOOZER_END_STATE_OBSERVABLES,
                     *NATIVE_BOOZER_REPLAY_DERIVED_OBSERVABLES,
-                ),
-                deciding_observables=(
-                    *NATIVE_BOOZER_REPLAY_EXACT_OBSERVABLES,
                     *NATIVE_BOOZER_REPLAY_SOLUTION_OBSERVABLES,
+                    *NATIVE_BOOZER_REPLAY_RULE_OBSERVABLES,
                 ),
+                deciding_observables=NATIVE_BOOZER_REPLAY_EXACT_OBSERVABLES,
                 same_state_tests=(
                     "tests/integration/test_jax_mirror_boozer_official_end_states.py",
                     "tests/integration/test_jax_mirror_boozer_first_stage_same_state.py",
@@ -367,17 +369,17 @@ _CASES = {
                     f"pre-registered first-stage ends k = 0..8 at {scale} (9e027eac3, one thread, "
                     "one-ulp protocol; tracked scatter record keys first:surface_dofs, first:iota, "
                     "first:G) -- every lane runs the official area and flux Newton stages; the starts "
-                    "and success flags are compared exactly, every replayed solve must meet upstream's "
-                    "success rule norm(J^T r) <= tol, and the two lanes' solved states must lie "
-                    "within (norm(b_native) + norm(b_jax)) / min(lambda_min(J^T J)) plus "
-                    "max(norm(dx*/dt)) times the two lanes' label-target difference of each other "
-                    "(amendments 6 and 7, B1' and B1'', set post hoc by the user after the 1e-11 rule "
-                    "and then the stopping-radius rule failed at the bounded k8 start; labels and "
-                    "the flux target informational). The bound is first order: a row is refused "
-                    "unless both lanes' endpoint curvature and sensitivity agree within 10 % and the "
-                    "bound is at most 1e-6 of the state norm; the area target must be bitwise shared "
-                    "and each lane's flux target must equal a native recomputation at its published "
-                    "area state (amendment 8, F1/F2, post hoc, strictness only). The chained end "
+                    "and success flags are compared exactly. Each lane's area and flux end state must "
+                    "meet upstream's success rule norm(J^T r) <= tol evaluated by its own "
+                    "implementation and by the other one at the label target that state solved (the "
+                    "native library at the JAX state, BoozerSurfaceJAX at the native state): each JAX "
+                    "lane reruns the native replays in-process and cross-evaluates both ways, and the "
+                    "native replays it reran are compared exactly with the native lane's (amendment 9, "
+                    "user ruling 2026-09-30, post hoc; it replaces amendments 6-8's gap bound, which "
+                    "endpoint data cannot establish). The two lanes' solved states, labels and flux "
+                    "targets are informational; the area target must be bitwise shared and each "
+                    "lane's flux target must equal a native recomputation at its published area state "
+                    "(amendment 8, F1). The chained end "
                     "state is informational: the first stage's capped, "
                     "path-dependent L-BFGS end point decides which surface the chain reaches. "
                     "The first stage itself is judged at identical x (x0 and upstream's nine "

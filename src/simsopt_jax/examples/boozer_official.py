@@ -112,10 +112,7 @@ class BoozerStageOutcome(NamedTuple):
     same reason.  ``gradient_norm`` is the norm of the penalty gradient at the
     end state on both routes, and ``penalty_residual_norm`` is the norm of the
     solver's own residual vector (with its constraint rows), which the manual
-    route alone returns.  ``normal_matrix_min_eigenvalue`` is the smallest
-    eigenvalue of the manual route's own ``J^T J`` at the end state (the
-    Gauss-Newton curvature that turns ``gradient_norm`` into a distance to the
-    root); ``None`` on the L-BFGS route, which forms no such matrix.
+    route alone returns.
     """
 
     state: BoozerStageState
@@ -129,7 +126,6 @@ class BoozerStageOutcome(NamedTuple):
     objective: float | None
     gradient_norm: float
     penalty_residual_norm: float | None
-    normal_matrix_min_eigenvalue: float | None
 
 
 def boozer_first_stage_budget(*, least_squares_steps: int, native_default: bool) -> int:
@@ -228,7 +224,6 @@ def run_boozer_lbfgs_stage(
         objective=host_float(result["fun"]),
         gradient_norm=_host_norm(result["gradient"]),
         penalty_residual_norm=None,
-        normal_matrix_min_eigenvalue=None,
     )
 
 
@@ -263,9 +258,6 @@ def run_boozer_manual_stage(
         objective=None,
         gradient_norm=_host_norm(result["gradient"]),
         penalty_residual_norm=_host_norm(result["residual"]),
-        normal_matrix_min_eigenvalue=float(
-            np.linalg.eigvalsh(host_array(result["jacobian"], dtype=np.float64))[0]
-        ),
     )
 
 

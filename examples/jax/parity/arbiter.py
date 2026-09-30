@@ -489,71 +489,6 @@ def _require_fp64(lane: str, value_key: str, value: np.ndarray) -> None:
         )
 
 
-#: The first-order validity precondition of ``stopping_bound`` (PLAN.md amendment 8, F2): the two
-#: lanes' endpoint curvatures and sensitivities agree within this fraction ...
-STOPPING_BOUND_AGREEMENT = 0.1
-#: ... and the bound is this small against the state's own scale.
-STOPPING_BOUND_STEP_SCALE = 1.0e-6
-
-
-def stopping_bound_gaps(
-    left: np.ndarray, right: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Per-row solved-state gap and its FIRST-ORDER bound (PLAN.md amendments 6-8).
-
-    Each row of ``left`` and ``right`` is one lane's solution of one penalty
-    least-squares solve: the state x, the solve's label target t, its end
-    ``norm(J^T r)``, ``lambda_min(J^T J)`` at x and ``s = norm(dx*/dt)``, all
-    from the lane's own run. With ``b = J^T r`` the gradient of
-    ``f_t = 1/2 |r(x, t)|^2`` and ``mu`` a lower bound on the curvature along the
-    segment to the root, each lane lies within ``|b| / mu`` of its own root
-    x*(t); the two lanes' roots differ by at most ``s |t_l - t_r|`` to first
-    order; so ``|x_l - x_r| <= (|b_l| + |b_r|) / mu + s |t_l - t_r|`` with ``mu``
-    the smaller Gauss-Newton curvature and ``s`` the larger sensitivity.
-    Endpoint curvature and sensitivity make this a first-order estimate, not a
-    rigorous bound: it is admitted only where
-    :func:`stopping_bound_precondition` holds. Returns the Euclidean gap per
-    row and that bound per row.
-    """
-    gap = np.linalg.norm(left[..., :-4] - right[..., :-4], axis=-1)
-    bound = (left[..., -3] + right[..., -3]) / np.minimum(
-        left[..., -2], right[..., -2]
-    ) + np.maximum(left[..., -1], right[..., -1]) * np.abs(
-        left[..., -4] - right[..., -4]
-    )
-    return gap, bound
-
-
-def stopping_bound_precondition(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Per row, whether the first-order bound of :func:`stopping_bound_gaps` may judge it.
-
-    Both lanes' endpoint curvatures ``lambda`` and sensitivities ``s`` must agree
-    within :data:`STOPPING_BOUND_AGREEMENT` of the smaller, and the bound must be
-    at most :data:`STOPPING_BOUND_STEP_SCALE` times the larger state norm, so the
-    neglected second-order terms are negligible. A row that fails is refused,
-    never admitted (PLAN.md amendment 8, F2).
-    """
-    curvature_left, curvature_right = left[..., -2], right[..., -2]
-    sensitivity_left, sensitivity_right = left[..., -1], right[..., -1]
-    _, bound = stopping_bound_gaps(left, right)
-    state_scale = np.maximum(
-        np.linalg.norm(left[..., :-4], axis=-1),
-        np.linalg.norm(right[..., :-4], axis=-1),
-    )
-    return (
-        (
-            np.abs(curvature_left - curvature_right)
-            <= STOPPING_BOUND_AGREEMENT * np.minimum(curvature_left, curvature_right)
-        )
-        & (
-            np.abs(sensitivity_left - sensitivity_right)
-            <= STOPPING_BOUND_AGREEMENT
-            * np.minimum(sensitivity_left, sensitivity_right)
-        )
-        & (bound <= STOPPING_BOUND_STEP_SCALE * state_scale)
-    )
-
-
 def _compare(
     route: ComparisonRoute, left: np.ndarray, right: np.ndarray
 ) -> tuple[bool, str]:
@@ -576,22 +511,6 @@ def _compare(
         rtol, atol = _route_tolerance(route)
         upper_bound = left + rtol * np.abs(left) + atol
         return bool(np.all(right <= upper_bound)), f"not_worse rtol={rtol} atol={atol}"
-    if route.comparator == "stopping_bound":
-        gap, bound = stopping_bound_gaps(left, right)
-        curvature = np.minimum(left[..., -2], right[..., -2])
-        admitted = stopping_bound_precondition(left, right) & (curvature > 0.0)
-        if not bool(np.all(admitted)):
-            return False, (
-                "stopping_bound refused: first-order precondition fails at rows "
-                f"{np.flatnonzero(~admitted).tolist()}"
-            )
-        passed = bool(np.all(gap <= bound))
-        ratio = np.where(
-            gap == 0.0,
-            0.0,
-            np.where(bound > 0.0, gap / np.where(bound > 0.0, bound, 1.0), np.inf),
-        )
-        return passed, f"stopping_bound: max gap/bound {float(np.max(ratio)):.3e}"
     raise ArbitrationError(
         "equivalent comparator requires a case-owned invariant: "
         f"{route.phase}:{route.observable}"

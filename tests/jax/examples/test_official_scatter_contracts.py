@@ -19,6 +19,7 @@ from examples.jax.parity.cases.native_boozer import (
     END_STATE_OBSERVABLES,
     REPLAY_DERIVED_OBSERVABLES,
     REPLAY_EXACT_OBSERVABLES,
+    REPLAY_RULE_OBSERVABLES,
     REPLAY_SOLUTION_OBSERVABLES,
     REPLAY_STARTS,
 )
@@ -364,11 +365,12 @@ def test_boozer_is_judged_stage_wise_with_its_end_state_set_informational(
     assert contract.informational_observables == (
         *END_STATE_OBSERVABLES,
         *REPLAY_DERIVED_OBSERVABLES,
-    )
-    assert contract.deciding_observables == (
-        *REPLAY_EXACT_OBSERVABLES,
         *REPLAY_SOLUTION_OBSERVABLES,
+        *REPLAY_RULE_OBSERVABLES,
     )
+    # The cross-check decides through each lane's success gate; across lanes
+    # only exactly shared quantities decide (PLAN.md amendment 9).
+    assert contract.deciding_observables == REPLAY_EXACT_OBSERVABLES
     assert contract.same_state_tests == (
         "tests/integration/test_jax_mirror_boozer_official_end_states.py",
         "tests/integration/test_jax_mirror_boozer_first_stage_same_state.py",
@@ -381,9 +383,8 @@ def test_boozer_is_judged_stage_wise_with_its_end_state_set_informational(
     }
     for key in REPLAY_EXACT_OBSERVABLES:
         assert routes[key].applicable and routes[key].comparator == "exact", key
-    for key in REPLAY_SOLUTION_OBSERVABLES:
+    for key in (*REPLAY_SOLUTION_OBSERVABLES, *REPLAY_RULE_OBSERVABLES):
         assert routes[key].applicable, key
-        assert routes[key].comparator == "stopping_bound", key
     for key in REPLAY_DERIVED_OBSERVABLES:
         assert routes[key].applicable, key
     for key in END_STATE_OBSERVABLES:

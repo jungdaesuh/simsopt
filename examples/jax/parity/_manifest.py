@@ -54,9 +54,7 @@ PHASES = frozenset(
     }
 )
 LANE_PAIRS = frozenset({"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"})
-COMPARATORS = frozenset(
-    {"allclose", "exact", "equivalent", "not_worse", "stopping_bound"}
-)
+COMPARATORS = frozenset({"allclose", "exact", "equivalent", "not_worse"})
 V2_ROOT_FIELDS = frozenset({"schema_version", "relationships"})
 V2_OPTIONAL_ROOT_FIELDS = frozenset({"experimental_relationships"})
 RELATIONSHIP_FIELDS = frozenset(

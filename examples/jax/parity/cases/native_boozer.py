@@ -87,22 +87,27 @@ native lane's own first-stage end (which each JAX lane recomputes in-process
 by running the native first stage, under the lane's one-thread policy) and
 upstream's nine pre-registered first-stage ends at the case's scale (the
 tracked scatter record, frozen into the input bundle).  The starts are compared
-exactly; every replayed solve must meet upstream's success rule
-``norm(J^T r) <= tol``; and the two lanes' solved states must lie within the sum
-of their stopping radii, ``(norm(b_native) + norm(b_jax)) / min(lambda_min)``,
-plus the carry-over ``max(norm(dx*/dt)) * |t_native - t_jax|`` of the two lanes'
-label targets (PLAN.md amendments 6 and 7, B1' and B1'', the arbiter's
-``stopping_bound`` comparator).
+exactly, and the replayed solves are judged by a CROSS-CHECK of upstream's own
+success rule (PLAN.md amendment 9, replacing amendments 6-8's gap bound): each
+lane's area and flux end state must satisfy ``norm(J^T r) <= tol`` evaluated by
+its own implementation AND by the other one -- the native library evaluates the
+JAX state, ``BoozerSurfaceJAX`` evaluates the native state -- each at the label
+target that state solved.  Every JAX lane reruns the native replays in-process
+(as it reruns the native first stage) and cross-evaluates both ways; the native
+replays it reran are compared exactly with the native lane's own, so the native
+states it judged are the native lane's.  The two lanes' solved states are then
+informational: two correct solves of an ill-conditioned problem need not agree
+beyond what their own stopping rule certifies.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, NamedTuple, get_args
+from typing import Final, Literal, NamedTuple, TypeVar, get_args
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -208,7 +213,10 @@ REPLAY_STARTS: Final[tuple[str, ...]] = (
     *(f"k{k}" for k in PRE_REGISTERED_DRAWS),
 )
 #: The replay keys compared exactly: the shared starts, the area stage's label target (which must be
-#: bitwise shared, PLAN.md amendment 8, F1) and the solves' success flags.
+#: bitwise shared, PLAN.md amendment 8, F1), the solves' success flags, and the NATIVE replayed
+#: solutions, one row per start -- solved state (surface dofs, iota, G), label target, native
+#: norm(J^T r) -- which the native lane runs and every JAX lane reruns in-process to cross-evaluate
+#: them (PLAN.md amendment 9).
 REPLAY_EXACT_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:start_surface_dofs",
     "replay:start_iota",
@@ -216,14 +224,24 @@ REPLAY_EXACT_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:area_target",
     "replay:area_solver_success",
     "replay:flux_solver_success",
+    "replay:native_area_solution",
+    "replay:native_flux_solution",
 )
-#: The replayed Newton solutions, one row per start: the solved state (surface dofs, iota, G), the
-#: stage's label target, its end norm(J^T r), lambda_min(J^T J) at that state and norm(dx*/dt), each
-#: from the lane's own run. The arbiter's ``stopping_bound`` comparator judges them (PLAN.md
-#: amendments 6 and 7, B1' and B1'').
+#: Each lane's own replayed solutions in the same row layout (state, label target, its own
+#: norm(J^T r)). Two correct solves need not agree beyond their stopping rule, so the inter-lane
+#: state gap is informational (PLAN.md amendment 9).
 REPLAY_SOLUTION_OBSERVABLES: Final[tuple[str, ...]] = (
     "replay:area_solution",
     "replay:flux_solution",
+)
+#: Upstream's success rule cross-evaluated, one row per start: norm(J^T r) of the native
+#: implementation at the native state, of the native implementation at this lane's state, of this
+#: lane's implementation at the native state, and of this lane's implementation at its own state
+#: (on the native lane all four are its own norm). A lane succeeds only if every entry is
+#: <= tol (PLAN.md amendment 9); across lanes the rows are informational.
+REPLAY_RULE_OBSERVABLES: Final[tuple[str, ...]] = (
+    "replay:area_rule_norms",
+    "replay:flux_rule_norms",
 )
 #: Functions of the judged solutions, published and recorded, informational.
 REPLAY_DERIVED_OBSERVABLES: Final[tuple[str, ...]] = (
@@ -546,14 +564,61 @@ def _native_newton_stages(
     )
 
 
+ReplayStage = Literal["area", "flux"]
+State = TypeVar("State")
+
+
+def cross_checked_rule_norms(
+    native_rule: Callable[[State, float], float],
+    lane_rule: Callable[[State, float], float],
+    native_end: tuple[State, float, float],
+    lane_end: tuple[State, float, float],
+) -> tuple[float, float, float, float]:
+    """Upstream's success-rule norms of one replayed stage, cross-evaluated (PLAN.md amendment 9).
+
+    ``native_end`` and ``lane_end`` are each solve's (end state, label target,
+    its own ``norm(J^T r)`` there); ``native_rule`` and ``lane_rule`` evaluate
+    ``norm(J^T r)`` of one implementation at a state and label target. Returns
+    the native norm at the native state (the solve's own), the native norm at
+    the lane state, the lane implementation's norm at the native state and the
+    lane's norm at its own state (the solve's own). Each state is judged at the
+    target it solved, so two correct solves of different targets both pass,
+    however far apart they are.
+    """
+    native_state, native_target, native_norm = native_end
+    lane_state, lane_target, lane_norm = lane_end
+    return (
+        native_norm,
+        native_rule(lane_state, lane_target),
+        lane_rule(native_state, native_target),
+        lane_norm,
+    )
+
+
+def rule_norms_pass(rule_norms: np.ndarray, tolerance: float) -> bool:
+    """Whether every cross-evaluated ``norm(J^T r)`` meets upstream's rule ``<= tol``."""
+    return bool(np.all(np.asarray(rule_norms, dtype=np.float64) <= tolerance))
+
+
 class _Replay(NamedTuple):
-    """One replay: the Newton stages, each stage's label target and its sensitivity ``norm(dx*/dt)``."""
+    """One lane's replay from one start, cross-checked (PLAN.md amendment 9).
+
+    ``stages`` are the lane's own Newton stages and ``native`` the native
+    implementation's from the same start: the native lane's own, or a JAX
+    lane's in-process rerun of them. ``*_rule_norms`` hold upstream's
+    success-rule ``norm(J^T r)`` of the native implementation at the native
+    state, of the native implementation at the lane's state, of the lane's
+    implementation at the native state and of the lane's implementation at its
+    own state, each at the label target that state solved.
+    """
 
     stages: _NewtonStages
     area_target: float
-    area_target_sensitivity: float
-    flux_target_sensitivity: float
     flux_target_reference: float
+    native: _NewtonStages
+    native_area_target: float
+    area_rule_norms: tuple[float, float, float, float]
+    flux_rule_norms: tuple[float, float, float, float]
 
 
 def _stage_x(outcome: BoozerStageOutcome) -> np.ndarray:
@@ -566,54 +631,102 @@ def _stage_x(outcome: BoozerStageOutcome) -> np.ndarray:
     )
 
 
-def _target_sensitivity(jacobian: np.ndarray, constraint_weight: float) -> float:
-    """``norm(dx*/dt)`` of a penalty solve from one lane's own Jacobian at its end state.
+def _stage_label(stage: ReplayStage, surface, field):
+    """A replay stage's label: the surface's area, or the toroidal flux through it."""
+    return Area(surface) if stage == "area" else ToroidalFlux(surface, field)
 
-    The label row (row -2) is ``sqrt(cw) (l(x) - t)``, so ``db/dt = -sqrt(cw) J[l]^T``
-    and, with the Gauss-Newton ``H = J^T J``, ``dx*/dt = sqrt(cw) H^-1 J[l]^T``
-    (PLAN.md amendment 7, B1'').
+
+def _native_rule_norm(
+    configuration: Mapping[str, object],
+    stage: ReplayStage,
+    target: float,
+    state: BoozerStageState,
+) -> float:
+    """Upstream's success-rule ``norm(J^T r)`` at ``state``, evaluated by the native library.
+
+    Upstream's manual route at ``maxiter=0`` on fresh objects takes no step and
+    returns the norm its loop tests against ``tol``, at ``state`` and the label
+    ``target`` that state solved.
     """
-    return float(
-        np.linalg.norm(
-            np.sqrt(constraint_weight)
-            * np.linalg.solve(jacobian.T @ jacobian, jacobian[-2])
-        )
+    _, native_field, field, surface, _ = _problem(configuration)
+    solver = BoozerSurface(
+        native_field, surface, _stage_label(stage, surface, field), target
+    )
+    return run_boozer_manual_stage(
+        solver,
+        state,
+        tol=_configuration_float(configuration, "solver_tolerance"),
+        maxiter=0,
+        constraint_weight=_configuration_float(configuration, "constraint_weight"),
+    ).gradient_norm
+
+
+def _jax_rule_norm(
+    configuration: Mapping[str, object],
+    stage: ReplayStage,
+    target: float,
+    state: BoozerStageState,
+) -> float:
+    """Upstream's success-rule ``norm(J^T r)`` at ``state``, evaluated by ``BoozerSurfaceJAX``.
+
+    The JAX manual route at ``maxiter=0`` on fresh objects, on this lane's
+    device: no step, the norm its loop tests against ``tol``.
+    """
+    _, native_field, field, surface, _ = _problem(configuration)
+    constraint_weight = _configuration_float(configuration, "constraint_weight")
+    solver = BoozerSurfaceJAX(
+        BiotSavartJAX(native_field.coils),
+        surface,
+        _stage_label(stage, surface, field),
+        target,
+        constraint_weight=constraint_weight,
+        options=_jax_options(configuration),
+    )
+    return run_boozer_manual_stage(
+        solver,
+        state,
+        tol=_configuration_float(configuration, "solver_tolerance"),
+        maxiter=0,
+        constraint_weight=constraint_weight,
+    ).gradient_norm
+
+
+def _native_stages(
+    configuration: Mapping[str, object], start: BoozerStageState
+) -> tuple[_NewtonStages, float]:
+    """The native Newton stages from ``start`` on fresh objects, and their area target (the initial surface's)."""
+    _, native_field, field, surface, _ = _problem(configuration)
+    area = Area(surface)
+    area_target = float(area.J())
+    solver = BoozerSurface(native_field, surface, area, area_target)
+    return (
+        _native_newton_stages(
+            configuration, solver, area, surface, native_field, field, start
+        ),
+        area_target,
     )
 
 
 def _native_replay(
     configuration: Mapping[str, object], start: BoozerStageState
 ) -> _Replay:
-    """The native Newton stages from ``start`` on fresh objects (the area target is the initial surface's)."""
-    _, native_field, field, surface, _ = _problem(configuration)
-    constraint_weight = _configuration_float(configuration, "constraint_weight")
-    area = Area(surface)
-    area_target = float(area.J())
-    solver = BoozerSurface(native_field, surface, area, area_target)
-    stages = _native_newton_stages(
-        configuration, solver, area, surface, native_field, field, start
-    )
-    flux_solver = BoozerSurface(
-        native_field, surface, ToroidalFlux(surface, field), stages.flux_target
-    )
+    """The native lane's replay: its own stages, which are also the native ones.
+
+    Every entry of its rule norms is its own ``norm(J^T r)``; the JAX
+    implementation's verdict on these states is published by each JAX lane,
+    which reruns them (``replay:native_*_solution`` compared exactly).
+    """
+    stages, area_target = _native_stages(configuration, start)
     return _Replay(
         stages=stages,
         area_target=area_target,
         flux_target_reference=_reference_flux_target(
             configuration, stages.area.state.surface_dofs
         ),
-        area_target_sensitivity=_target_sensitivity(
-            solver._get_residual_vector_and_jacobian(
-                _stage_x(stages.area), constraint_weight, True, True
-            )[1],
-            constraint_weight,
-        ),
-        flux_target_sensitivity=_target_sensitivity(
-            flux_solver._get_residual_vector_and_jacobian(
-                _stage_x(stages.flux), constraint_weight, True, True
-            )[1],
-            constraint_weight,
-        ),
+        native=stages,
+        native_area_target=area_target,
+        area_rule_norms=(stages.area.gradient_norm,) * 4,
+        flux_rule_norms=(stages.flux.gradient_norm,) * 4,
     )
 
 
@@ -799,72 +912,64 @@ def _jax_options(configuration: Mapping[str, object]):
     )
 
 
-def _jax_penalty_jacobian(
-    solver, field, surface, outcome: BoozerStageOutcome, constraint_weight: float
-) -> np.ndarray:
-    """The JAX lane's own penalty Jacobian at a stage's end state, on the host."""
-    surface.set_dofs(np.asarray(outcome.state.surface_dofs, dtype=np.float64))
-    kernels = solver._get_penalty_kernel_bundle(
-        optimize_G=True,
-        weight_inv_modB=True,
-        constraint_weight=constraint_weight,
+def _jax_stages(
+    configuration: Mapping[str, object], start: BoozerStageState
+) -> tuple[_NewtonStages, float]:
+    """The JAX Newton stages from ``start`` on fresh objects, and their area target (the initial surface's)."""
+    _, native_field, field, surface, _ = _problem(configuration)
+    options = _jax_options(configuration)
+    area = Area(surface)
+    area_target = float(area.J())
+    solver = BoozerSurfaceJAX(
+        BiotSavartJAX(native_field.coils),
+        surface,
+        area,
+        area_target,
+        constraint_weight=_configuration_float(configuration, "constraint_weight"),
+        options=options,
     )
-    return np.asarray(
-        jax.device_get(
-            kernels.jacobian(jax.device_put(_stage_x(outcome)), field.coil_set_spec())
+    return (
+        _jax_newton_stages(
+            configuration, options, solver, area, surface, native_field, field, start
         ),
-        dtype=np.float64,
+        area_target,
     )
 
 
 def _jax_replay(
     configuration: Mapping[str, object], start: BoozerStageState
 ) -> _Replay:
-    """The JAX Newton stages from ``start`` on fresh objects (the area target is the initial surface's)."""
-    _, native_field, field, surface, _ = _problem(configuration)
-    options = _jax_options(configuration)
-    constraint_weight = _configuration_float(configuration, "constraint_weight")
-    area = Area(surface)
-    area_target = float(area.J())
-    area_field = BiotSavartJAX(native_field.coils)
-    solver = BoozerSurfaceJAX(
-        area_field,
-        surface,
-        area,
-        area_target,
-        constraint_weight=constraint_weight,
-        options=options,
-    )
-    stages = _jax_newton_stages(
-        configuration, options, solver, area, surface, native_field, field, start
-    )
-    flux_field = BiotSavartJAX(native_field.coils)
-    flux_solver = BoozerSurfaceJAX(
-        flux_field,
-        surface,
-        ToroidalFlux(surface, field),
-        stages.flux_target,
-        constraint_weight=constraint_weight,
-        options=options,
-        surface_runtime_state=solver.surface_runtime_state,
-    )
+    """A JAX lane's replay: its own stages and the native ones, each judged by both implementations.
+
+    The native stages are rerun here, on the host under this lane's
+    one-thread policy (as the native first stage is), and published so the
+    arbiter compares them exactly with the native lane's own.
+    """
+    stages, area_target = _jax_stages(configuration, start)
+    native, native_area_target = _native_stages(configuration, start)
     return _Replay(
         stages=stages,
         area_target=area_target,
         flux_target_reference=_reference_flux_target(
             configuration, stages.area.state.surface_dofs
         ),
-        area_target_sensitivity=_target_sensitivity(
-            _jax_penalty_jacobian(
-                solver, area_field, surface, stages.area, constraint_weight
+        native=native,
+        native_area_target=native_area_target,
+        area_rule_norms=cross_checked_rule_norms(
+            lambda state, target: _native_rule_norm(
+                configuration, "area", target, state
             ),
-            constraint_weight,
+            lambda state, target: _jax_rule_norm(configuration, "area", target, state),
+            (native.area.state, native_area_target, native.area.gradient_norm),
+            (stages.area.state, area_target, stages.area.gradient_norm),
         ),
-        flux_target_sensitivity=_target_sensitivity(
-            _jax_penalty_jacobian(
-                flux_solver, flux_field, surface, stages.flux, constraint_weight
+        flux_rule_norms=cross_checked_rule_norms(
+            lambda state, target: _native_rule_norm(
+                configuration, "flux", target, state
             ),
-            constraint_weight,
+            lambda state, target: _jax_rule_norm(configuration, "flux", target, state),
+            (native.flux.state, native.flux_target, native.flux.gradient_norm),
+            (stages.flux.state, stages.flux_target, stages.flux.gradient_norm),
         ),
     )
 
@@ -1005,7 +1110,7 @@ def _values(
     rough_residual_norm: float,
     chained: _NewtonStages,
     starts: tuple[BoozerStageState, ...],
-    replays: tuple[_NewtonStages, ...],
+    replays: tuple[_Replay, ...],
 ) -> dict[str, np.ndarray]:
     first_stopping_reason = first_stage_stopping_reason(
         rough,
@@ -1065,22 +1170,12 @@ def _values(
     }
 
 
-def _solution_row(
-    outcome: BoozerStageOutcome, target: float, target_sensitivity: float
-) -> np.ndarray:
-    """One ``replay:*_solution`` row: state, label target, norm(J^T r), lambda_min(J^T J), norm(dx*/dt)."""
+def _solution_row(outcome: BoozerStageOutcome, target: float) -> np.ndarray:
+    """One ``replay:*solution`` row: the solved state, its label target and the solve's own norm(J^T r)."""
     return np.concatenate(
         (
             _stage_x(outcome),
-            np.asarray(
-                [
-                    target,
-                    outcome.gradient_norm,
-                    outcome.normal_matrix_min_eigenvalue,
-                    target_sensitivity,
-                ],
-                dtype=np.float64,
-            ),
+            np.asarray([target, outcome.gradient_norm], dtype=np.float64),
         )
     )
 
@@ -1096,6 +1191,9 @@ def _replay_values(
     def flags(values) -> np.ndarray:
         return np.asarray(list(values), dtype=np.bool_)
 
+    def floats_2d(rows) -> np.ndarray:
+        return np.asarray([list(row) for row in rows], dtype=np.float64)
+
     return {
         "replay:start_surface_dofs": np.stack(
             [np.asarray(start.surface_dofs, dtype=np.float64) for start in starts]
@@ -1104,13 +1202,18 @@ def _replay_values(
         "replay:start_G": floats(start.G for start in starts),
         "replay:area_solution": np.stack(
             [
-                _solution_row(
-                    replay.stages.area,
-                    replay.area_target,
-                    replay.area_target_sensitivity,
-                )
+                _solution_row(replay.stages.area, replay.area_target)
                 for replay in replays
             ]
+        ),
+        "replay:native_area_solution": np.stack(
+            [
+                _solution_row(replay.native.area, replay.native_area_target)
+                for replay in replays
+            ]
+        ),
+        "replay:area_rule_norms": floats_2d(
+            replay.area_rule_norms for replay in replays
         ),
         "replay:area_label": floats(replay.stages.area_label for replay in replays),
         "replay:area_solver_success": flags(
@@ -1123,13 +1226,18 @@ def _replay_values(
         ),
         "replay:flux_solution": np.stack(
             [
-                _solution_row(
-                    replay.stages.flux,
-                    replay.stages.flux_target,
-                    replay.flux_target_sensitivity,
-                )
+                _solution_row(replay.stages.flux, replay.stages.flux_target)
                 for replay in replays
             ]
+        ),
+        "replay:native_flux_solution": np.stack(
+            [
+                _solution_row(replay.native.flux, replay.native.flux_target)
+                for replay in replays
+            ]
+        ),
+        "replay:flux_rule_norms": floats_2d(
+            replay.flux_rule_norms for replay in replays
         ),
         "replay:flux_label": floats(replay.stages.flux_label for replay in replays),
         "replay:flux_solver_success": flags(
@@ -1157,18 +1265,15 @@ def _observation(
         and np.array_equal(
             values["replay:flux_target"], values["replay:flux_target_reference"]
         )
-        # Upstream's own success rule, norm(J^T r) <= tol, on every replayed solve.
-        and bool(
-            np.all(
-                values["replay:area_solution"][:, -3]
-                <= _configuration_float(bundle.configuration, "solver_tolerance")
-            )
+        # Upstream's own success rule, norm(J^T r) <= tol, at every replayed end
+        # state by both implementations (PLAN.md amendment 9).
+        and rule_norms_pass(
+            values["replay:area_rule_norms"],
+            _configuration_float(bundle.configuration, "solver_tolerance"),
         )
-        and bool(
-            np.all(
-                values["replay:flux_solution"][:, -3]
-                <= _configuration_float(bundle.configuration, "solver_tolerance")
-            )
+        and rule_norms_pass(
+            values["replay:flux_rule_norms"],
+            _configuration_float(bundle.configuration, "solver_tolerance"),
         )
         and np.all(np.isfinite(values["flux:surface_dofs"]))
         and np.isfinite(float(values["flux:residual_norm"]))

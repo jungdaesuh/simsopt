@@ -12,8 +12,6 @@ import pytest
 from examples.jax.manifest_runtime import load_runtime_contract_pair
 from examples.jax.parity.arbiter import (
     LaneObservation,
-    stopping_bound_gaps,
-    stopping_bound_precondition,
     upstream_branch_representatives,
     upstream_end_state_matches,
 )
@@ -24,17 +22,25 @@ from examples.jax.parity.cases.native_boozer import (
     NATIVE_DRIVER,
     REPLAY_DERIVED_OBSERVABLES,
     REPLAY_EXACT_OBSERVABLES,
+    REPLAY_RULE_OBSERVABLES,
     REPLAY_SOLUTION_OBSERVABLES,
     REPLAY_STARTS,
     STOPPING_REASON_CODES,
     _observation,
     _scale_configuration,
+    cross_checked_rule_norms,
     first_stage_stopping_reason,
+    rule_norms_pass,
 )
-from examples.jax.parity.input_bundle import create_input_bundle, load_input_bundle
+from examples.jax.parity.input_bundle import (
+    InputBundle,
+    create_input_bundle,
+    load_input_bundle,
+)
 from examples.jax.parity.official_reference import load_official_reference
 from examples.jax.parity.runtime import ParityLane
 from simsopt_jax.examples.boozer_official import (
+    OFFICIAL_SOLVER_TOLERANCE,
     BoozerStageOutcome,
     BoozerStageState,
     boozer_official_options,
@@ -112,6 +118,48 @@ def test_boozer_observation_requires_both_solver_stages(
     expected_success: bool,
 ) -> None:
     """Both chained solves, and every replayed solve, must succeed."""
+    bundle, values = _gate_fixture(tmp_path, area_success, flux_success, replay_success)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+
+    observation = _observation(
+        lane,
+        bundle,
+        values,
+        platform="cpu",
+        precision="fp64",
+        driver="test-provider",
+    )
+
+    assert observation.success is expected_success
+    assert observation.normalized_status == (
+        "converged" if expected_success else "failed"
+    )
+    assert observation.raw_status == f"area={area_success};flux={flux_success}"
+
+
+@pytest.mark.parametrize("stage", ["area", "flux"])
+@pytest.mark.parametrize("entry", range(4))
+def test_boozer_observation_requires_every_cross_checked_rule_norm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, entry: int
+) -> None:
+    """One replayed end state failing either implementation's rule fails the lane (amendment 9)."""
+    bundle, values = _gate_fixture(tmp_path, True, True, True)
+    rule_norms = values[f"replay:{stage}_rule_norms"].copy()
+    rule_norms[-1, entry] = 2.0 * float(bundle.configuration["solver_tolerance"])
+    values[f"replay:{stage}_rule_norms"] = rule_norms
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+
+    observation = _observation(
+        "jax-cpu", bundle, values, platform="cpu", precision="fp64", driver="t"
+    )
+
+    assert observation.success is False
+
+
+def _gate_fixture(
+    tmp_path: Path, area_success: bool, flux_success: bool, replay_success: bool
+) -> tuple[InputBundle, dict[str, np.ndarray]]:
+    """A bundle and the values ``_observation``'s success gate reads."""
     bundle = create_input_bundle(
         tmp_path / "inputs",
         case_id="native-boozer",
@@ -136,31 +184,11 @@ def test_boozer_observation_requires_both_solver_stages(
         "replay:flux_solver_success": np.asarray([True] * len(REPLAY_STARTS)),
         "replay:flux_target": np.full(len(REPLAY_STARTS), 0.037),
         "replay:flux_target_reference": np.full(len(REPLAY_STARTS), 0.037),
-        # Rows: state (one dof, iota, G), target, norm(J^T r) within tol, lambda_min,
-        # norm(dx*/dt).
-        "replay:area_solution": np.tile(
-            [1.0, -0.4, 1.0, 5.86, 1.0e-11, 0.05, 1.0], (len(REPLAY_STARTS), 1)
-        ),
-        "replay:flux_solution": np.tile(
-            [1.0, -0.4, 1.0, 0.037, 1.0e-11, 0.05, 1.0], (len(REPLAY_STARTS), 1)
-        ),
+        # Cross-evaluated norm(J^T r), all within tol (PLAN.md amendment 9).
+        "replay:area_rule_norms": np.full((len(REPLAY_STARTS), 4), 1.0e-11),
+        "replay:flux_rule_norms": np.full((len(REPLAY_STARTS), 4), 1.0e-11),
     }
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
-
-    observation = _observation(
-        lane,
-        bundle,
-        values,
-        platform="cpu",
-        precision="fp64",
-        driver="test-provider",
-    )
-
-    assert observation.success is expected_success
-    assert observation.normalized_status == (
-        "converged" if expected_success else "failed"
-    )
-    assert observation.raw_status == f"area={area_success};flux={flux_success}"
+    return bundle, values
 
 
 def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
@@ -213,12 +241,11 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
     # its input (the first stage stops at its iteration cap, unconverged, and
     # upstream's own script reaches five surfaces from nine one-ulp starts at
     # this scale), so the chained end state is informational and the stages
-    # are judged from shared starts (PLAN.md amendment 5, B1, and amendment 6,
-    # B1'): the starts exactly -- including the native first-stage end the JAX
-    # lane reran --, upstream's success rule norm(J^T r) <= tol on every
-    # replayed solve, and each pair of solved states within the sum of the two
-    # lanes' stopping radii, from each lane's own norm(J^T r) and lambda_min,
-    # plus the carry-over of the two lanes' label targets (amendment 7, B1'').
+    # are judged from shared starts (PLAN.md amendment 5, B1): the starts
+    # exactly -- including the native first-stage end the JAX lane reran --,
+    # the native replays exactly (the JAX lane reruns them), and every replayed
+    # end state by upstream's success rule norm(J^T r) <= tol under both
+    # implementations (amendment 9).
     assert native.values["replay:start_surface_dofs"].shape[0] == len(REPLAY_STARTS)
     for observable in REPLAY_EXACT_OBSERVABLES:
         np.testing.assert_array_equal(
@@ -229,19 +256,24 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
         native.values["first:surface_dofs"],
     )
     tolerance = float(bundle.configuration["solver_tolerance"])
-    for observable in REPLAY_SOLUTION_OBSERVABLES:
-        gap, bound = stopping_bound_gaps(
-            jax.values[observable], native.values[observable]
+    for stage in ("area", "flux"):
+        rule_norms = f"replay:{stage}_rule_norms"
+        native_solution = native.values[f"replay:native_{stage}_solution"]
+        # The native lane judged its own states: all four entries are its norm.
+        np.testing.assert_array_equal(
+            native.values[rule_norms],
+            np.repeat(native_solution[:, -1:], 4, axis=1),
         )
-        assert np.all(
-            stopping_bound_precondition(
-                jax.values[observable], native.values[observable]
-            )
-        ), observable
-        assert np.all(gap <= bound), (observable, gap / bound)
+        # The JAX lane's own entries are its solves' and the native rerun's.
+        np.testing.assert_array_equal(
+            jax.values[rule_norms][:, 0], native_solution[:, -1]
+        )
+        np.testing.assert_array_equal(
+            jax.values[rule_norms][:, 3],
+            jax.values[f"replay:{stage}_solution"][:, -1],
+        )
         for observation in (native, jax):
-            assert np.all(observation.values[observable][:, -3] <= tolerance)
-            assert np.all(observation.values[observable][:, -2] > 0.0)
+            assert rule_norms_pass(observation.values[rule_norms], tolerance)
     for observation in (native, jax):
         # Amendment 8, F1: each flux target is the native recomputation at the
         # lane's own published area state.
@@ -454,6 +486,7 @@ def _assert_route_matrix(published: set[str]) -> None:
         for key in (
             *REPLAY_EXACT_OBSERVABLES,
             *REPLAY_SOLUTION_OBSERVABLES,
+            *REPLAY_RULE_OBSERVABLES,
             *REPLAY_DERIVED_OBSERVABLES,
         ):
             assert applicability[key] == {True}, (scale, key)
@@ -483,7 +516,6 @@ def _first_stage_outcome(
         objective=objective,
         gradient_norm=1.0,
         penalty_residual_norm=None,
-        normal_matrix_min_eigenvalue=None,
     )
 
 
@@ -669,13 +701,14 @@ def test_boozer_initial_plain_residual_is_the_official_definition(
 def test_a_jax_only_flux_target_offset_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Amendment 8, F1: a flux-target construction error cannot buy its own allowance.
+    """Amendment 8, F1: a flux-target construction error fails the lane.
 
-    The JAX lane's flux stage takes its target through ``_flux_target``; a
-    JAX-only offset there moves the JAX flux root by about ``s * offset``,
-    exactly what the replay bound's carry-over term would otherwise admit. The
-    lane's flux targets must equal the independent native recomputation at its
-    published area states, so the offset fails the lane instead.
+    The JAX lane's flux stages take their target through ``_flux_target``; an
+    offset there, in the JAX lane's process only, moves its flux root to a
+    correct solve of the wrong problem, which upstream's success rule alone
+    accepts at that target (amendment 9 judges each state at the target it
+    solved). The lane's flux targets must equal the independent native
+    recomputation at its published area states, so the offset fails the lane.
     """
     case = get_case("native-boozer")
     input_root = tmp_path / "inputs"
@@ -700,3 +733,133 @@ def test_a_jax_only_flux_target_offset_is_rejected(
         observation.values["replay:flux_target"]
         != observation.values["replay:flux_target_reference"]
     )
+
+
+# ------------------------------------------ the replay cross-check (PLAN.md amendment 9)
+# Codex's delta-review counterexamples to amendments 6-8's gap bound, judged by
+# the cross-check that replaced it: each end state is accepted iff upstream's
+# rule norm(J^T r) <= tol holds under both implementations at the label target
+# that state solved, whatever the distance between the two lanes' states.
+_TOLERANCE = OFFICIAL_SOLVER_TOLERANCE
+
+
+def _cross_check(native_rule, lane_rule, native_end, lane_end) -> bool:
+    return rule_norms_pass(
+        np.asarray(
+            cross_checked_rule_norms(native_rule, lane_rule, native_end, lane_end)
+        ),
+        _TOLERANCE,
+    )
+
+
+def test_cross_check_accepts_the_scaled_cubics_exact_roots() -> None:
+    """r(x, t) = eps (u + u^3/3) - t with u = (x - 1) / eps, eps = 1e-8.
+
+    The exact roots u = +-1/2 of the targets t = +-eps (1/2 + 1/24) are a gap
+    eps apart; the first-order bound allowed 13 eps / 15 and rejected these two
+    exact solutions although both endpoint preconditions held. Two independent
+    spellings of the residual stand for the two implementations.
+    """
+    epsilon = 1.0e-8
+
+    def native_rule(x: float, target: float) -> float:
+        u = (x - 1.0) / epsilon
+        return abs((1.0 + u * u) * (epsilon * (u + u**3 / 3.0) - target))
+
+    def lane_rule(x: float, target: float) -> float:
+        u = (x - 1.0) / epsilon
+        return abs((1.0 + u * u) * (epsilon * u * (1.0 + u * u / 3.0) - target))
+
+    target = epsilon * (0.5 + 0.5**3 / 3.0)
+    native_x, lane_x = 1.0 + 0.5 * epsilon, 1.0 - 0.5 * epsilon
+    native_end = (native_x, target, native_rule(native_x, target))
+    lane_end = (lane_x, -target, lane_rule(lane_x, -target))
+
+    assert abs(native_x - lane_x) > 13.0 * epsilon / 15.0
+    assert _cross_check(native_rule, lane_rule, native_end, lane_end)
+
+
+def _hessian_case_rule(residual_second_row):
+    """norm(J^T r) of r(x, t) = (u - t, 1 - 0.495 u^2), u = x - 1, with J = (1, -0.99 u)."""
+
+    def rule(x: float, target: float) -> float:
+        u = x - 1.0
+        return abs((u - target) - 0.99 * u * residual_second_row(u))
+
+    return rule
+
+
+def _hessian_case_root(target: float) -> float:
+    """The exact stationary point x = 1 + u of 0.01 u + 0.49005 u^3 = t, by Newton from t / 0.01."""
+    u = target / 0.01
+    for _ in range(8):
+        u -= (0.01 * u + 0.49005 * u**3 - target) / (0.01 + 3.0 * 0.49005 * u * u)
+    return 1.0 + u
+
+
+def test_cross_check_judges_the_residual_hessian_case() -> None:
+    """Nonzero residuals: the true Hessian (about 0.01) is not J^T J (about 1).
+
+    Endpoint J^T J understated dx*/dt about 100-fold, so the gap bound
+    rejected the two exact stationary points of targets 1e-9 apart (gap about
+    1e-7) and admitted a state displaced from its own root by the understated
+    step. The cross-check accepts the exact solutions and rejects that wrong
+    state, even when its lane reports convergence.
+    """
+    native_rule = _hessian_case_rule(lambda u: 1.0 - 0.495 * u * u)
+    lane_rule = _hessian_case_rule(lambda u: 1.0 - (0.495 * u) * u)
+    native_target, lane_target = 1.0e-6, 1.0e-6 + 1.0e-9
+    native_x = _hessian_case_root(native_target)
+    lane_x = _hessian_case_root(lane_target)
+    native_end = (native_x, native_target, native_rule(native_x, native_target))
+
+    assert abs(lane_x - native_x) > 50.0 * (lane_target - native_target)
+    assert _cross_check(
+        native_rule,
+        lane_rule,
+        native_end,
+        (lane_x, lane_target, lane_rule(lane_x, lane_target)),
+    )
+    # The state the understated sensitivity admitted, reported as converged.
+    wrong_x = native_x + (lane_target - native_target)
+    assert not _cross_check(
+        native_rule, lane_rule, native_end, (wrong_x, lane_target, 0.0)
+    )
+
+
+def test_a_jax_state_that_fails_natives_rule_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Amendment 9: a JAX flux end state is judged by the native library too.
+
+    The JAX stages are displaced after their solve while keeping the solve's
+    own converged report, as a JAX implementation that stopped at a wrong
+    state would publish them. The native evaluation of that state fails
+    upstream's rule, so the lane fails.
+    """
+    case = get_case("native-boozer")
+    input_root = tmp_path / "inputs"
+    bundle = case.create_input(input_root, "bounded")
+    _, arrays = load_input_bundle(input_root, bundle)
+    jax_stages = native_boozer._jax_stages
+
+    def displaced_jax_stages(configuration, start):
+        stages, area_target = jax_stages(configuration, start)
+        flux = stages.flux
+        dofs = np.array(flux.state.surface_dofs, dtype=np.float64, copy=True)
+        dofs[0] += 1.0e-6
+        displaced = flux._replace(state=flux.state._replace(surface_dofs=dofs))
+        return stages._replace(flux=displaced), area_target
+
+    monkeypatch.setattr(native_boozer, "_jax_stages", displaced_jax_stages)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_PRECISION", "fp64")
+    monkeypatch.setenv("JAX_ENABLE_X64", "1")
+
+    observation = case.execute("jax-cpu", bundle, arrays)
+
+    tolerance = float(bundle.configuration["solver_tolerance"])
+    flux_rule_norms = observation.values["replay:flux_rule_norms"]
+    assert np.all(flux_rule_norms[:, 3] <= tolerance)
+    assert np.all(flux_rule_norms[:, 1] > tolerance)
+    assert observation.success is False
