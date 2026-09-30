@@ -96,8 +96,9 @@ complementarity gap uses each row's actual slack
 ([termination.md](termination.md)). The optional
 `search_step_success` (False rejects the trial step; absent means accepted)
 must be a `bool` or `numpy.bool_`: 0, None or any other type raises
-`ValueError`. A non-finite value at a trial point rejects the trial (the line
-search backtracks); at an outer iterate it raises `ValueError`.
+`ValueError`. A non-finite value, or `nonfinite_evaluation=True`, at a trial
+point rejects the trial (the line search backtracks); at an outer iterate
+either raises `ValueError`.
 
 - **Stateless physics** (depends on x alone): `cached_alm_evaluator(physics)`.
   Call its `cache_clear()` whenever anything else the physics reads changes

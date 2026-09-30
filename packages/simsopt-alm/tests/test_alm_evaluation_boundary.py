@@ -162,3 +162,62 @@ class ReusedEvaluatorBuffersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlaggedEvaluationTests(unittest.TestCase):
+    """``nonfinite_evaluation=True`` marks a point unusable even when every
+    value is finite. A flagged trial point is rejected like a non-finite one;
+    a flagged outer evaluation raises ``ValueError`` like a non-finite one,
+    so it is never certified and never becomes the incumbent."""
+
+    def test_a_flagged_start_raises(self):
+        # Astra's reproduction: finite data flagged unusable at x0 came back
+        # ``converged``.
+        def evaluate(x, multipliers, penalty):
+            return dict(
+                augmented_inequality_objective(
+                    float(x @ x), 2.0 * x, [-1.0], [np.zeros(1)], multipliers, penalty
+                ),
+                nonfinite_evaluation=True,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ALM outer iterate evaluation produced non-finite ALM data: "
+            "nonfinite_evaluation",
+        ):
+            minimize_alm(np.zeros(1), ["g"], evaluate, ALMSettings(), {"maxiter": 10})
+
+    def test_a_flagged_outer_reevaluation_raises(self):
+        # The start is usable; every evaluation after the first dual update
+        # (nonzero multipliers) is flagged, so the next outer evaluation of
+        # the accepted iterate is.
+        def evaluate(x, multipliers, penalty):
+            built = augmented_inequality_objective(
+                float((x[0] - 2.0) ** 2), np.array([2.0 * (x[0] - 2.0)]),
+                [x[0] - 1.0], [np.ones(1)], multipliers, penalty,
+            )
+            return dict(built, nonfinite_evaluation=bool(np.any(multipliers > 0.0)))
+
+        with self.assertRaisesRegex(ValueError, "non-finite ALM data: nonfinite_evaluation"):
+            minimize_alm(np.zeros(1), ["x_at_most_one"], evaluate, ALMSettings(), {"maxiter": 50})
+
+    def test_a_flagged_trial_is_rejected_and_the_run_goes_on(self):
+        # min 10 (x - 0.5)^2 with an inactive row from x = 0: L-BFGS-B's
+        # first trial, a unit step to x = 1, is flagged (x > 0.8).
+        flagged_trials = []
+
+        def evaluate(x, multipliers, penalty):
+            built = augmented_inequality_objective(
+                float(10.0 * (x[0] - 0.5) ** 2), np.array([20.0 * (x[0] - 0.5)]),
+                [-1.0], [np.zeros(1)], multipliers, penalty,
+            )
+            flagged = bool(x[0] > 0.8)
+            flagged_trials.append(flagged)
+            return dict(built, nonfinite_evaluation=flagged)
+
+        result = minimize_alm(np.zeros(1), ["g"], evaluate, ALMSettings(), {"maxiter": 50})
+        self.assertTrue(any(flagged_trials), "no trial point was flagged")
+        self.assertTrue(result.success, result.termination_reason)
+        self.assertLessEqual(float(result.x[0]), 0.8)
+        self.assertFalse(result.evaluation.get("nonfinite_evaluation", False))

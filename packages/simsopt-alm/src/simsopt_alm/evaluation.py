@@ -183,7 +183,13 @@ def _nonfinite_evaluation_fields(evaluation: dict) -> Tuple[str, ...]:
     return tuple(invalid_fields)
 
 def _require_finite_evaluation(evaluation: dict, *, context: str) -> None:
-    invalid_fields = _nonfinite_evaluation_fields(evaluation)
+    """Raise ``ValueError`` naming ``context`` when a field the loop reads is
+    not finite or the evaluator flagged the point unusable
+    (``nonfinite_evaluation``): an evaluation the loop keeps as an iterate
+    may be neither."""
+    invalid_fields = _nonfinite_evaluation_fields(evaluation) + (
+        ("nonfinite_evaluation",) if evaluation.get("nonfinite_evaluation") else ()
+    )
     if invalid_fields:
         invalid_summary = ", ".join(invalid_fields)
         raise ValueError(f"{context} produced non-finite ALM data: {invalid_summary}")
@@ -306,8 +312,9 @@ def _checked_evaluation(
     """The evaluation at ``(x, multipliers, penalty_argument)`` with the
     constraint metadata attached (an owned dict). Raises as
     :func:`_contract_checked_evaluation` does, and ``ValueError`` naming
-    ``context`` when a field the loop reads is not finite or a container in
-    it contains itself."""
+    ``context`` when a field the loop reads is not finite, the evaluator
+    flagged it ``nonfinite_evaluation``, or a container in it contains
+    itself."""
     evaluation = _attach_alm_constraint_metadata(
         _contract_checked_evaluation(
             evaluate_problem(x, multipliers, penalty_argument),

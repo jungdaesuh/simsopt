@@ -18,7 +18,8 @@ measures ``||grad||``, without the components pointing out of the box at an
 active ``base_bounds`` bound; a value that is not ``||grad||`` is the
 evaluator's own measure, used as given, so it must account for the bounds),
 ``constraint_scales``, ``constraint_activity_tolerances``,
-``nonfinite_evaluation`` (the point is unusable), and
+``nonfinite_evaluation`` (the point is unusable: a trial point is rejected,
+an outer iterate raises ``ValueError`` as a non-finite value does), and
 ``search_step_success=False`` (reject the trial step). With ``base_bounds``,
 x0 is projected onto the box (as L-BFGS-B does), and a ``resume_from`` whose
 x lies outside it raises ``ValueError``.

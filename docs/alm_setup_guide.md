@@ -369,8 +369,9 @@ complementarity gap uses each row's actual slack
 ([Termination reasons](#termination-reasons)). The optional
 `search_step_success` (False rejects the trial step; absent means accepted)
 must be a `bool` or `numpy.bool_`: 0, None or any other type raises
-`ValueError`. A non-finite value at a trial point rejects the trial (the line
-search backtracks); at an outer iterate it raises `ValueError`.
+`ValueError`. A non-finite value, or `nonfinite_evaluation=True`, at a trial
+point rejects the trial (the line search backtracks); at an outer iterate
+either raises `ValueError`.
 
 - **Stateless physics** (depends on x alone): `cached_alm_evaluator(physics)`.
   Call its `cache_clear()` whenever anything else the physics reads changes
@@ -861,10 +862,10 @@ Each entry: the symptom, the cause, the fix.
    `constraint_activity_tolerances` entry. Build the dict with `ALMPhysics.evaluation`
    or `augmented_inequality_objective`, as the templates do, and pass any
    step flag as `bool(...)`.
-9. **Non-finite values.** A NaN or inf at a trial point is rejected (the
-   line search backtracks); at an outer iterate (the start point, a restored
-   incumbent) `minimize_alm` raises `ValueError: ... produced non-finite ALM
-   data`. Make x0 evaluate cleanly.
+9. **Non-finite values.** A NaN or inf, or `nonfinite_evaluation=True`, at
+   a trial point is rejected (the line search backtracks); at an outer
+   iterate (the start point, a restored incumbent) `minimize_alm` raises
+   `ValueError: ... produced non-finite ALM data`. Make x0 evaluate cleanly.
 10. **The returned x may be an earlier iterate.** On failure the solver can
     return the best hard-feasible iterate (`result.restored_best_feasible`).
     Set your objects to `result.x` (and, for stateful physics, re-solve from

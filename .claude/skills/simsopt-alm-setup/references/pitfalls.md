@@ -65,10 +65,10 @@ Each entry: the symptom, the cause, the fix.
    `constraint_activity_tolerances` entry. Build the dict with `ALMPhysics.evaluation`
    or `augmented_inequality_objective`, as the templates do, and pass any
    step flag as `bool(...)`.
-9. **Non-finite values.** A NaN or inf at a trial point is rejected (the
-   line search backtracks); at an outer iterate (the start point, a restored
-   incumbent) `minimize_alm` raises `ValueError: ... produced non-finite ALM
-   data`. Make x0 evaluate cleanly.
+9. **Non-finite values.** A NaN or inf, or `nonfinite_evaluation=True`, at
+   a trial point is rejected (the line search backtracks); at an outer
+   iterate (the start point, a restored incumbent) `minimize_alm` raises
+   `ValueError: ... produced non-finite ALM data`. Make x0 evaluate cleanly.
 10. **The returned x may be an earlier iterate.** On failure the solver can
     return the best hard-feasible iterate (`result.restored_best_feasible`).
     Set your objects to `result.x` (and, for stateful physics, re-solve from
