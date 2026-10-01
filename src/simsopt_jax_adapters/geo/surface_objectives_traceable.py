@@ -10,9 +10,7 @@ compatibility with existing callers.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from functools import partial
@@ -112,10 +110,8 @@ from .boozer_surface import (
 @dataclass
 class _LazyCompiledGradientState:
     total_gradient: Callable | None = None
-    total_gradient_with_execution: Callable | None = None
     value_and_grad: Callable | None = None
     gradient_lock: Lock = dataclass_field(default_factory=Lock)
-    execution_gradient_lock: Lock = dataclass_field(default_factory=Lock)
     value_and_grad_lock: Lock = dataclass_field(default_factory=Lock)
 
 
@@ -315,39 +311,6 @@ class TraceableObjectiveIncumbentEvaluation(NamedTuple):
     actual_adjoint_success: jax.Array
     gradient_source: str
     candidate_inner_state: TraceableObjectiveInnerState
-    forward_result: dict[str, object] | None = None
-    adjoint_output: jax.Array | None = None
-    adjoint_residual: jax.Array | None = None
-    adjoint_residual_relative: jax.Array | None = None
-    execution_counts: TraceableObjectiveExecutionCounts | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _AcceptedIncumbentHostEvaluationObservation:
-    """Production host result plus deferred device-only timeline evidence."""
-
-    value: float
-    gradient: np.ndarray
-    forward_success: jax.Array
-    primal_success: jax.Array
-    actual_adjoint_success: jax.Array
-    gradient_source: str
-    candidate_gradient_source: bool
-    eligible: jax.Array
-    forward_result: Mapping[str, object]
-    adjoint_output: jax.Array
-    adjoint_residual: jax.Array
-    adjoint_residual_relative: jax.Array
-    execution_counts: TraceableObjectiveExecutionCounts
-
-
-_ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK: ContextVar[
-    Callable[[_AcceptedIncumbentHostEvaluationObservation], None] | None
-] = ContextVar("accepted_incumbent_host_observation_sink", default=None)
-_TRACEABLE_EXECUTION_EVIDENCE_REQUESTED: ContextVar[bool] = ContextVar(
-    "traceable_execution_evidence_requested",
-    default=False,
-)
 
 
 def _host_evaluation_identity(parameters):
@@ -374,31 +337,6 @@ def _host_evaluation_identity(parameters):
         "parameter_sha256": parameter_sha256,
     }
     return canonical, evaluation_id, trace_attributes
-
-
-@contextmanager
-def _traceable_execution_evidence() -> Iterator[None]:
-    """Opt into the richer compiled result only for timeline observation."""
-
-    token = _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.set(True)
-    try:
-        yield
-    finally:
-        _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.reset(token)
-
-
-@contextmanager
-def _accepted_incumbent_host_observation_sink(
-    sink: Callable[[_AcceptedIncumbentHostEvaluationObservation], None],
-) -> Iterator[None]:
-    """Observe an existing host result without changing its numerical API."""
-
-    token = _ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK.set(sink)
-    try:
-        with _traceable_execution_evidence():
-            yield
-    finally:
-        _ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK.reset(token)
 
 
 class AcceptedIncumbentHostValueAndGrad:
@@ -461,38 +399,6 @@ class AcceptedIncumbentHostValueAndGrad:
             ), _host_transfer_phase(PhaseId.HOST_D2H_MATERIALIZE.value):
                 value = float(_host_scalar(evaluation.value, dtype=np.float64))
                 gradient = _host_array(evaluation.gradient, dtype=np.float64)
-                observation_sink = _ACCEPTED_INCUMBENT_HOST_OBSERVATION_SINK.get()
-                if observation_sink is not None:
-                    gradient_source = evaluation.gradient_source
-                    if (
-                        evaluation.forward_result is None
-                        or evaluation.adjoint_output is None
-                        or evaluation.adjoint_residual is None
-                        or evaluation.adjoint_residual_relative is None
-                        or evaluation.execution_counts is None
-                    ):
-                        raise RuntimeError(
-                            "timeline observation requires device execution evidence"
-                        )
-                    observation_sink(
-                        _AcceptedIncumbentHostEvaluationObservation(
-                            value=value,
-                            gradient=gradient,
-                            forward_success=evaluation.forward_success,
-                            primal_success=evaluation.primal_success,
-                            actual_adjoint_success=evaluation.actual_adjoint_success,
-                            gradient_source=gradient_source,
-                            candidate_gradient_source=(gradient_source == "candidate"),
-                            eligible=evaluation.candidate_inner_state.eligible,
-                            forward_result=evaluation.forward_result,
-                            adjoint_output=evaluation.adjoint_output,
-                            adjoint_residual=evaluation.adjoint_residual,
-                            adjoint_residual_relative=(
-                                evaluation.adjoint_residual_relative
-                            ),
-                            execution_counts=evaluation.execution_counts,
-                        )
-                    )
         record_host_event(HostEvent.EVALUATOR_RETURN)
         return value, gradient
 
@@ -2173,45 +2079,6 @@ def _traceable_total_gradient_with_status(
     return total_grad, linear_solve_success
 
 
-def _traceable_total_gradient_with_execution_evidence(
-    booz_jax,
-    coil_set_spec_from_dofs,
-    *,
-    coil_dofs,
-    solved_x,
-    solved_linear_solve_factors,
-    linearization_kind,
-    linear_solve_tol,
-    linear_solve_stab,
-    objective_kwargs,
-):
-    """Return one gradient and device-resident evidence from that execution."""
-    (
-        _,
-        _,
-        total_grad,
-        linear_solve_success,
-        execution_counts,
-        adjoint_evidence,
-    ) = _traceable_objective_gradient_parts(
-        booz_jax,
-        coil_set_spec_from_dofs,
-        coil_dofs=coil_dofs,
-        solved_x=solved_x,
-        solved_linear_solve_factors=solved_linear_solve_factors,
-        linearization_kind=linearization_kind,
-        linear_solve_tol=linear_solve_tol,
-        linear_solve_stab=linear_solve_stab,
-        objective_kwargs=objective_kwargs,
-    )
-    return (
-        total_grad,
-        linear_solve_success,
-        execution_counts,
-        adjoint_evidence,
-    )
-
-
 def _traceable_adjoint_rhs_exactly_zero(rhs):
     """Test exact zero entirely on device without staging a scalar constant."""
     rhs = jnp.asarray(rhs)
@@ -3553,28 +3420,6 @@ def _build_traceable_objective_compiled_bundle_from_state(
     def _build_compiled_total_gradient_for():
         return jax.jit(_total_gradient_for)
 
-    def _total_gradient_with_execution_for(
-        coil_dofs,
-        solved_x,
-        solved_linear_solve_factors,
-    ):
-        return _traceable_total_gradient_with_execution_evidence(
-            booz_jax,
-            coil_set_spec_from_dofs,
-            coil_dofs=coil_dofs,
-            solved_x=solved_x,
-            solved_linear_solve_factors=_traceable_runtime_deviceify_tree(
-                solved_linear_solve_factors
-            ),
-            linearization_kind=linearization_kind,
-            linear_solve_tol=linear_solve_tol,
-            linear_solve_stab=linear_solve_stab,
-            objective_kwargs=objective_kwargs,
-        )
-
-    def _build_compiled_total_gradient_with_execution_for():
-        return jax.jit(_total_gradient_with_execution_for)
-
     def _build_value_and_grad_for(compiled_total_gradient_for):
         def _value_and_grad_for(coil_dofs):
             result = jitted_forward_result_for(coil_dofs)
@@ -3656,15 +3501,6 @@ def _build_traceable_objective_compiled_bundle_from_state(
                         lazy_state.total_gradient = _build_compiled_total_gradient_for()
             return lazy_state.total_gradient(*args)
 
-        def _lazy_compiled_total_gradient_with_execution_for(*args):
-            if lazy_state.total_gradient_with_execution is None:
-                with lazy_state.execution_gradient_lock:
-                    if lazy_state.total_gradient_with_execution is None:
-                        lazy_state.total_gradient_with_execution = (
-                            _build_compiled_total_gradient_with_execution_for()
-                        )
-            return lazy_state.total_gradient_with_execution(*args)
-
         def _lazy_compiled_value_and_grad_for(coil_dofs):
             if lazy_state.value_and_grad is None:
                 with lazy_state.value_and_grad_lock:
@@ -3681,18 +3517,12 @@ def _build_traceable_objective_compiled_bundle_from_state(
             return lazy_state.value_and_grad(coil_dofs)
 
         compiled_total_gradient_for = _lazy_compiled_total_gradient_for
-        compiled_total_gradient_with_execution_for = (
-            _lazy_compiled_total_gradient_with_execution_for
-        )
         compiled_value_and_grad_for = mark_cacheable_jit_value_and_grad(
             _lazy_compiled_value_and_grad_for
         )
     else:
         lazy_state = None
         compiled_total_gradient_for = _build_compiled_total_gradient_for()
-        compiled_total_gradient_with_execution_for = (
-            _build_compiled_total_gradient_with_execution_for()
-        )
         compiled_value_and_grad_for = _build_compiled_value_and_grad_for(
             compiled_total_gradient_for
         )
@@ -3704,9 +3534,6 @@ def _build_traceable_objective_compiled_bundle_from_state(
             jitted_forward_result_from_anchor_for
         ),
         "compiled_total_gradient_for": compiled_total_gradient_for,
-        "compiled_total_gradient_with_execution_for": (
-            compiled_total_gradient_with_execution_for
-        ),
         "compiled_value_and_grad_for": compiled_value_and_grad_for,
         "lazy_gradient_state": lazy_state,
     }
@@ -4216,8 +4043,6 @@ class TraceableObjectiveCandidateEvaluation(NamedTuple):
     actual_adjoint_success: jax.Array
     gradient_source: str
     candidate_inner_state: TraceableObjectiveInnerState
-    execution_counts: TraceableObjectiveExecutionCounts | None = None
-    adjoint_evidence: _TraceableAdjointExecutionEvidence | None = None
 
 
 def _build_candidate_evaluation_core(
@@ -4237,9 +4062,6 @@ def _build_candidate_evaluation_core(
         "compiled_forward_result_from_anchor_for"
     )
     compiled_total_gradient_for = compiled_bundle["compiled_total_gradient_for"]
-    compiled_total_gradient_with_execution_for = compiled_bundle.get(
-        "compiled_total_gradient_with_execution_for"
-    )
     baseline_coil_dofs = _as_jax_float64(state["baseline_coil_dofs"])
     baseline_x = _as_jax_float64(state["baseline_x"])
     baseline_linear_solve_factors = _traceable_runtime_deviceify_tree(
@@ -4250,7 +4072,6 @@ def _build_candidate_evaluation_core(
         candidate_coil_dofs,
         incumbent: TraceableObjectiveInnerState | None,
     ) -> TraceableObjectiveCandidateEvaluation:
-        execution_evidence_requested = _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.get()
         if incumbent is None:
             forward_result = compiled_forward_result_for(candidate_coil_dofs)
             fallback_coil_dofs = baseline_coil_dofs
@@ -4284,26 +4105,6 @@ def _build_candidate_evaluation_core(
             gradient = _traceable_adjoint_fail_gradient_like(candidate_coil_dofs)
             actual_adjoint_success = _runtime_device_put(np.bool_(False))
             gradient_source = "unavailable"
-            if execution_evidence_requested:
-                execution_counts = _traceable_adjoint_execution_counts(
-                    candidate_coil_dofs
-                )
-                adjoint_evidence = _TraceableAdjointExecutionEvidence(
-                    adjoint_output=_runtime_zeros_like(forward_result["x"]),
-                    residual=_staged_like(
-                        candidate_coil_dofs,
-                        0.0,
-                        dtype=jnp.float64,
-                    ),
-                    residual_relative=_staged_like(
-                        candidate_coil_dofs,
-                        0.0,
-                        dtype=jnp.float64,
-                    ),
-                )
-            else:
-                execution_counts = None
-                adjoint_evidence = None
         else:
             gradient_coil_dofs = fallback_coil_dofs
             gradient_x = fallback_x
@@ -4311,28 +4112,11 @@ def _build_candidate_evaluation_core(
             gradient_source = fallback_gradient_source
 
         if candidate_gradient_source or fallback_gradient_on_primal_failure:
-            if (
-                not execution_evidence_requested
-                or compiled_total_gradient_with_execution_for is None
-            ):
-                raw_gradient, actual_adjoint_success = compiled_total_gradient_for(
-                    gradient_coil_dofs,
-                    gradient_x,
-                    gradient_linear_solve_factors,
-                )
-                execution_counts = None
-                adjoint_evidence = None
-            else:
-                (
-                    raw_gradient,
-                    actual_adjoint_success,
-                    execution_counts,
-                    adjoint_evidence,
-                ) = compiled_total_gradient_with_execution_for(
-                    gradient_coil_dofs,
-                    gradient_x,
-                    gradient_linear_solve_factors,
-                )
+            raw_gradient, actual_adjoint_success = compiled_total_gradient_for(
+                gradient_coil_dofs,
+                gradient_x,
+                gradient_linear_solve_factors,
+            )
             gradient = _traceable_adjoint_gradient_or_nan(
                 raw_gradient,
                 actual_adjoint_success,
@@ -4354,8 +4138,6 @@ def _build_candidate_evaluation_core(
             actual_adjoint_success=actual_adjoint_success,
             gradient_source=gradient_source,
             candidate_inner_state=candidate_inner_state,
-            execution_counts=execution_counts,
-            adjoint_evidence=adjoint_evidence,
         )
 
     return evaluate_candidate
@@ -4373,17 +4155,7 @@ def _build_accepted_incumbent_evaluator(compiled_bundle):
         candidate_coil_dofs,
         incumbent: TraceableObjectiveInnerState,
     ) -> TraceableObjectiveIncumbentEvaluation:
-        execution_evidence_requested = _TRACEABLE_EXECUTION_EVIDENCE_REQUESTED.get()
         core = evaluate_candidate(candidate_coil_dofs, incumbent)
-        execution_counts = core.execution_counts
-        if execution_counts is not None:
-            execution_counts = execution_counts._replace(
-                newton_iteration_count=jnp.asarray(
-                    core.forward_result["newton_iterations"],
-                    dtype=jnp.int32,
-                )
-            )
-        adjoint_evidence = core.adjoint_evidence
         return TraceableObjectiveIncumbentEvaluation(
             value=jnp.asarray(core.forward_result["value"], dtype=jnp.float64),
             gradient=jnp.asarray(core.gradient, dtype=jnp.float64),
@@ -4398,19 +4170,6 @@ def _build_accepted_incumbent_evaluator(compiled_bundle):
             ),
             gradient_source=core.gradient_source,
             candidate_inner_state=core.candidate_inner_state,
-            forward_result=(
-                core.forward_result if execution_evidence_requested else None
-            ),
-            adjoint_output=(
-                None if adjoint_evidence is None else adjoint_evidence.adjoint_output
-            ),
-            adjoint_residual=(
-                None if adjoint_evidence is None else adjoint_evidence.residual
-            ),
-            adjoint_residual_relative=(
-                None if adjoint_evidence is None else adjoint_evidence.residual_relative
-            ),
-            execution_counts=execution_counts,
         )
 
     return compiled_evaluate
@@ -6267,36 +6026,6 @@ class TraceableObjectiveSession:
         ).reshape(-1)
         candidate = _runtime_device_put(canonical, dtype=jnp.float64)
         return self._evaluate_candidate_device(candidate, incumbent_state)
-
-    def _evaluate_candidate_from_anchor_host(
-        self,
-        parameters: np.ndarray,
-        incumbent_state: TraceableObjectiveInnerState,
-    ) -> tuple[TraceableObjectiveCandidateEvaluation, float, np.ndarray]:
-        """Evaluate once with exact lifecycle and host-transfer evidence."""
-
-        record_host_event(HostEvent.EVALUATOR_ENTRY)
-        canonical, evaluation_id, trace_attributes = _host_evaluation_identity(
-            parameters
-        )
-        with _host_transfer_evaluation(evaluation_id):
-            with host_span(PhaseId.HOST_H2D_SUBMIT, attributes=trace_attributes):
-                candidate = _runtime_device_put(canonical, dtype=jnp.float64)
-            evaluation = self._evaluate_candidate_device(candidate, incumbent_state)
-            record_host_event(HostEvent.DEVICE_READY)
-            with host_span(
-                PhaseId.HOST_D2H_MATERIALIZE,
-                attributes=trace_attributes,
-            ), _host_transfer_phase(PhaseId.HOST_D2H_MATERIALIZE.value):
-                value = float(
-                    _host_scalar(
-                        evaluation.forward_result["value"],
-                        dtype=np.float64,
-                    )
-                )
-                gradient = _host_array(evaluation.gradient, dtype=np.float64)
-        record_host_event(HostEvent.EVALUATOR_RETURN)
-        return evaluation, value, gradient
 
     def accepted_incumbent_host_value_and_grad(
         self,

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -65,17 +63,6 @@ WORKFLOW_STAGES = (
     "record_final_objective_gradient_and_physics_terms",
 )
 
-_TIMELINE_PHYSICS_OBSERVABLES = (
-    "objective",
-    "iota",
-    "volume",
-    "non_qs_ratio",
-    "boozer_residual",
-)
-_TIMELINE_UNAVAILABLE_PHYSICS_OBSERVABLES = tuple(
-    (name, None) for name in _TIMELINE_PHYSICS_OBSERVABLES
-)
-
 
 @dataclass(frozen=True, slots=True)
 class BoozerSingleStageSpec:
@@ -126,60 +113,6 @@ def _outer_driver(spec: BoozerSingleStageSpec) -> Driver:
 
 
 @dataclass(frozen=True, slots=True)
-class ChangedStateTimelineObservation:
-    """Immutable numerical evidence from one already-completed evaluation."""
-
-    evaluation_id: str
-    evaluation_kind: str
-    outer_iteration_id: int | None
-    parameter_sha256: str
-    parameters: tuple[float, ...]
-    parameter_shape: tuple[int, ...]
-    objective: float
-    gradient: tuple[float, ...]
-    gradient_dtype: str
-    gradient_shape: tuple[int, ...]
-    values_finite: bool
-    forward_success: bool
-    primal_success: bool
-    actual_adjoint_success: bool
-    gradient_source: str
-    candidate_gradient_source: bool
-    eligible: bool
-    inner_residual_trace: tuple[float, ...]
-    newton_step_accepted_trace: tuple[bool, ...]
-    newton_linear_solve_success_trace: tuple[bool, ...]
-    newton_iterations: int
-    newton_attempted_iterations: int | None
-    newton_trace_available: bool
-    adjoint_route: str
-    adjoint_output: tuple[float, ...]
-    adjoint_residual: float
-    adjoint_residual_relative: float
-    dense_materializations: int
-    lu_factorizations: int
-    lu_solves: int
-    refinement_corrections: int
-    adjoint_executions: int
-    observables: tuple[tuple[str, float | None], ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ChangedStateTimelineDisposition:
-    """Immutable optimizer decision joined to an existing evaluation."""
-
-    evaluation_id: str
-    parameter_sha256: str
-    disposition: str
-    accepted_iteration_id: int | None
-
-
-ChangedStateTimelineRecord = (
-    ChangedStateTimelineObservation | ChangedStateTimelineDisposition
-)
-
-
-@dataclass(frozen=True, slots=True)
 class _PreparedJaxRuntime:
     """One constructed session and its exact reusable compiled callables."""
 
@@ -191,7 +124,6 @@ class _PreparedJaxRuntime:
     initial_inner_success: bool
     iota_target: float
     initial_volume: float
-    incumbent_evaluator: Callable[..., object]
     incumbent_factory: Callable[[], object]
 
     def fresh_incumbent_controller(self) -> object:
@@ -294,114 +226,11 @@ class _PreparedNativeRuntime:
         )
 
 
-class _TimelineEvaluationKind(Protocol):
-    value: str
-
-
-class _TimelineTraceContext(Protocol):
-    evaluation_id: str
-    kind: _TimelineEvaluationKind
-    outer_iteration_id: int | None
-    parameter_sha256: str
-
-
-class _TimelineExecutionCounts(Protocol):
-    dense_materialization_count: object
-    lu_factorization_count: object
-    lu_solve_count: object
-    refinement_correction_count: object
-    adjoint_execution_count: object
-
-
 class _PreparedIncumbentPrototype(Protocol):
     _compiled_evaluate: Callable[..., object]
 
     @property
     def current_inner_state(self) -> object: ...
-
-
-@dataclass(frozen=True, slots=True)
-class _AcceptedTimelineValueAndGradient:
-    """Exact host value and gradient from the accepted timeline trial."""
-
-    parameter_sha256: str
-    value: float
-    gradient: np.ndarray
-
-
-@dataclass(frozen=True, slots=True)
-class _DeferredChangedStateTimelineObservation:
-    """Device evidence retained until the measured optimization has ended."""
-
-    trace_context: _TimelineTraceContext
-    parameters: tuple[float, ...]
-    parameter_shape: tuple[int, ...]
-    objective: float
-    gradient: tuple[float, ...]
-    gradient_shape: tuple[int, ...]
-    forward_success: object
-    primal_success: object
-    actual_adjoint_success: object
-    gradient_source: str
-    candidate_gradient_source: bool
-    eligible: object
-    newton_iterations: object
-    newton_attempted_iterations: object
-    newton_trace_active_present: object
-    inner_residual_trace_present: object
-    newton_step_accepted_trace_present: object
-    newton_linear_solve_success_trace_present: object
-    newton_trace_active: object
-    inner_residual_trace: object
-    newton_step_accepted_trace: object
-    newton_linear_solve_success_trace: object
-    adjoint_output: object
-    adjoint_residual: object
-    adjoint_residual_relative: object
-    execution_counts: _TimelineExecutionCounts
-    observables: tuple[tuple[str, object | None], ...]
-
-
-def _optimizer_final_value_and_gradient(
-    parameters: np.ndarray,
-    *,
-    timeline_enabled: bool,
-    accepted_timeline_evaluation: _AcceptedTimelineValueAndGradient | None,
-    parameter_sha256: Callable[[np.ndarray], str],
-    evaluate: Callable[[np.ndarray], tuple[float, np.ndarray]],
-) -> tuple[float, np.ndarray]:
-    """Reuse the accepted timeline result, or preserve ordinary evaluation."""
-
-    if not timeline_enabled:
-        return evaluate(parameters)
-    if accepted_timeline_evaluation is None:
-        raise RuntimeError("timeline optimizer final check has no accepted evaluation")
-    if parameter_sha256(parameters) != accepted_timeline_evaluation.parameter_sha256:
-        raise RuntimeError(
-            "optimizer final parameters do not match the accepted timeline evaluation"
-        )
-    return (
-        accepted_timeline_evaluation.value,
-        accepted_timeline_evaluation.gradient,
-    )
-
-
-_TIMELINE_OBSERVATION_SINK: ContextVar[
-    Callable[[ChangedStateTimelineRecord], None] | None
-] = ContextVar("simsopt_jax_changed_state_timeline_observation_sink", default=None)
-
-
-@contextmanager
-def changed_state_timeline_observation_sink(
-    sink: Callable[[ChangedStateTimelineRecord], None],
-) -> Iterator[None]:
-    """Collect already-materialized evaluation values without reevaluation."""
-
-    token = _TIMELINE_OBSERVATION_SINK.set(sink)
-    try:
-        yield
-    finally:
-        _TIMELINE_OBSERVATION_SINK.reset(token)
 
 
 def variant_scale_configuration(
@@ -869,104 +698,12 @@ def _host_bool(value: object) -> bool:
     return bool(np.asarray(jax.device_get(value), dtype=np.bool_))
 
 
-def _host_int(value: object) -> int:
-    import jax
-
-    return int(np.asarray(jax.device_get(value), dtype=np.int64))
-
-
-def _materialize_changed_state_timeline_observation(
-    deferred: _DeferredChangedStateTimelineObservation,
-) -> ChangedStateTimelineObservation:
-    """Hostify deferred evidence only after the measured window has closed."""
-
-    trace_presence = (
-        _host_bool(deferred.newton_trace_active_present),
-        _host_bool(deferred.inner_residual_trace_present),
-        _host_bool(deferred.newton_step_accepted_trace_present),
-        _host_bool(deferred.newton_linear_solve_success_trace_present),
-    )
-    if len(set(trace_presence)) != 1:
-        raise RuntimeError("packed Newton detailed-trace presence is inconsistent")
-    newton_trace_available = all(trace_presence)
-    missing_int = int(np.iinfo(np.int32).min)
-    attempted_value = _host_int(deferred.newton_attempted_iterations)
-    newton_attempted_iterations = (
-        None if attempted_value == missing_int else attempted_value
-    )
-    if newton_trace_available != (newton_attempted_iterations is not None):
-        raise RuntimeError(
-            "packed Newton attempted count and detailed-trace availability disagree"
-        )
-    if newton_trace_available:
-        active = _host_array(deferred.newton_trace_active).astype(np.bool_)
-        residual_trace = _host_array(deferred.inner_residual_trace).reshape(-1)
-        step_accepted = _host_array(deferred.newton_step_accepted_trace).astype(
-            np.bool_
-        )
-        linear_success = _host_array(deferred.newton_linear_solve_success_trace).astype(
-            np.bool_
-        )
-        trimmed_residual_trace = tuple(float(value) for value in residual_trace[active])
-        trimmed_step_accepted = tuple(bool(value) for value in step_accepted[active])
-        trimmed_linear_success = tuple(bool(value) for value in linear_success[active])
-    else:
-        trimmed_residual_trace = ()
-        trimmed_step_accepted = ()
-        trimmed_linear_success = ()
-    parameters = np.asarray(deferred.parameters, dtype=np.float64)
-    gradient = np.asarray(deferred.gradient, dtype=np.float64)
-    counts = deferred.execution_counts
-    return ChangedStateTimelineObservation(
-        evaluation_id=deferred.trace_context.evaluation_id,
-        evaluation_kind=deferred.trace_context.kind.value,
-        outer_iteration_id=deferred.trace_context.outer_iteration_id,
-        parameter_sha256=deferred.trace_context.parameter_sha256,
-        parameters=tuple(float(value) for value in parameters.reshape(-1)),
-        parameter_shape=deferred.parameter_shape,
-        objective=float(deferred.objective),
-        gradient=tuple(float(value) for value in gradient.reshape(-1)),
-        gradient_dtype=np.dtype(np.float64).str,
-        gradient_shape=deferred.gradient_shape,
-        values_finite=bool(
-            np.isfinite(deferred.objective) and np.all(np.isfinite(gradient))
-        ),
-        forward_success=_host_bool(deferred.forward_success),
-        primal_success=_host_bool(deferred.primal_success),
-        actual_adjoint_success=_host_bool(deferred.actual_adjoint_success),
-        gradient_source=deferred.gradient_source,
-        candidate_gradient_source=deferred.candidate_gradient_source,
-        eligible=_host_bool(deferred.eligible),
-        inner_residual_trace=trimmed_residual_trace,
-        newton_step_accepted_trace=trimmed_step_accepted,
-        newton_linear_solve_success_trace=trimmed_linear_success,
-        newton_iterations=_host_int(deferred.newton_iterations),
-        newton_attempted_iterations=newton_attempted_iterations,
-        newton_trace_available=newton_trace_available,
-        adjoint_route="exact_jacobian_dense_fp64_lu",
-        adjoint_output=tuple(
-            float(value) for value in _host_array(deferred.adjoint_output).reshape(-1)
-        ),
-        adjoint_residual=_host_float(deferred.adjoint_residual),
-        adjoint_residual_relative=_host_float(deferred.adjoint_residual_relative),
-        dense_materializations=_host_int(counts.dense_materialization_count),
-        lu_factorizations=_host_int(counts.lu_factorization_count),
-        lu_solves=_host_int(counts.lu_solve_count),
-        refinement_corrections=_host_int(counts.refinement_correction_count),
-        adjoint_executions=_host_int(counts.adjoint_execution_count),
-        observables=tuple(
-            (name, None if value is None else _host_float(value))
-            for name, value in deferred.observables
-        ),
-    )
-
-
 def _prepare_jax_variant_runtime(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     spec: BoozerSingleStageSpec,
 ) -> _PreparedJaxRuntime:
-    """Construct the single session whose compiled callables warm and measure."""
+    """Construct the single session and its reusable compiled callables."""
 
     from simsopt.geo import CurveLength, Volume
     from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
@@ -1082,7 +819,6 @@ def _prepare_jax_variant_runtime(
         initial_inner_success=initial_inner_success,
         iota_target=iota_target,
         initial_volume=initial_volume,
-        incumbent_evaluator=incumbent_evaluator,
         incumbent_factory=mint_incumbent_controller,
     )
 
@@ -1100,23 +836,8 @@ def _jax(
         minimize_bfgs_host_core,
         minimize_lbfgs_host_core,
     )
-    from simsopt_jax.runtime.trace_annotations import (
-        EvaluationDisposition,
-        EvaluationKind,
-        EvaluationTraceContext,
-        PhaseId,
-        annotations_enabled,
-        evaluation_context,
-        host_span,
-        record_evaluation_disposition,
-    )
     from simsopt_jax_adapters.geo.surface_objectives import (
         traceable_forward_result_outer_raw_terms,
-    )
-    from simsopt_jax_adapters.geo.surface_objectives_traceable import (
-        _accepted_incumbent_host_observation_sink,
-        _AcceptedIncumbentHostEvaluationObservation,
-        _traceable_execution_evidence,
     )
 
     import jax
@@ -1129,273 +850,13 @@ def _jax(
     iota_target = prepared.iota_target
     initial_volume = prepared.initial_volume
     incumbent_controller = prepared.fresh_incumbent_controller()
-    timeline_evaluation_count = 0
-    timeline_accepted_iterations = 0
-    timeline_pending_trials: list[EvaluationTraceContext] = []
-    timeline_pending_values: dict[str, tuple[float, np.ndarray]] = {}
-    accepted_timeline_evaluation: _AcceptedTimelineValueAndGradient | None = None
-    timeline_contexts: list[EvaluationTraceContext] = []
-    deferred_timeline_observations: list[_DeferredChangedStateTimelineObservation] = []
-
-    def timeline_parameter_sha256(parameters: np.ndarray) -> str:
-        canonical = np.ascontiguousarray(
-            parameters,
-            dtype=np.dtype("<f8"),
-        ).reshape(-1)
-        return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
-
-    def timeline_evaluate(parameters, kind: EvaluationKind, evaluate: Callable):
-        nonlocal timeline_evaluation_count
-        observation_sink = _TIMELINE_OBSERVATION_SINK.get()
-        if not annotations_enabled() and observation_sink is None:
-            return evaluate()
-        context_id = f"evaluation-{timeline_evaluation_count:06d}"
-        timeline_evaluation_count += 1
-        with evaluation_context(
-            context_id,
-            timeline_parameter_sha256(np.asarray(parameters)),
-            kind,
-        ) as trace_context:
-            evaluated = evaluate()
-        timeline_contexts.append(trace_context)
-        if (
-            annotations_enabled() or observation_sink is not None
-        ) and kind is EvaluationKind.TRIAL:
-            timeline_pending_trials.append(trace_context)
-        return evaluated
-
-    def defer_timeline_observation(
-        trace_context: EvaluationTraceContext,
-        parameters: np.ndarray,
-        objective: float,
-        gradient: np.ndarray,
-        *,
-        forward_success: object,
-        primal_success: object,
-        actual_adjoint_success: object,
-        gradient_source: str,
-        candidate_gradient_source: bool,
-        eligible: object,
-        forward_result: Mapping[str, object],
-        adjoint_output: object,
-        adjoint_residual: object,
-        adjoint_residual_relative: object,
-        execution_counts: _TimelineExecutionCounts,
-        observables: tuple[
-            tuple[str, object | None], ...
-        ] = _TIMELINE_UNAVAILABLE_PHYSICS_OBSERVABLES,
-    ) -> None:
-        canonical_parameters = np.asarray(parameters, dtype=np.float64)
-        canonical_gradient = np.asarray(gradient, dtype=np.float64)
-        deferred_timeline_observations.append(
-            _DeferredChangedStateTimelineObservation(
-                trace_context=trace_context,
-                parameters=tuple(
-                    float(value) for value in canonical_parameters.reshape(-1)
-                ),
-                parameter_shape=tuple(canonical_parameters.shape),
-                objective=float(objective),
-                gradient=tuple(
-                    float(value) for value in canonical_gradient.reshape(-1)
-                ),
-                gradient_shape=tuple(canonical_gradient.shape),
-                forward_success=forward_success,
-                primal_success=primal_success,
-                actual_adjoint_success=actual_adjoint_success,
-                gradient_source=gradient_source,
-                candidate_gradient_source=candidate_gradient_source,
-                eligible=eligible,
-                newton_iterations=forward_result["newton_iterations"],
-                newton_attempted_iterations=forward_result[
-                    "newton_attempted_iterations"
-                ],
-                newton_trace_active_present=forward_result[
-                    "newton_trace_active_present"
-                ],
-                inner_residual_trace_present=forward_result[
-                    "newton_trace_linear_residual_relative_present"
-                ],
-                newton_step_accepted_trace_present=forward_result[
-                    "newton_trace_step_accepted_present"
-                ],
-                newton_linear_solve_success_trace_present=forward_result[
-                    "newton_trace_linear_solve_success_present"
-                ],
-                newton_trace_active=forward_result["newton_trace_active"],
-                inner_residual_trace=forward_result[
-                    "newton_trace_linear_residual_relative"
-                ],
-                newton_step_accepted_trace=forward_result["newton_trace_step_accepted"],
-                newton_linear_solve_success_trace=forward_result[
-                    "newton_trace_linear_solve_success"
-                ],
-                adjoint_output=adjoint_output,
-                adjoint_residual=adjoint_residual,
-                adjoint_residual_relative=adjoint_residual_relative,
-                execution_counts=execution_counts,
-                observables=observables,
-            )
-        )
-
-    def timeline_value_and_grad(
-        parameters: np.ndarray,
-        kind: EvaluationKind,
-    ) -> tuple[float, np.ndarray]:
-        observation_sink = _TIMELINE_OBSERVATION_SINK.get()
-        scientific_evidence: list[_AcceptedIncumbentHostEvaluationObservation] = []
-
-        def evaluate() -> tuple[float, np.ndarray]:
-            if observation_sink is None:
-                return incumbent_controller.value_and_grad(parameters)
-            with _accepted_incumbent_host_observation_sink(scientific_evidence.append):
-                return incumbent_controller.value_and_grad(parameters)
-
-        evaluated = timeline_evaluate(
-            parameters,
-            kind,
-            evaluate,
-        )
-        if (
-            annotations_enabled() or observation_sink is not None
-        ) and kind is EvaluationKind.TRIAL:
-            value, gradient = evaluated
-            timeline_pending_values[timeline_contexts[-1].evaluation_id] = (
-                value,
-                gradient,
-            )
-        if observation_sink is not None:
-            if len(scientific_evidence) != 1:
-                raise RuntimeError(
-                    "timeline evaluation did not produce exactly one scientific "
-                    "evidence record"
-                )
-            evidence = scientific_evidence[0]
-            defer_timeline_observation(
-                timeline_contexts[-1],
-                np.asarray(parameters, dtype=np.float64),
-                evidence.value,
-                evidence.gradient,
-                forward_success=evidence.forward_success,
-                primal_success=evidence.primal_success,
-                actual_adjoint_success=evidence.actual_adjoint_success,
-                gradient_source=evidence.gradient_source,
-                candidate_gradient_source=evidence.candidate_gradient_source,
-                eligible=evidence.eligible,
-                forward_result=evidence.forward_result,
-                adjoint_output=evidence.adjoint_output,
-                adjoint_residual=evidence.adjoint_residual,
-                adjoint_residual_relative=evidence.adjoint_residual_relative,
-                execution_counts=evidence.execution_counts,
-            )
-        return evaluated
-
-    def emit_timeline_disposition(
-        trace_context: EvaluationTraceContext,
-        disposition: EvaluationDisposition,
-        accepted_iteration_id: int | None,
-    ) -> None:
-        record_evaluation_disposition(
-            trace_context,
-            disposition,
-            accepted_iteration_id=accepted_iteration_id,
-        )
-        observation_sink = _TIMELINE_OBSERVATION_SINK.get()
-        if observation_sink is not None:
-            observation_sink(
-                ChangedStateTimelineDisposition(
-                    evaluation_id=trace_context.evaluation_id,
-                    parameter_sha256=trace_context.parameter_sha256,
-                    disposition=disposition.value,
-                    accepted_iteration_id=accepted_iteration_id,
-                )
-            )
-
-    def evaluate_optimizer_trial(parameters: np.ndarray) -> tuple[float, np.ndarray]:
-        return timeline_value_and_grad(parameters, EvaluationKind.TRIAL)
-
-    def evaluate_optimizer_final(
-        parameters: np.ndarray,
-    ) -> tuple[float, np.ndarray]:
-        return _optimizer_final_value_and_gradient(
-            parameters,
-            timeline_enabled=(
-                annotations_enabled() or _TIMELINE_OBSERVATION_SINK.get() is not None
-            ),
-            accepted_timeline_evaluation=accepted_timeline_evaluation,
-            parameter_sha256=timeline_parameter_sha256,
-            evaluate=incumbent_controller.value_and_grad,
-        )
-
-    def accept_optimizer_trial(parameters: np.ndarray) -> None:
-        nonlocal accepted_timeline_evaluation, timeline_accepted_iterations
-        if not annotations_enabled() and _TIMELINE_OBSERVATION_SINK.get() is None:
-            incumbent_controller.accept(parameters)
-            return
-        accepted_sha256 = timeline_parameter_sha256(np.asarray(parameters))
-        accepted_indices = tuple(
-            index
-            for index, pending in enumerate(timeline_pending_trials)
-            if pending.parameter_sha256 == accepted_sha256
-        )
-        if not accepted_indices:
-            raise RuntimeError(
-                "accepted parameters have no correlated timeline evaluation"
-            )
-        accepted_index = accepted_indices[-1]
-        accepted_context = timeline_pending_trials[accepted_index]
-        accepted_value, accepted_gradient = timeline_pending_values[
-            accepted_context.evaluation_id
-        ]
-        accepted_iteration_id = timeline_accepted_iterations + 1
-        with host_span(
-            PhaseId.OPTIMIZER_LIFECYCLE,
-            attributes={"accepted_iteration_id": accepted_iteration_id},
-        ):
-            incumbent_controller.accept(parameters)
-            accepted_timeline_evaluation = _AcceptedTimelineValueAndGradient(
-                parameter_sha256=accepted_context.parameter_sha256,
-                value=accepted_value,
-                gradient=accepted_gradient,
-            )
-            for index, pending in enumerate(timeline_pending_trials):
-                accepted = index == accepted_index
-                emit_timeline_disposition(
-                    pending,
-                    (
-                        EvaluationDisposition.ACCEPTED
-                        if accepted
-                        else EvaluationDisposition.REJECTED
-                    ),
-                    accepted_iteration_id if accepted else None,
-                )
-        timeline_pending_trials.clear()
-        timeline_pending_values.clear()
-        timeline_accepted_iterations = accepted_iteration_id
-
-    def reject_unresolved_optimizer_trials() -> None:
-        if not timeline_pending_trials:
-            return
-        with host_span(
-            PhaseId.OPTIMIZER_LIFECYCLE,
-            attributes={"completion_rejections": len(timeline_pending_trials)},
-        ):
-            for pending in timeline_pending_trials:
-                emit_timeline_disposition(
-                    pending,
-                    EvaluationDisposition.REJECTED,
-                    None,
-                )
-        timeline_pending_trials.clear()
-        timeline_pending_values.clear()
-
-    def evaluate_initial() -> tuple[float, np.ndarray]:
-        return timeline_value_and_grad(initial_parameters, EvaluationKind.INITIAL)
-
-    initial_objective, initial_gradient = evaluate_initial()
+    initial_objective, initial_gradient = incumbent_controller.value_and_grad(
+        initial_parameters
+    )
     driver = _outer_driver(spec)
     if driver == Driver.SIMSOPT_LBFGSB:
         optimizer_result = minimize_lbfgs_host_core(
-            evaluate_optimizer_trial,
+            incumbent_controller.value_and_grad,
             initial_parameters,
             maxiter=_configuration_int(
                 bundle.configuration,
@@ -1409,12 +870,12 @@ def _jax(
             gtol=OUTER_GRADIENT_TOLERANCE,
             maxls=20,
             initial_value_and_grad=(initial_objective, initial_gradient),
-            final_eval_value_and_grad_host=evaluate_optimizer_final,
-            callback=accept_optimizer_trial,
+            final_eval_value_and_grad_host=incumbent_controller.value_and_grad,
+            callback=incumbent_controller.accept,
         )
     else:
         optimizer_result = minimize_bfgs_host_core(
-            evaluate_optimizer_trial,
+            incumbent_controller.value_and_grad,
             initial_parameters,
             maxiter=_configuration_int(
                 bundle.configuration,
@@ -1424,55 +885,22 @@ def _jax(
             maxls=20,
             initial_value_and_grad=(initial_objective, initial_gradient),
             line_search_value_and_grad=(line_search_value_and_grad_more_thuente_host),
-            callback=accept_optimizer_trial,
+            callback=incumbent_controller.accept,
         )
-    reject_unresolved_optimizer_trials()
     final_parameters = np.asarray(optimizer_result.x_k, dtype=np.float64)
     optimizer_iterations = int(optimizer_result.k)
     optimizer_evaluations = int(optimizer_result.nfev)
     optimizer_gradient_evaluations = int(optimizer_result.ngev)
     optimizer_status = int(optimizer_result.status)
-    outer_solver_success = bool(
-        lbfgs_status_is_success(optimizer_result.status, False)
-        if driver == Driver.SIMSOPT_LBFGSB
-        else optimizer_result.converged
-    )
     status_convention = (
         "host-lbfgsb" if driver == Driver.SIMSOPT_LBFGSB else "host-bfgs"
     )
-
-    timeline_final_lifecycle = (
-        annotations_enabled() or _TIMELINE_OBSERVATION_SINK.get() is not None
+    final_evaluation = session.evaluate_candidate_from_anchor(
+        final_parameters, incumbent_controller.current_inner_state
     )
-
-    def evaluate_final_candidate():
-        if _TIMELINE_OBSERVATION_SINK.get() is None:
-            if timeline_final_lifecycle:
-                return session._evaluate_candidate_from_anchor_host(
-                    final_parameters,
-                    incumbent_controller.current_inner_state,
-                )
-            return session.evaluate_candidate_from_anchor(
-                final_parameters, incumbent_controller.current_inner_state
-            )
-        with _traceable_execution_evidence():
-            return session._evaluate_candidate_from_anchor_host(
-                final_parameters, incumbent_controller.current_inner_state
-            )
-
-    final_result = timeline_evaluate(
-        final_parameters,
-        EvaluationKind.FINAL_REPORTING,
-        evaluate_final_candidate,
-    )
-    if timeline_final_lifecycle:
-        final_evaluation, final_objective, final_gradient = final_result
-    else:
-        final_evaluation = final_result
-        final_forward = final_evaluation.forward_result
-        final_objective = _host_float(final_forward["value"])
-        final_gradient = _host_array(final_evaluation.gradient)
     final_forward = final_evaluation.forward_result
+    final_objective = _host_float(final_forward["value"])
+    final_gradient = _host_array(final_evaluation.gradient)
     provider_state_invalid = bool(
         not np.isfinite(final_objective) or not np.all(np.isfinite(final_gradient))
     )
@@ -1488,40 +916,7 @@ def _jax(
         include_distance_metrics=False,
         outer_raw_terms=traceable_forward_result_outer_raw_terms(final_forward),
     )
-    if _TIMELINE_OBSERVATION_SINK.get() is not None:
-        final_adjoint_evidence = final_evaluation.adjoint_evidence
-        final_execution_counts = final_evaluation.execution_counts
-        if final_adjoint_evidence is None or final_execution_counts is None:
-            raise RuntimeError("final timeline evaluation lacks execution evidence")
-        defer_timeline_observation(
-            timeline_contexts[-1],
-            final_parameters,
-            final_objective,
-            final_gradient,
-            forward_success=final_forward["success"],
-            primal_success=final_forward["primal_success"],
-            actual_adjoint_success=final_evaluation.actual_adjoint_success,
-            gradient_source=final_evaluation.gradient_source,
-            candidate_gradient_source=(final_evaluation.gradient_source == "candidate"),
-            eligible=final_evaluation.candidate_inner_state.eligible,
-            forward_result=final_forward,
-            adjoint_output=final_adjoint_evidence.adjoint_output,
-            adjoint_residual=final_adjoint_evidence.residual,
-            adjoint_residual_relative=final_adjoint_evidence.residual_relative,
-            execution_counts=final_execution_counts,
-            observables=(
-                ("objective", final_forward["value"]),
-                ("iota", final_metrics["final_iota"]),
-                ("volume", final_metrics["final_volume"]),
-                ("non_qs_ratio", final_metrics["final_non_qs"]),
-                ("boozer_residual", final_metrics["final_boozer_residual"]),
-            ),
-        )
     jax.block_until_ready((final_forward, final_metrics))
-    observation_sink = _TIMELINE_OBSERVATION_SINK.get()
-    if observation_sink is not None:
-        for deferred in deferred_timeline_observations:
-            observation_sink(_materialize_changed_state_timeline_observation(deferred))
     final_non_qs_ratio = _host_float(final_metrics["final_non_qs"])
     final_iota = _host_float(final_metrics["final_iota"])
     final_volume = _host_float(final_metrics["final_volume"])
