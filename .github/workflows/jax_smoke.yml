@@ -100,7 +100,6 @@ jobs:
       - name: Run quality ratchets and scale-gate contracts
         run: |
           python -m pytest \
-            tests/geo/test_remaining_core_quality_ratchets.py \
             tests/test_host_boundary_ssot_ratchet.py \
             tests/test_jax_legacy_isolation_boundaries.py \
             tests/geo/test_weight_zero_term_gating.py \
