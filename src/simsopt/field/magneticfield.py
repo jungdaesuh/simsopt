@@ -44,7 +44,7 @@ def _has_native_magnetic_field_callbacks(field):
 def _raise_if_cpu_only_child_in_strict_backend(component, fields):
     fields = tuple(fields)
     if fields and all(_has_native_magnetic_field_callbacks(field) for field in fields):
-        return True
+        return
     if _strict_backend_requires_native_callbacks():
         mode = os.environ.get(_MODE_ENV, "legacy-env")
         raise RuntimeError(
@@ -52,7 +52,6 @@ def _raise_if_cpu_only_child_in_strict_backend(component, fields):
             f"simsopt backend mode {mode!r} has strict=True. Select a native "
             "magnetic-field callback path or disable strict mode."
         )
-    return False
 
 
 def _require_jax_magnetic_field_callbacks(fields, callback_name):
@@ -278,11 +277,8 @@ class MagneticFieldMultiply(MagneticField):
     """
 
     def __init__(self, scalar, Bfield):
-        has_native_callbacks = _raise_if_cpu_only_child_in_strict_backend(
-            "MagneticFieldMultiply", [Bfield]
-        )
+        _raise_if_cpu_only_child_in_strict_backend("MagneticFieldMultiply", [Bfield])
         MagneticField.__init__(self, depends_on=[Bfield])
-        self._simsopt_native_magnetic_field_callbacks = has_native_callbacks
         self.scalar = scalar
         self.Bfield = Bfield
 
@@ -340,11 +336,8 @@ class MagneticFieldSum(MagneticField):
     """
 
     def __init__(self, Bfields):
-        has_native_callbacks = _raise_if_cpu_only_child_in_strict_backend(
-            "MagneticFieldSum", Bfields
-        )
+        _raise_if_cpu_only_child_in_strict_backend("MagneticFieldSum", Bfields)
         MagneticField.__init__(self, depends_on=Bfields)
-        self._simsopt_native_magnetic_field_callbacks = has_native_callbacks
         self.Bfields = Bfields
 
     def _set_points_cb(self):

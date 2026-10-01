@@ -1,21 +1,11 @@
-from __future__ import annotations
-
-from contextlib import contextmanager
-from contextvars import ContextVar
-from functools import partial
-from typing import Callable, Iterator, Mapping
-
 import numpy as np
-import simsoptpp as sopp
 from scipy.linalg import lu
-from scipy.optimize import least_squares, minimize
+from scipy.optimize import minimize, least_squares
+import simsoptpp as sopp
 
+from .surfaceobjectives import boozer_surface_residual, boozer_surface_dexactresidual_dcoils_dcurrents_vjp, boozer_surface_dlsqgrad_dcoils_vjp
 from .._core.optimizable import Optimizable
-from .surfaceobjectives import (
-    boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
-    boozer_surface_dlsqgrad_dcoils_vjp,
-    boozer_surface_residual,
-)
+from functools import partial
 
 __all__ = ["BoozerSurface"]
 
@@ -60,31 +50,6 @@ def _ls_newton_growth_allows_continue(norm, initial_norm, divergence_factor):
     if divergence_factor is None or divergence_factor == 0:
         return True
     return norm <= divergence_factor * initial_norm
-
-
-_ExactNewtonObservationSink = Callable[[Mapping[str, object]], None]
-_exact_newton_observation_sink: ContextVar[_ExactNewtonObservationSink | None] = (
-    ContextVar("simsopt_boozer_exact_newton_observation_sink", default=None)
-)
-
-
-@contextmanager
-def _boozer_exact_newton_observation_context(
-    sink: _ExactNewtonObservationSink,
-) -> Iterator[None]:
-    """Route exact-Newton raw events to one context-local benchmark observer."""
-
-    token = _exact_newton_observation_sink.set(sink)
-    try:
-        yield
-    finally:
-        _exact_newton_observation_sink.reset(token)
-
-
-def _emit_exact_newton_observation(event: Mapping[str, object]) -> None:
-    sink = _exact_newton_observation_sink.get()
-    if sink is not None:
-        sink(event)
 
 
 class BoozerSurface(Optimizable):
@@ -1306,23 +1271,7 @@ class BoozerSurface(Optimizable):
         initial_G = G
         x = np.concatenate((s.get_dofs(), [iota, G]))
         i = 0
-        observing = _exact_newton_observation_sink.get() is not None
         r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
-        counters = (
-            {
-                "residual_evaluation_count": 1,
-                "attempted_iteration_count": 0,
-                "applied_update_count": 0,
-                "assessed_state_count": 0,
-                "rollback_recompute_count": 0,
-                "dense_materialization_count": 0,
-                "factorization_count": 0,
-                "linear_solve_count": 0,
-                "refinement_correction_count": 0,
-            }
-            if observing
-            else None
-        )
         norm = 1e6
         initial_norm = None
         while i < maxiter:
@@ -1333,18 +1282,6 @@ class BoozerSurface(Optimizable):
                     (r[mask], [(label.J() - self.targetlabel), s.gamma()[0, 0, 2]])
                 )
             norm = np.linalg.norm(b)
-            if observing:
-                counters["assessed_state_count"] += 1
-                _emit_exact_newton_observation(
-                    {
-                        "event": "assessment",
-                        "iteration_index": i,
-                        "state": np.array(x, copy=True),
-                        "residual": np.array(b, copy=True),
-                        "residual_norm": float(norm),
-                        "counters": dict(counters),
-                    }
-                )
             if initial_norm is None:
                 initial_norm = norm
             if norm <= tol:
@@ -1364,70 +1301,16 @@ class BoozerSurface(Optimizable):
                         np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0.0, 0.0])),
                     )
                 )
-            if not observing:
-                dx = np.linalg.solve(J, b)
-                dx += np.linalg.solve(J, b - J @ dx)
-            else:
-                counters["dense_materialization_count"] += 1
-                counters["attempted_iteration_count"] += 1
-                state_before = np.array(x, copy=True)
-                jacobian = np.array(J, copy=True)
-                try:
-                    counters["factorization_count"] += 1
-                    dx = np.linalg.solve(J, b)
-                    counters["linear_solve_count"] += 1
-                    initial_solve = np.array(dx, copy=True)
-                    refinement_rhs = b - J @ dx
-                    counters["factorization_count"] += 1
-                    refinement_correction = np.linalg.solve(J, refinement_rhs)
-                    counters["linear_solve_count"] += 1
-                    counters["refinement_correction_count"] += 1
-                except np.linalg.LinAlgError:
-                    _emit_exact_newton_observation(
-                        {
-                            "event": "failure",
-                            "iteration_index": i,
-                            "failure_stage": "dense_solve_or_refinement",
-                            "state": state_before,
-                            "residual": np.array(b, copy=True),
-                            "jacobian": jacobian,
-                            "counters": dict(counters),
-                        }
-                    )
-                    raise
-                dx += refinement_correction
-            refined_residual = b - J @ dx if observing else None
+            dx = np.linalg.solve(J, b)
+            dx += np.linalg.solve(J, b - J @ dx)
             x -= dx
-            if observing:
-                counters["applied_update_count"] += 1
-                _emit_exact_newton_observation(
-                    {
-                        "event": "update",
-                        "iteration_index": i,
-                        "state_before": state_before,
-                        "residual": np.array(b, copy=True),
-                        "jacobian": jacobian,
-                        "initial_solve": np.array(initial_solve, copy=True),
-                        "refinement_rhs": np.array(refinement_rhs, copy=True),
-                        "refinement_correction": np.array(
-                            refinement_correction, copy=True
-                        ),
-                        "refined_residual": np.array(refined_residual, copy=True),
-                        "state_after": np.array(x, copy=True),
-                        "assessed_norm": float(norm),
-                        "counters": dict(counters),
-                    }
-                )
             s.set_dofs(x[:-2])
             iota = x[-2]
             G = x[-1]
             i += 1
             r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
-            if observing:
-                counters["residual_evaluation_count"] += 1
 
         success = norm <= tol
-        returned_norm = norm
         persist_solved_state = _boozer_iterate_is_persistable(
             success, norm, initial_norm
         )
@@ -1436,9 +1319,6 @@ class BoozerSurface(Optimizable):
             iota = initial_iota
             G = initial_G
             r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
-            if observing:
-                counters["residual_evaluation_count"] += 1
-                counters["rollback_recompute_count"] += 1
 
         if s.stellsym:
             J = np.vstack(
@@ -1457,40 +1337,6 @@ class BoozerSurface(Optimizable):
             )
 
         P, L, U = lu(J)
-        if observing:
-            if s.stellsym:
-                returned_b = np.concatenate((r[mask], [(label.J() - self.targetlabel)]))
-            else:
-                returned_b = np.concatenate(
-                    (
-                        r[mask],
-                        [(label.J() - self.targetlabel), s.gamma()[0, 0, 2]],
-                    )
-                )
-            returned_norm = np.linalg.norm(returned_b)
-        returned_state = (
-            np.concatenate((s.get_dofs(), [iota, G])) if observing else None
-        )
-        if observing:
-            status_code = 0 if success else (1 if persist_solved_state else 2)
-            _emit_exact_newton_observation(
-                {
-                    "event": "terminal",
-                    "iteration_index": i,
-                    "success": bool(success),
-                    "persist_solved_state": bool(persist_solved_state),
-                    "rollback_taken": not bool(persist_solved_state),
-                    "initial_norm": (
-                        None if initial_norm is None else float(initial_norm)
-                    ),
-                    "returned_norm": float(returned_norm),
-                    "returned_state": np.array(returned_state, copy=True),
-                    "returned_residual": np.array(returned_b, copy=True),
-                    "returned_jacobian": np.array(J, copy=True),
-                    "status_code": status_code,
-                    "counters": dict(counters),
-                }
-            )
         res = {
             "residual": r,
             "jacobian": J,
