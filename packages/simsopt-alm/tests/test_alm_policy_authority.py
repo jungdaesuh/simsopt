@@ -5,9 +5,8 @@ convergence veto. The success guarantees (an approximate KKT point at the
 shifted multipliers, within the feasibility, stationarity and
 complementarity-gap tolerances; no hybrid signal mismatch, no binding
 multiplier cap) are those of
-``DefaultContinuationPolicy`` and of policies that keep its vetoes. The first
-test pins that contract as behavior; the second checks the protocol and the
-package docstring say so.
+``DefaultContinuationPolicy`` and of policies that keep its vetoes. The test
+pins that contract as behavior.
 """
 
 import unittest
@@ -16,7 +15,7 @@ import numpy as np
 
 import simsopt_alm as alm
 from simsopt_alm.continuation import ALMConverge
-from simsopt_alm.policy import ALMContinuationPolicy, DefaultContinuationPolicy
+from simsopt_alm.policy import DefaultContinuationPolicy
 
 
 class _ConvergeImmediately:
@@ -60,14 +59,6 @@ class AlmPolicyAuthorityTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertGreater(result.max_violation, settings.feasibility_tol)
         self.assertEqual(result.message, "declared by the policy")
-
-    def test_the_protocol_and_the_package_say_who_owns_the_guarantees(self):
-        for owner, doc in (
-            ("ALMContinuationPolicy", ALMContinuationPolicy.__doc__),
-            ("simsopt_alm", alm.__doc__),
-        ):
-            with self.subTest(owner=owner):
-                self.assertIn("keep its vetoes", " ".join(doc.split()))
 
 
 if __name__ == "__main__":

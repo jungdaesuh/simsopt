@@ -131,19 +131,18 @@ class AlmGoldenFixtureSetTests(unittest.TestCase):
                 "are written only by generate_alm_golden.py",
             )
 
-    def test_the_sensitivity_was_measured_on_these_sources_and_scenarios(self):
+    def test_the_receipts_name_the_sources_and_scenarios_that_produced_them(self):
+        ids = alm_source_blob_ids()
         self.assertEqual(list(SENSITIVITY["scenarios"]), [s.name for s in golden.SCENARIOS])
         self.assertEqual(
             SENSITIVITY["source_blob_ids"],
-            alm_source_blob_ids(),
+            ids,
             "the ALM sources changed since the sensitivity was measured; rerun "
             + SENSITIVITY["measure"],
         )
-
-    def test_the_manifest_names_the_sources_that_produced_the_goldens(self):
         self.assertEqual(
             MANIFEST["source_blob_ids"],
-            alm_source_blob_ids(),
+            ids,
             "the ALM sources changed since the goldens were recorded; if every "
             "fixture still replays byte-identically, refresh the provenance: "
             + MANIFEST["regenerate"] + " --provenance-only",
@@ -293,30 +292,26 @@ class AlmGoldenOutcomeReplayTests(unittest.TestCase):
                 if name not in LABEL_ONLY_SCENARIOS:
                     self.assertEqual(measured["observed_outcomes"], _golden(name)["outcomes"])
 
-    def test_an_unobserved_label_fails_a_label_only_replay(self):
+    # Outcomes a label-only replay must reject: labels the rules emit that
+    # were never observed under noise for that scenario (skipped where they
+    # were), and labels no rule emits.
+    RECOGNIZED_EXTRA_OUTCOMES = ("termination:converged", "action:constraints_inactive_stall")
+    INVENTED_OUTCOMES = ("action:invented_regression", "termination:invented_regression")
+
+    def test_an_unobserved_or_invented_label_fails_a_label_only_replay(self):
         for name in LABEL_ONLY_SCENARIOS:
+            observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
             with self.subTest(scenario=name):
-                observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
                 self.assertIsNone(outcome_replay_failure(name, observed, exact=False))
-                for extra in ("termination:converged", "action:constraints_inactive_stall"):
-                    if extra in observed:
-                        continue
-                    self.assertIn(
-                        extra,
-                        outcome_replay_failure(name, [*observed, extra], exact=False),
-                    )
                 if observed != _golden(name)["outcomes"]:
                     # The recording environment still demands the golden's outcomes.
                     self.assertIsNotNone(outcome_replay_failure(name, observed, exact=True))
-
-    def test_an_invented_action_or_termination_fails_every_label_only_replay(self):
-        for name in LABEL_ONLY_SCENARIOS:
-            observed = SENSITIVITY["scenarios"][name]["observed_outcomes"]
-            for invented in ("action:invented_regression", "termination:invented_regression"):
-                with self.subTest(scenario=name, outcome=invented):
+            unobserved = [extra for extra in self.RECOGNIZED_EXTRA_OUTCOMES if extra not in observed]
+            for extra in (*unobserved, *self.INVENTED_OUTCOMES):
+                with self.subTest(scenario=name, outcome=extra):
                     self.assertIn(
-                        invented,
-                        outcome_replay_failure(name, [*observed, invented], exact=False) or "",
+                        extra,
+                        outcome_replay_failure(name, [*observed, extra], exact=False) or "",
                     )
 
     def test_a_missing_intended_outcome_fails_a_label_only_replay(self):

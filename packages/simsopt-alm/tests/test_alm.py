@@ -146,20 +146,15 @@ def _solve_unit_halfspace_problem():
 
 
 class AlmEvaluatorContractTests(unittest.TestCase):
-    def test_minimal_evaluator_contract(self):
+    def test_minimal_evaluator_solves_and_returns_a_frozen_dataclass(self):
         # An evaluator that returns only augmented_inequality_objective(...)
-        # output (no optional keys, no hybrid quartet) is a complete problem.
+        # output (no optional keys, no hybrid quartet) is a complete problem,
+        # and minimize_alm answers it with a frozen dataclass.
         result = _solve_unit_halfspace_problem()
 
         self.assertTrue(result.success, result.message)
         np.testing.assert_allclose(result.x, [1.0, 0.0], atol=1e-5)
         np.testing.assert_allclose(result.multipliers, [2.0], rtol=1e-4)
-
-
-class AlmResultTypeTests(unittest.TestCase):
-    def test_minimize_alm_returns_a_frozen_dataclass(self):
-        result = _solve_unit_halfspace_problem()
-
         self.assertTrue(
             dataclasses.is_dataclass(result),
             f"minimize_alm returned {type(result).__name__}, not a dataclass",

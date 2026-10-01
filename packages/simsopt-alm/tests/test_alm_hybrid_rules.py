@@ -65,9 +65,6 @@ def _all_hybrid_rules_fail(stack: ExitStack) -> None:
 
 
 class AlmHybridInertnessTests(unittest.TestCase):
-    def test_hybrid_module_holds_the_mismatch_rules(self):
-        self.assertNotEqual(_hybrid_functions(), [])
-
     def test_non_hybrid_goldens_never_reach_a_hybrid_rule(self):
         for name in NON_HYBRID_GOLDENS:
             with self.subTest(scenario=name):

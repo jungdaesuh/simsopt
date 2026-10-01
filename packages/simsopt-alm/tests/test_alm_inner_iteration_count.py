@@ -75,58 +75,51 @@ class _CountedRun:
         )
 
 
-class GateStoppedInnerSolveCountTests(unittest.TestCase):
-    def test_gate_stops_after_several_iterations(self):
-        # Guards the premise: an early stop that ran one iteration would not
-        # tell a true count from the old fixed nit=1.
-        run = _CountedRun(200)
-        self.assertGreater(
-            max(callbacks for _reported, callbacks in run.step_iterations),
-            1,
-            "no inner solve ran more than one iteration before the gate stopped it",
-        )
+# Each budget runs once, every count check on every run; the multi-iteration
+# premise is checked on the maxiter=200 run.
+BUDGETS = (5, 10, 20, 38, 40, 50, 200)
+PREMISE_BUDGET = 200
 
-    def test_nit_equals_optimizer_callbacks(self):
-        for budget in (38, 40, 50, 200):
+
+class GateStoppedInnerSolveCountTests(unittest.TestCase):
+    def test_counts_and_budget_agree_with_optimizer_callbacks(self):
+        for budget in BUDGETS:
             with self.subTest(maxiter=budget):
                 run = _CountedRun(budget)
+                if budget == PREMISE_BUDGET:
+                    # Guards the premise: an early stop that ran one iteration
+                    # would not tell a true count from the old fixed nit=1.
+                    self.assertGreater(
+                        max(callbacks for _reported, callbacks in run.step_iterations),
+                        1,
+                        "no inner solve ran more than one iteration before the gate "
+                        "stopped it",
+                    )
                 self.assertEqual(
                     run.result.nit,
                     run.callbacks,
                     "result.nit does not count the L-BFGS-B iterations the "
                     "callback saw",
                 )
-
-    def test_step_iterations_equal_callbacks_of_that_step(self):
-        run = _CountedRun(200)
-        for index, (reported, callbacks) in enumerate(run.step_iterations):
-            with self.subTest(step=index):
-                self.assertEqual(
-                    0 if reported is None else reported,
-                    callbacks,
-                    "a step's inner.iterations differs from the iterations its "
-                    "inner solve ran",
-                )
-
-    def test_checkpoint_totals_equal_callbacks_so_far(self):
-        run = _CountedRun(200)
-        self.assertEqual(
-            [int(b.state.total_inner_iterations) for b in run.boundaries],
-            run.callbacks_at_boundary,
-            "a boundary's total_inner_iterations differs from the iterations run "
-            "before it, so a resume would budget from a wrong count",
-        )
-
-    def test_call_budget_bounds_the_iterations_run(self):
-        for budget in (5, 10, 20, 38):
-            with self.subTest(maxiter=budget):
-                run = _CountedRun(budget)
                 self.assertLessEqual(
                     run.callbacks,
                     budget,
                     "the call ran more L-BFGS-B iterations than its maxiter budget",
                 )
-                self.assertEqual(run.result.nit, run.callbacks)
+                for index, (reported, callbacks) in enumerate(run.step_iterations):
+                    self.assertEqual(
+                        0 if reported is None else reported,
+                        callbacks,
+                        f"step {index}: inner.iterations differs from the "
+                        "iterations its inner solve ran",
+                    )
+                self.assertEqual(
+                    [int(b.state.total_inner_iterations) for b in run.boundaries],
+                    run.callbacks_at_boundary,
+                    "a boundary's total_inner_iterations differs from the "
+                    "iterations run before it, so a resume would budget from a "
+                    "wrong count",
+                )
 
     def test_resume_budget_continues_the_uninterrupted_count(self):
         budget = 38
