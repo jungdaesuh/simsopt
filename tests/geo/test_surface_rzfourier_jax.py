@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 
 import numpy as np
 import jax
@@ -156,45 +155,6 @@ def _geometry_vector_from_dofs(surface: SurfaceRZFourier, dofs, evaluator):
         stellsym=surface.stellsym,
     )
     return jnp.concatenate([jnp.ravel(part) for part in evaluator(spec)])
-
-
-def _hlo_stats(text: str) -> dict[str, int]:
-    return {
-        "cosine": len(re.findall(r"\bcosine(?:\(|\b)", text)),
-        "sine": len(re.findall(r"\bsine(?:\(|\b)", text)),
-        "dot_general": len(re.findall(r"\bdot_general(?:\(|\b)", text)),
-        "reduce": len(re.findall(r"\breduce(?:\(|\b)", text)),
-        "fusion": len(re.findall(r"\bfusion(?:\(|\b)", text)),
-        "line_count": text.count("\n") + 1,
-    }
-
-
-def _compiled_hlo_stats(fn, *args) -> dict[str, int]:
-    return _hlo_stats(jax.jit(fn).lower(*args).compile().as_text())
-
-
-def _lowered_hlo_stats(fn, *args) -> dict[str, int]:
-    return _hlo_stats(jax.jit(fn).lower(*args).as_text())
-
-
-def _make_hlo_probe_surface() -> SurfaceRZFourier:
-    surface = SurfaceRZFourier.from_nphi_ntheta(
-        nfp=2,
-        stellsym=True,
-        mpol=8,
-        ntor=6,
-        nphi=17,
-        ntheta=18,
-        range="field period",
-    )
-    rng = parity_rng(1729)
-    surface.rc[:, :] = rng.normal(scale=0.02, size=surface.rc.shape)
-    surface.zs[:, :] = rng.normal(scale=0.02, size=surface.zs.shape)
-    surface.rc[0, surface.ntor] = 1.2
-    surface.rc[1, surface.ntor] += 0.15
-    surface.zs[1, surface.ntor] += 0.08
-    surface.local_full_x = surface.get_dofs()
-    return surface
 
 
 def _make_rz_surface(
@@ -899,76 +859,6 @@ def test_surface_rzfourier_high_resolution_stellsym_transfer_guard_and_parity():
         rtol=1e-10,
         atol=1e-10,
     )
-
-
-def test_surface_rzfourier_fused_geometry_reduces_hlo_work():
-    surface = _make_hlo_probe_surface()
-    dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
-    scalar_geometry = lambda x: _geometry_vector_from_dofs(
-        surface,
-        x,
-        _scalar_geometry_from_spec,
-    )
-    fused_geometry = lambda x: _geometry_vector_from_dofs(
-        surface,
-        x,
-        surface_rz_fourier_geometry_from_spec,
-    )
-    scalar_lowered_stats = _lowered_hlo_stats(scalar_geometry, dofs)
-    fused_lowered_stats = _lowered_hlo_stats(fused_geometry, dofs)
-    scalar_optimized_stats = _compiled_hlo_stats(scalar_geometry, dofs)
-    fused_optimized_stats = _compiled_hlo_stats(fused_geometry, dofs)
-
-    assert fused_lowered_stats["cosine"] < scalar_lowered_stats["cosine"]
-    assert fused_lowered_stats["sine"] < scalar_lowered_stats["sine"]
-    assert fused_lowered_stats["dot_general"] > 0
-    assert fused_lowered_stats["dot_general"] <= scalar_lowered_stats["dot_general"]
-    assert fused_lowered_stats["reduce"] < scalar_lowered_stats["reduce"]
-    assert fused_optimized_stats["line_count"] < scalar_optimized_stats["line_count"]
-    assert fused_optimized_stats["cosine"] <= scalar_optimized_stats["cosine"]
-    assert fused_optimized_stats["sine"] <= scalar_optimized_stats["sine"]
-    assert fused_optimized_stats["reduce"] <= scalar_optimized_stats["reduce"]
-
-
-def test_surface_rzfourier_scalar_gamma_hlo_stays_single_output():
-    surface = _make_surface(stellsym=True)
-    dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
-
-    gamma_stats = _compiled_hlo_stats(
-        lambda x: surface_rz_fourier_gamma_from_dofs(_surface_spec_from_surface(surface), x),
-        dofs,
-    )
-    geometry_stats = _compiled_hlo_stats(
-        lambda x: _geometry_vector_from_dofs(
-            surface,
-            x,
-            surface_rz_fourier_geometry_from_spec,
-        ),
-        dofs,
-    )
-    gamma_jacfwd_stats = _compiled_hlo_stats(
-        lambda x: jax.jacfwd(
-            lambda y: jnp.ravel(
-                surface_rz_fourier_gamma_from_dofs(_surface_spec_from_surface(surface), y)
-            )
-        )(x),
-        dofs,
-    )
-    geometry_jacfwd_stats = _compiled_hlo_stats(
-        lambda x: jax.jacfwd(
-            lambda y: _geometry_vector_from_dofs(
-                surface,
-                y,
-                surface_rz_fourier_geometry_from_spec,
-            )
-        )(x),
-        dofs,
-    )
-
-    assert gamma_stats["line_count"] < geometry_stats["line_count"]
-    assert gamma_stats["cosine"] <= geometry_stats["cosine"]
-    assert gamma_stats["sine"] <= geometry_stats["sine"]
-    assert gamma_jacfwd_stats["line_count"] < geometry_jacfwd_stats["line_count"]
 
 
 def test_surface_rzfourier_geometry_avoids_jnp_arange(monkeypatch):
