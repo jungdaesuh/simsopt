@@ -8,11 +8,17 @@ from pathlib import Path
 
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
-from examples.jax.parity.provenance import collect_lane_provenance
+from examples.jax.parity.provenance import (
+    collect_lane_provenance,
+    loaded_extension_identity,
+)
 from examples.jax.parity.receipts import write_lane_observation
 from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+# Established when the imports above have loaded simsoptpp, before any lane runs;
+# the receipt is refused unless the binary still has these bytes.
+_LOADED_EXTENSION = loaded_extension_identity()
 _NATIVE_MEASUREMENT_SYNCHRONIZATION = "native synchronous execution"
 _JAX_MEASUREMENT_SYNCHRONIZATION = (
     "jax.block_until_ready over published observation values"
@@ -57,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     provenance = collect_lane_provenance(
         _REPO_ROOT,
         measurement_synchronization=measurement_synchronization,
+        loaded_extension=_LOADED_EXTENSION,
     )
     observation = dataclasses.replace(observation, provenance=provenance)
     write_lane_observation(args.result_directory, observation)

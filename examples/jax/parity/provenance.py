@@ -296,25 +296,54 @@ def _device_metadata() -> tuple[
     return devices, peak, status, str(jax_module.__version__), guards
 
 
+@dataclass(frozen=True)
+class LoadedExtension:
+    """The simsoptpp binary a process loaded: its resolved path, bytes and version."""
+
+    path: str
+    sha256: str
+    version: str
+
+
+def loaded_extension_identity() -> LoadedExtension | None:
+    """Identify the simsoptpp binary this process has loaded, or None if none is."""
+    simsoptpp_module = sys.modules.get("simsoptpp")
+    if simsoptpp_module is None:
+        return None
+    binary_path = Path(str(simsoptpp_module.__file__)).resolve()
+    return LoadedExtension(
+        path=str(binary_path),
+        sha256=_sha256_file(binary_path),
+        version=str(getattr(simsoptpp_module, "__version__", "unknown")),
+    )
+
+
 def collect_lane_provenance(
-    repo_root: Path, *, measurement_synchronization: str
+    repo_root: Path,
+    *,
+    measurement_synchronization: str,
+    loaded_extension: LoadedExtension | None,
 ) -> LaneProvenance:
-    """Collect a receipt using the synchronization recorded by its producer."""
+    """Collect a receipt using the synchronization recorded by its producer.
+
+    ``loaded_extension`` is the identity established before the lane executed;
+    the receipt is refused unless the binary still has those bytes, so a lane
+    can only record the extension it actually ran.
+    """
+    if loaded_extension_identity() != loaded_extension:
+        raise ValueError(
+            "simsoptpp extension changed between lane start and receipt: "
+            f"{loaded_extension}"
+        )
     repository = collect_repository_state(repo_root)
     devices, device_peak, device_status, jax_version, effective_guards = (
         _device_metadata()
     )
     simsopt_module = sys.modules.get("simsopt")
     simsopt_version = str(getattr(simsopt_module, "__version__", "unknown"))
-    simsoptpp_module = sys.modules.get("simsoptpp")
-    simsoptpp_path = None
-    simsoptpp_sha256 = None
-    simsoptpp_version = None
-    if simsoptpp_module is not None:
-        binary_path = Path(str(simsoptpp_module.__file__)).resolve()
-        simsoptpp_path = str(binary_path)
-        simsoptpp_sha256 = _sha256_file(binary_path)
-        simsoptpp_version = str(getattr(simsoptpp_module, "__version__", "unknown"))
+    simsoptpp_path = None if loaded_extension is None else loaded_extension.path
+    simsoptpp_sha256 = None if loaded_extension is None else loaded_extension.sha256
+    simsoptpp_version = None if loaded_extension is None else loaded_extension.version
     executed_sources = _merge_sources(
         collect_executed_sources(repo_root),
         collect_explicit_sources(repo_root, REQUIRED_PROVENANCE_SOURCE_PATHS),

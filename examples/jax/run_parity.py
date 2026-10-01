@@ -31,6 +31,7 @@ from examples.jax.parity.provenance import (
     REQUIRED_PROVENANCE_SOURCE_PATHS,
     collect_explicit_sources,
     collect_repository_state,
+    validate_extension_current,
     validate_sources_current,
 )
 from examples.jax.parity.publication import (
@@ -146,6 +147,17 @@ def _agreed_completed_workflow_stages(
     if len(stages) != 1:
         return []
     return list(next(iter(stages)))
+
+
+def _validate_recorded_extensions(
+    case_observations: dict[str, dict[str, LaneObservation]],
+) -> None:
+    """Refuse to publish if any lane's recorded simsoptpp binary changed since."""
+    for case_id, observations in case_observations.items():
+        for observation in observations.values():
+            if observation.provenance is None:
+                raise RunnerError(f"{case_id} lane omitted provenance")
+            validate_extension_current(observation.provenance)
 
 
 def _validate_case_lane_provenance(
@@ -342,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     case_ids = _selected_cases(args.case, applicable_case_ids)
     paths = begin_run(args.artifact_root.resolve(), _run_id())
     summaries: list[dict[str, object]] = []
+    case_observations: dict[str, dict[str, LaneObservation]] = {}
     repository_changed_during_run = False
     try:
         for case_id in case_ids:
@@ -392,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                 python_executable=sys.executable,
                 scale=scale,
             )
+            case_observations[case_id] = observations
             try:
                 arbitration = arbitrate(
                     relationship.comparison_routes,
@@ -518,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
         if verdict == "fail":
             mark_run_failed(paths, "one or more parity cases failed")
             return 1
+        _validate_recorded_extensions(case_observations)
         published = publish_run(paths)
         print(published)
         return 0

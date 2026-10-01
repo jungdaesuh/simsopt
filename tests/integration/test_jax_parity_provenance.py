@@ -27,7 +27,10 @@ def _collect_with_sources(
     *,
     executed_sources: tuple[provenance.ExecutedSource, ...],
     loaded_binary: Path,
+    replacement_bytes: bytes | None = None,
 ) -> provenance.LaneProvenance:
+    """Load ``loaded_binary``, establish its identity, then (optionally) replace it
+    with ``replacement_bytes`` as a lane's execution might, and collect the receipt."""
     monkeypatch.setattr(
         provenance,
         "collect_repository_state",
@@ -57,9 +60,13 @@ def _collect_with_sources(
         "simsoptpp",
         SimpleNamespace(__file__=str(loaded_binary), __version__="test"),
     )
+    loaded_extension = provenance.loaded_extension_identity()
+    if replacement_bytes is not None:
+        loaded_binary.write_bytes(replacement_bytes)
     return provenance.collect_lane_provenance(
         tmp_path,
         measurement_synchronization="native synchronous execution",
+        loaded_extension=loaded_extension,
     )
 
 
@@ -127,3 +134,43 @@ def test_payload_rejects_an_extension_path_or_digest_recorded_alone(
 
     with pytest.raises(ValueError, match="must be recorded together"):
         provenance.lane_provenance_from_payload(payload)
+
+
+def test_receipt_refuses_an_extension_replaced_during_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lane that loaded binary A cannot record binary B written over A's path."""
+    binary = tmp_path / "simsoptpp.so"
+    binary.write_bytes(b"binary the lane loaded")
+
+    with pytest.raises(ValueError, match="changed between lane start and receipt"):
+        _collect_with_sources(
+            tmp_path,
+            monkeypatch,
+            executed_sources=(),
+            loaded_binary=binary,
+            replacement_bytes=b"binary written during execution",
+        )
+
+
+def test_receipt_refuses_an_extension_loaded_after_identity_was_established(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extension imported only after the lane started has no pre-execution identity."""
+    binary = tmp_path / "simsoptpp.so"
+    binary.write_bytes(b"late extension")
+    monkeypatch.setattr(provenance, "collect_repository_state", lambda _root: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "simsoptpp",
+        SimpleNamespace(__file__=str(binary), __version__="test"),
+    )
+
+    with pytest.raises(ValueError, match="changed between lane start and receipt"):
+        provenance.collect_lane_provenance(
+            tmp_path,
+            measurement_synchronization="native synchronous execution",
+            loaded_extension=None,
+        )

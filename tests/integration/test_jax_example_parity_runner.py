@@ -2321,13 +2321,18 @@ def _inject_completed_lane_receipts(
     corrupt_source: bool = False,
     integrity_break: str | None = None,
     published_values: dict[str, np.ndarray] | None = None,
+    extension_binary: Path | None = None,
+    replace_extension_after_receipts: bool = False,
 ) -> None:
     """Serve hand-built lane receipts in place of real child executions.
 
     ``rejected_lane`` makes one lane report an honest failure (a lane outcome).
     ``integrity_break`` instead violates a harness/contract invariant, which is
     never a lane's result and must abort the run. ``published_values``, when
-    given, replaces every lane's published values.
+    given, replaces every lane's published values. ``extension_binary`` makes
+    every lane record that file as its loaded simsoptpp, and
+    ``replace_extension_after_receipts`` changes its bytes once all receipts
+    are written, before the runner publishes.
     """
 
     def execute_case_lanes(
@@ -2395,6 +2400,15 @@ def _inject_completed_lane_receipts(
                     tracked_diff_sha256=repository_state.tracked_diff_sha256,
                     untracked_files=repository_state.untracked_files,
                     executed_sources=sources,
+                    simsoptpp_path=(
+                        None if extension_binary is None else str(extension_binary)
+                    ),
+                    simsoptpp_sha256=(
+                        None
+                        if extension_binary is None
+                        else hashlib.sha256(extension_binary.read_bytes()).hexdigest()
+                    ),
+                    simsoptpp_version=None if extension_binary is None else "test",
                 ),
             )
             if published_values is not None:
@@ -2436,6 +2450,8 @@ def _inject_completed_lane_receipts(
                     result_directory=result_directory,
                 )
             )
+        if extension_binary is not None and replace_extension_after_receipts:
+            extension_binary.write_bytes(extension_binary.read_bytes() + b"replaced")
         return tuple(executions), observations
 
     monkeypatch.setattr(parity_cli, "execute_case_lanes", execute_case_lanes)
@@ -3339,6 +3355,55 @@ def _declare(
             declared if case_id == _ROUND_TRIP_CASE_ID else get_case(case_id)
         ),
     )
+
+
+@pytest.mark.parametrize("replaced", (False, True), ids=("unchanged", "replaced"))
+def test_run_parity_refuses_to_publish_after_the_recorded_extension_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced: bool
+) -> None:
+    """A binary replaced after the receipts but before publication is not published."""
+    extension = tmp_path / "ext" / "simsoptpp.so"
+    extension.parent.mkdir()
+    extension.write_bytes(b"loaded compiled extension")
+    artifact_root = tmp_path / "artifacts"
+    _inject_completed_lane_receipts(
+        monkeypatch,
+        rejected_lane=None,
+        published_values=_round_trip_values(),
+        extension_binary=extension,
+        replace_extension_after_receipts=replaced,
+    )
+    _declare(monkeypatch, parity_cli, _round_trip_declaration())
+
+    result = parity_cli.main(
+        [
+            "--case",
+            _ROUND_TRIP_CASE_ID,
+            "--lanes",
+            "native-cpu,jax-cpu",
+            "--scale",
+            "bounded",
+            "--artifact-root",
+            str(artifact_root),
+        ]
+    )
+
+    published = [
+        path
+        for path in artifact_root.iterdir()
+        if path.is_dir() and not path.name.endswith(".partial")
+    ]
+    if not replaced:
+        assert result == 0
+        assert len(published) == 1
+        return
+    assert result == 1
+    assert published == []
+    (partial,) = [
+        path for path in artifact_root.iterdir() if path.name.endswith(".partial")
+    ]
+    failure = json.loads((partial / "FAILURE.json").read_text(encoding="utf-8"))
+    assert "simsoptpp extension changed" in json.dumps(failure)
 
 
 def test_run_parity_records_and_the_audit_recomputes_upstream_end_states(
