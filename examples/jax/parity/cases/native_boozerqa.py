@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeVar, cast
+from typing import Protocol, cast
 
 import numpy as np
 from examples.jax.parity.arbiter import LaneObservation
@@ -17,11 +17,6 @@ from examples.jax.parity.input_bundle import (
     InputBundle,
     create_input_bundle,
     effective_construction_fingerprint,
-)
-from examples.jax.parity.measurement import MeasurementExecution
-from examples.jax.parity.optimization_trajectory import (
-    OptimizationMeasurementWindow,
-    OptimizationTrajectoryRecorder,
 )
 from examples.jax.parity.runtime import ParityLane
 from simsopt.configs import get_data
@@ -299,40 +294,6 @@ class _PreparedNativeRuntime:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedJaxVariantExecution:
-    """Prepared case execution that mints fresh optimizer state per invocation."""
-
-    lane: ParityLane
-    bundle: InputBundle
-    arrays: dict[str, np.ndarray]
-    spec: BoozerSingleStageSpec
-    _runtime: _PreparedJaxRuntime
-
-    @property
-    def compilation_identity(self) -> tuple[int, int, int, int]:
-        """Identity proof for the reused session, runtime, and value/grad callable."""
-
-        return (
-            id(self._runtime.session),
-            id(self._runtime.runtime),
-            id(self._runtime.value_and_grad),
-            id(self._runtime.incumbent_evaluator),
-        )
-
-    def execute(self, measurement: MeasurementExecution) -> LaneObservation:
-        """Run from a fresh incumbent controller on the prepared runtime."""
-
-        return _jax(
-            self.lane,
-            self.bundle,
-            self.arrays,
-            self.spec,
-            measurement,
-            prepared=self._runtime,
-        )
-
-
 class _TimelineEvaluationKind(Protocol):
     value: str
 
@@ -441,26 +402,6 @@ def changed_state_timeline_observation_sink(
         yield
     finally:
         _TIMELINE_OBSERVATION_SINK.reset(token)
-
-
-_InitialEvaluation = TypeVar("_InitialEvaluation")
-
-
-@contextmanager
-def _measurement_optimization_window(
-    measurement: MeasurementExecution | None,
-    evaluate_initial: Callable[[], _InitialEvaluation],
-) -> Iterator[tuple[_InitialEvaluation, OptimizationTrajectoryRecorder | None]]:
-    """Start trajectory time before the lane's required initial evaluation."""
-    with OptimizationMeasurementWindow(
-        trajectory_path=(
-            measurement.trajectory_path if measurement is not None else None
-        ),
-        timing_path=(
-            measurement.optimization_timing_path if measurement is not None else None
-        ),
-    ) as trajectory:
-        yield evaluate_initial(), trajectory
 
 
 def variant_scale_configuration(
@@ -802,7 +743,6 @@ def _native(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     spec: BoozerSingleStageSpec,
-    measurement: MeasurementExecution | None = None,
 ) -> LaneObservation:
     from scipy.optimize import minimize
 
@@ -820,31 +760,17 @@ def _native(
 
     value_and_grad = prepared.value_and_grad
 
-    native_iteration = 0
-    with _measurement_optimization_window(
-        measurement,
-        lambda: value_and_grad(initial_parameters),
-    ) as ((initial_objective, initial_gradient), trajectory):
-        if trajectory is None:
-            record_iteration = None
-        else:
-
-            def record_iteration(intermediate_result) -> None:
-                nonlocal native_iteration
-                native_iteration += 1
-                trajectory.record(native_iteration, float(intermediate_result.fun))
-
-        optimizer_result = minimize(
-            value_and_grad,
-            initial_parameters,
-            jac=True,
-            method="BFGS",
-            options={
-                "maxiter": _configuration_int(bundle.configuration, "outer_maxiter"),
-                "gtol": OUTER_GRADIENT_TOLERANCE,
-            },
-            callback=record_iteration,
-        )
+    initial_objective, initial_gradient = value_and_grad(initial_parameters)
+    optimizer_result = minimize(
+        value_and_grad,
+        initial_parameters,
+        jac=True,
+        method="BFGS",
+        options={
+            "maxiter": _configuration_int(bundle.configuration, "outer_maxiter"),
+            "gtol": OUTER_GRADIENT_TOLERANCE,
+        },
+    )
     final_parameters = np.asarray(optimizer_result.x, dtype=np.float64)
     objective.x = final_parameters
     final_objective = float(objective.J())
@@ -1039,7 +965,6 @@ def _prepare_jax_variant_runtime(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     spec: BoozerSingleStageSpec,
-    measurement: MeasurementExecution | None,
 ) -> _PreparedJaxRuntime:
     """Construct the single session whose compiled callables warm and measure."""
 
@@ -1167,9 +1092,6 @@ def _jax(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     spec: BoozerSingleStageSpec,
-    measurement: MeasurementExecution | None = None,
-    *,
-    prepared: _PreparedJaxRuntime | None = None,
 ) -> LaneObservation:
     from simsopt_jax.backend.runtime import get_runtime_jax_device
     from simsopt_jax.geo.optimizer_host_lbfgs import (
@@ -1199,15 +1121,7 @@ def _jax(
 
     import jax
 
-    if measurement is None:
-        prepared = _prepare_jax_variant_runtime(
-            bundle,
-            arrays,
-            spec,
-            None,
-        )
-    elif prepared is None:
-        prepared = _prepare_jax_variant_runtime(bundle, arrays, spec, measurement)
+    prepared = _prepare_jax_variant_runtime(bundle, arrays, spec)
     session = prepared.session
     reporting = prepared.reporting
     initial_parameters = prepared.initial_parameters
@@ -1477,74 +1391,55 @@ def _jax(
     def evaluate_initial() -> tuple[float, np.ndarray]:
         return timeline_value_and_grad(initial_parameters, EvaluationKind.INITIAL)
 
-    with _measurement_optimization_window(
-        measurement,
-        evaluate_initial,
-    ) as ((initial_objective, initial_gradient), trajectory):
-        if trajectory is None:
-            progress_callback = None
-        else:
-
-            def record_iteration(
-                iteration: int,
-                objective: float,
-                _grad_norm: float,
-            ) -> None:
-                trajectory.record(iteration, objective)
-
-            progress_callback = record_iteration
-        driver = _outer_driver(spec)
-        if driver == Driver.SIMSOPT_LBFGSB:
-            optimizer_result = minimize_lbfgs_host_core(
-                evaluate_optimizer_trial,
-                initial_parameters,
-                maxiter=_configuration_int(
-                    bundle.configuration,
-                    "outer_maxiter",
-                ),
-                maxcor=min(
-                    _configuration_int(bundle.configuration, "outer_maxiter"),
-                    200,
-                ),
-                ftol=0.0,
-                gtol=OUTER_GRADIENT_TOLERANCE,
-                maxls=20,
-                initial_value_and_grad=(initial_objective, initial_gradient),
-                final_eval_value_and_grad_host=evaluate_optimizer_final,
-                callback=accept_optimizer_trial,
-                progress_callback=progress_callback,
-            )
-        else:
-            optimizer_result = minimize_bfgs_host_core(
-                evaluate_optimizer_trial,
-                initial_parameters,
-                maxiter=_configuration_int(
-                    bundle.configuration,
-                    "outer_maxiter",
-                ),
-                gtol=OUTER_GRADIENT_TOLERANCE,
-                maxls=20,
-                initial_value_and_grad=(initial_objective, initial_gradient),
-                line_search_value_and_grad=(
-                    line_search_value_and_grad_more_thuente_host
-                ),
-                callback=accept_optimizer_trial,
-                progress_callback=progress_callback,
-            )
-        reject_unresolved_optimizer_trials()
-        final_parameters = np.asarray(optimizer_result.x_k, dtype=np.float64)
-        optimizer_iterations = int(optimizer_result.k)
-        optimizer_evaluations = int(optimizer_result.nfev)
-        optimizer_gradient_evaluations = int(optimizer_result.ngev)
-        optimizer_status = int(optimizer_result.status)
-        outer_solver_success = bool(
-            lbfgs_status_is_success(optimizer_result.status, False)
-            if driver == Driver.SIMSOPT_LBFGSB
-            else optimizer_result.converged
+    initial_objective, initial_gradient = evaluate_initial()
+    driver = _outer_driver(spec)
+    if driver == Driver.SIMSOPT_LBFGSB:
+        optimizer_result = minimize_lbfgs_host_core(
+            evaluate_optimizer_trial,
+            initial_parameters,
+            maxiter=_configuration_int(
+                bundle.configuration,
+                "outer_maxiter",
+            ),
+            maxcor=min(
+                _configuration_int(bundle.configuration, "outer_maxiter"),
+                200,
+            ),
+            ftol=0.0,
+            gtol=OUTER_GRADIENT_TOLERANCE,
+            maxls=20,
+            initial_value_and_grad=(initial_objective, initial_gradient),
+            final_eval_value_and_grad_host=evaluate_optimizer_final,
+            callback=accept_optimizer_trial,
         )
-        status_convention = (
-            "host-lbfgsb" if driver == Driver.SIMSOPT_LBFGSB else "host-bfgs"
+    else:
+        optimizer_result = minimize_bfgs_host_core(
+            evaluate_optimizer_trial,
+            initial_parameters,
+            maxiter=_configuration_int(
+                bundle.configuration,
+                "outer_maxiter",
+            ),
+            gtol=OUTER_GRADIENT_TOLERANCE,
+            maxls=20,
+            initial_value_and_grad=(initial_objective, initial_gradient),
+            line_search_value_and_grad=(line_search_value_and_grad_more_thuente_host),
+            callback=accept_optimizer_trial,
         )
+    reject_unresolved_optimizer_trials()
+    final_parameters = np.asarray(optimizer_result.x_k, dtype=np.float64)
+    optimizer_iterations = int(optimizer_result.k)
+    optimizer_evaluations = int(optimizer_result.nfev)
+    optimizer_gradient_evaluations = int(optimizer_result.ngev)
+    optimizer_status = int(optimizer_result.status)
+    outer_solver_success = bool(
+        lbfgs_status_is_success(optimizer_result.status, False)
+        if driver == Driver.SIMSOPT_LBFGSB
+        else optimizer_result.converged
+    )
+    status_convention = (
+        "host-lbfgsb" if driver == Driver.SIMSOPT_LBFGSB else "host-bfgs"
+    )
 
     timeline_final_lifecycle = (
         annotations_enabled() or _TIMELINE_OBSERVATION_SINK.get() is not None
@@ -2052,10 +1947,8 @@ def execute_variant(
     bundle: InputBundle,
     arrays: dict[str, np.ndarray],
     spec: BoozerSingleStageSpec,
-    *,
-    measurement: MeasurementExecution | None = None,
 ) -> LaneObservation:
     """Execute one configured native/JAX Boozer single-stage workflow."""
     if lane == "native-cpu":
-        return _native(bundle, arrays, spec, measurement)
-    return _jax(lane, bundle, arrays, spec, measurement)
+        return _native(bundle, arrays, spec)
+    return _jax(lane, bundle, arrays, spec)

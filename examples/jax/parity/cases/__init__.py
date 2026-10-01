@@ -177,7 +177,6 @@ from examples.jax.parity.contracts import (
     UpstreamEndStates,
 )
 from examples.jax.parity.input_bundle import InputBundle
-from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.official_quality_bands import official_quality_band
 from examples.jax.parity.official_reference import load_upstream_scatter
 from examples.jax.parity.official_scatter_contracts import upstream_end_states
@@ -192,18 +191,6 @@ class CaseDefinition:
     case_id: str
     create_input: Callable[[Path, ExecutionScale], InputBundle]
     execute: Callable[[ParityLane, InputBundle, dict[str, np.ndarray]], LaneObservation]
-    measurement_execute: (
-        Callable[
-            [
-                ParityLane,
-                InputBundle,
-                dict[str, np.ndarray],
-                MeasurementExecution,
-            ],
-            LaneObservation,
-        ]
-        | None
-    ) = None
     quality_bands: tuple[QualityBand, ...] = ()
     """Endpoint quality floors (2026-08-15 rule 3), at most one per scale.
 

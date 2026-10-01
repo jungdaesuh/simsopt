@@ -154,7 +154,7 @@ def test_official_route_matches_the_session_route_at_the_shipped_scale(
     problem = _official_problem(bundle, arrays)
     states = _states(problem.initial_coil_dofs)
 
-    prepared = _prepare_jax_variant_runtime(bundle, arrays, BOOZER_QA_SPEC, None)
+    prepared = _prepare_jax_variant_runtime(bundle, arrays, BOOZER_QA_SPEC)
     session = prepared.fresh_incumbent_controller()
     assert problem.iota_target == pytest.approx(
         prepared.iota_target, rel=FROZEN_TARGET_RELATIVE_TOLERANCE, abs=0.0

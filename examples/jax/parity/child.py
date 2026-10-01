@@ -8,7 +8,6 @@ from pathlib import Path
 
 from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
-from examples.jax.parity.measurement import MeasurementExecution
 from examples.jax.parity.provenance import collect_lane_provenance
 from examples.jax.parity.receipts import write_lane_observation
 from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
@@ -28,8 +27,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input-bundle", type=Path, required=True)
     parser.add_argument("--result-directory", type=Path, required=True)
-    parser.add_argument("--trajectory-path", type=Path)
-    parser.add_argument("--optimization-timing-path", type=Path)
     parser.add_argument("--scale", choices=EXECUTION_SCALES, required=True)
     return parser
 
@@ -48,20 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             f"input bundle scale {bundle.scale} does not match requested {scale}"
         )
-    if args.trajectory_path is None and args.optimization_timing_path is None:
-        observation = case.execute(args.lane, bundle, arrays)
-    else:
-        if case.measurement_execute is None:
-            raise ValueError(f"case {case.case_id} does not support measurements")
-        observation = case.measurement_execute(
-            args.lane,
-            bundle,
-            arrays,
-            MeasurementExecution(
-                trajectory_path=args.trajectory_path,
-                optimization_timing_path=args.optimization_timing_path,
-            ),
-        )
+    observation = case.execute(args.lane, bundle, arrays)
     measurement_synchronization = _NATIVE_MEASUREMENT_SYNCHRONIZATION
     if args.lane.startswith("jax-"):
         import jax

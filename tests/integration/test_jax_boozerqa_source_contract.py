@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from conftest import ast_names_used, enable_non_strict_jax_backend
@@ -89,10 +88,9 @@ def test_official_jax_lane_runs_the_owner_and_never_the_traceable_session(
 ) -> None:
     """The official JAX lane must not reach the traceable-session route at all.
 
-    Source text is not coverage: the session route stays in this module for the
-    sealed compute-graph campaigns and for the single-stage measurement entry
-    point, so a test that only greps for it would pass while the official lane
-    ran something else.  This one fails the run if the official lane builds the
+    Source text is not coverage: the session route stays in this module for
+    ``execute_variant``, so a test that only greps for it would pass while the
+    official lane ran something else.  This one fails the run if the official lane builds the
     session runtime or calls ``_jax``.
     """
     enable_non_strict_jax_backend(monkeypatch, request, "jax_cpu_parity")
@@ -132,13 +130,12 @@ def test_official_jax_lane_runs_the_owner_and_never_the_traceable_session(
     }
 
 
-def test_sealed_and_measurement_entry_points_still_reach_the_session_route(
+def test_execute_variant_still_reaches_the_session_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every caller other than the official lane keeps the session route.
 
-    ``execute_variant`` and ``_PreparedJaxVariantExecution.execute`` must still
-    dispatch JAX lanes to ``_jax``.
+    ``execute_variant`` must still dispatch JAX lanes to ``_jax``.
     """
     calls: list[tuple[str, str]] = []
 
@@ -147,9 +144,6 @@ def test_sealed_and_measurement_entry_points_still_reach_the_session_route(
         bundle: object,
         arrays: object,
         spec: object,
-        measurement: object = None,
-        *,
-        prepared: object = None,
     ) -> str:
         calls.append((lane, str(getattr(spec, "case_id", spec))))
         return "session-observation"
@@ -162,21 +156,7 @@ def test_sealed_and_measurement_entry_points_still_reach_the_session_route(
         )
         == "session-observation"
     )
-    execution = native_boozerqa._PreparedJaxVariantExecution(
-        lane="jax-gpu",
-        bundle=None,
-        arrays={},
-        spec=native_boozerqa.BOOZER_QA_SPEC,
-        _runtime=SimpleNamespace(optimizer_backend=None),
-    )
-    assert (
-        execution.execute(SimpleNamespace(optimizer_backend=None))
-        == "session-observation"
-    )
-    assert calls == [
-        ("jax-cpu", native_boozerqa.BOOZER_QA_SPEC.case_id),
-        ("jax-gpu", native_boozerqa.BOOZER_QA_SPEC.case_id),
-    ]
+    assert calls == [("jax-cpu", native_boozerqa.BOOZER_QA_SPEC.case_id)]
 
 
 def test_native_lane_still_reaches_the_variant_route(
