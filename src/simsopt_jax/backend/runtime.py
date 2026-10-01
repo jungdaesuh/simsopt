@@ -408,7 +408,6 @@ def _resolve_mode(mode: str | None = None) -> str:
 
 _cached_backend_policy: BackendPolicy | None = None
 _warned_jax_fallbacks: set[tuple[str, str, str]] = set()
-_logged_sharding_notices: set[tuple[str, int]] = set()
 
 
 def get_backend_policy(mode: str | None = None) -> BackendPolicy:
@@ -632,6 +631,7 @@ def get_runtime_jax_device(mode: str | None = None):
     if platform is None:
         return None
 
+    # Deferred: importing this module must not import jax (no-JAX installs).
     import jax
 
     _apply_compilation_cache_config(jax, get_backend_config())
@@ -1107,6 +1107,7 @@ def apply_jax_runtime_config() -> None:
     _apply_cpu_compile_preset_env(config, policy)
     _apply_cuda_autotuner_env(config)
 
+    # Deferred: the environment above must be set before jax is first imported.
     import jax
 
     jax.config.update(
@@ -1128,6 +1129,7 @@ class _CpuDeviceConstructionContext:
         self._context = None
 
     def __enter__(self):
+        # Deferred: importing this module must not import jax (no-JAX installs).
         import jax
 
         cpu_devices = jax.devices("cpu")

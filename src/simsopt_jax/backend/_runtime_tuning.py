@@ -2,7 +2,9 @@
 
 Owns chunk, sharding, and field-kernel contracts plus the
 pure builders and device probes that resolve them from policy and environment.
-Process-global caches and locks live in :mod:`simsopt_jax.backend.runtime`.
+Process-global caches and locks live in :mod:`simsopt_jax.backend.runtime`;
+the one exception is the set of sharding notices already logged, which only
+this module's sharding builder reads and writes.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from simsopt_jax.backend._runtime_policy import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_logged_sharding_notices: set[tuple[str, int]] = set()
 
 _VALID_SHARDING_STRATEGIES = (
     "none",
@@ -577,8 +580,6 @@ def _build_sharding_tuning(
         local_device_count = _detect_local_jax_device_count(policy)
         device_count = local_device_count
     if mode == "jax_gpu_parity" and strategy == "none" and local_device_count > 1:
-        from simsopt_jax.backend.runtime import _logged_sharding_notices
-
         if (mode, local_device_count) not in _logged_sharding_notices:
             _logged_sharding_notices.add((mode, local_device_count))
             _LOGGER.info(
