@@ -452,9 +452,7 @@ _TRACEABLE_RUNNER_CACHE_LOCK = Lock()
 _TRACEABLE_LM_QR_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = {}
-_TRACEABLE_EXACT_NEWTON_C0_ORACLE_RUNNER_CACHE = {}
 _TRACEABLE_DENSE_EXACT_NEWTON_C2_RUNNER_CACHE = {}
-_TRACEABLE_DENSE_EXACT_NEWTON_C2_ORACLE_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_MATVEC_COUNT_ENV = "SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS"
 _TRACEABLE_EXACT_NEWTON_EXECUTION_COUNT_ENV = (
     "SIMSOPT_TRACEABLE_EXACT_NEWTON_EXECUTION_COUNTS"
@@ -595,70 +593,6 @@ class _NativeDenseExactNewtonC2Result(NamedTuple):
     rollback_recompute_count: jax.Array
 
 
-class _ExactNewtonC0OracleTrace(NamedTuple):
-    """Fixed-shape raw replay for every active C0 physical attempt."""
-
-    active: jax.Array
-    state_before: jax.Array
-    update: jax.Array
-    state_after: jax.Array
-    merit_before: jax.Array
-    merit_after: jax.Array
-    merit_after_assessed: jax.Array
-    backtracking_iterations: jax.Array
-    accepted: jax.Array
-    stop_reason_code: jax.Array
-    linear_success: jax.Array
-    residual_evaluation_count: jax.Array
-    linear_solve_attempt_count: jax.Array
-    accepted_update_count: jax.Array
-
-
-class _ExactNewtonC0OracleResult(NamedTuple):
-    """C0 terminal certificate plus its oracle-only fixed replay."""
-
-    state: jax.Array
-    residual: jax.Array
-    jacobian: jax.Array
-    norm: jax.Array
-    nit: jax.Array
-    success: jax.Array
-    stalled: jax.Array
-    stop_reason_code: jax.Array
-    numerical_failure: jax.Array
-    residual_evaluation_count: jax.Array
-    linear_solve_attempt_count: jax.Array
-    accepted_update_count: jax.Array
-    trace: _ExactNewtonC0OracleTrace
-
-
-class _DenseExactNewtonC2OracleResult(NamedTuple):
-    """C2 raw result plus source-owned dense traversal accounting."""
-
-    native: _NativeDenseExactNewtonC2Result
-    first_attempt: _DenseExactNewtonOneStepOracle
-    exact_newton_variant_residual_evaluation_count: jax.Array
-    exact_newton_variant_dense_primal_traversal_count: jax.Array
-    exact_newton_variant_dense_tangent_batch_count: jax.Array
-    exact_newton_variant_dense_tangent_direction_count: jax.Array
-
-
-class _DenseExactNewtonOneStepOracle(NamedTuple):
-    """Fixed-shape raw algebra certificate for one dense Newton attempt."""
-
-    active: jax.Array
-    state: jax.Array
-    residual: jax.Array
-    jacobian: jax.Array
-    initial_solve: jax.Array
-    refinement_rhs: jax.Array
-    refinement_correction: jax.Array
-    refined_direction: jax.Array
-    refined_residual: jax.Array
-    correction_step: jax.Array
-    next_state: jax.Array
-
-
 _TraceableExactNewtonVariant = Literal["C0", "C2"]
 
 
@@ -696,11 +630,6 @@ class TraceableExactNewtonVariantContract:
 _C2_STOP_REASON_CONVERGED = np.int32(0)
 _C2_STOP_REASON_MAXITER = np.int32(1)
 _C2_STOP_REASON_NUMERICAL_FAILURE = np.int32(2)
-_C1_STOP_REASON_CONVERGED = np.int32(0)
-_C1_STOP_REASON_MAXITER = np.int32(1)
-_C1_STOP_REASON_BACKTRACKING_STALL = np.int32(2)
-_C1_STOP_REASON_LINEAR_FAILURE = np.int32(3)
-_C1_STOP_REASON_NONFINITE_INITIAL_RESIDUAL = np.int32(4)
 
 
 def resolve_optimizer_backend(optimizer_backend: str | None) -> str:
@@ -4810,28 +4739,6 @@ def _make_traceable_exact_newton_runner(
     )
 
 
-def _make_traceable_exact_newton_c0_oracle_runner(
-    residual_fn: Callable[..., jax.Array],
-    maxiter: int,
-    tol: float,
-):
-    """Return a separate C0 runner with fixed replay and terminal payloads."""
-
-    cache_key = (int(maxiter), float(tol))
-    return _cached_traceable_runner(
-        _TRACEABLE_EXACT_NEWTON_C0_ORACLE_RUNNER_CACHE,
-        residual_fn,
-        cache_key,
-        lambda residual_fn_ref: _build_traceable_exact_newton_runner(
-            residual_fn_ref,
-            int(maxiter),
-            float(tol),
-            False,
-            trace_enabled=True,
-        ),
-    )
-
-
 def _materialize_traceable_dense_exact_newton_c2_state(
     residual_fn: Callable[[jax.Array], jax.Array],
     x: jax.Array,
@@ -4932,27 +4839,6 @@ def _make_traceable_dense_direct_exact_newton_c2_runner(
     )
 
 
-def _make_traceable_dense_direct_exact_newton_c2_oracle_runner(
-    residual_fn: Callable[..., jax.Array],
-    maxiter: int,
-    tol: float,
-):
-    """Return a separate C2 oracle runner exposing its existing raw trace."""
-
-    cache_key = (int(maxiter), float(tol))
-    return _cached_traceable_runner(
-        _TRACEABLE_DENSE_EXACT_NEWTON_C2_ORACLE_RUNNER_CACHE,
-        residual_fn,
-        cache_key,
-        lambda residual_fn_ref: _build_traceable_dense_direct_exact_newton_c2_runner(
-            residual_fn_ref,
-            int(maxiter),
-            float(tol),
-            telemetry_enabled=True,
-        ),
-    )
-
-
 def _dense_direct_exact_newton_direction_from_jacobian(
     residual: jax.Array,
     jacobian: jax.Array,
@@ -5041,8 +4927,6 @@ def _build_traceable_exact_newton_runner(
     maxiter,
     tol,
     execution_counts_enabled,
-    *,
-    trace_enabled: bool = False,
 ):
     def run_solver(x_init, fn_args):
         residual_fn = _lookup_traceable_runner_callable(
@@ -5069,78 +4953,6 @@ def _build_traceable_exact_newton_runner(
         r0 = residual_eval(x_init)
         norm0 = jnp.linalg.norm(r0)
         zero_count = _device_int32(0, like=x_init)
-        if trace_enabled:
-            trace_length = max(1, 2 * maxiter)
-            vector_trace_shape = (trace_length,) + x_init.shape
-            oracle_trace_state = {
-                "oracle_trace_active": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.bool_,
-                ),
-                "oracle_state_before_trace": jnp.full(
-                    vector_trace_shape,
-                    jnp.nan,
-                    dtype=dtype,
-                ),
-                "oracle_update_trace": jnp.zeros(
-                    vector_trace_shape,
-                    dtype=dtype,
-                ),
-                "oracle_state_after_trace": jnp.full(
-                    vector_trace_shape,
-                    jnp.nan,
-                    dtype=dtype,
-                ),
-                "oracle_merit_before_trace": jnp.full(
-                    (trace_length,),
-                    jnp.nan,
-                    dtype=dtype,
-                ),
-                "oracle_merit_after_trace": jnp.full(
-                    (trace_length,),
-                    jnp.nan,
-                    dtype=dtype,
-                ),
-                "oracle_merit_after_assessed_trace": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.bool_,
-                ),
-                "oracle_backtracking_iterations_trace": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.int32,
-                ),
-                "oracle_accepted_trace": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.bool_,
-                ),
-                "oracle_stop_reason_code_trace": jnp.full(
-                    (trace_length,),
-                    -1,
-                    dtype=jnp.int32,
-                ),
-                "oracle_linear_success_trace": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.bool_,
-                ),
-                "oracle_residual_evaluation_count_trace": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.int32,
-                ),
-                "oracle_linear_solve_attempt_count_trace": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.int32,
-                ),
-                "oracle_accepted_update_count_trace": jnp.zeros(
-                    (trace_length,),
-                    dtype=jnp.int32,
-                ),
-                "oracle_residual_evaluation_count": _device_int32(1, like=x_init),
-                "oracle_linear_solve_attempt_count": zero_count,
-                "oracle_accepted_update_count": zero_count,
-                "oracle_last_linear_success": jnp.asarray(True),
-            }
-        else:
-            oracle_trace_state = {}
 
         def cond_fun(state):
             return (
@@ -5150,8 +4962,6 @@ def _build_traceable_exact_newton_runner(
             )
 
         def body_fun(state):
-            if trace_enabled:
-                trace_index = state["oracle_linear_solve_attempt_count"]
             strict_cap_tol = _eisenstat_walker_strict_cap(
                 tol_value,
                 dtype=state["x"].dtype,
@@ -5259,7 +5069,6 @@ def _build_traceable_exact_newton_runner(
                 state["norm"],
             )
             accepted = candidate["accepted"]
-            linear_success = jnp.all(jnp.isfinite(dx))
             loose_finite_direction = (linear_tol_iteration > strict_cap_tol) & jnp.all(
                 jnp.isfinite(dx)
             )
@@ -5310,107 +5119,6 @@ def _build_traceable_exact_newton_runner(
                         ),
                     }
                 )
-            if trace_enabled:
-                residual_evaluation_count = (
-                    state["oracle_residual_evaluation_count"] + candidate["iteration"]
-                )
-                linear_solve_attempt_count = (
-                    state["oracle_linear_solve_attempt_count"] + 1
-                )
-                accepted_update_count = state[
-                    "oracle_accepted_update_count"
-                ] + accepted.astype(jnp.int32)
-                attempt_stop_reason = jnp.select(
-                    (
-                        ~linear_success,
-                        accepted & (candidate["norm"] <= tol_value),
-                        stalled,
-                        accepted & (next_state["nit"] >= maxiter),
-                    ),
-                    (
-                        _device_int32(_C1_STOP_REASON_LINEAR_FAILURE, like=x_init),
-                        _device_int32(_C1_STOP_REASON_CONVERGED, like=x_init),
-                        _device_int32(
-                            _C1_STOP_REASON_BACKTRACKING_STALL,
-                            like=x_init,
-                        ),
-                        _device_int32(_C1_STOP_REASON_MAXITER, like=x_init),
-                    ),
-                    default=_device_int32(-1, like=x_init),
-                )
-                applied_update = state["x"] - next_state["x"]
-                next_state.update(
-                    {
-                        "oracle_residual_evaluation_count": (residual_evaluation_count),
-                        "oracle_linear_solve_attempt_count": (
-                            linear_solve_attempt_count
-                        ),
-                        "oracle_accepted_update_count": accepted_update_count,
-                        "oracle_last_linear_success": linear_success,
-                        "oracle_trace_active": state["oracle_trace_active"]
-                        .at[trace_index]
-                        .set(True),
-                        "oracle_state_before_trace": state["oracle_state_before_trace"]
-                        .at[trace_index]
-                        .set(state["x"]),
-                        "oracle_update_trace": state["oracle_update_trace"]
-                        .at[trace_index]
-                        .set(applied_update),
-                        "oracle_state_after_trace": state["oracle_state_after_trace"]
-                        .at[trace_index]
-                        .set(next_state["x"]),
-                        "oracle_merit_before_trace": state["oracle_merit_before_trace"]
-                        .at[trace_index]
-                        .set(state["norm"]),
-                        "oracle_merit_after_trace": state["oracle_merit_after_trace"]
-                        .at[trace_index]
-                        .set(
-                            lax.select(
-                                accepted,
-                                candidate["norm"],
-                                _device_scalar(jnp.nan, dtype=dtype),
-                            )
-                        ),
-                        "oracle_merit_after_assessed_trace": state[
-                            "oracle_merit_after_assessed_trace"
-                        ]
-                        .at[trace_index]
-                        .set(accepted),
-                        "oracle_backtracking_iterations_trace": state[
-                            "oracle_backtracking_iterations_trace"
-                        ]
-                        .at[trace_index]
-                        .set(candidate["iteration"]),
-                        "oracle_accepted_trace": state["oracle_accepted_trace"]
-                        .at[trace_index]
-                        .set(accepted),
-                        "oracle_stop_reason_code_trace": state[
-                            "oracle_stop_reason_code_trace"
-                        ]
-                        .at[trace_index]
-                        .set(attempt_stop_reason),
-                        "oracle_linear_success_trace": state[
-                            "oracle_linear_success_trace"
-                        ]
-                        .at[trace_index]
-                        .set(linear_success),
-                        "oracle_residual_evaluation_count_trace": state[
-                            "oracle_residual_evaluation_count_trace"
-                        ]
-                        .at[trace_index]
-                        .set(residual_evaluation_count),
-                        "oracle_linear_solve_attempt_count_trace": state[
-                            "oracle_linear_solve_attempt_count_trace"
-                        ]
-                        .at[trace_index]
-                        .set(linear_solve_attempt_count),
-                        "oracle_accepted_update_count_trace": state[
-                            "oracle_accepted_update_count_trace"
-                        ]
-                        .at[trace_index]
-                        .set(accepted_update_count),
-                    }
-                )
             return next_state
 
         state = lax.while_loop(
@@ -5443,7 +5151,6 @@ def _build_traceable_exact_newton_runner(
                     if execution_counts_enabled
                     else {}
                 ),
-                **oracle_trace_state,
             },
         )
         result = {
@@ -5472,68 +5179,7 @@ def _build_traceable_exact_newton_runner(
                     ),
                 }
             )
-        if not trace_enabled:
-            return result
-        terminal_materialization = _linearize_and_materialize_dense_square_jacobian(
-            residual_eval,
-            state["x"],
-        )
-        nonfinite_initial_residual = ~jnp.isfinite(norm0)
-        linear_failure = state["stalled"] & (~state["oracle_last_linear_success"])
-        numerical_failure = nonfinite_initial_residual | linear_failure
-        success = state["norm"] <= tol_value
-        stop_reason_code = jnp.select(
-            (
-                nonfinite_initial_residual,
-                linear_failure,
-                success,
-                state["stalled"],
-            ),
-            (
-                _device_int32(
-                    _C1_STOP_REASON_NONFINITE_INITIAL_RESIDUAL,
-                    like=x_init,
-                ),
-                _device_int32(_C1_STOP_REASON_LINEAR_FAILURE, like=x_init),
-                _device_int32(_C1_STOP_REASON_CONVERGED, like=x_init),
-                _device_int32(_C1_STOP_REASON_BACKTRACKING_STALL, like=x_init),
-            ),
-            default=_device_int32(_C1_STOP_REASON_MAXITER, like=x_init),
-        )
-        return _ExactNewtonC0OracleResult(
-            state=state["x"],
-            residual=terminal_materialization.residual,
-            jacobian=terminal_materialization.jacobian,
-            norm=jnp.linalg.norm(terminal_materialization.residual),
-            nit=state["nit"],
-            success=success,
-            stalled=state["stalled"],
-            stop_reason_code=stop_reason_code,
-            numerical_failure=numerical_failure,
-            residual_evaluation_count=state["oracle_residual_evaluation_count"],
-            linear_solve_attempt_count=state["oracle_linear_solve_attempt_count"],
-            accepted_update_count=state["oracle_accepted_update_count"],
-            trace=_ExactNewtonC0OracleTrace(
-                active=state["oracle_trace_active"],
-                state_before=state["oracle_state_before_trace"],
-                update=state["oracle_update_trace"],
-                state_after=state["oracle_state_after_trace"],
-                merit_before=state["oracle_merit_before_trace"],
-                merit_after=state["oracle_merit_after_trace"],
-                merit_after_assessed=state["oracle_merit_after_assessed_trace"],
-                backtracking_iterations=state["oracle_backtracking_iterations_trace"],
-                accepted=state["oracle_accepted_trace"],
-                stop_reason_code=state["oracle_stop_reason_code_trace"],
-                linear_success=state["oracle_linear_success_trace"],
-                residual_evaluation_count=state[
-                    "oracle_residual_evaluation_count_trace"
-                ],
-                linear_solve_attempt_count=state[
-                    "oracle_linear_solve_attempt_count_trace"
-                ],
-                accepted_update_count=state["oracle_accepted_update_count_trace"],
-            ),
-        )
+        return result
 
     run_solver.__name__ = "traceable_exact_newton_run_solver"
     return jax.jit(run_solver)
@@ -5544,7 +5190,6 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
     maxiter: int,
     tol: float,
     *,
-    telemetry_enabled: bool = False,
     value_jacobian_fn: _ArrayValueAndJacobianWithArgs | None = None,
 ):
     """Build native finite-path C2 with optional exact pair assembly."""
@@ -5593,40 +5238,6 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
             (trace_length,),
             dtype=jnp.bool_,
         )
-        if telemetry_enabled:
-            oracle_vector_nan = jnp.full_like(x_init_array, jnp.nan)
-            oracle_matrix_nan = jnp.full(
-                (x_init_array.shape[0], x_init_array.shape[0]),
-                jnp.nan,
-                dtype=dtype,
-            )
-            oracle_telemetry_state = {
-                "oracle_residual_evaluation_count": (
-                    initial_materialization.telemetry.residual_evaluation_count
-                ),
-                "oracle_dense_primal_traversal_count": (
-                    initial_materialization.telemetry.primal_traversal_count
-                ),
-                "oracle_dense_tangent_batch_count": (
-                    initial_materialization.telemetry.tangent_batch_count
-                ),
-                "oracle_dense_tangent_direction_count": (
-                    initial_materialization.telemetry.tangent_direction_count
-                ),
-                "oracle_first_attempt_active": jnp.asarray(False),
-                "oracle_first_attempt_state": oracle_vector_nan,
-                "oracle_first_attempt_residual": oracle_vector_nan,
-                "oracle_first_attempt_jacobian": oracle_matrix_nan,
-                "oracle_first_attempt_initial_solve": oracle_vector_nan,
-                "oracle_first_attempt_refinement_rhs": oracle_vector_nan,
-                "oracle_first_attempt_refinement_correction": oracle_vector_nan,
-                "oracle_first_attempt_refined_direction": oracle_vector_nan,
-                "oracle_first_attempt_refined_residual": oracle_vector_nan,
-                "oracle_first_attempt_correction_step": oracle_vector_nan,
-                "oracle_first_attempt_next_state": oracle_vector_nan,
-            }
-        else:
-            oracle_telemetry_state = {}
 
         def cond_fun(state):
             return (
@@ -5672,65 +5283,6 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
                 "exact_newton_linear_residual_rel": linear_residual_rel,
                 "exact_refinement_correction_rel": correction_rel,
             }
-            if telemetry_enabled:
-                first_attempt = state["linear_solve_attempt_count"] == zero_count
-                attempted.update(
-                    {
-                        "oracle_first_attempt_active": (
-                            state["oracle_first_attempt_active"] | first_attempt
-                        ),
-                        "oracle_first_attempt_state": lax.select(
-                            first_attempt,
-                            state["x"],
-                            state["oracle_first_attempt_state"],
-                        ),
-                        "oracle_first_attempt_residual": lax.select(
-                            first_attempt,
-                            current.residual,
-                            state["oracle_first_attempt_residual"],
-                        ),
-                        "oracle_first_attempt_jacobian": lax.select(
-                            first_attempt,
-                            current.jacobian,
-                            state["oracle_first_attempt_jacobian"],
-                        ),
-                        "oracle_first_attempt_initial_solve": lax.select(
-                            first_attempt,
-                            current.initial_solve,
-                            state["oracle_first_attempt_initial_solve"],
-                        ),
-                        "oracle_first_attempt_refinement_rhs": lax.select(
-                            first_attempt,
-                            current.refinement_rhs,
-                            state["oracle_first_attempt_refinement_rhs"],
-                        ),
-                        "oracle_first_attempt_refinement_correction": lax.select(
-                            first_attempt,
-                            current.correction,
-                            state["oracle_first_attempt_refinement_correction"],
-                        ),
-                        "oracle_first_attempt_refined_direction": lax.select(
-                            first_attempt,
-                            current.direction,
-                            state["oracle_first_attempt_refined_direction"],
-                        ),
-                        "oracle_first_attempt_refined_residual": lax.select(
-                            first_attempt,
-                            current.linear_residual,
-                            state["oracle_first_attempt_refined_residual"],
-                        ),
-                        "oracle_first_attempt_correction_step": lax.select(
-                            first_attempt,
-                            current.direction,
-                            state["oracle_first_attempt_correction_step"],
-                        ),
-                        "oracle_first_attempt_next_state": lax.select(
-                            first_attempt,
-                            state["x"] - current.direction,
-                            state["oracle_first_attempt_next_state"],
-                        ),
-                    }
-                )
 
             def materialize_updated_state(current_state):
                 candidate_x = current_state["x"] - current.direction
@@ -5770,27 +5322,6 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
                         current_state["dense_materialization_count"] + 1
                     ),
                 }
-                if telemetry_enabled:
-                    next_state.update(
-                        {
-                            "oracle_residual_evaluation_count": (
-                                current_state["oracle_residual_evaluation_count"]
-                                + candidate_materialization.telemetry.residual_evaluation_count
-                            ),
-                            "oracle_dense_primal_traversal_count": (
-                                current_state["oracle_dense_primal_traversal_count"]
-                                + candidate_materialization.telemetry.primal_traversal_count
-                            ),
-                            "oracle_dense_tangent_batch_count": (
-                                current_state["oracle_dense_tangent_batch_count"]
-                                + candidate_materialization.telemetry.tangent_batch_count
-                            ),
-                            "oracle_dense_tangent_direction_count": (
-                                current_state["oracle_dense_tangent_direction_count"]
-                                + candidate_materialization.telemetry.tangent_direction_count
-                            ),
-                        }
-                    )
                 return next_state
 
             return lax.cond(
@@ -5862,7 +5393,6 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
                 "lu_factorization_count": zero_count,
                 "lu_solve_count": zero_count,
                 "refinement_correction_count": zero_count,
-                **oracle_telemetry_state,
             },
         )
         success = state["has_initial_norm"] & (state["assessed_norm"] <= tol_value)
@@ -5887,56 +5417,22 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
                 fn_args,
                 value_jacobian_fn=value_jacobian_fn,
             )
-            if telemetry_enabled:
-                return (
-                    rebuilt.residual,
-                    rebuilt.jacobian,
-                    one_count,
-                    rebuilt.telemetry.residual_evaluation_count,
-                    rebuilt.telemetry.primal_traversal_count,
-                    rebuilt.telemetry.tangent_batch_count,
-                    rebuilt.telemetry.tangent_direction_count,
-                )
             return rebuilt.residual, rebuilt.jacobian, one_count
 
-        if telemetry_enabled:
-            (
-                returned_residual,
-                returned_jacobian,
-                rollback_recompute_count,
-                rollback_residual_evaluation_count,
-                rollback_dense_primal_traversal_count,
-                rollback_dense_tangent_batch_count,
-                rollback_dense_tangent_direction_count,
-            ) = lax.cond(
-                rollback_branch_taken,
-                rebuild_initial_residual,
-                lambda _operand: (
-                    state["residual"],
-                    state["jacobian"],
-                    zero_count,
-                    zero_count,
-                    zero_count,
-                    zero_count,
-                    zero_count,
-                ),
-                operand=None,
-            )
-        else:
-            (
-                returned_residual,
-                returned_jacobian,
-                rollback_recompute_count,
-            ) = lax.cond(
-                rollback_branch_taken,
-                rebuild_initial_residual,
-                lambda _operand: (
-                    state["residual"],
-                    state["jacobian"],
-                    zero_count,
-                ),
-                operand=None,
-            )
+        (
+            returned_residual,
+            returned_jacobian,
+            rollback_recompute_count,
+        ) = lax.cond(
+            rollback_branch_taken,
+            rebuild_initial_residual,
+            lambda _operand: (
+                state["residual"],
+                state["jacobian"],
+                zero_count,
+            ),
+            operand=None,
+        )
         stop_reason_code = jnp.where(
             state["numerical_failure"],
             _device_int32(
@@ -5979,42 +5475,7 @@ def _build_traceable_dense_direct_exact_newton_c2_runner(
             refinement_correction_count=state["refinement_correction_count"],
             rollback_recompute_count=rollback_recompute_count,
         )
-        if not telemetry_enabled:
-            return native_result
-        return _DenseExactNewtonC2OracleResult(
-            native=native_result,
-            first_attempt=_DenseExactNewtonOneStepOracle(
-                active=state["oracle_first_attempt_active"],
-                state=state["oracle_first_attempt_state"],
-                residual=state["oracle_first_attempt_residual"],
-                jacobian=state["oracle_first_attempt_jacobian"],
-                initial_solve=state["oracle_first_attempt_initial_solve"],
-                refinement_rhs=state["oracle_first_attempt_refinement_rhs"],
-                refinement_correction=state[
-                    "oracle_first_attempt_refinement_correction"
-                ],
-                refined_direction=state["oracle_first_attempt_refined_direction"],
-                refined_residual=state["oracle_first_attempt_refined_residual"],
-                correction_step=state["oracle_first_attempt_correction_step"],
-                next_state=state["oracle_first_attempt_next_state"],
-            ),
-            exact_newton_variant_residual_evaluation_count=(
-                state["oracle_residual_evaluation_count"]
-                + rollback_residual_evaluation_count
-            ),
-            exact_newton_variant_dense_primal_traversal_count=(
-                state["oracle_dense_primal_traversal_count"]
-                + rollback_dense_primal_traversal_count
-            ),
-            exact_newton_variant_dense_tangent_batch_count=(
-                state["oracle_dense_tangent_batch_count"]
-                + rollback_dense_tangent_batch_count
-            ),
-            exact_newton_variant_dense_tangent_direction_count=(
-                state["oracle_dense_tangent_direction_count"]
-                + rollback_dense_tangent_direction_count
-            ),
-        )
+        return native_result
 
     run_solver.__name__ = "traceable_dense_direct_exact_newton_c2_run_solver"
     return jax.jit(run_solver)
