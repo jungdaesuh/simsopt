@@ -428,9 +428,6 @@ _EXACT_NEWTON_VARIANT_TELEMETRY_KEYS = (
     "exact_newton_variant_lu_factorization_count",
     "exact_newton_variant_lu_solve_count",
     "exact_newton_variant_refinement_correction_count",
-    "exact_newton_variant_backtracking_iteration_count",
-    "exact_newton_variant_stalled",
-    "exact_newton_variant_retry_linear_solve_at_strict_cap",
     "exact_newton_variant_applied_update_count",
     "exact_newton_variant_stop_reason_code",
     "exact_newton_variant_numerical_failure",
@@ -7231,7 +7228,7 @@ class BoozerSurfaceJAX(Optimizable):
         analytic: bool = False,
         condition_estimate: bool = True,
     ):
-        """Build a C1/C2 compiled array kernel and host reporting projection."""
+        """Build a C2 compiled array kernel and host reporting projection."""
 
         if self.boozer_type != "exact":
             raise ValueError(
@@ -7240,10 +7237,8 @@ class BoozerSurfaceJAX(Optimizable):
         solver_contract = _optimizer_jax.make_traceable_exact_newton_variant_contract(
             variant
         )
-        if solver_contract.variant == "C0":
-            raise ValueError("benchmark exact Newton variant must be C1 or C2.")
-        if analytic and solver_contract.variant != "C2":
-            raise ValueError("analytic exact assembly requires native-order C2.")
+        if solver_contract.variant != "C2":
+            raise ValueError("benchmark exact Newton variant must be C2.")
 
         weight_inv_modB = self.options["weight_inv_modB"]
         value_jacobian_fn = (

@@ -7840,22 +7840,19 @@ class TestBoozerSurfaceJAXExactPath:
     - Residual is raw unmasked (full grid size).
     """
 
-    @pytest.mark.parametrize("variant", ["C1", "C2"])
-    def test_benchmark_entry_point_binds_variant_before_jit(self, variant):
+    def test_benchmark_entry_point_binds_variant_before_jit(self):
         booz = _make_mock_boozer_surface_exact()
 
-        route = booz._make_run_code_traceable_exact_benchmark_variant(variant)
+        route = booz._make_run_code_traceable_exact_benchmark_variant("C2")
 
-        assert route.variant == variant
+        assert route.variant == "C2"
         assert route.compiled_kernel.__name__ == (
-            f"run_code_traceable_exact_{variant}_array_kernel"
+            "run_code_traceable_exact_C2_array_kernel"
         )
 
-    @pytest.mark.parametrize("variant", ["C1", "C2"])
     def test_benchmark_route_jits_array_kernel_with_certificate_source(
         self,
         monkeypatch,
-        variant,
     ):
         booz = _make_mock_boozer_surface_exact()
         booz.options["newton_maxiter"] = 2
@@ -7882,7 +7879,7 @@ class TestBoozerSurfaceJAXExactPath:
             return residual
 
         monkeypatch.setattr(booz, "_get_traceable_exact_residual", exact_residual)
-        route = booz._make_run_code_traceable_exact_benchmark_variant(variant)
+        route = booz._make_run_code_traceable_exact_benchmark_variant("C2")
 
         with jax.transfer_guard("disallow"):
             array_result = route.compiled_kernel(
@@ -7918,25 +7915,19 @@ class TestBoozerSurfaceJAXExactPath:
         assert projected["type"] == "exact"
         assert projected["plu"] is None
         assert projected["exact_factorization_backend"] == "dense-lu"
-        assert projected["jacobian_materialized"] is (variant == "C2")
+        assert projected["jacobian_materialized"] is True
         assert bool(projected["exact_newton_variant_dense_linearization_used"])
         assert int(projected["exact_newton_variant_dense_materialization_count"]) > 0
         assert int(projected["exact_newton_variant_lu_factorization_count"]) > 0
         assert int(projected["exact_newton_variant_lu_solve_count"]) > 0
-        if variant == "C1":
-            assert projected["jacobian"] is None
-            assert int(projected["exact_newton_variant_stop_reason_code"]) == 0
-            assert not bool(projected["exact_newton_variant_numerical_failure"])
-            assert not bool(projected["exact_newton_variant_stalled"])
-        else:
-            assert projected["jacobian"] is not None
-            assert int(projected["exact_newton_variant_stop_reason_code"]) >= 0
-            assert not bool(projected["exact_newton_variant_numerical_failure"])
+        assert projected["jacobian"] is not None
+        assert int(projected["exact_newton_variant_stop_reason_code"]) >= 0
+        assert not bool(projected["exact_newton_variant_numerical_failure"])
 
     def test_benchmark_entry_point_rejects_c0_at_construction(self):
         booz = _make_mock_boozer_surface_exact()
 
-        with pytest.raises(ValueError, match="must be C1 or C2"):
+        with pytest.raises(ValueError, match="must be C2"):
             booz._make_run_code_traceable_exact_benchmark_variant("C0")
 
     def test_exact_instantiation(self):
