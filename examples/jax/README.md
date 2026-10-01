@@ -13,10 +13,9 @@ native source it names.
 
 The generated
 [`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists the native sources,
-their exact JAX mirrors or blockers, device scope, execution scale, and latest
-evidence status. Registered branch-only experiments would appear in a separate
-section and not count toward official coverage. Regenerate it from the validated manifests and compact
-authority record with
+their exact JAX mirrors or blockers, device scope, and execution scale.
+Registered branch-only experiments would appear in a separate section and not
+count toward official coverage. Regenerate it from the validated manifests with
 `python -m examples.jax.native_to_jax_index --write`; use `--check` in
 validation.
 

@@ -2,9 +2,8 @@
 
 The exported package restates one retained local parity run as plain JSON: every
 lane receipt field, the endpoint and input array values, and the original
-SHA-256 of each artifact it read. It is derivative review evidence whose bytes
-are bound by `derived_summary_sha256` in `examples/jax/authority_evidence.json`;
-it never establishes authority on its own.
+SHA-256 of each artifact it read. It is derivative review evidence; it never
+establishes authority on its own.
 """
 
 from __future__ import annotations
