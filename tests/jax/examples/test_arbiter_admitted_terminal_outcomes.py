@@ -78,8 +78,6 @@ def _provenance(backend_mode: str) -> LaneProvenance:
         python_version="3.11.0",
         jax_version="0.10.0" if is_jax else None,
         simsopt_version="1.10.0",
-        simsopt_version_commit="g" + "d" * 9,
-        simsopt_version_checkout_compatible=True,
         lane_environment_policy=policy,
         jax_effective_transfer_guards=(
             {
@@ -107,9 +105,6 @@ def _provenance(backend_mode: str) -> LaneProvenance:
         simsoptpp_path=None,
         simsoptpp_sha256=None,
         simsoptpp_version=None,
-        simsoptpp_build_commit=None,
-        simsoptpp_checkout_compatible=None,
-        authoritative=True,
     )
 
 

@@ -162,8 +162,6 @@ jobs:
   jax-public-integration:
     name: JAX public lane (with simsoptpp)
     runs-on: ubuntu-latest
-    env:
-      SIMSOPT_PARITY_SIMSOPTPP_BUILD_COMMIT: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4

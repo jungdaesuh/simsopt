@@ -18,8 +18,6 @@ from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.provenance import (
     ExecutedSource,
-    collect_repository_state,
-    validate_authoritative_provenance,
     validate_sources_current,
 )
 from examples.jax.parity.publication import require_published_run
@@ -34,7 +32,6 @@ class AuditResult:
     case_count: int
     lane_receipt_count: int
     comparison_count: int
-    authoritative: bool
     verdict: str
 
 
@@ -95,7 +92,6 @@ def audit_published_run(
     run_directory: Path,
     *,
     repo_root: Path,
-    require_authoritative: bool = False,
 ) -> AuditResult:
     """Re-read all receipts and independently validate an aggregate verdict."""
     run_directory = require_published_run(run_directory.parent, run_directory.name)
@@ -109,18 +105,7 @@ def audit_published_run(
     summary_verdict = _string(summary, "verdict", "summary")
     if summary_verdict not in ("pass", QUALITY_BAND_VERDICT):
         raise ValueError("only passing published runs can be audited")
-    authoritative = _boolean(summary, "authoritative", "summary")
-    if require_authoritative and not authoritative:
-        raise ValueError("run is exploratory, not authoritative")
     repository_commit = _string(summary, "repository_commit", "summary")
-    repository_state = collect_repository_state(repo_root)
-    if authoritative and (
-        repository_state.repository_dirty
-        or repository_state.repository_commit != repository_commit
-    ):
-        raise ValueError(
-            "authoritative audit requires the clean recorded repository checkout"
-        )
     contract_pair = load_runtime_contract_pair(
         repo_root / "examples" / "jax" / "manifest.json",
         repo_root / "examples" / "jax" / "parity_manifest.json",
@@ -234,12 +219,6 @@ def audit_published_run(
             if provenance.repository_commit != repository_commit:
                 raise ValueError(f"repository commit mismatch: {case_id}:{lane}")
             validate_sources_current(repo_root, provenance.executed_sources)
-            if authoritative:
-                validate_authoritative_provenance(repo_root, provenance)
-            if authoritative and not provenance.authoritative:
-                raise ValueError(
-                    f"non-authoritative lane in authoritative run: {case_id}:{lane}"
-                )
             if (
                 provenance.steady_state_memory_measured
                 or provenance.memory_measurement_scope
@@ -383,7 +362,6 @@ def audit_published_run(
         case_count=len(case_ids),
         lane_receipt_count=lane_receipt_count,
         comparison_count=comparison_count,
-        authoritative=authoritative,
         verdict=summary_verdict,
     )
 
@@ -393,13 +371,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-    parser.add_argument("--require-authoritative", action="store_true")
     args = parser.parse_args(argv)
-    result = audit_published_run(
-        args.run,
-        repo_root=args.repo_root,
-        require_authoritative=args.require_authoritative,
-    )
+    result = audit_published_run(args.run, repo_root=args.repo_root)
     print(json.dumps(result.__dict__, sort_keys=True))
     return 0
 

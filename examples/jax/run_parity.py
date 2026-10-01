@@ -206,10 +206,6 @@ def _case_summary_record(
     end_state_results: tuple[EndStateResult, ...] = (),
     stage_wise: StageWiseContract | None = None,
 ) -> dict[str, object]:
-    case_authoritative = all(
-        observation.provenance is not None and observation.provenance.authoritative
-        for observation in observations.values()
-    )
     case_record: dict[str, object] = {
         "case_id": case_id,
         "jax_example_id": relationship.jax_example_id,
@@ -221,7 +217,6 @@ def _case_summary_record(
         "cost_tier": relationship.cost_tier,
         "omitted_scientific_stages": list(relationship.omitted_scientific_stages),
         "excluded_teaching_stages": list(relationship.excluded_teaching_stages),
-        "authoritative": case_authoritative,
         "repository_changed_during_run": any(
             observation.provenance is not None
             and (
@@ -494,12 +489,6 @@ def main(argv: list[str] | None = None) -> int:
             if QUALITY_BAND_VERDICT in case_verdicts
             else "pass"
         )
-        authoritative = not repository_state.repository_dirty and all(
-            source.git_blob_id is not None for source in explicit_sources
-        )
-        authoritative = authoritative and all(
-            case_summary["authoritative"] for case_summary in summaries
-        )
         summary_path = paths.partial / "summary.json"
         write_bytes_exclusive(
             paths.partial,
@@ -515,7 +504,6 @@ def main(argv: list[str] | None = None) -> int:
                     "lanes": list(args.lanes),
                     "scale": scale,
                     "smoke": scale == "bounded",
-                    "authoritative": authoritative,
                     "repository_commit": repository_state.repository_commit,
                     "repository_dirty": repository_state.repository_dirty,
                     "repository_changed_during_run": repository_changed_during_run,

@@ -11,12 +11,6 @@ import numpy as np
 from simsopt_contracts.examples_runtime import ExecutionScale
 
 
-def _is_hex_digest(value: str, length: int) -> bool:
-    return len(value) == length and all(
-        character in "0123456789abcdef" for character in value
-    )
-
-
 def _is_lane_key(key: object) -> bool:
     """Whether ``key`` spells one published lane value key, ``phase:name``."""
     if not isinstance(key, str):
@@ -364,45 +358,3 @@ class EndStateResult:
             raise ValueError("matched draws must be unique and ascending")
         if self.passed != bool(self.matched_draws):
             raise ValueError("an end-state result passes iff it matches a draw")
-
-
-@dataclass(frozen=True)
-class RunManifest:
-    schema_version: int
-    run_id: str
-    authoritative: bool
-    repository_commit: str
-    repository_dirty: bool
-    lane_results: tuple[LaneResult, ...]
-    comparisons: tuple[ComparisonResult, ...]
-    verdict: str
-
-
-def validate_authoritative_source(
-    *,
-    authoritative: bool,
-    repository_dirty: bool,
-    repository_commit: str,
-    executed_source_hashes: Mapping[str, str],
-    simsoptpp_path: str | None,
-    simsoptpp_sha256: str | None,
-) -> None:
-    """Reject provenance that cannot support an authoritative parity claim."""
-    if not authoritative:
-        return
-    if repository_dirty:
-        raise ValueError("authoritative evidence requires a clean repository")
-    if not _is_hex_digest(repository_commit, 40):
-        raise ValueError(
-            "authoritative repository commit must contain 40 hexadecimal characters"
-        )
-    if not executed_source_hashes or any(
-        not _is_hex_digest(digest, 64) for digest in executed_source_hashes.values()
-    ):
-        raise ValueError(
-            "authoritative source hashes must contain 64 hexadecimal characters"
-        )
-    if (simsoptpp_path is None) != (simsoptpp_sha256 is None):
-        raise ValueError("simsoptpp path and SHA-256 must be recorded together")
-    if simsoptpp_sha256 is not None and not _is_hex_digest(simsoptpp_sha256, 64):
-        raise ValueError("simsoptpp SHA-256 must contain 64 hexadecimal characters")

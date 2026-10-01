@@ -17,7 +17,6 @@ from examples.jax.parity.artifacts import (
 from examples.jax.parity.contracts import (
     InitialStateResult,
     ParityInputMetadata,
-    validate_authoritative_source,
 )
 
 
@@ -170,37 +169,6 @@ def test_sidecar_rejects_nonfinite_and_object_arrays(
 ) -> None:
     with pytest.raises(ArtifactValidationError, match="forbidden"):
         write_array(tmp_path, "arrays/invalid.npy", values)
-
-
-def test_authoritative_source_requires_clean_commit_and_binary_hash() -> None:
-    validate_authoritative_source(
-        authoritative=True,
-        repository_dirty=False,
-        repository_commit="c" * 40,
-        executed_source_hashes={"examples/jax/run_parity.py": "d" * 64},
-        simsoptpp_path="/opt/simsopt/simsoptpp.so",
-        simsoptpp_sha256="e" * 64,
-    )
-
-    with pytest.raises(ValueError, match="clean repository"):
-        validate_authoritative_source(
-            authoritative=True,
-            repository_dirty=True,
-            repository_commit="c" * 40,
-            executed_source_hashes={"examples/jax/run_parity.py": "d" * 64},
-            simsoptpp_path=None,
-            simsoptpp_sha256=None,
-        )
-
-    with pytest.raises(ValueError, match="hexadecimal"):
-        validate_authoritative_source(
-            authoritative=True,
-            repository_dirty=False,
-            repository_commit="z" * 40,
-            executed_source_hashes={"examples/jax/run_parity.py": "d" * 64},
-            simsoptpp_path=None,
-            simsoptpp_sha256=None,
-        )
 
 
 def test_array_reference_round_trips_through_json(tmp_path: Path) -> None:

@@ -53,7 +53,7 @@ python examples/jax/run_examples.py --device gpu --intent parity --scale bounded
 ```
 
 `--scale` is a typed selector, not an inference from the command name. It
-defaults to `bounded`, but state it explicitly in CI and authority commands so
+defaults to `bounded`, but state it explicitly in CI and parity commands so
 the emitted child argv, canonical input, receipt, and artifact scale are all
 attributable. Only `bounded` maps to the child `--smoke` flag; `native_default`
 emits no scale flag and runs the example's native-default step budget.
@@ -159,13 +159,12 @@ python examples/jax/run_parity.py \
   --artifact-root .artifacts/jax-example-parity
 ```
 
-Then audit the published run independently and require authority explicitly:
+Then audit the published run independently:
 
 ```console
 python -m examples.jax.parity.audit \
   --run .artifacts/jax-example-parity/<run-id> \
-  --repo-root "$PWD" \
-  --require-authoritative
+  --repo-root "$PWD"
 ```
 
 `--case` also accepts individual case IDs, repeated. The legacy `--smoke` flag
@@ -181,16 +180,17 @@ lane receipt per case, and an aggregate `summary.json` that records the loaded
 manifest version pair and the selected scale. Failed or interrupted runs retain
 a diagnostic `.partial` directory and are never published as passing evidence.
 
-Only a clean committed run whose lane receipts are all marked authoritative may
-promote a parity classification. Dirty-checkout runs remain useful exploratory
-evidence and record the tracked diff hash plus untracked-file inventory.
+Every lane receipt records the repository commit, the tracked diff hash, the
+untracked-file inventory, and the SHA-256 of each executed source and of the
+loaded native extension. The auditor re-hashes those sources against the
+checkout it is given and rejects any that changed.
 
 Bounded and native-default scale are independent of workflow coverage: a
 bounded `full` case is not native-default evidence. Every tracked parity
-relationship records `scale_tier: bounded`, and native-default authority runs
+relationship records `scale_tier: bounded`, and native-default parity runs
 only from the manual `run_native_default` dispatch input of the GPU parity
 workflow. Treat native-default evidence as not run rather than inferring it
-from a bounded pass. Current authority bundles are local-only: `.artifacts/` is
+from a bounded pass. Published runs are local-only: `.artifacts/` is
 ignored, is not a durable shared archive, and cannot by itself support a
 remotely reproducible retention claim.
 

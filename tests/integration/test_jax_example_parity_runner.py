@@ -59,7 +59,6 @@ from examples.jax.parity.provenance import (
     LaneProvenance,
     collect_explicit_sources,
     collect_repository_state,
-    generated_version_matches_checkout,
 )
 from examples.jax.parity.publication import begin_run, publish_run
 from examples.jax.parity.receipts import write_lane_observation
@@ -118,8 +117,6 @@ def _provenance(backend_mode: str) -> LaneProvenance:
         python_version="3.11.0",
         jax_version="0.10.0" if is_jax else None,
         simsopt_version="1.10.0",
-        simsopt_version_commit="g" + "d" * 9,
-        simsopt_version_checkout_compatible=True,
         lane_environment_policy=policy,
         jax_effective_transfer_guards=(
             {
@@ -147,9 +144,6 @@ def _provenance(backend_mode: str) -> LaneProvenance:
         simsoptpp_path=None,
         simsoptpp_sha256=None,
         simsoptpp_version=None,
-        simsoptpp_build_commit=None,
-        simsoptpp_checkout_compatible=None,
-        authoritative=True,
     )
 
 
@@ -277,14 +271,6 @@ def test_mirror_parity_tolerances_preserve_source_owned_thresholds(
 
     assert tolerance["rtol"] == rtol
     assert tolerance["atol"] == atol
-
-
-def test_generated_version_source_must_name_the_clean_checkout() -> None:
-    repository_commit = "123456789abcdef" + "0" * 25
-
-    assert generated_version_matches_checkout(repository_commit, "g123456789")
-    assert not generated_version_matches_checkout(repository_commit, "gabcdef123")
-    assert not generated_version_matches_checkout(repository_commit, None)
 
 
 def test_arbiter_requires_direct_all_pairs_and_passes_matching_receipts() -> None:
@@ -670,7 +656,6 @@ def test_arbiter_accepts_unrelated_dirty_worktree_drift() -> None:
             repository_dirty=True,
             tracked_diff_sha256="1" * 64,
             untracked_files=("unrelated.txt",),
-            authoritative=False,
         ),
     )
 
@@ -1442,7 +1427,6 @@ def _publish_quality_band_run(
                 tracked_diff_sha256=repository_state.tracked_diff_sha256,
                 untracked_files=repository_state.untracked_files,
                 executed_sources=explicit_sources,
-                authoritative=False,
             ),
             values=_band_case_receipt_values(
                 relationship.comparison_routes, lane, fork=fork
@@ -1510,7 +1494,6 @@ def _publish_quality_band_run(
         "cost_tier": cost_tier_override or relationship.cost_tier,
         "omitted_scientific_stages": list(relationship.omitted_scientific_stages),
         "excluded_teaching_stages": list(relationship.excluded_teaching_stages),
-        "authoritative": False,
         "repository_changed_during_run": False,
         "input_fingerprint": bundle.input_fingerprint,
         "configuration_fingerprint": bundle.configuration_fingerprint,
@@ -1552,7 +1535,6 @@ def _publish_quality_band_run(
         "lanes": list(lanes),
         "scale": "native_default",
         "smoke": False,
-        "authoritative": False,
         "repository_commit": repository_state.repository_commit,
         "repository_dirty": repository_state.repository_dirty,
         "repository_changed_during_run": False,
@@ -1575,7 +1557,6 @@ def test_audit_accepts_a_published_quality_band_run(tmp_path: Path) -> None:
     assert result.verdict == "quality-band"
     assert result.case_count == 1
     assert result.lane_receipt_count == 3
-    assert result.authoritative is False
     assert result.comparison_count > 0
 
 
@@ -1838,18 +1819,9 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert summary["used_legacy_manifest_adapter"] is False
     assert summary["scale"] == "bounded"
     assert summary["lanes"] == ["native-cpu", "jax-cpu"]
-    assert isinstance(summary["authoritative"], bool)
-    if initial_repository_state.repository_dirty:
-        assert summary["authoritative"] is False
-    # A clean checkout with a verified native build may establish provenance.
-    # Independently replay that claim before exercising receipt tampering below.
-    audited = audit_published_run(
-        published[0],
-        repo_root=repo_root,
-        require_authoritative=summary["authoritative"],
-    )
+    # Independently replay the verdict before exercising receipt tampering below.
+    audited = audit_published_run(published[0], repo_root=repo_root)
     assert audited.verdict == "pass"
-    assert audited.authoritative is summary["authoritative"]
     assert len(summary["repository_commit"]) == 40
     assert summary["repository_dirty"] is initial_repository_state.repository_dirty
     assert len(summary["tracked_diff_sha256"]) == 64
@@ -2325,7 +2297,6 @@ def _inject_completed_lane_receipts(
                     tracked_diff_sha256=repository_state.tracked_diff_sha256,
                     untracked_files=repository_state.untracked_files,
                     executed_sources=sources,
-                    authoritative=False,
                 ),
             )
             if published_values is not None:
