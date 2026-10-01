@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
 from numpy.typing import NDArray
-from simsopt_jax.backend.dtypes import explicit_device_array
+from simsopt_jax.backend.dtypes import commit_in_place, explicit_device_array
 from simsopt_jax.core._math_utils import as_jax_float64
 from simsopt_jax.core.field import (
     coil_set_spec_from_dof_extraction_spec,
@@ -270,9 +270,7 @@ class ExactAnalyticSingleStage:
         # Every later inner state is a committed output of that program; the
         # initial one is committed explicitly so the first call compiles the
         # same executable instead of a second, uncommitted-input variant.
-        self._x = explicit_device_array(
-            initial["x"], dtype=initial["x"].dtype, reference=initial["x"]
-        )
+        self._x = commit_in_place(initial["x"])
         self.coil_dofs = np.asarray(field.x, dtype=np.float64)
 
     @property

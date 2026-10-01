@@ -22,6 +22,7 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from simsopt_jax.backend import dtypes
 from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
@@ -348,25 +349,6 @@ def test_unplaced_values_stay_uncommitted_like_jax_leaves_them(monkeypatch):
     assert with_committed_reference.devices() == {default_device}
 
 
-def test_runtime_device_put_commits_a_runtime_device_jax_would_not_choose(monkeypatch):
-    """A runtime device other than JAX's default is still an explicit placement."""
-    runtime_device = object()
-    placements: list[object | None] = []
-
-    def _device_put(array, placement=None):
-        placements.append(placement)
-        return array, placement
-
-    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
-    monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: runtime_device)
-    monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
-
-    _, placement = dtypes.runtime_device_put_tree({"a": np.ones(3)})
-
-    assert placement is runtime_device
-    assert placements == [runtime_device]
-
-
 _UNPLACED_JOINS_COMMITTED_CHILD = """
 import sys
 from pathlib import Path
@@ -398,6 +380,27 @@ with jax.default_device(second):
 assert scoped.devices() == {second}, scoped.devices()
 moved = dtypes.runtime_device_put(elsewhere)
 assert moved.committed and moved.devices() == {first}, moved.devices()
+
+# An uncommitted array left on another device by an exited default_device
+# scope is not where the runtime puts values: it is moved there.
+with jax.default_device(second):
+    left_behind = jnp.arange(3.0)
+assert not left_behind.committed and left_behind.devices() == {second}
+for placed in (
+    dtypes.runtime_device_put(left_behind),
+    dtypes.runtime_device_put_tree({"leaf": left_behind})["leaf"],
+):
+    assert placed.devices() == {first}, placed.devices()
+# One already there stays uncommitted, like a host value.
+assert not dtypes.runtime_device_put_tree({"leaf": jnp.zeros(3)})["leaf"].committed
+
+# A runtime device JAX would not choose is committed, host values included.
+dtypes.get_runtime_jax_device = lambda: second
+for placed in (
+    dtypes.runtime_device_put(np.ones(3)),
+    dtypes.runtime_device_put_tree({"leaf": np.ones(3)})["leaf"],
+):
+    assert placed.committed and placed.devices() == {second}, placed.devices()
 """
 
 
@@ -407,8 +410,10 @@ def test_unplaced_values_join_data_committed_to_another_device():
     The committed-to-the-runtime-device rule refused this combination: a
     Boozer instance built under ``with_cpu_device_for_construction`` (or on
     an active mesh) met constants committed to the runtime device. A
-    ``jax.default_device`` scope is honoured as well, and an array committed
-    elsewhere is still moved onto the runtime device.
+    ``jax.default_device`` scope is honoured as well; an array committed
+    elsewhere, or left uncommitted elsewhere by an exited scope, is moved
+    onto the runtime device; and a runtime device JAX would not choose is
+    committed.
     """
     environment = dict(os.environ)
     environment.update(
@@ -432,3 +437,98 @@ def test_unplaced_values_join_data_committed_to_another_device():
         timeout=300,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+_CUDA_TWO_BACKEND_CHILD = """
+import sys
+from pathlib import Path
+
+repo_root = sys.argv[1]
+sys.path.insert(0, repo_root)
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(Path(repo_root) / "src")
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+jax.config.update("jax_enable_x64", True)
+from simsopt_jax.backend import dtypes
+from simsopt_jax.backend.runtime import (
+    invalidate_backend_cache,
+    set_backend,
+    with_cpu_device_for_construction,
+)
+from simsopt_jax_adapters.geo.boozer_surface import _place_runtime_tree
+
+gpu = jax.devices("gpu")[0]
+cpu = jax.devices("cpu")[0]
+assert dtypes.get_runtime_jax_device() == gpu
+with with_cpu_device_for_construction():
+    left_behind = jnp.arange(3.0)
+    scoped = dtypes.runtime_device_put(np.ones(3))
+assert not left_behind.committed and left_behind.devices() == {cpu}
+assert not scoped.committed and scoped.devices() == {cpu}
+for placed in (
+    dtypes.runtime_device_put(left_behind),
+    dtypes.runtime_device_put_tree({"leaf": left_behind})["leaf"],
+    _place_runtime_tree({"leaf": left_behind})["leaf"],
+):
+    assert placed.devices() == {gpu}, placed.devices()
+
+invalidate_backend_cache()
+set_backend("jax_cpu_parity", configure_runtime=False)
+assert dtypes.get_runtime_jax_device() == cpu
+for placed in (
+    dtypes.runtime_device_put(np.ones(3)),
+    dtypes.runtime_device_put_tree({"leaf": np.ones(3)})["leaf"],
+):
+    assert placed.committed and placed.devices() == {cpu}, placed.devices()
+"""
+
+
+def test_unplaced_values_follow_the_runtime_policy_in_a_cuda_process():
+    """Real two-backend placement: a GPU policy and a jax-cpu policy in one CUDA process.
+
+    An uncommitted CPU array left by ``with_cpu_device_for_construction``
+    goes to the GPU runtime device after the scope (also through the Boozer
+    adapter's ``_place_runtime_tree``); under a jax-cpu policy, which JAX
+    would not choose in a CUDA process, host values are committed to the CPU.
+    """
+    if not any(device.platform == "gpu" for device in jax.devices()):
+        pytest.skip("CUDA device required for the two-backend placement check")
+    environment = dict(os.environ)
+    environment.update({"JAX_PLATFORMS": "cuda,cpu", "JAX_ENABLE_X64": "1"})
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            _CUDA_TWO_BACKEND_CHILD,
+            str(Path(__file__).resolve().parents[1]),
+        ),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_commit_in_place_commits_where_the_array_lives():
+    """An uncommitted array is committed on its own device; a mesh placement is kept."""
+    uncommitted = jnp.arange(3.0)
+    mesh_sharding = NamedSharding(
+        Mesh(np.asarray(jax.devices()[:1], dtype=object), ("device",)), P("device")
+    )
+    on_mesh = jax.device_put(np.arange(3.0), mesh_sharding)
+
+    committed = dtypes.commit_in_place(uncommitted)
+    kept = dtypes.commit_in_place(on_mesh)
+
+    assert committed.committed
+    assert committed.devices() == uncommitted.devices()
+    assert committed.dtype == uncommitted.dtype
+    assert kept.sharding == mesh_sharding
+    np.testing.assert_array_equal(np.asarray(committed), np.arange(3.0))

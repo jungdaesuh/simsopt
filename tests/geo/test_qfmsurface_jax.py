@@ -594,6 +594,50 @@ def test_qfm_augmented_lagrangian_solve_jax_transfer_guard_clean() -> None:
     assert host_scalar(info.multiplier) != 0.0
 
 
+@pytest.mark.parametrize("committed_coils", [False, True])
+def test_qfm_augmented_lagrangian_compiles_its_bfgs_runner_once(
+    monkeypatch, committed_coils
+) -> None:
+    """Every outer iteration reuses the BFGS runner's first compiled executable.
+
+    ``jit`` keys committed and uncommitted arguments separately, so the first
+    call must receive arguments committed exactly like the BFGS results and
+    multiplier updates of the later iterations, or iteration two recompiles:
+    with committed coils and uncommitted initial dofs, the BFGS result is
+    committed while the first input was not.
+    """
+    runners = []
+    make_runner = qfm_solver_module._make_bfgs_runner
+
+    def recording_make_runner(*args, **kwargs):
+        runner = make_runner(*args, **kwargs)
+        runners.append(runner)
+        return runner
+
+    monkeypatch.setattr(qfm_solver_module, "_make_bfgs_runner", recording_make_runner)
+    _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()
+    if committed_coils:
+        coil_set_spec = jax.device_put(coil_set_spec, jax.local_devices()[0])
+    target = jnp.asarray(0.99 * Area(surface).J(), dtype=dofs.dtype)
+
+    assert not dofs.committed
+    qfm_augmented_lagrangian_solve_jax(
+        _surface_spec(surface),
+        coil_set_spec,
+        "area",
+        target,
+        dofs,
+        label_spec=_surface_spec(surface),
+        label_coil_set_spec=coil_set_spec,
+        max_outer=3,
+        inner_max_iter=1,
+        tol=1e-8,
+    )
+
+    (runner,) = runners
+    assert runner._cache_size() == 1
+
+
 def test_qfm_augmented_lagrangian_info_reports_qfm_gradient() -> None:
     """The exact-path result pairs QFM ``fun`` with the QFM objective gradient."""
     _biotsavart, surface, dofs, coil_set_spec = _make_qfm_inputs()

@@ -140,12 +140,18 @@ _NON_JAX_BINDING = "non-jax"
 # placement of ``dtypes._device_put`` and ``dtypes.runtime_device_put_tree``
 # into their shared owner ``dtypes._unplaced_device_put`` (two sites there),
 # leaving one explicit-placement site in each caller. Baseline: 29.
+# Admitted 2026-09-30, ONE new owner-internal site: ``_unplaced_device_put``
+# now places per leaf (a leaf left uncommitted on another device by an exited
+# ``jax.default_device`` scope is moved to the runtime device), a third
+# ``device_put`` in the same owner. ``dtypes.commit_in_place`` routes through
+# ``_device_put`` and adds none. Baseline: 30.
 _ALLOWED_OWNER_CALLS = frozenset(
     {
-        "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::346:11",
-        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put::device_put::319:15",
-        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put::device_put::320:11",
-        "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree::device_put::371:11",
+        "src/simsopt_jax/backend/dtypes.py::_device_put::device_put::369:11",
+        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put::device_put::332:15",
+        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put::device_put::337:15",
+        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put::device_put::343:39",
+        "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree::device_put::394:11",
         "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_device_to_device::255:13",
         "src/simsopt_jax/core/sharding.py::_place_leading_axis_arrays::transfer_guard_host_to_device::254:9",
         "src/simsopt_jax/core/sharding.py::replicate_tree_on_mesh::transfer_guard_device_to_device::249:13",

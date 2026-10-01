@@ -36,6 +36,7 @@ __all__ = [
     "as_runtime_array",
     "as_runtime_float64",
     "as_runtime_value",
+    "commit_in_place",
     "compute_dtype",
     "compute_jnp_dtype",
     "compute_np_dtype",
@@ -291,33 +292,55 @@ def _runtime_device_put_dtype(
     return None
 
 
-def _contains_committed_jax_leaves(value) -> bool:
-    return any(
-        isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf) and leaf.committed
-        for leaf in jax.tree.leaves(value)
-    )
+def _uncommitted_default_device():
+    """The device an uncommitted put lands on: a ``jax.default_device`` scope, else JAX's."""
+    scoped = jax.config.jax_default_device
+    if scoped is None:
+        return jax.local_devices()[0]
+    if isinstance(scoped, str):
+        return jax.local_devices(backend=scoped)[0]
+    return scoped
+
+
+def _unplaced_leaf_placement(leaf, *, home, runtime_device):
+    """Where an unplaced leaf goes; ``None`` leaves it uncommitted on ``home``."""
+    if not isinstance(leaf, jax.Array) or _is_jax_tracer(leaf):
+        return None
+    if leaf.committed:
+        return runtime_device
+    if leaf.devices() == {home}:
+        return None
+    return home
 
 
 def _unplaced_device_put(value):
     """Place a value (or pytree) its caller did not place, as JAX itself would.
 
-    JAX leaves such a value uncommitted on its default device (an active
-    ``jax.default_device`` scope included), and an uncommitted value joins the
-    committed data it meets.  Committing it to the runtime device would claim
-    a placement no caller made and refuse every computation with data
-    committed elsewhere: a Boozer instance built under
-    ``with_cpu_device_for_construction``, an active mesh on other devices.
-    The runtime device is still committed when JAX would not choose it by
-    itself, and a committed array is still moved onto it (an explicit
-    transfer, as before).
+    Its home is an active ``jax.default_device`` scope, else the runtime
+    device. When JAX's own uncommitted placement lands there, a host value
+    (or an uncommitted array already there) stays uncommitted, as JAX leaves
+    it, and joins the committed data it meets: committing it would claim a
+    placement no caller made and refuse every computation with data committed
+    elsewhere (a Boozer instance built under
+    ``with_cpu_device_for_construction``, an active mesh on other devices).
+    An uncommitted array elsewhere is moved home, a committed array onto the
+    runtime device, and everything is committed when the runtime device is
+    one JAX would not choose (a jax-cpu policy in a CUDA process).
     """
     runtime_device = get_runtime_jax_device()
-    if runtime_device is None or (
-        runtime_device == jax.local_devices()[0]
-        and not _contains_committed_jax_leaves(value)
-    ):
+    if runtime_device is None:
         return jax.device_put(value)
-    return jax.device_put(value, runtime_device)
+    default_device = _uncommitted_default_device()
+    scoped = jax.config.jax_default_device is not None
+    home = default_device if scoped else runtime_device
+    if home != default_device:
+        return jax.device_put(value, runtime_device)
+    leaves, treedef = jax.tree.flatten(value)
+    placements = [
+        _unplaced_leaf_placement(leaf, home=home, runtime_device=runtime_device)
+        for leaf in leaves
+    ]
+    return jax.tree.unflatten(treedef, jax.device_put(leaves, placements))
 
 
 def _device_put(
@@ -485,6 +508,23 @@ def runtime_zeros(shape) -> jax.Array:
 
 def runtime_eye(n: int) -> jax.Array:
     return runtime_device_put(np.eye(int(n), dtype=runtime_np_dtype()))
+
+
+def commit_in_place(array: jax.Array) -> jax.Array:
+    """Commit a concrete array to the device or mesh it already lives on.
+
+    For a loop that feeds a jitted step its own outputs: ``jit`` keys
+    committed and uncommitted arguments separately, and a step's outputs are
+    committed whenever an input is, so the first input is committed up front
+    to compile the executable every later call reuses.
+    """
+    sharding = array.sharding
+    placement = (
+        sharding
+        if isinstance(sharding, NamedSharding)
+        else _single_device_placement(sharding)
+    )
+    return _device_put_preserving_dtype(array, dtype=array.dtype, target=placement)
 
 
 def explicit_device_array(

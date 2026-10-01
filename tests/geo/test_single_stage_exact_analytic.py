@@ -642,6 +642,22 @@ def test_construction_under_the_guard_reproduces_the_unguarded_evaluation():
     np.testing.assert_array_equal(guarded_evaluation.gradient, baseline.gradient)
 
 
+def test_later_evaluations_reuse_the_first_compiled_kernel():
+    """The initial warm start is committed like the kernel's own outputs.
+
+    ``jit`` keys committed and uncommitted arguments separately; every later
+    warm start is a committed kernel output, so an uncommitted initial one
+    would compile a second executable.
+    """
+    evaluator, _boozer = _jax_evaluator()
+    x0 = np.asarray(evaluator.coil_dofs, dtype=np.float64)
+
+    assert evaluator.evaluate(x0).inner_success
+    assert evaluator.evaluate(x0 * (1.0 + 1.0e-4)).inner_success
+
+    assert evaluator._evaluate_kernel._cache_size() == 1
+
+
 def test_value_and_gradient_match_native_at_initial_and_moved_coils():
     objective, _native = _native_objective()
     evaluator, _boozer = _jax_evaluator()
