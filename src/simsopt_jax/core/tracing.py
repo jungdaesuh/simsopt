@@ -462,9 +462,8 @@ def _lane_axis_zero(lane_value: jax.Array) -> jax.Array:
     ``lane_value - lane_value`` is ``nan`` for a non-finite row, and adding that
     to the carried ``phi_hits`` rewrites every row already recorded as ``nan``.
     That is how a shipped-scale particle lane published an all-``nan``
-    ``poincare:positions`` while its first rows had been recorded finite
-    (``.artifacts/official-mirror-closure-20260919/fix-wave-3/tracing/``
-    ``logs/probe_particle_nan_54_sweep.log``). ``nan_to_num`` keeps the data
+    ``poincare:positions`` while its first rows had been recorded finite.
+    ``nan_to_num`` keeps the data
     dependency, and the device or host placement of ``lane_value`` (a fresh
     ``zeros_like`` constant would be a host-to-device transfer under the strict
     transfer guard), while being ``0`` for every input: ``x - x`` is ``0`` for a

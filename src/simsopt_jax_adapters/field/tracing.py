@@ -125,20 +125,18 @@ def _adaptive_loop_for_backend_mode(mode: str) -> AdaptiveLoop:
 # The two chunked Cartesian routes always take the early-exit form. Their chunks
 # are drained to NumPy and assembled in a host loop, so nothing can differentiate
 # through them and ``scan`` buys only cost: it runs every masked body iteration of
-# the chunk after the last lane has finished. The two forms were verified bitwise
-# equal on the trajectory, the event rows, ``t_final`` and ``h``
-# (``.artifacts/official-mirror-closure-20260919/investigations/tracer-cost/logs/``
-# ``buffers_and_host.log``, and ``tests/field/test_tracing_chunked_adapter.py::``
+# the chunk after the last lane has finished. The two forms are bitwise equal on
+# the trajectory, the event rows, ``t_final`` and ``h``
+# (``tests/field/test_tracing_chunked_adapter.py::``
 # ``test_chunked_routes_use_the_early_exit_loop_and_match_the_scan_form``).
 #
-# What this does NOT do, so the round-1 finding is not read as fully closed:
-# ``while`` shortens a chunk once ALL lanes are done, but under ``jax.vmap``
+# What this does NOT do: ``while`` shortens a chunk once ALL lanes are done,
+# but under ``jax.vmap``
 # ``lax.while_loop``'s batching rule keeps executing the body for lanes whose
 # own predicate is already False (the result is select-masked), so a finished
 # lane is still re-entered, re-traced and re-drained in every later chunk. The
-# batch is deliberately not compacted; the cost measurement behind that ruling
-# is in ``.artifacts/official-mirror-closure-20260919/fix-wave-2/tracing/``
-# ``IMPLEMENTATION.md`` section 9.
+# batch is deliberately not compacted: compaction would cost more than the
+# masked iterations it saves.
 _CHUNKED_ADAPTIVE_LOOP: AdaptiveLoop = "while"
 
 
