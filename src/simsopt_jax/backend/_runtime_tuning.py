@@ -1,6 +1,6 @@
 """Topology and kernel tuning for the JAX backend.
 
-Owns chunk, sharding, field-kernel, and distributed-bootstrap contracts plus the
+Owns chunk, sharding, and field-kernel contracts plus the
 pure builders and device probes that resolve them from policy and environment.
 Process-global caches and locks live in :mod:`simsopt_jax.backend.runtime`.
 """
@@ -16,11 +16,6 @@ from simsopt_jax.backend._runtime_policy import (
     BackendPolicy,
     _CHUNK_AUTOTUNE_ENV,
     _COIL_CHUNK_SIZE_ENV,
-    _DISTRIBUTED_COORDINATOR_ADDRESS_ENV,
-    _DISTRIBUTED_INIT_ENV,
-    _DISTRIBUTED_LOCAL_DEVICE_IDS_ENV,
-    _DISTRIBUTED_NUM_PROCESSES_ENV,
-    _DISTRIBUTED_PROCESS_ID_ENV,
     _GPU_MEMORY_TOTAL_MB_ENV,
     _MIN_COILS_TO_SHARD_ENV,
     _MIN_PAIRWISE_ROWS_TO_SHARD_ENV,
@@ -32,7 +27,6 @@ from simsopt_jax.backend._runtime_policy import (
     _SHARDING_COIL_AXIS_ENV,
     _SHARDING_STRATEGY_ENV,
     _TRUTHY_ENV_VALUES,
-    _env_bool,
     _optional_env_value,
     _optional_nonempty_env,
     _optional_nonneg_int_env,
@@ -219,33 +213,6 @@ class ShardingTuning:
     local_device_count: int
     active: bool
     platform: str
-    distributed_enabled: bool
-    distributed_initialized: bool
-
-
-@dataclass(frozen=True)
-class DistributedRuntimeConfig:
-    enabled: bool
-    coordinator_address: str | None
-    num_processes: int | None
-    process_id: int | None
-    local_device_ids: tuple[int, ...] | None
-    initialized: bool
-
-
-def _with_distributed_initialized(
-    config: DistributedRuntimeConfig,
-    *,
-    initialized: bool,
-) -> DistributedRuntimeConfig:
-    return DistributedRuntimeConfig(
-        enabled=config.enabled,
-        coordinator_address=config.coordinator_address,
-        num_processes=config.num_processes,
-        process_id=config.process_id,
-        local_device_ids=config.local_device_ids,
-        initialized=initialized,
-    )
 
 
 def _validate_sharding_strategy(value: str, *, source: str) -> str:
@@ -383,16 +350,6 @@ def _detect_local_jax_device_count(policy: BackendPolicy) -> int:
     return len(jax.local_devices(backend=backend_name))
 
 
-def _detect_global_jax_device_count(policy: BackendPolicy) -> int:
-    # Same ImportError boundary as _detect_local_jax_device_count.
-    try:
-        import jax
-    except ImportError:
-        return 0
-    backend_name = _runtime_jax_backend_name(policy.jax_platform)
-    return len(jax.devices(backend=backend_name))
-
-
 def _visible_cuda_device_selector() -> str | None:
     raw_value = _optional_env_value("CUDA_VISIBLE_DEVICES")
     if raw_value is None:
@@ -421,16 +378,6 @@ def _detect_imported_jax_cuda_device_index() -> int | None:
     jax = sys.modules.get("jax")
     if jax is None:
         return None
-    from simsopt_jax.backend.runtime import get_distributed_runtime_config
-
-    distributed = get_distributed_runtime_config()
-    if distributed.enabled:
-        distributed_module = getattr(jax, "distributed", None)
-        is_initialized = getattr(distributed_module, "is_initialized", None)
-        if not callable(is_initialized):
-            return None
-        if not bool(is_initialized()):
-            return None
     local_devices = getattr(jax, "local_devices", None)
     if not callable(local_devices):
         return None
@@ -621,22 +568,14 @@ def _build_sharding_tuning(
     mode: str,
     policy: BackendPolicy,
 ) -> ShardingTuning:
-    # Lifecycle cache owner stays in runtime; lazy import avoids import cycles.
-    from simsopt_jax.backend.runtime import get_distributed_runtime_config
-
     strategy = _resolve_sharding_strategy(mode, policy)
-    distributed = get_distributed_runtime_config()
     if policy.backend != "jax":
         strategy = "none"
         local_device_count = 0
         device_count = 0
     else:
         local_device_count = _detect_local_jax_device_count(policy)
-        device_count = (
-            _detect_global_jax_device_count(policy)
-            if distributed.initialized
-            else local_device_count
-        )
+        device_count = local_device_count
     if mode == "jax_gpu_parity" and strategy == "none" and local_device_count > 1:
         from simsopt_jax.backend.runtime import _logged_sharding_notices
 
@@ -678,76 +617,4 @@ def _build_sharding_tuning(
         local_device_count=local_device_count,
         active=strategy != "none" and device_count > 1,
         platform=policy.jax_platform,
-        distributed_enabled=distributed.enabled,
-        distributed_initialized=distributed.initialized,
-    )
-
-
-def _parse_local_device_ids(raw_value: str | None) -> tuple[int, ...] | None:
-    if raw_value in (None, ""):
-        return None
-    values = []
-    for field in raw_value.split(","):
-        stripped = field.strip()
-        if not stripped:
-            continue
-        value = int(stripped)
-        if value < 0:
-            raise ValueError(
-                f"{_DISTRIBUTED_LOCAL_DEVICE_IDS_ENV} entries must be >= 0."
-            )
-        values.append(value)
-    return tuple(values) if values else None
-
-
-def _build_distributed_runtime_config() -> DistributedRuntimeConfig:
-    enabled = _env_bool(_DISTRIBUTED_INIT_ENV)
-    coordinator_address = _optional_nonempty_env(_DISTRIBUTED_COORDINATOR_ADDRESS_ENV)
-    num_processes = _optional_nonneg_int_env(_DISTRIBUTED_NUM_PROCESSES_ENV)
-    process_id = _optional_nonneg_int_env(_DISTRIBUTED_PROCESS_ID_ENV)
-    local_device_ids = _parse_local_device_ids(
-        _optional_nonempty_env(_DISTRIBUTED_LOCAL_DEVICE_IDS_ENV)
-    )
-    if not enabled:
-        return DistributedRuntimeConfig(
-            enabled=False,
-            coordinator_address=None,
-            num_processes=None,
-            process_id=None,
-            local_device_ids=None,
-            initialized=False,
-        )
-
-    missing = [
-        name
-        for name, value in (
-            (_DISTRIBUTED_COORDINATOR_ADDRESS_ENV, coordinator_address),
-            (_DISTRIBUTED_NUM_PROCESSES_ENV, num_processes),
-            (_DISTRIBUTED_PROCESS_ID_ENV, process_id),
-        )
-        if value is None
-    ]
-    if missing:
-        missing_list = ", ".join(missing)
-        raise ValueError(
-            "Distributed JAX bootstrap requires the following env vars when "
-            f"{_DISTRIBUTED_INIT_ENV}=1: {missing_list}."
-        )
-    if int(num_processes) <= 0:
-        raise ValueError(
-            f"{_DISTRIBUTED_NUM_PROCESSES_ENV} must be > 0 when "
-            f"{_DISTRIBUTED_INIT_ENV}=1."
-        )
-    if int(process_id) >= int(num_processes):
-        raise ValueError(
-            f"{_DISTRIBUTED_PROCESS_ID_ENV}={process_id} must be smaller than "
-            f"{_DISTRIBUTED_NUM_PROCESSES_ENV}={num_processes}."
-        )
-    return DistributedRuntimeConfig(
-        enabled=True,
-        coordinator_address=coordinator_address,
-        num_processes=num_processes,
-        process_id=process_id,
-        local_device_ids=local_device_ids,
-        initialized=False,
     )

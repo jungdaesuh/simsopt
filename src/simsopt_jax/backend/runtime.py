@@ -18,8 +18,8 @@ Internal knowledge is split along stable boundaries:
 
 - :mod:`simsopt_jax.backend._runtime_policy` — mode/precision validation and
   config/policy resolution
-- :mod:`simsopt_jax.backend._runtime_tuning` — chunk/sharding/field-kernel and
-  distributed topology builders
+- :mod:`simsopt_jax.backend._runtime_tuning` — chunk/sharding/field-kernel
+  topology builders
 - this module — process-global lifecycle, configure-before-JAX, and the public
   facade re-exports
 """
@@ -141,21 +141,17 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _POINT_OWNED_SHARDING_STRATEGIES,
     _VALID_SHARDING_STRATEGIES,
     ChunkTuning,
-    DistributedRuntimeConfig,
     FieldKernelTuning,
     ShardingTuning,
     _apply_chunk_env_overrides,
     _build_chunk_tuning,
-    _build_distributed_runtime_config,
     _build_sharding_tuning,
     _detect_active_jax_cuda_device_index,
     _detect_active_jax_cuda_device_selector,
-    _detect_global_jax_device_count,
     _detect_imported_jax_cuda_device_index,
     _detect_local_jax_device_count,
     _factor_device_count_2d,
     _pairwise_penalty_chunk_size_default,
-    _parse_local_device_ids,
     _parse_nvidia_smi_indexed_value_row,
     _parse_visible_cuda_device_index,
     _point_chunk_size_default,
@@ -176,7 +172,6 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _strategy_reduced_axis_name,
     _validate_sharding_strategy,
     _visible_cuda_device_selector,
-    _with_distributed_initialized,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -187,7 +182,6 @@ __all__ = [
     "BackendMode",
     "BackendPolicy",
     "ChunkTuning",
-    "DistributedRuntimeConfig",
     "ExecutionIntent",
     "FieldKernelTuning",
     "JaxDevice",
@@ -210,7 +204,6 @@ __all__ = [
     "get_compute_dtype",
     "get_debug_nans",
     "get_disable_jit",
-    "get_distributed_runtime_config",
     "get_field_kernel_tuning",
     "get_jax_platform",
     "get_pairwise_penalty_chunk_size",
@@ -228,7 +221,6 @@ __all__ = [
     "is_float32_smoke_policy",
     "is_jax_backend",
     "is_parity_mode",
-    "maybe_initialize_distributed_jax",
     "query_active_gpu_memory_mb",
     "raise_if_strict_jax_fallback",
     "raise_if_target_lane_bypass",
@@ -543,49 +535,6 @@ def get_compilation_cache_policy(mode: str | None = None) -> str:
 _cached_field_kernel_tuning: FieldKernelTuning | None = None
 _cached_chunk_tuning: ChunkTuning | None = None
 _cached_sharding_tuning: ShardingTuning | None = None
-_cached_distributed_runtime_config: DistributedRuntimeConfig | None = None
-
-
-def _jax_distributed_runtime_is_initialized() -> bool:
-    jax_module = sys.modules.get("jax")
-    if jax_module is None:
-        return False
-    distributed_module = getattr(jax_module, "distributed", None)
-    is_initialized = getattr(distributed_module, "is_initialized", None)
-    if not callable(is_initialized):
-        return False
-    return bool(is_initialized())
-
-
-def _invalidate_distributed_tuning_caches() -> None:
-    global _cached_chunk_tuning, _cached_field_kernel_tuning, _cached_sharding_tuning
-    with _backend_runtime_lock:
-        _cached_chunk_tuning = None
-        _cached_field_kernel_tuning = None
-        _cached_sharding_tuning = None
-
-
-def _cache_distributed_initialized_config(
-    config: DistributedRuntimeConfig,
-) -> DistributedRuntimeConfig:
-    global _cached_distributed_runtime_config
-    initialized_config = _with_distributed_initialized(config, initialized=True)
-    with _backend_runtime_lock:
-        _cached_distributed_runtime_config = initialized_config
-        _invalidate_distributed_tuning_caches()
-        return initialized_config
-
-
-def _resolve_distributed_runtime_config(
-    config: DistributedRuntimeConfig,
-) -> DistributedRuntimeConfig:
-    if (
-        config.enabled
-        and not config.initialized
-        and _jax_distributed_runtime_is_initialized()
-    ):
-        return _cache_distributed_initialized_config(config)
-    return config
 
 
 def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
@@ -781,58 +730,16 @@ def _run_backend_cache_clear_callbacks() -> None:
 
 
 def _reset_backend_runtime_caches() -> None:
-    global _cached_backend_policy, _cached_distributed_runtime_config
-    global _compilation_cache_applied_dir
+    global _cached_backend_policy, _cached_chunk_tuning, _cached_field_kernel_tuning
+    global _cached_sharding_tuning, _compilation_cache_applied_dir
     with _backend_runtime_lock:
         _cached_backend_policy = None
         _compilation_cache_applied_dir = None
-        _invalidate_distributed_tuning_caches()
-        _cached_distributed_runtime_config = None
+        _cached_chunk_tuning = None
+        _cached_field_kernel_tuning = None
+        _cached_sharding_tuning = None
         _warned_jax_fallbacks.clear()
     _run_backend_cache_clear_callbacks()
-
-
-def get_distributed_runtime_config() -> DistributedRuntimeConfig:
-    """Return the configured distributed-JAX bootstrap contract."""
-    global _cached_distributed_runtime_config
-    with _backend_runtime_lock:
-        if _cached_distributed_runtime_config is None:
-            _cached_distributed_runtime_config = _build_distributed_runtime_config()
-        _cached_distributed_runtime_config = _resolve_distributed_runtime_config(
-            _cached_distributed_runtime_config
-        )
-        return _cached_distributed_runtime_config
-
-
-def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
-    """Initialize multi-host JAX when explicitly configured through env vars."""
-    config = get_distributed_runtime_config()
-    if not config.enabled:
-        return config
-
-    import jax
-
-    distributed_module = getattr(jax, "distributed", None)
-    if distributed_module is None:
-        raise RuntimeError("Installed JAX runtime does not expose jax.distributed.")
-    is_initialized = getattr(distributed_module, "is_initialized", None)
-    if callable(is_initialized) and bool(is_initialized()):
-        return _cache_distributed_initialized_config(config)
-
-    initialize = getattr(distributed_module, "initialize", None)
-    if initialize is None:
-        raise RuntimeError(
-            "Installed JAX runtime does not expose jax.distributed.initialize."
-        )
-    initialize(
-        coordinator_address=config.coordinator_address,
-        num_processes=int(config.num_processes),
-        process_id=int(config.process_id),
-        local_device_ids=(
-            None if config.local_device_ids is None else list(config.local_device_ids)
-        ),
-    )
-    return _cache_distributed_initialized_config(config)
 
 
 def invalidate_backend_cache() -> None:

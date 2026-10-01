@@ -1,9 +1,7 @@
 """Regression tests for the JAX device-detection strictness contract.
 
-Plan reference: ``.artifacts/jax-silent-fallback-removal-2026-05-13/PLAN.md``
-sections §2 (silent fallback removal in ``simsopt_jax.backend.runtime``) and §3
-(narrowed external-boundary catches). After the silent-fallback cleanup, the
-JAX runtime probes in ``backend/runtime.py`` and ``jax_core/sharding.py`` must
+After the silent-fallback cleanup (§2 below) and the narrowed external-boundary
+catches (§3), the JAX runtime probes in ``backend/runtime.py`` and ``jax_core/sharding.py`` must
 propagate every error from the JAX runtime; the only tolerated boundary
 exceptions are:
 
@@ -19,30 +17,21 @@ Tests (one per situation):
 
 1. ``test_build_sharding_tuning_skips_jax_device_apis_for_non_jax_backend``
    §2-i — CPU policy must short-circuit before any JAX device API is called.
-2. ``test_detect_local_jax_device_count_propagates_runtime_error`` /
-   ``test_detect_local_jax_device_count_propagates_value_error`` /
-   ``test_detect_global_jax_device_count_propagates_runtime_error`` /
-   ``test_detect_global_jax_device_count_propagates_value_error``
+2. ``test_detect_jax_device_count_propagates_runtime_error`` /
+   ``test_detect_jax_device_count_propagates_value_error``
    §2-ii — JAX-mode probes propagate ``RuntimeError`` and ``ValueError``.
-3. ``test_detect_local_jax_device_count_tolerates_import_error`` /
-   ``test_detect_global_jax_device_count_tolerates_import_error``
+3. ``test_detect_jax_device_count_tolerates_import_error``
    §2-iii — ``ImportError`` is the one tolerated boundary; returns ``0``.
-4. ``test_jax_distributed_runtime_is_initialized_*`` — §2-iv:
-   ``RuntimeError`` propagates from ``is_initialized``; ``True``/``False``
-   and the ``None``/non-callable paths still return the expected booleans.
-5. ``test_inspect_array_sharding_summary_propagates_jax_errors_for_jax_array``
+4. ``test_inspect_array_sharding_summary_propagates_jax_errors_for_jax_array``
    and ``test_inspect_array_sharding_summary_returns_base_summary_for_non_jax_array``
    §2-v — JAX errors propagate when a real ``jax.Array`` is inspected;
    non-array inputs short-circuit through the pre-check.
-6. ``test_detect_imported_jax_cuda_device_index_*`` — §3-vi: narrow
+5. ``test_detect_imported_jax_cuda_device_index_*`` — §3-vi: narrow
    ``RuntimeError`` catch around ``local_devices(backend="gpu")`` returns
    ``None``; any other exception type propagates.
-7. ``test_detect_imported_jax_cuda_device_index_distributed_*`` — §3-vii:
-   ``is_initialized() -> False`` returns ``None``; a raised ``RuntimeError``
-   propagates instead.
-8. ``test_parse_visible_cuda_device_index_*`` — §3-viii: garbage env values
+6. ``test_parse_visible_cuda_device_index_*`` — §3-viii: garbage env values
    map to ``None``; valid non-negative integers parse through.
-9. ``test_query_gpu_metric_mb_from_nvidia_smi_*`` — §3-ix: ``nvidia-smi``
+7. ``test_query_gpu_metric_mb_from_nvidia_smi_*`` — §3-ix: ``nvidia-smi``
    absence / non-zero exit returns ``None``; a valid stdout row parses.
 """
 
@@ -61,10 +50,8 @@ from simsopt_jax.backend.runtime import (
     BackendPolicy,
     _build_sharding_tuning,
     _config_from_mode,
-    _detect_global_jax_device_count,
     _detect_imported_jax_cuda_device_index,
     _detect_local_jax_device_count,
-    _jax_distributed_runtime_is_initialized,
     _parse_visible_cuda_device_index,
     _policy_from_config,
     _query_gpu_metric_mb_from_nvidia_smi,
@@ -135,7 +122,6 @@ def test_build_sharding_tuning_skips_jax_device_apis_for_non_jax_backend(monkeyp
     ("attr_name", "detector"),
     [
         ("local_devices", _detect_local_jax_device_count),
-        ("devices", _detect_global_jax_device_count),
     ],
 )
 def test_detect_jax_device_count_propagates_runtime_error(
@@ -159,7 +145,6 @@ def test_detect_jax_device_count_propagates_runtime_error(
     ("attr_name", "detector"),
     [
         ("local_devices", _detect_local_jax_device_count),
-        ("devices", _detect_global_jax_device_count),
     ],
 )
 def test_detect_jax_device_count_propagates_value_error(
@@ -185,7 +170,7 @@ def test_detect_jax_device_count_propagates_value_error(
 
 @pytest.mark.parametrize(
     "detector",
-    [_detect_local_jax_device_count, _detect_global_jax_device_count],
+    [_detect_local_jax_device_count],
 )
 def test_detect_jax_device_count_tolerates_import_error(monkeypatch, detector):
     """When ``import jax`` fails, the helper returns ``0`` (simsopt remains importable)."""
@@ -204,71 +189,6 @@ def test_detect_jax_device_count_tolerates_import_error(monkeypatch, detector):
     monkeypatch.setattr(builtins, "__import__", _no_jax_import)
 
     assert detector(policy) == 0
-
-
-# ---------------------------------------------------------------------------
-# §2-iv — ``_jax_distributed_runtime_is_initialized`` propagation contract.
-# ---------------------------------------------------------------------------
-
-
-def test_jax_distributed_runtime_is_initialized_returns_false_when_jax_absent(
-    monkeypatch,
-):
-    """First guard: ``sys.modules.get('jax')`` returns ``None`` -> ``False``."""
-    monkeypatch.delitem(sys.modules, "jax", raising=False)
-
-    assert _jax_distributed_runtime_is_initialized() is False
-
-
-def test_jax_distributed_runtime_is_initialized_returns_false_when_distributed_absent(
-    monkeypatch,
-):
-    """Second guard: ``jax`` present but ``getattr(jax, 'distributed', None)`` is ``None``."""
-    monkeypatch.setitem(sys.modules, "jax", types.SimpleNamespace())
-
-    assert _jax_distributed_runtime_is_initialized() is False
-
-
-def test_jax_distributed_runtime_is_initialized_returns_false_when_not_callable(
-    monkeypatch,
-):
-    """Third guard: ``is_initialized`` is present but not callable."""
-    monkeypatch.setitem(
-        sys.modules,
-        "jax",
-        types.SimpleNamespace(distributed=types.SimpleNamespace(is_initialized=False)),
-    )
-
-    assert _jax_distributed_runtime_is_initialized() is False
-
-
-@pytest.mark.parametrize("expected", [True, False])
-def test_jax_distributed_runtime_is_initialized_returns_boolean(monkeypatch, expected):
-    monkeypatch.setitem(
-        sys.modules,
-        "jax",
-        types.SimpleNamespace(
-            distributed=types.SimpleNamespace(is_initialized=lambda: expected),
-        ),
-    )
-
-    assert _jax_distributed_runtime_is_initialized() is expected
-
-
-def test_jax_distributed_runtime_is_initialized_propagates_runtime_error(monkeypatch):
-    def _raise_runtime():
-        raise RuntimeError("distributed handshake failed")
-
-    monkeypatch.setitem(
-        sys.modules,
-        "jax",
-        types.SimpleNamespace(
-            distributed=types.SimpleNamespace(is_initialized=_raise_runtime),
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="distributed handshake failed"):
-        _jax_distributed_runtime_is_initialized()
 
 
 # ---------------------------------------------------------------------------
@@ -377,66 +297,6 @@ def test_detect_imported_jax_cuda_device_index_returns_value_when_device_present
     )
 
     assert _detect_imported_jax_cuda_device_index() == 2
-
-
-# ---------------------------------------------------------------------------
-# §3-vii — distributed gating inside ``_detect_imported_jax_cuda_device_index``.
-# ---------------------------------------------------------------------------
-
-
-def _set_distributed_init_env(monkeypatch) -> None:
-    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
-    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
-    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
-    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
-    monkeypatch.delenv("SIMSOPT_JAX_LOCAL_DEVICE_IDS", raising=False)
-
-
-def test_detect_imported_jax_cuda_device_index_returns_none_when_distributed_not_initialized(
-    monkeypatch,
-):
-    """When distributed init is enabled but not handshake-complete, return ``None``."""
-    _set_distributed_init_env(monkeypatch)
-
-    def _is_initialized():
-        return False
-
-    def _unexpected_local_devices(*, backend=None):
-        raise AssertionError(
-            f"local_devices must not run before distributed init (backend={backend!r})"
-        )
-
-    monkeypatch.setitem(
-        sys.modules,
-        "jax",
-        types.SimpleNamespace(
-            distributed=types.SimpleNamespace(is_initialized=_is_initialized),
-            local_devices=_unexpected_local_devices,
-        ),
-    )
-
-    assert _detect_imported_jax_cuda_device_index() is None
-
-
-def test_detect_imported_jax_cuda_device_index_propagates_is_initialized_runtime_error(
-    monkeypatch,
-):
-    """``is_initialized`` raising ``RuntimeError`` must surface, not silently become ``None``."""
-    _set_distributed_init_env(monkeypatch)
-
-    def _raise_runtime():
-        raise RuntimeError("distributed init query failed")
-
-    monkeypatch.setitem(
-        sys.modules,
-        "jax",
-        types.SimpleNamespace(
-            distributed=types.SimpleNamespace(is_initialized=_raise_runtime),
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="distributed init query failed"):
-        _detect_imported_jax_cuda_device_index()
 
 
 # ---------------------------------------------------------------------------

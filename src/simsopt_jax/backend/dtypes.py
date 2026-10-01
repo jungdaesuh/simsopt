@@ -25,7 +25,6 @@ from simsopt_jax.backend.runtime import (
     get_backend_policy,
     get_compute_dtype,
     get_runtime_jax_device,
-    maybe_initialize_distributed_jax,
 )
 
 __all__ = [
@@ -363,7 +362,6 @@ def _device_put(
         array = np.asarray(value)
     else:
         array = np.asarray(value, dtype=resolved_dtype)
-    maybe_initialize_distributed_jax()
     if placement is None:
         return _unplaced_device_put(array)
     return jax.device_put(array, placement)
@@ -388,7 +386,6 @@ def runtime_device_put_tree(
 ) -> _TreeT:
     """Place every dynamic pytree leaf without changing leaf dtypes or structure."""
     placement = _device_put_target(target, device)
-    maybe_initialize_distributed_jax()
     if placement is None:
         return _unplaced_device_put(value)
     return jax.device_put(value, placement)

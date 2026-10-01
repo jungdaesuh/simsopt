@@ -194,7 +194,6 @@ def test_runtime_device_put_uses_runtime_device_when_no_target(monkeypatch):
         placements.append(placement)
         return array, placement
 
-    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
     monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: runtime_device)
     monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
 
@@ -217,7 +216,6 @@ def test_runtime_device_put_preserves_explicit_target(monkeypatch):
     def _unexpected_runtime_device():
         raise AssertionError("explicit placement must not query runtime device")
 
-    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
     monkeypatch.setattr(dtypes, "get_runtime_jax_device", _unexpected_runtime_device)
     monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
 
@@ -236,7 +234,6 @@ def test_runtime_device_put_keeps_default_placement_without_runtime_device(monke
         placements.append(placement)
         return array, placement
 
-    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
     monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: None)
     monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
 
@@ -250,7 +247,6 @@ def test_runtime_device_put_keeps_default_placement_without_runtime_device(monke
 def test_explicit_device_array_preserves_requested_float_dtype(monkeypatch):
     """Explicit FP32 placement must not be rewritten by runtime FP64 policy."""
     runtime_device = jax.devices()[0]
-    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
     monkeypatch.setattr(dtypes, "get_runtime_jax_device", lambda: runtime_device)
     invalidate_backend_cache()
     set_backend("jax_cpu_parity", configure_runtime=False)
@@ -280,7 +276,6 @@ def test_explicit_device_array_preserves_single_device_reference(monkeypatch):
     def _unexpected_runtime_device():
         raise AssertionError("reference placement must not query runtime device")
 
-    monkeypatch.setattr(dtypes, "maybe_initialize_distributed_jax", lambda: None)
     monkeypatch.setattr(dtypes, "get_runtime_jax_device", _unexpected_runtime_device)
     monkeypatch.setattr(dtypes.jax, "device_put", _device_put)
 

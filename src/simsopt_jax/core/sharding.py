@@ -14,7 +14,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from simsopt_jax.backend import (
     get_sharding_tuning,
-    maybe_initialize_distributed_jax,
     register_backend_cache_clear,
 )
 from simsopt_jax.backend.dtypes import runtime_device_put
@@ -131,7 +130,6 @@ def _devices_for_platform(platform: str) -> tuple[object, ...]:
     # configuration error, not a graceful-degradation case. Let it
     # propagate.
     backend_name = "gpu" if platform == "cuda" else platform
-    maybe_initialize_distributed_jax()
     return tuple(jax.devices(backend=backend_name))
 
 
