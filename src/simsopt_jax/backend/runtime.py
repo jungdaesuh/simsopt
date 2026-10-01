@@ -216,7 +216,6 @@ __all__ = [
     "get_pairwise_penalty_chunk_size",
     "get_point_chunk_size",
     "get_precision",
-    "get_provenance_label",
     "get_quadrature_block_size",
     "get_resolved_precision",
     "get_runtime_jax_device",
@@ -539,11 +538,6 @@ def get_tolerance_tier(mode: str | None = None) -> str:
 def get_compilation_cache_policy(mode: str | None = None) -> str:
     """Return the compilation-cache policy label for the resolved mode."""
     return get_backend_policy(mode).compilation_cache_policy
-
-
-def get_provenance_label(mode: str | None = None) -> str:
-    """Return the provenance label that should tag outputs from the mode."""
-    return get_backend_policy(mode).provenance_label
 
 
 _cached_field_kernel_tuning: FieldKernelTuning | None = None

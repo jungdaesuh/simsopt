@@ -9,7 +9,6 @@ from .contracts import (
     NONFINITE_RESULT_STATUS,
     OptimizerCallbackEvent,
     OptimizerResult,
-    OptimizerResultFingerprint,
     OptionsBase,
     SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS,
     STATUS_CODES,
@@ -21,7 +20,6 @@ from .contracts import (
     SimsoptLBFGSBCallbackEvent,
     SimsoptLMQRCallbackEvent,
     SimsoptTraceLBFGSCallbackEvent,
-    fingerprint_optimizer_result,
 )
 from .scipy import ScipyBFGSOptions, ScipyBounds, ScipyLBFGSBOptions, ScipyLMOptions
 from .simsopt import (
@@ -42,7 +40,6 @@ __all__ = [
     "NONFINITE_RESULT_STATUS",
     "OptimizerCallbackEvent",
     "OptimizerResult",
-    "OptimizerResultFingerprint",
     "OptionsBase",
     "SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS",
     "STATUS_CODES",
@@ -64,5 +61,4 @@ __all__ = [
     "SimsoptLMQRCallbackEvent",
     "SimsoptTraceLBFGSOptions",
     "SimsoptTraceLBFGSCallbackEvent",
-    "fingerprint_optimizer_result",
 ]

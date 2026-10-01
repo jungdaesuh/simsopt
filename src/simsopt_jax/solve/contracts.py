@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Callable, Literal, Protocol, TypeAlias
@@ -147,29 +146,6 @@ class OptimizerResult:
     raw_message: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class OptimizerResultFingerprint:
-    driver: Driver
-    status: int
-    success: bool
-    x_shape: tuple[int, ...]
-    x_dtype: str
-    x_digest_blake2b: str
-
-
-def fingerprint_optimizer_result(result: OptimizerResult) -> OptimizerResultFingerprint:
-    x = np.ascontiguousarray(result.x)
-    digest = hashlib.blake2b(x.view(np.uint8), digest_size=16).hexdigest()
-    return OptimizerResultFingerprint(
-        driver=result.driver,
-        status=result.status,
-        success=result.success,
-        x_shape=tuple(int(dim) for dim in x.shape),
-        x_dtype=x.dtype.str,
-        x_digest_blake2b=digest,
-    )
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
 class _OptimizerCallbackEventBase:
     iteration: int
@@ -280,11 +256,9 @@ __all__ = [
     "OptimizerCallbackEvent",
     "OptimizerInput",
     "OptimizerResult",
-    "OptimizerResultFingerprint",
     "OptimizerStateTraceEntry",
     "OptionsBase",
     "ResidualFn",
     "ScalarResult",
     "ValueAndGradFn",
-    "fingerprint_optimizer_result",
 ]

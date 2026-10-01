@@ -144,7 +144,6 @@ _NO_CI_REPRODUCIBILITY_DEFAULTS = {
     "gpu_reduction_order_rel_tol": None,
     "gpu_reproducibility_seed": None,
     "gpu_reproducibility_sample_size": None,
-    "tolerance_ratchet_factor": None,
 }
 _NO_GPU_MEMORY_DEFAULTS = {
     "xla_gpu_preallocate": None,
@@ -190,7 +189,6 @@ _MODE_POLICY_DEFAULTS = {
         "compilation_cache_policy": "not_applicable",
         "matmul_precision": "highest",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
-        "provenance_label": "native_cpu",
         **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
@@ -209,7 +207,6 @@ _MODE_POLICY_DEFAULTS = {
         "compilation_cache_policy": "optional_persistent",
         "matmul_precision": "default",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
-        "provenance_label": "jax_cpu_fast",
         **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
@@ -228,7 +225,6 @@ _MODE_POLICY_DEFAULTS = {
         "compilation_cache_policy": "optional_persistent",
         "matmul_precision": "highest",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU,
-        "provenance_label": "jax_cpu_parity",
         **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
@@ -247,7 +243,6 @@ _MODE_POLICY_DEFAULTS = {
         "compilation_cache_policy": "optional_persistent",
         "matmul_precision": "default",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
-        "provenance_label": "jax_cpu_float32_smoke",
         **_FLOAT32_SMOKE_LINEAR_SOLVE_DEFAULTS,
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
@@ -266,14 +261,12 @@ _MODE_POLICY_DEFAULTS = {
         "compilation_cache_policy": "optional_persistent",
         "matmul_precision": "highest",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
-        "provenance_label": "jax_gpu_parity",
         **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_GPU_MEMORY_MODE_DEFAULTS,
         "gpu_reduction_order_max_ulp": 10,
         "gpu_reduction_order_rel_tol": 1e-12,
         "gpu_reproducibility_seed": 1729,
         "gpu_reproducibility_sample_size": 1000,
-        "tolerance_ratchet_factor": 10.0,
     },
     "jax_gpu_fast": {
         "parity_mode": False,
@@ -289,7 +282,6 @@ _MODE_POLICY_DEFAULTS = {
         "compilation_cache_policy": "optional_persistent",
         "matmul_precision": "default",
         "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
-        "provenance_label": "jax_gpu_fast",
         **_FLOAT64_LINEAR_SOLVE_DEFAULTS,
         **_GPU_MEMORY_MODE_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
@@ -356,7 +348,6 @@ class BackendPolicy:
     max_dense_jacobian_bytes: int | None
     linear_solve_tolerance_floor: float
     linear_solve_tolerance_cap: float | None
-    provenance_label: str
     xla_gpu_preallocate: bool | None
     xla_gpu_mem_fraction: float | None
     xla_gpu_allocator: Literal["platform", "vmm"] | None
@@ -365,7 +356,6 @@ class BackendPolicy:
     gpu_reduction_order_rel_tol: float | None
     gpu_reproducibility_seed: int | None
     gpu_reproducibility_sample_size: int | None
-    tolerance_ratchet_factor: float | None
     debug_nans: bool
     disable_jit: bool
     transfer_guard: str | None
@@ -892,7 +882,6 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         linear_solve_tolerance_cap=_optional_float_policy_default(
             defaults["linear_solve_tolerance_cap"]
         ),
-        provenance_label=str(defaults["provenance_label"]),
         xla_gpu_preallocate=config.xla_gpu_preallocate,
         xla_gpu_mem_fraction=config.xla_gpu_mem_fraction,
         xla_gpu_allocator=config.xla_gpu_allocator,
@@ -901,7 +890,6 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         gpu_reduction_order_rel_tol=defaults["gpu_reduction_order_rel_tol"],
         gpu_reproducibility_seed=defaults["gpu_reproducibility_seed"],
         gpu_reproducibility_sample_size=defaults["gpu_reproducibility_sample_size"],
-        tolerance_ratchet_factor=defaults["tolerance_ratchet_factor"],
         debug_nans=config.debug_nans,
         disable_jit=config.disable_jit,
         transfer_guard=config.transfer_guard,

@@ -315,7 +315,6 @@ def case_programmatic_backend_selection_configures_jax_runtime() -> None:
     assert policy.chunk_policy == "stable_default"
     assert policy.tolerance_tier == "parity"
     assert policy.compilation_cache_policy == "optional_persistent"
-    assert policy.provenance_label == "jax_cpu_parity"
     assert policy.debug_nans is True
     assert policy.transfer_guard == "log"
     assert policy.compilation_cache_dir == "/tmp/simsopt-jax-cache"
