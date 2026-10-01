@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 from unittest import mock
 
 import jax
@@ -113,19 +112,8 @@ def test_staged_like_tracer_preserves_explicit_integer_dtype():
 
 
 # Two host devices exist only if XLA is told so before it initializes, so the
-# check runs in a child process, bootstrapped onto this checkout's sources the
-# way tests/conftest.py is (an installed editable finder would otherwise win
-# over PYTHONPATH).
+# check runs in a child process.
 _STAGED_DEVICE_ARRAY_CHILD = """
-import sys
-from pathlib import Path
-
-repo_root = sys.argv[1]
-sys.path.insert(0, repo_root)
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(Path(repo_root) / "src")
-
 import jax
 import numpy as np
 
@@ -164,12 +152,7 @@ def test_staged_like_places_a_device_array_held_elsewhere_with_the_reference():
         }
     )
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-c",
-            _STAGED_DEVICE_ARRAY_CHILD,
-            str(Path(__file__).resolve().parents[1]),
-        ),
+        (sys.executable, "-c", _STAGED_DEVICE_ARRAY_CHILD),
         env=environment,
         check=False,
         capture_output=True,
@@ -350,15 +333,6 @@ def test_unplaced_values_stay_uncommitted_like_jax_leaves_them(monkeypatch):
 
 
 _UNPLACED_JOINS_COMMITTED_CHILD = """
-import sys
-from pathlib import Path
-
-repo_root = sys.argv[1]
-sys.path.insert(0, repo_root)
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(Path(repo_root) / "src")
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -424,12 +398,7 @@ def test_unplaced_values_join_data_committed_to_another_device():
         }
     )
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-c",
-            _UNPLACED_JOINS_COMMITTED_CHILD,
-            str(Path(__file__).resolve().parents[1]),
-        ),
+        (sys.executable, "-c", _UNPLACED_JOINS_COMMITTED_CHILD),
         env=environment,
         check=False,
         capture_output=True,
@@ -440,15 +409,6 @@ def test_unplaced_values_join_data_committed_to_another_device():
 
 
 _CUDA_TWO_BACKEND_CHILD = """
-import sys
-from pathlib import Path
-
-repo_root = sys.argv[1]
-sys.path.insert(0, repo_root)
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(Path(repo_root) / "src")
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -501,12 +461,7 @@ def test_unplaced_values_follow_the_runtime_policy_in_a_cuda_process():
     environment = dict(os.environ)
     environment.update({"JAX_PLATFORMS": "cuda,cpu", "JAX_ENABLE_X64": "1"})
     completed = subprocess.run(
-        (
-            sys.executable,
-            "-c",
-            _CUDA_TWO_BACKEND_CHILD,
-            str(Path(__file__).resolve().parents[1]),
-        ),
+        (sys.executable, "-c", _CUDA_TWO_BACKEND_CHILD),
         env=environment,
         check=False,
         capture_output=True,

@@ -46,13 +46,6 @@ _FACTOR_DENSE_HESSIAN_BYTE_PARITY_SELECTOR = (
     "test_factor_dense_hessian_scipy_and_jax_branches_share_bytes"
 )
 _FACTOR_DENSE_HESSIAN_CPU_CHILD_ENV = "SIMSOPT_TEST_FACTOR_DENSE_HESSIAN_CPU_CHILD"
-_REPO_ROOT_STR = str(_REPO_ROOT)
-if _REPO_ROOT_STR not in sys.path:
-    sys.path.insert(0, _REPO_ROOT_STR)
-
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(_SRC_ROOT)
 
 import simsopt_jax_adapters.geo.boozer_surface as bsj
 from simsopt_jax.geo.optimizers import optimizer as opt_jax

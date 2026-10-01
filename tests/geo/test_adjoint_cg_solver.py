@@ -231,13 +231,7 @@ def test_removed_adjoint_solver_environment_value_fails_at_import():
     env = dict(os.environ)
     env["SIMSOPT_ADJOINT_LINEAR_SOLVER"] = "lsmr_j"
     env["JAX_PLATFORMS"] = "cpu"
-    probe = (
-        "import sys; "
-        f"sys.path.insert(0, {str(repo_root)!r}); "
-        "from repo_bootstrap import bootstrap_local_simsopt; "
-        f"bootstrap_local_simsopt({str(repo_root / 'src')!r}); "
-        "import simsopt_jax.geo.optimizers.adjoint_linear_solve"
-    )
+    probe = "import simsopt_jax.geo.optimizers.adjoint_linear_solve"
     result = subprocess.run(
         (sys.executable, "-c", probe),
         cwd=repo_root,

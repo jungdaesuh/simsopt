@@ -42,12 +42,9 @@ def _prepend_sys_path(path: Path) -> None:
 
 
 def _prefer_local_simsopt_source_tree() -> None:
-    """Bootstrap the local checkout before importing ``simsopt`` modules."""
+    """Put the local checkout first on ``sys.path`` before importing ``simsopt``."""
     for path in _LOCAL_SIMSOPT_IMPORT_PATHS:
         _prepend_sys_path(path)
-    from repo_bootstrap import bootstrap_local_simsopt
-
-    bootstrap_local_simsopt(_SRC_DIR)
 
 
 _prefer_local_simsopt_source_tree()

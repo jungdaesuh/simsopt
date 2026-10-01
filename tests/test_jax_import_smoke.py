@@ -412,24 +412,6 @@ def test_import_package_root_with_generated_version_file():
     )
 
 
-def test_repo_bootstrap_synthesizes_version_for_clean_source_tree():
-    """repo_bootstrap should tolerate source trees without generated _version.py."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_repo_bootstrap_synthesizes_version_for_clean_source_tree",),
-        failure_message="repo_bootstrap clean-source version smoke failed",
-    )
-
-
-def test_repo_bootstrap_is_idempotent_for_local_source_tree():
-    """Repeated bootstrap calls must not churn class identity for local imports."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_repo_bootstrap_is_idempotent_for_local_source_tree",),
-        failure_message="repo_bootstrap should be idempotent for local source imports",
-    )
-
-
 def test_root_conftest_imports_without_jax_installed():
     """Root test fixtures must not fail collection in non-JAX environments."""
     _assert_python_script_passes(
@@ -445,53 +427,6 @@ def test_legacy_magneticfield_source_avoids_jax_import():
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_legacy_magneticfield_source_avoids_jax_import",),
         failure_message="simsopt.field.magneticfield.py should not import JAX",
-    )
-
-
-def test_root_conftest_bootstraps_local_simsopt_over_foreign_resolution():
-    """Root fixtures must pin imports to this repo even when another simsopt is earlier."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_root_conftest_bootstraps_local_simsopt_over_foreign_resolution",),
-        failure_message=(
-            "root tests/conftest.py should bootstrap the local simsopt package"
-        ),
-    )
-
-
-def test_repo_bootstrap_purges_detached_local_submodules():
-    """A second bootstrap must purge detached ``simsopt.*`` submodules."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_repo_bootstrap_purges_detached_local_submodules",),
-        failure_message="repo_bootstrap should purge detached local submodules",
-    )
-
-
-def test_repo_bootstrap_strips_editable_meta_path_finders_on_fast_path():
-    """Warm bootstraps must remove editable finders before later submodule imports."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_repo_bootstrap_strips_editable_meta_path_finders_on_fast_path",),
-        failure_message="repo_bootstrap should strip editable meta_path finders",
-    )
-
-
-def test_repo_bootstrap_preserves_unrelated_editable_meta_path_finders():
-    """Warm bootstraps must not remove editable finders for unrelated packages."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_repo_bootstrap_preserves_unrelated_editable_meta_path_finders",),
-        failure_message="repo_bootstrap should preserve unrelated editable finders",
-    )
-
-
-def test_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module():
-    """Bootstrapping local simsopt must replace foreign ``simsoptpp`` modules."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module",),
-        failure_message="repo_bootstrap should replace foreign simsoptpp modules",
     )
 
 
@@ -519,56 +454,6 @@ def test_package_root_propagates_backend_import_error():
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_package_root_propagates_backend_import_error",),
         failure_message="package root masked backend import failure",
-    )
-
-
-def test_entrypoint_runtime_helper_configures_cpu_before_import():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_entrypoint_runtime_helper_configures_cpu_before_import",),
-        failure_message="entrypoint runtime helper should pin CPU before importing jax",
-    )
-
-
-def test_entrypoint_runtime_helper_auto_clears_stale_platform_env():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_entrypoint_runtime_helper_auto_clears_stale_platform_env",),
-        failure_message="entrypoint runtime helper should clear stale platform env when auto is requested",
-    )
-
-
-def test_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root",),
-        failure_message="entrypoint runtime helper should auto-detect a CUDA toolchain root",
-    )
-
-
-def test_entrypoint_runtime_helper_detects_pip_cuda_nvcc_toolchain():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_entrypoint_runtime_helper_detects_pip_cuda_nvcc_toolchain",),
-        failure_message="entrypoint runtime helper should prefer the active env pip CUDA toolkit",
-    )
-
-
-def test_entrypoint_runtime_helper_accepts_multi_platform_env_list():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_entrypoint_runtime_helper_accepts_multi_platform_env_list",),
-        failure_message="entrypoint runtime helper should preserve multi-platform JAX_PLATFORMS lists",
-    )
-
-
-def test_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags():
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=(
-            "case_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags",
-        ),
-        failure_message="entrypoint runtime helper should keep a CPU lane for explicit diagnostic callback runs",
     )
 
 

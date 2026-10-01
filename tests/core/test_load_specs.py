@@ -3,10 +3,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
-
 pytest.importorskip("simsoptpp")
 
 from simsopt._core.optimizable import load  # noqa: E402

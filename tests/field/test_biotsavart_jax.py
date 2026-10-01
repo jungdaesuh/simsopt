@@ -26,11 +26,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
-
 from conftest import parity_acceptance_modes, parity_mode_case
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 

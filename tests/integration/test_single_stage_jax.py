@@ -6,8 +6,6 @@ JAX-only environment.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import jax
@@ -17,17 +15,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SRC_ROOT = _REPO_ROOT / "src"
-_REPO_ROOT_STR = str(_REPO_ROOT)
 _RTOL = 1e-12
 _ATOL = 1e-12
-if _REPO_ROOT_STR not in sys.path:
-    sys.path.insert(0, _REPO_ROOT_STR)
-
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(_SRC_ROOT)
 
 from simsopt._core.optimizable import DOFs, Optimizable
 import simsopt_jax_adapters.geo.surface_objectives as soj

@@ -1,9 +1,7 @@
 """Shared helpers for BoozerSurfaceJAX test modules."""
 
 import inspect
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 import types
 
 import jax
@@ -12,16 +10,6 @@ import numpy as np
 from jax.flatten_util import ravel_pytree
 
 jax.config.update("jax_enable_x64", True)
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SRC_ROOT = _REPO_ROOT / "src"
-_REPO_ROOT_STR = str(_REPO_ROOT)
-if _REPO_ROOT_STR not in sys.path:
-    sys.path.insert(0, _REPO_ROOT_STR)
-
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(_SRC_ROOT)
 
 import simsopt_jax.core.biotsavart as _bs_jax
 import simsopt_jax_adapters.field.biotsavart_backend as _bs_backend

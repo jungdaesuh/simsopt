@@ -30,22 +30,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-
 # Child program: build a small NCSX-fit surface, call the three kernel entry
 # points, and save every returned array. Kept as source text so the OpenMP
 # environment is in place before the extension is imported.
 _CHILD_PROGRAM = """
 import sys
-from pathlib import Path
 
-repo_root, out_path = sys.argv[1], sys.argv[2]
-sys.path.insert(0, repo_root)
-from repo_bootstrap import bootstrap_local_simsopt
-
-# Same shim tests/conftest.py installs: it is what makes ``simsoptpp``
-# importable from this tree, and it does not touch the OpenMP environment.
-bootstrap_local_simsopt(Path(repo_root) / "src")
+out_path = sys.argv[1]
 
 import numpy as np
 import simsoptpp as sopp
@@ -119,7 +110,7 @@ def _run_leg(tmp_path: Path, name: str, omp_env: dict[str, str]) -> dict[str, np
     env = dict(os.environ)
     env.update(omp_env)
     completed = subprocess.run(
-        [sys.executable, "-c", _CHILD_PROGRAM, str(_REPO_ROOT), str(out_path)],
+        [sys.executable, "-c", _CHILD_PROGRAM, str(out_path)],
         env=env,
         capture_output=True,
         text=True,

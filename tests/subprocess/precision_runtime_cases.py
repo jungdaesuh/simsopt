@@ -13,10 +13,6 @@ _SRC_DIR = _REPO_ROOT / "src"
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_SRC_DIR))
 
-from repo_bootstrap import _strip_editable_finders
-
-_strip_editable_finders()
-
 import simsopt_jax.config as simsopt_config
 
 PrecisionCase = Literal[

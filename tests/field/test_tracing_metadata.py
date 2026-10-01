@@ -20,26 +20,7 @@ def _run_import_probe(source):
         if existing_pythonpath is None
         else os.pathsep.join((local_pythonpath, existing_pythonpath))
     )
-    probe_source = (
-        textwrap.dedent(
-            """
-            from pathlib import Path
-            import sys
-
-            sys.meta_path = [
-                finder
-                for finder in sys.meta_path
-                if finder.__class__.__module__ != "_simsopt_editable"
-            ]
-
-            from repo_bootstrap import bootstrap_local_simsopt
-
-            bootstrap_local_simsopt(Path.cwd() / "src")
-            """
-        )
-        + "\n"
-        + textwrap.dedent(source)
-    )
+    probe_source = textwrap.dedent(source)
     return subprocess.run(
         [sys.executable, "-c", probe_source],
         cwd=REPO_ROOT,

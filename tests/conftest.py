@@ -16,10 +16,6 @@ while _REPO_ROOT_STR in sys.path:
     sys.path.remove(_REPO_ROOT_STR)
 sys.path.insert(0, _REPO_ROOT_STR)
 
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(_REPO_ROOT / "src")
-
 import numpy as np
 import pytest
 

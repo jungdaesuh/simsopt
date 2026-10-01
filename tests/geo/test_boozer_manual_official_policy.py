@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
@@ -35,20 +34,9 @@ def test_manual_step_takes_finite_cost_increase() -> None:
     assert result["success"] is False
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-
 # Two host devices exist only if XLA is told so before it initializes, so the
-# check runs in a child process (with the repository's kernel bootstrap).
+# check runs in a child process.
 _CONTROLS_ON_ANOTHER_DEVICE_CHILD = """
-import sys
-from pathlib import Path
-
-repo_root = sys.argv[1]
-sys.path.insert(0, repo_root)
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(Path(repo_root) / "src")
-
 import jax
 import numpy as np
 
@@ -92,7 +80,7 @@ def test_manual_controls_on_another_device_are_placed_with_the_state() -> None:
         }
     )
     completed = subprocess.run(
-        (sys.executable, "-c", _CONTROLS_ON_ANOTHER_DEVICE_CHILD, str(_REPO_ROOT)),
+        (sys.executable, "-c", _CONTROLS_ON_ANOTHER_DEVICE_CHILD),
         env=environment,
         check=False,
         capture_output=True,
