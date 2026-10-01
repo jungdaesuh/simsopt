@@ -1,16 +1,6 @@
-"""Tests for the opt-in adjoint linear solvers in ``optimizer.py``.
+"""Tests for the adjoint and square-operator linear solvers in ``optimizer.py``.
 
-Two opt-in adjoint paths are covered here:
-
-1. Matrix-free CG (``SIMSOPT_ADJOINT_LINEAR_SOLVER="cg"``): the inner-Boozer
-   Gauss-Newton adjoint operator ``J^T J + stab I`` is symmetric
-   positive-(semi)definite, so ``lineax`` Conjugate Gradients is valid.  These
-   tests verify the matrix-free CG path agrees with a direct solve and with the
-   established dense ``lstsq`` path, and that
-   ``_solve_hessian_least_squares_system_with_status`` dispatches to CG when the
-   module-level solver selector is ``"cg"``.
-
-2. Dense-LU exact-adjoint (``SIMSOPT_EXACT_ADJOINT_DENSE_LU=1``): direct LU
+The opt-in dense-LU exact-adjoint (``SIMSOPT_EXACT_ADJOINT_DENSE_LU=1``): direct LU
    factorization of the un-squared, well-conditioned ``J^T`` for the
    exact-Jacobian transpose solve (the GMRES baseline stagnates there).  These
    tests verify the LU+IR solver against an independent ``np.linalg.solve``
@@ -28,10 +18,8 @@ import numpy as np
 import pytest
 
 jax = pytest.importorskip("jax")
-lineax = pytest.importorskip("lineax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
 
@@ -76,171 +64,6 @@ def _run_jax_runtime_case(case):
         timeout=180,
         env=env,
     )
-
-
-def _spd_problem(n=12, seed=0):
-    """A well-conditioned SPD matrix, its matvec, and a random rhs."""
-    rng = np.random.default_rng(seed)
-    a = rng.standard_normal((n, n))
-    matrix = jnp.asarray(a @ a.T + n * np.eye(n))
-    rhs = jnp.asarray(rng.standard_normal(n))
-
-    def matvec(v):
-        return matrix @ v
-
-    return matrix, matvec, rhs
-
-
-def test_cg_matches_direct_solve():
-    matrix, matvec, rhs = _spd_problem(seed=0)
-    solution, status = _adjoint_linear_solve._solve_symmetric_operator_cg_with_status(
-        matvec, rhs, tol=1e-12
-    )
-    expected = jnp.linalg.solve(matrix, rhs)
-    assert bool(status.success)
-    assert int(np.asarray(status.iterations)) > 0
-    assert int(np.asarray(status.dense_materialization_count)) == 0
-    assert int(np.asarray(status.lu_factorization_count)) == 0
-    assert int(np.asarray(status.lu_solve_count)) == 0
-    assert int(np.asarray(status.refinement_correction_count)) == 0
-    np.testing.assert_allclose(
-        np.asarray(solution), np.asarray(expected), rtol=1e-8, atol=1e-10
-    )
-
-
-def test_cg_matches_dense_lstsq_path():
-    _, matvec, rhs = _spd_problem(seed=1)
-    cg_solution, _ = _adjoint_linear_solve._solve_symmetric_operator_cg_with_status(
-        matvec, rhs, tol=1e-12
-    )
-    dense_solution, _ = (
-        _linear_solve._solve_dense_square_operator_least_squares_system_with_status(
-            matvec, rhs, tol=1e-12
-        )
-    )
-    np.testing.assert_allclose(
-        np.asarray(cg_solution), np.asarray(dense_solution), rtol=1e-8, atol=1e-10
-    )
-
-
-def test_cg_handles_column_batched_rhs():
-    matrix, matvec, _ = _spd_problem(seed=3)
-    rng = np.random.default_rng(7)
-    rhs = jnp.asarray(rng.standard_normal((matrix.shape[0], 3)))
-    solutions, status = _adjoint_linear_solve._solve_symmetric_operator_cg_with_status(
-        matvec, rhs, tol=1e-12
-    )
-    expected = jnp.linalg.solve(matrix, rhs)
-    assert bool(status.success)
-    np.testing.assert_allclose(
-        np.asarray(solutions), np.asarray(expected), rtol=1e-8, atol=1e-10
-    )
-
-
-def test_hessian_least_squares_dispatches_to_cg(monkeypatch):
-    """With the selector set to 'cg', the Hessian LS solve routes through CG."""
-    matrix, _, rhs = _spd_problem(seed=2)
-
-    def objective_fn(x):
-        # Hessian of 0.5 x^T A x is the SPD matrix A.
-        return 0.5 * jnp.dot(x, matrix @ x)
-
-    x = jnp.zeros(matrix.shape[0])
-    expected = jnp.linalg.solve(matrix, rhs)
-
-    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "cg")
-    solution, status = (
-        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
-            objective_fn, x, rhs, stab=0.0, tol=1e-12
-        )
-    )
-    assert bool(status.success)
-    np.testing.assert_allclose(
-        np.asarray(solution), np.asarray(expected), rtol=1e-8, atol=1e-10
-    )
-
-
-def test_explicit_dense_solver_overrides_global_adjoint_selector(monkeypatch):
-    """A forward caller can select dense without mutating adjoint policy."""
-    matrix, _, rhs = _spd_problem(seed=17)
-
-    def objective_fn(x):
-        return 0.5 * jnp.dot(x, matrix @ x)
-
-    def fail_cg(*_args, **_kwargs):
-        raise AssertionError("explicit dense route must not dispatch to global CG")
-
-    monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "cg")
-    monkeypatch.setattr(
-        _adjoint_linear_solve,
-        "_solve_symmetric_operator_cg_with_status",
-        fail_cg,
-    )
-    solution, status = (
-        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
-            objective_fn,
-            jnp.zeros(matrix.shape[0]),
-            rhs,
-            stab=0.0,
-            tol=1e-12,
-            solver="dense",
-        )
-    )
-
-    assert bool(status.success)
-    np.testing.assert_allclose(
-        np.asarray(solution),
-        np.asarray(jnp.linalg.solve(matrix, rhs)),
-        rtol=1e-8,
-        atol=1e-10,
-    )
-
-
-def test_default_selector_does_not_use_cg():
-    """The default selector keeps the established (non-CG) path."""
-    assert _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER != "cg"
-
-
-def test_removed_adjoint_solver_environment_value_fails_at_import():
-    """A stale ``SIMSOPT_ADJOINT_LINEAR_SOLVER=lsmr_j`` must not run dense silently."""
-    repo_root = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["SIMSOPT_ADJOINT_LINEAR_SOLVER"] = "lsmr_j"
-    env["JAX_PLATFORMS"] = "cpu"
-    probe = "import simsopt_jax.geo.optimizers.adjoint_linear_solve"
-    result = subprocess.run(
-        (sys.executable, "-c", probe),
-        cwd=repo_root,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-
-    assert result.returncode != 0
-    assert (
-        "SIMSOPT_ADJOINT_LINEAR_SOLVER must be 'dense' or 'cg', got 'lsmr_j'"
-        in result.stderr
-    )
-
-
-def test_removed_adjoint_solver_argument_is_rejected():
-    """An explicit ``solver='lsmr_j'`` fails instead of taking the dense path."""
-    x = jnp.ones(3, dtype=jnp.float64)
-
-    def objective(point):
-        return 0.5 * jnp.sum(point**2)
-
-    with pytest.raises(ValueError, match="solver must be 'dense' or 'cg'"):
-        _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
-            objective,
-            x,
-            jnp.ones(3, dtype=jnp.float64),
-            stab=0.0,
-            tol=1e-10,
-            solver="lsmr_j",
-        )
 
 
 def test_operator_gmres_does_not_inherit_dense_lu_dimension_floor():

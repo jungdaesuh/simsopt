@@ -208,15 +208,12 @@ from simsopt_jax.geo.optimizers.dense_ir import (
     _solve_dense_ir_system_with_status as _solve_dense_ir_system_with_status,
 )
 from simsopt_jax.geo.optimizers.adjoint_linear_solve import (
-    _ADJOINT_LINEAR_SOLVER as _ADJOINT_LINEAR_SOLVER,
-    _AdjointHessianLinearSolver as _AdjointHessianLinearSolver,
     _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS as _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS,
     _hessian_linear_operator as _hessian_linear_operator,
     _require_tree_first_leaf as _require_tree_first_leaf,
     _solve_hessian_least_squares_system_with_status as _solve_hessian_least_squares_system_with_status,
     _solve_hessian_system as _solve_hessian_system,
     _solve_hessian_system_with_status as _solve_hessian_system_with_status,
-    _solve_symmetric_operator_cg_with_status as _solve_symmetric_operator_cg_with_status,
     adjoint_hessian_stabilization as adjoint_hessian_stabilization,
 )
 from simsopt_jax.geo.optimizers._evaluation_provider import (
@@ -2426,14 +2423,6 @@ def levenberg_marquardt_minpack_traceable(
 def dense_operator_chunk_batch_size():
     """Return the static dense-operator column batch used by JAX kernels."""
     return int(_DENSE_OPERATOR_CHUNK_BATCH_SIZE)
-
-
-# Solver for the inner-Boozer Gauss-Newton adjoint system (``J^T J + stab I``,
-# symmetric positive-(semi)definite).  Any value other than ``"cg"`` (default
-# ``"dense"``) keeps the established path: a dense ``lstsq`` solve when the N x N
-# operator fits ``max_dense_jacobian_bytes``, else an operator-only GMRES
-# refinement.  ``"cg"`` solves the same square system matrix-free with
-# ``lineax`` CG.  Read once at import (selects a static trace-time branch).
 
 
 # Operator-only square solves historically performed one residual-correction

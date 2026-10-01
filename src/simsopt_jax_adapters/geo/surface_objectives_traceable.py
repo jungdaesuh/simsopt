@@ -724,11 +724,6 @@ def _traceable_directional_inner_objective(
     )
 
 
-def _traceable_non_dense_adjoint_selected() -> bool:
-    """Return whether the explicit adjoint route is matrix-free."""
-    return _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER == "cg"
-
-
 def _traceable_solve_hessian_linearization(
     booz_jax,
     solved_x,
@@ -741,13 +736,12 @@ def _traceable_solve_hessian_linearization(
     linear_solve_stab,
     transpose,
 ):
-    explicit_adjoint = transpose and _traceable_non_dense_adjoint_selected()
     objective_fn = _make_boozer_penalty_objective_closure(
         coil_set_spec=coil_set_spec,
         decision_split_mode="jvp",
         **_traceable_inner_objective_kwargs(objective_kwargs),
     )
-    if linear_solve_factors is not None and not explicit_adjoint:
+    if linear_solve_factors is not None:
         live_x = _as_jax_float64(solved_x)
         live_rhs = _as_jax_float64(rhs)
         hessian_operator = _adjoint_linear_solve._hessian_linear_operator(
@@ -770,24 +764,16 @@ def _traceable_solve_hessian_linearization(
 
     # `_traceable_result_linear_solve_factors` deliberately returns ``None`` on
     # the LS runtime lane so adjoint solves stay matrix-free. The default path
-    # uses the pure-JAX Hessian operator solve (the explicit ``cg`` selector
-    # solves the same operator matrix-free). Both remain fully traceable under
-    # JIT and do not call a live host solver. Removing this path
+    # uses the pure-JAX Hessian operator solve. It remains fully traceable under
+    # JIT and does not call a live host solver. Removing this path
     # would force every LS warm-start and adjoint solve to surface
-    # ``success=False`` and emit NaN gradients (the adjoint-selector coverage in
-    # tests/geo/test_surface_objectives_jax.py, e.g.
-    # ``test_explicit_adjoint_selector_overrides_supplied_dense_factors``,
-    # exercises this seam).
-    linear_solver = (
-        _adjoint_linear_solve._ADJOINT_LINEAR_SOLVER if transpose else "dense"
-    )
+    # ``success=False`` and emit NaN gradients.
     return _adjoint_linear_solve._solve_hessian_least_squares_system_with_status(
         objective_fn,
         solved_x,
         rhs,
         stab=float(linear_solve_stab),
         tol=linear_solve_tol,
-        solver=linear_solver,
     )
 
 

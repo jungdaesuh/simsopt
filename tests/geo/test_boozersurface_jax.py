@@ -4642,7 +4642,6 @@ class TestBoozerSurfaceJAXClass:
         runner,
     ):
         """Step damping must not alter the accepted-state linearization."""
-        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
         A = jnp.array([[2.0, 0.5], [0.5, 3.0]])
         b = jnp.array([1.0, 2.0])
         stab = 0.25
@@ -6478,7 +6477,6 @@ class TestBoozerSurfaceJAXClass:
 
         recorded_stabs = []
 
-        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
         monkeypatch.setattr(
             _linear_solve,
             "_hessian_vector_product_fn",
@@ -10758,7 +10756,6 @@ class TestUpstreamFactoryBoozerMatrix:
         monkeypatch,
     ):
         """Nonlinear Newton damping must not split dense adjoint bundles."""
-        monkeypatch.setattr(_adjoint_linear_solve, "_ADJOINT_LINEAR_SOLVER", "dense")
         booz = _make_mock_boozer_surface(mpol=1, ntor=1)
         bundle = booz._get_penalty_kernel_bundle(
             True,
