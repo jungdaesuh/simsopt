@@ -19,34 +19,16 @@ count toward official coverage. Regenerate it from the validated manifests with
 `python -m examples.jax.native_to_jax_index --write`; use `--check` in
 validation.
 
-## Retained shipped-workload validation
+## Known limitations
 
-The 2026-09-22 UTC verification ran all 25 eligible official mappings at
-`native_default` on local validation snapshot `998148365` of the development
-branch before its 2026-09-28 carve-out (kept on `research/jax-port-full`, not in
-this history). Each JAX lane was compared with native CPU separately:
-
-| Comparison | Case-contract pass | Qualified quality-band | Failed |
-| --- | ---: | ---: | ---: |
-| Native CPU / JAX CPU | 20 | 5 | 0 |
-| Native CPU / JAX GPU | 19 | 4 | 2 |
-
-The four qualified GPU cases are BoozerQA, coil forces, finite-build stage two,
-and minimal stage two. A quality-band result does not establish convergence;
-coil forces retains its raw GPU solver failure. QFM's GPU endpoint-quality
-failure and the NCSX GPU long-trajectory comparison failure remain unresolved.
-
-The independent official reference checks selected construction, input and count
-quantities. Endpoint acceptance uses the individual native/JAX case contracts;
-this does not establish equivalence of every official trajectory or setting.
-PM4Stell's backtracking deviation and the planar-coil upstream-gradient
-limitation remain disclosed in the case contracts. These are two native-referenced
-comparisons, not a complete three-lane comparison matrix.
-
-The source-bound reports and raw packets are retained locally under
-`.artifacts/reconciliation-execution-20260921/`, which is not distributed in
-Git. These counts describe that snapshot, not a new run on the current checkout.
-Verification jobs overlapped, so their elapsed times do not establish speedups.
+- A quality-band result does not establish convergence. At `native_default`
+  scale, coil forces keeps its raw GPU solver failure under its quality band,
+  and the QFM GPU endpoint quality and the NCSX GPU long-trajectory comparison
+  do not meet their case contracts.
+- Endpoint acceptance uses the individual native/JAX case contracts; it does
+  not establish equivalence of every official trajectory or setting.
+- PM4Stell's backtracking deviation and the planar-coil upstream-gradient
+  limitation are disclosed in their case contracts.
 
 Install the CPU runtime from the repository root with:
 
