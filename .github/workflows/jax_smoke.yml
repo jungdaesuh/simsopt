@@ -97,11 +97,10 @@ jobs:
             -m "not private_optimizer_runtime" \
             -v --tb=short
 
-      - name: Run quality ratchets and scale-gate contracts
+      - name: Run host-boundary and scale-gate contracts
         run: |
           python -m pytest \
             tests/test_host_boundary_ssot_ratchet.py \
-            tests/test_jax_legacy_isolation_boundaries.py \
             tests/geo/test_weight_zero_term_gating.py \
             tests/jax/solve/test_endpoint_certificate.py \
             -v --tb=short
@@ -201,6 +200,7 @@ jobs:
             tests/geo/test_surface_objectives.py \
             tests/integration/test_single_stage_jax.py \
             tests/integration/test_remaining_jax_surfaces_mode_matrix.py \
+            tests/test_jax_legacy_isolation_boundaries.py \
             -m "not private_optimizer_runtime" \
             -v --tb=short
 
