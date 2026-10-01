@@ -11,7 +11,7 @@ available and every caller names one:
     run, through the same host SciPy route four sibling mirrors use.
 ``MINIMAL_STAGE_TWO_DEVICE_DRIVER``
     the in-tree device-resident L-BFGS-B, an explicit opt-in **performance
-    mode** (the example's ``--device-solver`` flag). It keeps the whole solve
+    mode** for library callers. It keeps the whole solve
     on the device and keeps its own strict-transfer and policy tests; it is
     not the mirror.
 

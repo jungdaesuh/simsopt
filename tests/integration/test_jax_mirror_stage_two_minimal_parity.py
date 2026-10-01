@@ -402,9 +402,8 @@ def test_exact_stage_two_minimal_matches_native_and_jax_cpu(
     monkeypatch.setenv("JAX_ENABLE_X64", "1")
     jax = case.execute("jax-cpu", bundle, arrays)
 
-    # The mirror solves with the provider upstream calls. The device L-BFGS-B
-    # remains available as the example's ``--device-solver`` performance mode,
-    # but a parity lane that ran it would not be mirroring upstream's workflow,
+    # The mirror solves with the provider upstream calls; a parity lane that ran
+    # the library's device L-BFGS-B would not be mirroring upstream's workflow,
     # so the published driver is asserted on both lanes.
     assert native.driver == jax.driver == Driver.SCIPY_LBFGSB.value
 

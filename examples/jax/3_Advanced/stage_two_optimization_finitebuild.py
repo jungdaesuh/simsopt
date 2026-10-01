@@ -12,16 +12,12 @@ Outer optimizer.  By default this mirror solves with the provider the
 official script calls, ``scipy.optimize.minimize(..., method="L-BFGS-B")``,
 driven over the JAX objective with the official script's own options
 (maxiter 400, maxcor 400, tol 1e-20, SciPy's own evaluation and line-search
-limits).  Pass ``--device-solver`` to solve with the in-tree device-resident
-L-BFGS-B instead: that is a performance mode, not the mirror, and it reaches
-a different point of the same objective.
+limits).
 """
 
 from __future__ import annotations
 
-import argparse
 import itertools
-from functools import partial
 from pathlib import Path
 
 import jax
@@ -46,14 +42,12 @@ from simsopt_jax.examples import (
     run_example,
 )
 from simsopt_jax.examples.stage_two_finitebuild import (
-    FINITE_BUILD_DEVICE_DRIVER,
     FINITE_BUILD_NATIVE_ITERATIONS,
     FINITE_BUILD_OFFICIAL_DRIVER,
     FINITE_BUILD_TOLERANCE,
     prepare_finite_build_stage_two,
     solve_finite_build_stage_two,
 )
-from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives import (
     FiniteBuildStageTwoConfig,
@@ -161,8 +155,6 @@ def solve(
     _output_directory: Path,
     max_steps: int,
     scale: ExecutionScale,
-    *,
-    driver: Driver = FINITE_BUILD_OFFICIAL_DRIVER,
 ) -> ExampleResult:
     field, flux, config = _build_problem(scale)
     objective = make_finite_build_stage_two_objective(
@@ -187,7 +179,7 @@ def solve(
     initial_values_device = prepared.diagnostics(initial_device)
     result = solve_finite_build_stage_two(
         prepared,
-        driver=driver,
+        driver=FINITE_BUILD_OFFICIAL_DRIVER,
         max_steps=max_steps,
         rtol=FINITE_BUILD_TOLERANCE,
         atol=FINITE_BUILD_TOLERANCE,
@@ -249,29 +241,14 @@ def solve(
     )
 
 
-def _selected_driver(arguments: list[str] | None) -> tuple[Driver, list[str]]:
-    """Read the one option this example adds to the shared example CLI.
-
-    ``allow_abbrev=False`` is required: an abbreviating pre-parser would
-    capture prefixes of the shared CLI's own options.
-    """
-    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--device-solver", action="store_true")
-    selected, remaining = parser.parse_known_args(arguments)
-    if selected.device_solver:
-        return FINITE_BUILD_DEVICE_DRIVER, remaining
-    return FINITE_BUILD_OFFICIAL_DRIVER, remaining
-
-
 def main(arguments: list[str] | None = None) -> int:
-    driver, remaining = _selected_driver(arguments)
     return run_example(
-        remaining,
+        arguments,
         description=__doc__,
         temporary_prefix="simsopt-jax-stage-two-finitebuild-",
         bounded_steps=3,
         native_default_steps=FINITE_BUILD_NATIVE_ITERATIONS,
-        solve=partial(solve, driver=driver),
+        solve=solve,
     )
 
 

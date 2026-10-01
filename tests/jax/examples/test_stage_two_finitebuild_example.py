@@ -9,11 +9,8 @@ clear one another.  A source-shape test cannot see any of that -- an example
 that imported the right names and published the right dictionary keys while
 returning an unusable coil set would pass it.
 
-That shared run is the example's DEFAULT mode, the host SciPy provider
-upstream calls.  A second bounded run drives the opt-in device solver through
-``--device-solver``'s driver argument, and the last test states what must hold
-of both: same schema, same budget spent, an improved objective, and a
-published ``solver_driver`` that names which optimizer actually ran.
+That shared run uses the host SciPy provider upstream calls, and the last
+test checks that the published ``solver_driver`` names it.
 """
 
 from __future__ import annotations
@@ -95,18 +92,6 @@ def bounded_result(example: ModuleType, tmp_path_factory) -> ExampleResult:
     """One bounded solve in the shipped default mode, shared below."""
     output_directory = tmp_path_factory.mktemp("finitebuild-bounded")
     return example.solve(output_directory, BOUNDED_STEPS, "bounded")
-
-
-@pytest.fixture(scope="module")
-def bounded_device_result(example: ModuleType, tmp_path_factory) -> ExampleResult:
-    """The same bounded problem solved in the opt-in performance mode."""
-    output_directory = tmp_path_factory.mktemp("finitebuild-bounded-device")
-    return example.solve(
-        output_directory,
-        BOUNDED_STEPS,
-        "bounded",
-        driver=example.FINITE_BUILD_DEVICE_DRIVER,
-    )
 
 
 def test_bounded_solve_publishes_exactly_the_agreed_observable_schema(
@@ -191,26 +176,8 @@ def test_bounded_solve_publishes_one_gradient_entry_per_solved_coordinate(
     assert len(observables["gradient"]) == len(observables["solution"])
 
 
-def test_both_solver_modes_publish_the_same_contract_and_name_themselves(
+def test_bounded_solve_names_the_upstream_provider(
     bounded_result: ExampleResult,
-    bounded_device_result: ExampleResult,
 ) -> None:
-    """The opt-in mode is a solver choice, not a different example.
-
-    Everything the example promises must hold in both modes, and the run must
-    say which optimizer produced it -- otherwise a reader cannot tell the
-    mirror from the performance mode by reading the published result.
-    """
-    default = bounded_result.observables
-    device = bounded_device_result.observables
-
-    assert set(device) == set(default) == PUBLISHED_OBSERVABLES
-    assert bounded_device_result.status == "ok"
-    assert device["solver_iterations"] == BOUNDED_STEPS
-    assert default["solver_driver"] == Driver.SCIPY_LBFGSB.value
-    assert device["solver_driver"] == Driver.SIMSOPT_LBFGSB.value
-    assert device["final_objective"] < device["initial_objective"]
-    assert device["minimum_clearance"] > 0.0
-    # The two modes start from the same state, so their initial objective is
-    # one number; only what the optimizer did with it may differ.
-    assert device["initial_objective"] == default["initial_objective"]
+    """The run says which optimizer produced it: the provider upstream calls."""
+    assert bounded_result.observables["solver_driver"] == Driver.SCIPY_LBFGSB.value

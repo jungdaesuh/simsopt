@@ -23,7 +23,7 @@ Two outer optimizers are available and every caller names one:
     case run.
 ``FINITE_BUILD_DEVICE_DRIVER``
     the in-tree device-resident L-BFGS-B, an explicit opt-in **performance
-    mode** (the example's ``--device-solver`` flag). It carries a certified
+    mode** for library callers. It carries a certified
     GPU speed-up and keeps its own tests; it is not the mirror.
 
 Historical history-10 speed results describe an earlier implementation only.

@@ -103,10 +103,7 @@ outer optimizer over JAX physics and derivatives** where explicitly declared:
 | Official upstream mirror | QFM surface (`1_Simple/qfm.py`) | SciPy L-BFGS-B, then SciPy SLSQP | QFM residual, labels and their derivatives |
 | Official upstream mirror | `just_a_quadratic`, `minimize_curve_length`, `surf_vol_area` | SciPy `least_squares` (TRF) | Residuals and Jacobians |
 
-These are the providers the upstream scripts call, with upstream's own options. The minimal and finite-build
-stage-two mirrors additionally accept `--device-solver`, an opt-in performance mode that replaces the host
-provider by the in-tree device-resident L-BFGS-B (a JAX reimplementation of SciPy's algorithm); that mode is not
-the upstream mirror and is never what the parity cases run.
+These are the providers the upstream scripts call, with upstream's own options.
 
 The `outer_optimizer_policy` manifest field declares the policy owned by that
 example. The declaration is bound to the registered example and, for parity,

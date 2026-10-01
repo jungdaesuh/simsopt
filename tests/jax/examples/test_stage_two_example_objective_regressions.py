@@ -233,54 +233,6 @@ def test_coil_forces_active_length_penalty_separates_the_two_stage_weights() -> 
 # device-lane behaviour change, and the certified finite-build device speed-up
 # was measured at history 10.
 #
-# Re-baselined 2026-09-29 (PLAN.md amendment 6 cleanups): the parity package
-# moved the device endpoint by 3.4e-12 relative. Measured per commit with the
-# same test: the L-BFGS-B fix (the unconstrained fast path searches along
-# SciPy's d = z - x) moved the objective 3.30e-12 relative, and device_one
-# carrying no derivative path then moved it a further 3.64e-16 absolute
-# (6.85e-14 relative; an earlier version of this note said 6.9e-17); the
-# CurveLength mean and the arclength VJP restores left it unchanged.
-
-
-def test_finitebuild_example_bounded_device_solve_lands_on_its_endpoint(
-    tmp_path,
-) -> None:
-    """The shipped fused device solve, then the unscaled republication, lands where it did.
-
-    ``solve()`` drives the optimizer and then republishes at
-    ``PUBLISHED_OBJECTIVE_SCALE`` with the scale as a device operand.  The
-    fused device solver is the example's opt-in performance mode.
-    """
-    example = _example("stage_two_optimization_finitebuild")
-    result = example.solve(
-        tmp_path,
-        _BOUNDED_STEPS,
-        "bounded",
-        driver=example.FINITE_BUILD_DEVICE_DRIVER,
-    )
-
-    assert result.status == "ok"
-    assert result.observables["solver_iterations"] == _BOUNDED_STEPS
-    np.testing.assert_allclose(
-        result.observables["final_objective"],
-        0.005313081455091724,
-        rtol=1.0e-12,
-        atol=0.0,
-    )
-    np.testing.assert_allclose(
-        result.observables["squared_flux"],
-        0.0030583480385486506,
-        rtol=1.0e-12,
-        atol=0.0,
-    )
-    np.testing.assert_allclose(
-        result.observables["minimum_clearance"],
-        0.0946712348814373,
-        rtol=1.0e-12,
-        atol=0.0,
-    )
-
-
 def test_coil_forces_example_bounded_solve_lands_on_its_endpoint(tmp_path) -> None:
     """Both shipped stages run, the second after swapping the device length weight."""
     example = _example("coil_forces")
