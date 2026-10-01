@@ -151,9 +151,11 @@ def penalty_ramp_closed_form() -> dict:
     18 - lambda' = (18 - lambda) 2 / (2 + rho). The penalty goes 1 -> 10 ->
     100 (scale 10) and stops at its cap 500. Step 1 is an early-stopped inner
     solve (x0 ~ 7), so its values are not stated; steps 2-3 are at rho = 10,
-    lambda = 0 (x0 = 2.5); steps 4-7 dual-update at rho = 100; step 8 at
-    rho = 500 keeps its multiplier and ends feasible (x0 < 1), its inner
-    solve stopping short of the minimizer 1 - 5e-9 (x0 not stated)."""
+    lambda = 0 (x0 = 2.5); steps 4-7 dual-update at rho = 100. Step 8
+    keeps its multiplier and publishes the capped penalty 500, raised after
+    its inner solve, which ran at rho = 100: that subproblem's minimizer is
+    x0 = 1 + 18 / (102 * 51^4) = 1 + 2.6085e-8, and the returned feasible
+    x0 < 1 is where the numerical solve stopped (x0 not stated)."""
     multipliers = [0.0, 0.0, 0.0] + [18.0 - 18.0 / 51.0 ** k for k in range(1, 5)]
     multipliers.append(multipliers[-1])
     x0 = [None, 2.5, 2.5] + [1.0 + 18.0 / (51.0 ** j * 102.0) for j in range(4)] + [None]
