@@ -358,64 +358,6 @@ def _patch_traceable_exact_warmstart_failure(monkeypatch, failed_dx):
     )
 
 
-def _make_test_exact_failure_profile_suite(
-    monkeypatch,
-    baseline_x,
-    failed_dx,
-    *,
-    objective_value=None,
-):
-    _patch_traceable_exact_warmstart_failure(monkeypatch, failed_dx)
-    monkeypatch.setattr(
-        surfaceobjectives_traceable_jax_module,
-        "_make_traceable_batched_value_and_grad_pipeline",
-        lambda compiled_value_and_grad_for: compiled_value_and_grad_for,
-    )
-    if objective_value is not None:
-        monkeypatch.setattr(
-            surfaceobjectives_traceable_jax_module,
-            "_evaluate_traceable_total_objective",
-            lambda *_args, **_kwargs: jnp.asarray(objective_value, dtype=jnp.float64),
-        )
-
-    compiled_bundle = {
-        "compiled_forward_result_for": object(),
-        "compiled_value_and_grad_for": object(),
-        "state": {
-            "objective_kwargs": {},
-            "baseline_coil_dofs": jnp.asarray([0.0, 0.0], dtype=jnp.float64),
-            "baseline_x": baseline_x,
-            "baseline_linear_solve_factors": None,
-            "optimize_G": False,
-            "predictor_kind": "exact",
-            "linearization_kind": "exact_jacobian",
-            "linear_solve_tol": 1.0e-10,
-            "linear_solve_stab": 0.0,
-            "newton_trace_capacity": _TEST_NEWTON_TRACE_CAPACITY,
-            "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
-        },
-    }
-    exact_failure_booz = types.SimpleNamespace(
-        _unpack_decision_vector_jax=lambda x, optimize_G, coil_set_spec: (
-            x[:-1],
-            x[-1],
-            None,
-        ),
-        run_code_traceable=lambda *_args, **_kwargs: {
-            "x": baseline_x,
-            "plu": None,
-            "fun": jnp.asarray(-999.0, dtype=jnp.float64),
-            "success": jnp.asarray(True, dtype=bool),
-            "nit": jnp.asarray(7, dtype=jnp.int64),
-        },
-    )
-    return surfaceobjectives_traceable_jax_module._make_traceable_objective_profile_suite_from_compiled_bundle(
-        compiled_bundle,
-        exact_failure_booz,
-        object(),
-    )
-
-
 def test_surface_to_surface_pairwise_distances_uses_square_primitive():
     gamma1 = jnp.asarray(
         [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]],
@@ -2731,52 +2673,6 @@ def test_traceable_exact_warmstart_failure_retries_from_incumbent_state(
     np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(baseline_x))
 
 
-def test_traceable_profile_suite_warmstart_predict_surfaces_exact_failure(
-    monkeypatch,
-):
-    baseline_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
-    failed_dx = jnp.asarray([0.125, -0.375], dtype=jnp.float64)
-    profile_suite = _make_test_exact_failure_profile_suite(
-        monkeypatch,
-        baseline_x,
-        failed_dx,
-    )
-
-    warmstart = profile_suite["warmstart_predict"](
-        jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    )
-
-    assert bool(np.asarray(warmstart["success"])) is False
-    np.testing.assert_allclose(
-        np.asarray(warmstart["x"]),
-        np.asarray(baseline_x + failed_dx),
-    )
-
-
-def test_traceable_profile_suite_inner_solve_surfaces_exact_failure_state(
-    monkeypatch,
-):
-    baseline_x = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
-    failed_dx = jnp.asarray([0.125, -0.375], dtype=jnp.float64)
-    profile_suite = _make_test_exact_failure_profile_suite(
-        monkeypatch,
-        baseline_x,
-        failed_dx,
-        objective_value=1.0,
-    )
-
-    solve_result = profile_suite["inner_solve"](
-        jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    )
-
-    assert bool(np.asarray(solve_result["success"])) is False
-    np.testing.assert_allclose(
-        np.asarray(solve_result["x"]),
-        np.asarray(baseline_x + failed_dx),
-    )
-    np.testing.assert_allclose(np.asarray(solve_result["fun"]), np.asarray(1.0))
-
-
 def _traceable_cache_key_state(
     state,
     *,
@@ -4754,7 +4650,6 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
-        "profile_suite": None,
     }
     ensure_public_calls = []
     ensure_host_calls = []
@@ -4803,7 +4698,6 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         object(),
         object(),
         0.23,
-        include_profile_suite=False,
     )
 
     assert bundle == {
@@ -4853,7 +4747,6 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
-        "profile_suite": None,
     }
     ensure_public_calls = []
     ensure_host_calls = []
@@ -4914,7 +4807,6 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         object(),
         object(),
         0.23,
-        include_profile_suite=False,
         include_host_wrappers=True,
     )
 
@@ -5024,7 +4916,6 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
             object(),
             object(),
             0.23,
-            include_profile_suite=False,
             session=session,
         )
 

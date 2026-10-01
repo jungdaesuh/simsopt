@@ -40,7 +40,6 @@ from simsopt_jax.core.field import (
     grouped_biot_savart_B_from_spec,
 )
 from simsopt_jax.core.sharding import (
-    inspect_array_sharding_summary,
     maybe_shard_seed_batch_inputs,
     seed_batch_sharding_config,
 )
@@ -147,7 +146,6 @@ __all__ = [
     "TraceableObjectiveTrialResult",
     "diagnose_traceable_objective_runtime",
     "make_traceable_objective",
-    "make_traceable_objective_profile_suite",
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_seeded_value_and_grad",
     "make_traceable_objective_session",
@@ -2003,32 +2001,6 @@ def _traceable_forward_result(
     return jax.lax.cond(same_coils, baseline_case, general_case, operand=None)
 
 
-def _traceable_total_gradient(
-    booz_jax,
-    coil_set_spec_from_dofs,
-    *,
-    coil_dofs,
-    solved_x,
-    solved_linear_solve_factors,
-    linearization_kind,
-    linear_solve_tol,
-    linear_solve_stab,
-    objective_kwargs,
-):
-    """Implicit total derivative of the pure traceable objective."""
-    return _traceable_objective_gradient_parts(
-        booz_jax,
-        coil_set_spec_from_dofs,
-        coil_dofs=coil_dofs,
-        solved_x=solved_x,
-        solved_linear_solve_factors=solved_linear_solve_factors,
-        linearization_kind=linearization_kind,
-        linear_solve_tol=linear_solve_tol,
-        linear_solve_stab=linear_solve_stab,
-        objective_kwargs=objective_kwargs,
-    )[2]
-
-
 def _traceable_adjoint_gradient_or_nan(gradient, linear_solve_success):
     """Surface adjoint-solve failures as non-finite gradients, not fallbacks."""
     failure_gradient = _traceable_adjoint_fail_gradient_like(gradient)
@@ -3027,26 +2999,6 @@ def _traceable_predict_warmstart_from_anchor(
         )
     )
     return predicted_x, linear_solve_success
-
-
-def _traceable_select_predictor_linear_solve_factors(
-    anchor_eligible,
-    *,
-    baseline_linear_solve_factors,
-    anchor_linear_solve_factors,
-):
-    """Select anchor factors only after the caller authorizes the anchor."""
-    if baseline_linear_solve_factors is None:
-        return None
-    return jax.tree.map(
-        lambda anchor_value, baseline_value: lax.select(
-            anchor_eligible,
-            anchor_value,
-            baseline_value,
-        ),
-        anchor_linear_solve_factors,
-        baseline_linear_solve_factors,
-    )
 
 
 def _traceable_predict_warmstart_x(
@@ -5761,7 +5713,7 @@ class TraceableObjectiveSession:
     ``compiled_bundle["state"]`` at construction. Lazy fields are explicit
     instance attributes (not dynamic ``setattr`` bags).
 
-    Fused, decomposed, reporting, host-wrapper, profile, and ALM entrypoints all
+    Fused, decomposed, reporting, host-wrapper, and ALM entrypoints all
     derive from the session-owned ``runtime_entry``. No cache state is attached
     to ``booz_jax``.
     """
@@ -5783,7 +5735,6 @@ class TraceableObjectiveSession:
         "host_value_and_grad",
         "objective",
         "optimizer_value_and_grad",
-        "profile_suite",
         "public_batched_value_and_grad",
         "public_forward_result",
         "public_objective",
@@ -5826,7 +5777,6 @@ class TraceableObjectiveSession:
         self.host_objective = None
         self.host_value_and_grad = None
         self.host_reporting_metrics = None
-        self.profile_suite = None
         self.optimizer_value_and_grad = None
         self.seeded_compiled_bundle = None
         self.seeded_value_and_grad = None
@@ -6155,280 +6105,11 @@ def make_traceable_objective_solved_pair(
     return session.solved_pair()
 
 
-def _make_traceable_forward_value_pipeline(compiled_forward_result_for):
-    def _forward_value_for(coil_dofs):
-        return compiled_forward_result_for(coil_dofs)["value"]
-
-    return jax.jit(_forward_value_for)
-
-
-def _make_traceable_field_eval_sharding_pipeline(field_at_solution_for):
-    compiled_field_at_solution_for = jax.jit(field_at_solution_for)
-
-    def _field_eval_sharding(coil_dofs):
-        return inspect_array_sharding_summary(compiled_field_at_solution_for(coil_dofs))
-
-    return _field_eval_sharding
-
-
-def _make_traceable_objective_profile_suite_from_compiled_bundle(
-    compiled_bundle,
-    booz_jax,
-    bs_jax,
-    *,
-    value_and_grad_pipeline=None,
-    batched_value_and_grad_pipeline=None,
-):
-    """Build profiling closures from the shared traceable runtime bundle."""
-    state = compiled_bundle["state"]
-    objective_kwargs = state["objective_kwargs"]
-    baseline_coil_dofs = state["baseline_coil_dofs"]
-    baseline_x = state["baseline_x"]
-    baseline_linear_solve_factors = state["baseline_linear_solve_factors"]
-    optimize_G = state["optimize_G"]
-    predictor_kind = state["predictor_kind"]
-    linearization_kind = state["linearization_kind"]
-    linear_solve_tol = state["linear_solve_tol"]
-    linear_solve_stab = state["linear_solve_stab"]
-    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
-    compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
-    resolved_value_and_grad_pipeline = (
-        compiled_bundle["compiled_value_and_grad_for"]
-        if value_and_grad_pipeline is None
-        else value_and_grad_pipeline
-    )
-    resolved_batched_value_and_grad_pipeline = (
-        _make_traceable_batched_value_and_grad_pipeline(
-            compiled_bundle["compiled_value_and_grad_for"]
-        )
-        if batched_value_and_grad_pipeline is None
-        else batched_value_and_grad_pipeline
-    )
-
-    def _warmstart_for(coil_dofs):
-        warmstart_x, warmstart_linear_solve_success = _traceable_predict_warmstart_x(
-            booz_jax,
-            coil_set_spec_from_dofs,
-            coil_dofs=coil_dofs,
-            baseline_coil_dofs=baseline_coil_dofs,
-            baseline_x=baseline_x,
-            baseline_linear_solve_factors=baseline_linear_solve_factors,
-            linearization_kind=linearization_kind,
-            linear_solve_tol=linear_solve_tol,
-            linear_solve_stab=linear_solve_stab,
-            predictor_kind=predictor_kind,
-            objective_kwargs=objective_kwargs,
-        )
-        return {
-            "x": warmstart_x,
-            "success": warmstart_linear_solve_success,
-        }
-
-    def _current_incumbent_warmstart_for(
-        coil_dofs,
-        anchor_coil_dofs,
-        anchor_x,
-        anchor_linear_solve_factors,
-        anchor_eligible,
-    ):
-        anchor_eligible = jnp.asarray(anchor_eligible, dtype=bool)
-        selected_anchor_coil_dofs = lax.select(
-            anchor_eligible,
-            _as_jax_float64(anchor_coil_dofs),
-            baseline_coil_dofs,
-        )
-        selected_anchor_x = lax.select(
-            anchor_eligible,
-            _as_jax_float64(anchor_x),
-            baseline_x,
-        )
-        selected_anchor_linear_solve_factors = (
-            _traceable_select_predictor_linear_solve_factors(
-                anchor_eligible,
-                baseline_linear_solve_factors=baseline_linear_solve_factors,
-                anchor_linear_solve_factors=anchor_linear_solve_factors,
-            )
-        )
-        warmstart_x, warmstart_linear_solve_success = (
-            _traceable_predict_warmstart_from_anchor(
-                booz_jax,
-                coil_set_spec_from_dofs,
-                coil_dofs=coil_dofs,
-                anchor_coil_dofs=selected_anchor_coil_dofs,
-                anchor_x=selected_anchor_x,
-                anchor_linear_solve_factors=selected_anchor_linear_solve_factors,
-                linearization_kind=linearization_kind,
-                linear_solve_tol=linear_solve_tol,
-                linear_solve_stab=linear_solve_stab,
-                predictor_kind=predictor_kind,
-                objective_kwargs=objective_kwargs,
-            )
-        )
-        return {
-            "x": warmstart_x,
-            "success": warmstart_linear_solve_success,
-            "anchor_used": anchor_eligible,
-        }
-
-    def _solve_for(coil_dofs):
-        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
-        warmstart = _warmstart_for(coil_dofs)
-        warmstart_x = warmstart["x"]
-        warmstart_linear_solve_success = warmstart["success"]
-
-        def _run_traceable_solve(_):
-            warmstart_sdofs, warmstart_iota, warmstart_G = (
-                booz_jax._unpack_decision_vector_jax(
-                    warmstart_x,
-                    optimize_G,
-                    coil_set_spec=coil_set_spec,
-                )
-            )
-            with device_scope(PhaseId.NEWTON_SOLVER_CONTROL):
-                solve_result = booz_jax.run_code_traceable(
-                    coil_set_spec,
-                    warmstart_sdofs,
-                    warmstart_iota,
-                    warmstart_G,
-                    materialize_dense_linearization=False,
-                )
-            solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
-                booz_jax,
-                solve_result,
-                optimize_G=optimize_G,
-                coil_set_spec=coil_set_spec,
-            )
-            return {
-                "x": solve_result["x"],
-                "sdofs": solved_sdofs,
-                "iota": solved_iota,
-                "G": solved_G,
-                "fun": solve_result["fun"],
-                "linear_solve_factors": _traceable_result_linear_solve_factors(
-                    solve_result,
-                    linearization_kind,
-                ),
-                "success": solve_result["success"],
-                "nit": _runtime_int32_scalar(solve_result["nit"]),
-            }
-
-        if linearization_kind != "exact_jacobian":
-            return _run_traceable_solve(None)
-
-        def _warmstart_failure(_):
-            warmstart_sdofs, warmstart_iota, warmstart_G = (
-                booz_jax._unpack_decision_vector_jax(
-                    warmstart_x,
-                    optimize_G,
-                    coil_set_spec=coil_set_spec,
-                )
-            )
-            warmstart_fun = _evaluate_traceable_total_objective(
-                warmstart_x,
-                coil_dofs,
-                coil_set_spec,
-                objective_kwargs,
-            )
-            return {
-                "x": warmstart_x,
-                "sdofs": warmstart_sdofs,
-                "iota": warmstart_iota,
-                "G": warmstart_G,
-                "fun": warmstart_fun,
-                "linear_solve_factors": None,
-                "success": _runtime_bool(False),
-                "nit": _runtime_int32_scalar(0),
-            }
-
-        return lax.cond(
-            warmstart_linear_solve_success,
-            _run_traceable_solve,
-            _warmstart_failure,
-            operand=None,
-        )
-
-    def _surface_geometry_for(solved_x):
-        sdofs, _, _ = _split_x_inner_runtime(solved_x, optimize_G)
-        return _surface_geometry_from_dofs(
-            sdofs,
-            objective_kwargs["quadpoints_phi"],
-            objective_kwargs["quadpoints_theta"],
-            objective_kwargs["mpol"],
-            objective_kwargs["ntor"],
-            objective_kwargs["nfp"],
-            objective_kwargs["stellsym"],
-            objective_kwargs["scatter_indices"],
-            surface_kind=objective_kwargs["surface_kind"],
-        )
-
-    def _field_for(coil_dofs, solved_x):
-        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
-        gamma, _, _ = _surface_geometry_for(solved_x)
-        points = gamma.reshape(-1, 3)
-        return grouped_biot_savart_B_from_spec(points, coil_set_spec)
-
-    def _field_at_solution_for(coil_dofs):
-        return _field_for(coil_dofs, _solve_for(coil_dofs)["x"])
-
-    def _solved_total_objective_for(coil_dofs, solved_x):
-        return _evaluate_traceable_total_objective(
-            solved_x,
-            coil_dofs,
-            coil_set_spec_from_dofs(coil_dofs),
-            objective_kwargs,
-        )
-
-    def _total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
-        return _traceable_total_gradient(
-            booz_jax,
-            coil_set_spec_from_dofs,
-            coil_dofs=coil_dofs,
-            solved_x=solved_x,
-            solved_linear_solve_factors=solved_linear_solve_factors,
-            linearization_kind=linearization_kind,
-            linear_solve_tol=linear_solve_tol,
-            linear_solve_stab=linear_solve_stab,
-            objective_kwargs=objective_kwargs,
-        )
-
-    compiled_forward_value_for = _make_traceable_forward_value_pipeline(
-        compiled_forward_result_for
-    )
-    compiled_warmstart_for = jax.jit(_warmstart_for)
-    compiled_current_incumbent_warmstart_for = jax.jit(_current_incumbent_warmstart_for)
-    compiled_inner_solve_for = jax.jit(_solve_for)
-    compiled_surface_geometry_for = jax.jit(_surface_geometry_for)
-    compiled_field_for = jax.jit(_field_for)
-    compiled_field_eval_sharding = _make_traceable_field_eval_sharding_pipeline(
-        _field_at_solution_for
-    )
-    compiled_solved_total_objective_for = jax.jit(_solved_total_objective_for)
-    compiled_solved_total_gradient_for = jax.jit(_total_gradient_for)
-
-    return {
-        "forward_result": compiled_forward_result_for,
-        "forward_value": compiled_forward_value_for,
-        "warmstart_predict": compiled_warmstart_for,
-        "current_incumbent_warmstart_predict": (
-            compiled_current_incumbent_warmstart_for
-        ),
-        "inner_solve": compiled_inner_solve_for,
-        "surface_geometry": compiled_surface_geometry_for,
-        "field_eval": compiled_field_for,
-        "field_eval_sharding": compiled_field_eval_sharding,
-        "solved_total_objective": compiled_solved_total_objective_for,
-        "solved_total_gradient": compiled_solved_total_gradient_for,
-        "value_and_grad_pipeline": resolved_value_and_grad_pipeline,
-        "batched_value_and_grad_pipeline": resolved_batched_value_and_grad_pipeline,
-    }
-
-
 def make_traceable_objective_runtime_bundle(
     booz_jax,
     bs_jax,
     iota_target,
     *,
-    include_profile_suite=False,
     include_host_wrappers=False,
     outer_objective_config=None,
     success_filter=None,
@@ -6437,7 +6118,7 @@ def make_traceable_objective_runtime_bundle(
     """Build the shared runtime bundle for the target single-stage objective path.
 
     Pass an explicit ``session`` to retain compiled runners and lazily built
-    profile/host boundaries across calls. Without one, this factory builds an
+    host boundaries across calls. Without one, this factory builds an
     isolated one-shot session. Rebuild the session after changing captured
     inputs; an existing session does not retarget itself.
 
@@ -6473,8 +6154,6 @@ def make_traceable_objective_runtime_bundle(
         Optional host-normalized callable returning the final solved-state
         reporting scalars used by the single-stage example when
         ``include_host_wrappers=True``.
-    ``profile_suite``
-        Optional profiled pure-JAX closures when ``include_profile_suite=True``.
     """
     runtime_entry = _get_cached_traceable_runtime_entry(
         booz_jax,
@@ -6504,22 +6183,6 @@ def make_traceable_objective_runtime_bundle(
                 "host_reporting_metrics": runtime_entry["host_reporting_metrics"],
             }
         )
-    if not include_profile_suite:
-        return runtime_bundle
-    compiled_bundle = runtime_entry["compiled_bundle"]
-    if runtime_entry["profile_suite"] is None:
-        runtime_entry["profile_suite"] = (
-            _make_traceable_objective_profile_suite_from_compiled_bundle(
-                compiled_bundle,
-                booz_jax,
-                bs_jax,
-                value_and_grad_pipeline=runtime_entry["public_value_and_grad"],
-                batched_value_and_grad_pipeline=runtime_entry[
-                    "public_batched_value_and_grad"
-                ],
-            )
-        )
-    runtime_bundle["profile_suite"] = runtime_entry["profile_suite"]
     return runtime_bundle
 
 
@@ -6828,25 +6491,6 @@ def make_traceable_single_stage_alm_runtime_bundle(
     }
     runtime_entry["alm_runtime_bundles"][alm_cache_key] = alm_runtime_bundle
     return alm_runtime_bundle
-
-
-def make_traceable_objective_profile_suite(
-    booz_jax,
-    bs_jax,
-    iota_target,
-    *,
-    outer_objective_config=None,
-    session: TraceableObjectiveSession | None = None,
-):
-    """Build profiled pure-JAX closures for the target single-stage objective path."""
-    return make_traceable_objective_runtime_bundle(
-        booz_jax,
-        bs_jax,
-        iota_target,
-        include_profile_suite=True,
-        outer_objective_config=outer_objective_config,
-        session=session,
-    )["profile_suite"]
 
 
 # Import the helper layer after this module defines its re-exported names.
