@@ -142,8 +142,8 @@ class ALMRunState(Generic[AcceptedStateT]):
     base_bounds: Optional[List[Tuple[float, float]]] = None
     # The best hard-feasible incumbent so far; the feasible-stall count,
     # restarted at each outer; the L-BFGS-B result of the latest subproblem;
-    # and the evaluation at x, multipliers and penalty as of the latest
-    # step's end (None until a step has run).
+    # and the evaluation at the latest step's end iterate (None until a step
+    # has run; a best-feasible restore moves x but not this).
     best_feasible: Optional[ALMFeasibleIncumbent[AcceptedStateT]] = None
     feasible_stall_count: int = 0
     last_result: Optional[object] = None

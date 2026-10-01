@@ -369,9 +369,7 @@ class AlmLibraryWithoutRecorderTests(unittest.TestCase):
 class AlmLoopOwnsNoHistoryTests(unittest.TestCase):
     HISTORY_SYMBOLS = frozenset(
         (
-            "_build_alm_history_entry",
-            "_build_skipped_inner_history_entry",
-            "_refresh_alm_history_for_penalty_update",
+            "_measured_history_fields",
             "_constraint_history_diagnostics",
             "_constraint_history_diagnostics_source",
             "_constraint_history_diagnostics_from_source",

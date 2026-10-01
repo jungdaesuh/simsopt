@@ -13,7 +13,7 @@
   "simsopt_alm/boundary.py": "fd388e4c3c7ef7967291b63af01fb2c0c3448c2e",
   "simsopt_alm/checkpoint.py": "9aee5442014176795094cb96cad73090d97edb3f",
   "simsopt_alm/continuation.py": "b327f33031c63bfaaf1bd9dbc615fb10b40013ea",
-  "simsopt_alm/control.py": "5204946c28d763719fb635b0a084cd08e2439ea8",
+  "simsopt_alm/control.py": "f439e94610fedb246e2e0f246114c316c8230293",
   "simsopt_alm/core.py": "30ceb00b913a714897bb932defd0ffc1dfc92c95",
   "simsopt_alm/evaluation.py": "5ee4046b1d040ad7e078b8096c6b196a5a8678ea",
   "simsopt_alm/events.py": "2ce64055d724f7fc2d380f579018ea7d06ae0151",
