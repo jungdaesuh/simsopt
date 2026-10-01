@@ -31,7 +31,7 @@ def native_jax_device():
 
 
 def jit(fun, **args):
-    if parameters["jit"]:
+    if parameters['jit']:
         return jaxjit(fun, **args)
     else:
         return fun

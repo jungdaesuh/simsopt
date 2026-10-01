@@ -11,16 +11,8 @@ from .._core.derivative import Derivative
 from .jit import jit, native_jax_device
 from .plotting import fix_matplotlib_3d
 
-__all__ = [
-    "Curve",
-    "JaxCurve",
-    "RotatedCurve",
-    "curves_to_vtk",
-    "create_equally_spaced_curves",
-    "create_equally_spaced_planar_curves",
-    "create_planar_curves_between_two_toroidal_surfaces",
-]
-
+__all__ = ['Curve', 'JaxCurve', 'RotatedCurve', 'curves_to_vtk', 'create_equally_spaced_curves',
+           'create_equally_spaced_planar_curves', 'create_planar_curves_between_two_toroidal_surfaces']
 
 @jit
 def centroid_pure(gamma, gammadash):
@@ -35,7 +27,6 @@ def centroid_pure(gamma, gammadash):
     arclength = jnp.linalg.norm(gammadash, axis=-1)
     centroid = jnp.sum(gamma * arclength[:, None], axis=0) / jnp.sum(arclength)
     return centroid
-
 
 @jit
 def incremental_arclength_pure(d1gamma):
@@ -70,28 +61,13 @@ def kappa_pure(d1gamma, d2gamma):
     where :math:`\mathbf{\gammadash}` is the tangent vector to the curve and
     :math:`\mathbf{\gammadashdash}` is the derivative of the tangent vector.
     """
-    return (
-        jnp.linalg.norm(jnp.cross(d1gamma, d2gamma), axis=1)
-        / jnp.linalg.norm(d1gamma, axis=1) ** 3
-    )
+    return jnp.linalg.norm(jnp.cross(d1gamma, d2gamma), axis=1)/jnp.linalg.norm(d1gamma, axis=1)**3
 
 
-kappavjp0 = jit(
-    lambda d1gamma, d2gamma, v: vjp(lambda d1g: kappa_pure(d1g, d2gamma), d1gamma)[1](
-        v
-    )[0]
-)
-kappavjp1 = jit(
-    lambda d1gamma, d2gamma, v: vjp(lambda d2g: kappa_pure(d1gamma, d2g), d2gamma)[1](
-        v
-    )[0]
-)
-kappagrad0 = jit(
-    lambda d1gamma, d2gamma: jacfwd(lambda d1g: kappa_pure(d1g, d2gamma))(d1gamma)
-)
-kappagrad1 = jit(
-    lambda d1gamma, d2gamma: jacfwd(lambda d2g: kappa_pure(d1gamma, d2g))(d2gamma)
-)
+kappavjp0 = jit(lambda d1gamma, d2gamma, v: vjp(lambda d1g: kappa_pure(d1g, d2gamma), d1gamma)[1](v)[0])
+kappavjp1 = jit(lambda d1gamma, d2gamma, v: vjp(lambda d2g: kappa_pure(d1gamma, d2g), d2gamma)[1](v)[0])
+kappagrad0 = jit(lambda d1gamma, d2gamma: jacfwd(lambda d1g: kappa_pure(d1g, d2gamma))(d1gamma))
+kappagrad1 = jit(lambda d1gamma, d2gamma: jacfwd(lambda d2g: kappa_pure(d1gamma, d2g))(d2gamma))
 
 
 @jit
@@ -106,26 +82,12 @@ def torsion_pure(d1gamma, d2gamma, d3gamma):
     :math:`\mathbf{\gammadashdash}` is the derivative of the tangent vector, and
     :math:`\mathbf{\gammadashdashdash}` is the derivative of the derivative of the tangent vector.
     """
-    return jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1) / jnp.sum(
-        jnp.cross(d1gamma, d2gamma, axis=1) ** 2, axis=1
-    )
+    return jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1) / jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1)**2, axis=1)
 
 
-torsionvjp0 = jit(
-    lambda d1gamma, d2gamma, d3gamma, v: vjp(
-        lambda d1g: torsion_pure(d1g, d2gamma, d3gamma), d1gamma
-    )[1](v)[0]
-)
-torsionvjp1 = jit(
-    lambda d1gamma, d2gamma, d3gamma, v: vjp(
-        lambda d2g: torsion_pure(d1gamma, d2g, d3gamma), d2gamma
-    )[1](v)[0]
-)
-torsionvjp2 = jit(
-    lambda d1gamma, d2gamma, d3gamma, v: vjp(
-        lambda d3g: torsion_pure(d1gamma, d2gamma, d3g), d3gamma
-    )[1](v)[0]
-)
+torsionvjp0 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d1g: torsion_pure(d1g, d2gamma, d3gamma), d1gamma)[1](v)[0])
+torsionvjp1 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d2g: torsion_pure(d1gamma, d2g, d3gamma), d2gamma)[1](v)[0])
+torsionvjp2 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d3g: torsion_pure(d1gamma, d2gamma, d3g), d3gamma)[1](v)[0])
 
 
 @jit
@@ -146,25 +108,18 @@ def frenet_frame_pure(gammadash, gammadashdash, incremental_arclength):
     .. math::
         \mathbf{b} = \mathbf{t} \times \mathbf{n}
     """
-
-    def norm(a):
-        return jnp.linalg.norm(a, axis=1)
-
-    def inner(a, b):
-        return jnp.sum(a * b, axis=1)
-
+    def norm(a): return jnp.linalg.norm(a, axis=1)
+    def inner(a, b): return jnp.sum(a*b, axis=1)
     N = jnp.shape(gammadash)[0]
     t, n, b = (jnp.zeros((N, 3)), jnp.zeros((N, 3)), jnp.zeros((N, 3)))
-    t = (1.0 / incremental_arclength[:, None]) * gammadash
+    t = (1./incremental_arclength[:, None]) * gammadash
 
-    tdash = (1.0 / incremental_arclength[:, None]) ** 2 * (
-        incremental_arclength[:, None] * gammadashdash
-        - (inner(gammadash, gammadashdash) / incremental_arclength)[:, None] * gammadash
-    )
-    n = (1.0 / norm(tdash))[:, None] * tdash
+    tdash = (1./incremental_arclength[:, None])**2 * (incremental_arclength[:, None] * gammadashdash
+                                    - (inner(gammadash, gammadashdash)/incremental_arclength)[:, None] * gammadash
+                                    )
+    n = (1./norm(tdash))[:, None] * tdash
     b = jnp.cross(t, n, axis=1)
     return t, n, b
-
 
 class Curve(Optimizable):
     """
@@ -184,16 +139,7 @@ class Curve(Optimizable):
         """
         self.invalidate_cache()
 
-    def plot(
-        self,
-        engine="matplotlib",
-        ax=None,
-        show=True,
-        plot_derivative=False,
-        close=False,
-        axis_equal=True,
-        **kwargs,
-    ):
+    def plot(self, engine="matplotlib", ax=None, show=True, plot_derivative=False, close=False, axis_equal=True, **kwargs):
         """
         Plot the curve in 3D using ``matplotlib.pyplot``, ``mayavi``, or ``plotly``.
 
@@ -235,19 +181,10 @@ class Curve(Optimizable):
 
             if ax is None or ax.name != "3d":
                 fig = plt.figure()
-                ax = fig.add_subplot(projection="3d")
+                ax = fig.add_subplot(projection='3d')
             ax.plot(x, y, z, **kwargs)
             if plot_derivative:
-                ax.quiver(
-                    x,
-                    y,
-                    z,
-                    0.1 * xt,
-                    0.1 * yt,
-                    0.1 * zt,
-                    arrow_length_ratio=0.1,
-                    color="r",
-                )
+                ax.quiver(x, y, z, 0.1 * xt, 0.1 * yt, 0.1 * zt, arrow_length_ratio=0.1, color="r")
             if axis_equal:
                 fix_matplotlib_3d(ax)
             if show:
@@ -259,7 +196,7 @@ class Curve(Optimizable):
 
             mlab.plot3d(x, y, z, **kwargs)
             if plot_derivative:
-                mlab.quiver3d(x, y, z, 0.1 * xt, 0.1 * yt, 0.1 * zt)
+                mlab.quiver3d(x, y, z, 0.1*xt, 0.1*yt, 0.1*zt)
             if show:
                 mlab.show()
 
@@ -274,14 +211,16 @@ class Curve(Optimizable):
             kwargs.setdefault("line", go.scatter3d.Line(color=color, width=4))
             if ax is None:
                 ax = go.Figure()
-            ax.add_trace(go.Scatter3d(x=x, y=y, z=z, mode="lines", **kwargs))
+            ax.add_trace(
+                go.Scatter3d(
+                    x=x, y=y, z=z, mode="lines", **kwargs
+                )
+            )
             ax.update_layout(scene_aspectmode="data")
             if show:
                 ax.show()
         else:
-            raise ValueError(
-                "Invalid engine option! Please use one of {matplotlib, mayavi, plotly}."
-            )
+            raise ValueError("Invalid engine option! Please use one of {matplotlib, mayavi, plotly}.")
         return ax
 
     def dgamma_by_dcoeff_vjp(self, v):
@@ -347,39 +286,20 @@ class Curve(Optimizable):
         dgamma_by_dphidcoeff = self.dgammadash_by_dcoeff()
         dgamma_by_dphidphidcoeff = self.dgammadashdash_by_dcoeff()
 
-        def norm(a):
-            return np.linalg.norm(a, axis=1)
-
+        def norm(a): return np.linalg.norm(a, axis=1)
         numerator = np.cross(dgamma_by_dphi, dgamma_by_dphidphi)
         denominator = self.incremental_arclength()
-        dkappa_by_dcoeff[:, :] = (1 / (denominator**3 * norm(numerator)))[
-            :, None
-        ] * np.sum(
-            numerator[:, :, None]
-            * (
-                np.cross(
-                    dgamma_by_dphidcoeff[:, :, :],
-                    dgamma_by_dphidphi[:, :, None],
-                    axis=1,
-                )
-                + np.cross(
-                    dgamma_by_dphi[:, :, None],
-                    dgamma_by_dphidphidcoeff[:, :, :],
-                    axis=1,
-                )
-            ),
-            axis=1,
-        ) - (norm(numerator) * 3 / denominator**5)[:, None] * np.sum(
-            dgamma_by_dphi[:, :, None] * dgamma_by_dphidcoeff[:, :, :], axis=1
-        )
+        dkappa_by_dcoeff[:, :] = (1 / (denominator**3*norm(numerator)))[:, None] * np.sum(numerator[:, :, None] * (
+            np.cross(dgamma_by_dphidcoeff[:, :, :], dgamma_by_dphidphi[:, :, None], axis=1) +
+            np.cross(dgamma_by_dphi[:, :, None], dgamma_by_dphidphidcoeff[:, :, :], axis=1)), axis=1) \
+            - (norm(numerator) * 3 / denominator**5)[:, None] * np.sum(dgamma_by_dphi[:, :, None] * dgamma_by_dphidcoeff[:, :, :], axis=1)
 
     def torsion_impl(self, torsion):
         r"""
         This function returns the torsion, :math:`\tau`, of a curve.
         """
-        torsion[:] = torsion_pure(
-            self.gammadash(), self.gammadashdash(), self.gammadashdashdash()
-        )
+        torsion[:] = torsion_pure(self.gammadash(), self.gammadashdash(),
+                                  self.gammadashdashdash())
 
     def dtorsion_by_dcoeff_impl(self, dtorsion_by_dcoeff):
         r"""
@@ -397,31 +317,10 @@ class Curve(Optimizable):
         d2gammadcoeff = self.dgammadashdash_by_dcoeff()
         d3gammadcoeff = self.dgammadashdashdash_by_dcoeff()
         dtorsion_by_dcoeff[:, :] = (
-            np.sum(
-                np.cross(d1gamma, d2gamma, axis=1)[:, :, None] * d3gammadcoeff, axis=1
-            )
-            + np.sum(
-                (
-                    np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1)
-                    + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)
-                )
-                * d3gamma[:, :, None],
-                axis=1,
-            )
-        ) / np.sum(np.cross(d1gamma, d2gamma, axis=1) ** 2, axis=1)[:, None]
-        dtorsion_by_dcoeff[:, :] -= (
-            np.sum(np.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1)[:, None]
-            * np.sum(
-                2
-                * np.cross(d1gamma, d2gamma, axis=1)[:, :, None]
-                * (
-                    np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1)
-                    + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)
-                ),
-                axis=1,
-            )
-            / np.sum(np.cross(d1gamma, d2gamma, axis=1) ** 2, axis=1)[:, None] ** 2
-        )
+            np.sum(np.cross(d1gamma, d2gamma, axis=1)[:, :, None] * d3gammadcoeff, axis=1)
+            + np.sum((np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1) + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)) * d3gamma[:, :, None], axis=1)
+        )/np.sum(np.cross(d1gamma, d2gamma, axis=1)**2, axis=1)[:, None]
+        dtorsion_by_dcoeff[:, :] -= np.sum(np.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1)[:, None] * np.sum(2 * np.cross(d1gamma, d2gamma, axis=1)[:, :, None] * (np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1) + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)), axis=1)/np.sum(np.cross(d1gamma, d2gamma, axis=1)**2, axis=1)[:, None]**2
 
     def dkappa_by_dcoeff_vjp(self, v):
         r"""
@@ -452,59 +351,30 @@ class Curve(Optimizable):
         where :math:`\mathbf c` are the curve dofs, and :math:`\tau` is the torsion.
         """
 
-        return (
-            self.dgammadash_by_dcoeff_vjp(
-                torsionvjp0(
-                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
-                )
-            )
-            + self.dgammadashdash_by_dcoeff_vjp(
-                torsionvjp1(
-                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
-                )
-            )
-            + self.dgammadashdashdash_by_dcoeff_vjp(
-                torsionvjp2(
-                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
-                )
-            )
-        )
+        return self.dgammadash_by_dcoeff_vjp(torsionvjp0(self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v)) \
+            + self.dgammadashdash_by_dcoeff_vjp(torsionvjp1(self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v)) \
+            + self.dgammadashdashdash_by_dcoeff_vjp(torsionvjp2(self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v))
 
     def frenet_frame(self):
         r"""
         This function returns the Frenet frame, :math:`(\mathbf{t}, \mathbf{n}, \mathbf{b})`,
         associated to the curve.
         """
-        return frenet_frame_pure(
-            self.gammadash(), self.gammadashdash(), self.incremental_arclength()
-        )
+        return frenet_frame_pure(self.gammadash(), self.gammadashdash(), self.incremental_arclength())
 
     def kappadash(self):
         r"""
         This function returns :math:`\kappa'(\phi)`, where :math:`\kappa` is the curvature.
         """
-        dkappa_by_dphi = np.zeros((len(self.quadpoints),))
+        dkappa_by_dphi = np.zeros((len(self.quadpoints), ))
         dgamma = self.gammadash()
         d2gamma = self.gammadashdash()
         d3gamma = self.gammadashdashdash()
-
-        def norm(a):
-            return np.linalg.norm(a, axis=1)
-
-        def inner(a, b):
-            return np.sum(a * b, axis=1)
-
-        def cross(a, b):
-            return np.cross(a, b, axis=1)
-
-        dkappa_by_dphi[:] = (
-            inner(cross(dgamma, d2gamma), cross(dgamma, d3gamma))
-            / (norm(cross(dgamma, d2gamma)) * norm(dgamma) ** 3)
-            - 3
-            * inner(dgamma, d2gamma)
-            * norm(cross(dgamma, d2gamma))
-            / norm(dgamma) ** 5
-        )
+        def norm(a): return np.linalg.norm(a, axis=1)
+        def inner(a, b): return np.sum(a*b, axis=1)
+        def cross(a, b): return np.cross(a, b, axis=1)
+        dkappa_by_dphi[:] = inner(cross(dgamma, d2gamma), cross(dgamma, d3gamma))/(norm(cross(dgamma, d2gamma)) * norm(dgamma)**3) \
+            - 3 * inner(dgamma, d2gamma) * norm(cross(dgamma, d2gamma))/norm(dgamma)**5
         return dkappa_by_dphi
 
     def dfrenet_frame_by_dcoeff(self):
@@ -524,18 +394,11 @@ class Curve(Optimizable):
         l = self.incremental_arclength()
         dl_by_dcoeff = self.dincremental_arclength_by_dcoeff()
 
-        def norm(a):
-            return np.linalg.norm(a, axis=1)
-
-        def inner(a, b):
-            return np.sum(a * b, axis=1)
+        def norm(a): return np.linalg.norm(a, axis=1)
+        def inner(a, b): return np.sum(a*b, axis=1)
 
         N = len(self.quadpoints)
-        dt_by_dcoeff, dn_by_dcoeff, db_by_dcoeff = (
-            np.zeros((N, 3, self.num_dofs())),
-            np.zeros((N, 3, self.num_dofs())),
-            np.zeros((N, 3, self.num_dofs())),
-        )
+        dt_by_dcoeff, dn_by_dcoeff, db_by_dcoeff = (np.zeros((N, 3, self.num_dofs())), np.zeros((N, 3, self.num_dofs())), np.zeros((N, 3, self.num_dofs())))
         t, n, b = self.frenet_frame()
 
         dt_by_dcoeff[:, :, :] = (
@@ -544,48 +407,23 @@ class Curve(Optimizable):
             + d2gamma_by_dphidcoeff / l[:, None, None]
         )
 
-        tdash = (1.0 / l[:, None]) ** 2 * (
+        tdash = (1./l[:, None])**2 * (
             l[:, None] * d2gamma_by_dphidphi
-            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi) / l)[:, None] * dgamma_by_dphi
+            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi)/l)[:, None] * dgamma_by_dphi
         )
 
-        dtdash_by_dcoeff = (-2 * dl_by_dcoeff[:, None, :] / l[:, None, None] ** 3) * (
-            l[:, None] * d2gamma_by_dphidphi
-            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi) / l)[:, None] * dgamma_by_dphi
-        )[:, :, None] + (1.0 / l[:, None, None]) ** 2 * (
-            dl_by_dcoeff[:, None, :] * d2gamma_by_dphidphi[:, :, None]
-            + l[:, None, None] * d3gamma_by_dphidphidcoeff
-            - (
-                inner(d2gamma_by_dphidcoeff, d2gamma_by_dphidphi[:, :, None])[
-                    :, None, :
-                ]
-                / l[:, None, None]
-            )
-            * dgamma_by_dphi[:, :, None]
-            - (
-                inner(dgamma_by_dphi[:, :, None], d3gamma_by_dphidphidcoeff)[:, None, :]
-                / l[:, None, None]
-            )
-            * dgamma_by_dphi[:, :, None]
-            + (
-                inner(dgamma_by_dphi, d2gamma_by_dphidphi)[:, None, None]
-                * dl_by_dcoeff[:, None, :]
-                / l[:, None, None] ** 2
-            )
-            * dgamma_by_dphi[:, :, None]
-            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi) / l)[:, None, None]
-            * d2gamma_by_dphidcoeff
+        dtdash_by_dcoeff = (-2 * dl_by_dcoeff[:, None, :] / l[:, None, None]**3) * (l[:, None] * d2gamma_by_dphidphi - (inner(dgamma_by_dphi, d2gamma_by_dphidphi)/l)[:, None] * dgamma_by_dphi)[:, :, None] \
+            + (1./l[:, None, None])**2 * (
+                dl_by_dcoeff[:, None, :] * d2gamma_by_dphidphi[:, :, None] + l[:, None, None] * d3gamma_by_dphidphidcoeff
+                - (inner(d2gamma_by_dphidcoeff, d2gamma_by_dphidphi[:, :, None])[:, None, :]/l[:, None, None]) * dgamma_by_dphi[:, :, None]
+                - (inner(dgamma_by_dphi[:, :, None], d3gamma_by_dphidphidcoeff)[:, None, :]/l[:, None, None]) * dgamma_by_dphi[:, :, None]
+                + (inner(dgamma_by_dphi, d2gamma_by_dphidphi)[:, None, None] * dl_by_dcoeff[:, None, :]/l[:, None, None]**2) * dgamma_by_dphi[:, :, None]
+                - (inner(dgamma_by_dphi, d2gamma_by_dphidphi)/l)[:, None, None] * d2gamma_by_dphidcoeff
         )
-        dn_by_dcoeff[:, :, :] = (1.0 / norm(tdash))[
-            :, None, None
-        ] * dtdash_by_dcoeff - (
-            inner(tdash[:, :, None], dtdash_by_dcoeff)[:, None, :]
-            / inner(tdash, tdash)[:, None, None] ** 1.5
-        ) * tdash[:, :, None]
+        dn_by_dcoeff[:, :, :] = (1./norm(tdash))[:, None, None] * dtdash_by_dcoeff \
+            - (inner(tdash[:, :, None], dtdash_by_dcoeff)[:, None, :]/inner(tdash, tdash)[:, None, None]**1.5) * tdash[:, :, None]
 
-        db_by_dcoeff[:, :, :] = np.cross(
-            dt_by_dcoeff, n[:, :, None], axis=1
-        ) + np.cross(t[:, :, None], dn_by_dcoeff, axis=1)
+        db_by_dcoeff[:, :, :] = np.cross(dt_by_dcoeff, n[:, :, None], axis=1) + np.cross(t[:, :, None], dn_by_dcoeff, axis=1)
         return dt_by_dcoeff, dn_by_dcoeff, db_by_dcoeff
 
     def dkappadash_by_dcoeff(self):
@@ -603,15 +441,9 @@ class Curve(Optimizable):
         d2gamma = self.gammadashdash()
         d3gamma = self.gammadashdashdash()
 
-        def norm(a):
-            return np.linalg.norm(a, axis=1)
-
-        def inner(a, b):
-            return np.sum(a * b, axis=1)
-
-        def cross(a, b):
-            return np.cross(a, b, axis=1)
-
+        def norm(a): return np.linalg.norm(a, axis=1)
+        def inner(a, b): return np.sum(a*b, axis=1)
+        def cross(a, b): return np.cross(a, b, axis=1)
         d1_dot_d2 = inner(dgamma, d2gamma)
         d1_x_d2 = cross(dgamma, d2gamma)
         d1_x_d3 = cross(dgamma, d3gamma)
@@ -634,25 +466,19 @@ class Curve(Optimizable):
             d1_x_d3coeff = cross(dgamma, d3gamma_dcoeff)
 
             dkappadash_by_dcoeff[:, i] = (
-                (
-                    +inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d3)
-                    + inner(d1_x_d2, d1coeff_x_d3 + d1_x_d3coeff)
-                )
-                / (norm_d1_x_d2 * normdgamma**3)
-                - inner(d1_x_d2, d1_x_d3)
-                * (
-                    inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)
-                    / (norm_d1_x_d2**3 * normdgamma**3)
-                    + 3 * inner(dgamma, dgamma_dcoeff) / (norm_d1_x_d2 * normdgamma**5)
-                )
-                - 3
-                * (
-                    +(d1coeff_dot_d2 + d1_dot_d2coeff) * norm_d1_x_d2 / normdgamma**5
-                    + d1_dot_d2
-                    * inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)
-                    / (norm_d1_x_d2 * normdgamma**5)
-                    - 5 * d1_dot_d2 * norm_d1_x_d2 * d1_dot_d1coeff / normdgamma**7
-                )
+                +inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d3)
+                + inner(d1_x_d2, d1coeff_x_d3 + d1_x_d3coeff)
+            )/(norm_d1_x_d2 * normdgamma**3) \
+                - inner(d1_x_d2, d1_x_d3) * (
+                    (
+                        inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)/(norm_d1_x_d2**3 * normdgamma**3)
+                        + 3 * inner(dgamma, dgamma_dcoeff)/(norm_d1_x_d2 * normdgamma**5)
+                    )
+            ) \
+                - 3 * (
+                    + (d1coeff_dot_d2 + d1_dot_d2coeff) * norm_d1_x_d2/normdgamma**5
+                    + d1_dot_d2 * inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)/(norm_d1_x_d2 * normdgamma**5)
+                    - 5 * d1_dot_d2 * norm_d1_x_d2 * d1_dot_d1coeff/normdgamma**7
             )
         return dkappadash_by_dcoeff
 
@@ -669,7 +495,6 @@ class Curve(Optimizable):
         """
         return centroid_pure(self.gamma(), self.gammadash())
 
-
 class JaxCurve(sopp.Curve, Curve):
     """
     A class for curves defined by a pure function.
@@ -679,7 +504,6 @@ class JaxCurve(sopp.Curve, Curve):
         gamma_pure (function): Pure function for the curve.
         **kwargs: Additional keyword arguments.
     """
-
     def __init__(self, quadpoints, gamma_pure, **kwargs):
         if isinstance(quadpoints, np.ndarray):
             quadpoints = list(quadpoints)
@@ -695,58 +519,26 @@ class JaxCurve(sopp.Curve, Curve):
         self.gamma_jax = jit(lambda dofs: self.gamma_pure(dofs, points))
         self.gamma_impl_jax = jit(lambda dofs, p: self.gamma_pure(dofs, p))
         self.dgamma_by_dcoeff_jax = jit(jacfwd(self.gamma_jax))
-        self.dgamma_by_dcoeff_vjp_jax = jit(
-            lambda x, v: vjp(self.gamma_jax, x)[1](v)[0]
-        )
+        self.dgamma_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gamma_jax, x)[1](v)[0])
 
-        self.gammadash_pure = lambda x, q: jvp(
-            lambda p: self.gamma_pure(x, p), (q,), (ones,)
-        )[1]
+        self.gammadash_pure = lambda x, q: jvp(lambda p: self.gamma_pure(x, p), (q,), (ones,))[1]
         self.gammadash_jax = jit(lambda x: self.gammadash_pure(x, points))
         self.dgammadash_by_dcoeff_jax = jit(jacfwd(self.gammadash_jax))
-        self.dgammadash_by_dcoeff_vjp_jax = jit(
-            lambda x, v: vjp(self.gammadash_jax, x)[1](v)[0]
-        )
+        self.dgammadash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammadash_jax, x)[1](v)[0])
 
-        self.gammadashdash_pure = lambda x, q: jvp(
-            lambda p: self.gammadash_pure(x, p), (q,), (ones,)
-        )[1]
+        self.gammadashdash_pure = lambda x, q: jvp(lambda p: self.gammadash_pure(x, p), (q,), (ones,))[1]
         self.gammadashdash_jax = jit(lambda x: self.gammadashdash_pure(x, points))
         self.dgammadashdash_by_dcoeff_jax = jit(jacfwd(self.gammadashdash_jax))
-        self.dgammadashdash_by_dcoeff_vjp_jax = jit(
-            lambda x, v: vjp(self.gammadashdash_jax, x)[1](v)[0]
-        )
+        self.dgammadashdash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammadashdash_jax, x)[1](v)[0])
 
-        self.gammadashdashdash_pure = lambda x, q: jvp(
-            lambda p: self.gammadashdash_pure(x, p), (q,), (ones,)
-        )[1]
-        self.gammadashdashdash_jax = jit(
-            lambda x: self.gammadashdashdash_pure(x, points)
-        )
+        self.gammadashdashdash_pure = lambda x, q: jvp(lambda p: self.gammadashdash_pure(x, p), (q,), (ones,))[1]
+        self.gammadashdashdash_jax = jit(lambda x: self.gammadashdashdash_pure(x, points))
         self.dgammadashdashdash_by_dcoeff_jax = jit(jacfwd(self.gammadashdashdash_jax))
-        self.dgammadashdashdash_by_dcoeff_vjp_jax = jit(
-            lambda x, v: vjp(self.gammadashdashdash_jax, x)[1](v)[0]
-        )
+        self.dgammadashdashdash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammadashdashdash_jax, x)[1](v)[0])
 
-        self.incremental_arclength_jax = jit(
-            lambda x: incremental_arclength_pure(self.gammadash_jax(x))
-        )
-        self.dkappa_by_dcoeff_vjp_jax = jit(
-            lambda x, v: vjp(
-                lambda d: kappa_pure(self.gammadash_jax(d), self.gammadashdash_jax(d)),
-                x,
-            )[1](v)[0]
-        )
-        self.dtorsion_by_dcoeff_vjp_jax = jit(
-            lambda x, v: vjp(
-                lambda d: torsion_pure(
-                    self.gammadash_jax(d),
-                    self.gammadashdash_jax(d),
-                    self.gammadashdashdash_jax(d),
-                ),
-                x,
-            )[1](v)[0]
-        )
+        self.incremental_arclength_jax = jit(lambda x: incremental_arclength_pure(self.gammadash_jax(x)))
+        self.dkappa_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(lambda d: kappa_pure(self.gammadash_jax(d), self.gammadashdash_jax(d)), x)[1](v)[0])
+        self.dtorsion_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(lambda d: torsion_pure(self.gammadash_jax(d), self.gammadashdash_jax(d), self.gammadashdashdash_jax(d)), x)[1](v)[0])
 
     def set_dofs(self, dofs):
         """
@@ -852,9 +644,7 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        dgammadashdash_by_dcoeff[:, :, :] = self.dgammadashdash_by_dcoeff_jax(
-            self.get_dofs()
-        )
+        dgammadashdash_by_dcoeff[:, :, :] = self.dgammadashdash_by_dcoeff_jax(self.get_dofs())
 
     def dgammadashdash_by_dcoeff_vjp_impl(self, v):
         r"""
@@ -889,9 +679,7 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        dgammadashdashdash_by_dcoeff[:, :, :] = self.dgammadashdashdash_by_dcoeff_jax(
-            self.get_dofs()
-        )
+        dgammadashdashdash_by_dcoeff[:, :, :] = self.dgammadashdashdash_by_dcoeff_jax(self.get_dofs())
 
     def dgammadashdashdash_by_dcoeff_vjp_impl(self, v):
         r"""
@@ -946,10 +734,14 @@ class RotatedCurve(sopp.Curve, Curve):
         Curve.__init__(self, depends_on=[curve])
         self._phi = phi
         self.rotmat = np.asarray(
-            [[cos(phi), -sin(phi), 0], [sin(phi), cos(phi), 0], [0, 0, 1]]
-        ).T
+            [[cos(phi), -sin(phi), 0],
+             [sin(phi), cos(phi), 0],
+             [0, 0, 1]]).T
         if flip:
-            self.rotmat = self.rotmat @ np.asarray([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+            self.rotmat = self.rotmat @ np.asarray(
+                [[1, 0, 0],
+                 [0, -1, 0],
+                 [0, 0, -1]])
         self.rotmatT = self.rotmat.T.copy()
 
     def get_dofs(self):
@@ -979,10 +771,8 @@ class RotatedCurve(sopp.Curve, Curve):
 
         """
 
-        if (
-            len(quadpoints) == len(self.curve.quadpoints)
-            and np.sum((quadpoints - self.curve.quadpoints) ** 2) < 1e-15
-        ):
+        if len(quadpoints) == len(self.curve.quadpoints) \
+                and np.sum((quadpoints-self.curve.quadpoints)**2) < 1e-15:
             gamma[:] = self.curve.gamma() @ self.rotmat
         else:
             self.curve.gamma_impl(gamma, quadpoints)
@@ -1054,9 +844,7 @@ class RotatedCurve(sopp.Curve, Curve):
 
         """
 
-        dgammadashdash_by_dcoeff[:] = (
-            self.rotmatT @ self.curve.dgammadashdash_by_dcoeff()
-        )
+        dgammadashdash_by_dcoeff[:] = self.rotmatT @ self.curve.dgammadashdash_by_dcoeff()
 
     def dgammadashdashdash_by_dcoeff_impl(self, dgammadashdashdash_by_dcoeff):
         r"""
@@ -1070,9 +858,7 @@ class RotatedCurve(sopp.Curve, Curve):
 
         """
 
-        dgammadashdashdash_by_dcoeff[:] = (
-            self.rotmatT @ self.curve.dgammadashdashdash_by_dcoeff()
-        )
+        dgammadashdashdash_by_dcoeff[:] = self.rotmatT @ self.curve.dgammadashdashdash_by_dcoeff()
 
     def dgamma_by_dcoeff_vjp(self, v):
         r"""
@@ -1157,14 +943,14 @@ def curves_to_vtk(curves, filename, close=False, extra_data=None):
         x = np.concatenate([wrap(c.gamma()[:, 0]) for c in curves])
         y = np.concatenate([wrap(c.gamma()[:, 1]) for c in curves])
         z = np.concatenate([wrap(c.gamma()[:, 2]) for c in curves])
-        ppl = np.asarray([c.gamma().shape[0] + 1 for c in curves])
+        ppl = np.asarray([c.gamma().shape[0]+1 for c in curves])
     else:
         x = np.concatenate([c.gamma()[:, 0] for c in curves])
         y = np.concatenate([c.gamma()[:, 1] for c in curves])
         z = np.concatenate([c.gamma()[:, 2] for c in curves])
         ppl = np.asarray([c.gamma().shape[0] for c in curves])
-    data = np.concatenate([i * np.ones((ppl[i],)) for i in range(len(curves))])
-    pointData = {"idx": data}
+    data = np.concatenate([i*np.ones((ppl[i], )) for i in range(len(curves))])
+    pointData = {'idx': data}
     if extra_data is not None:
         pointData = {**pointData, **extra_data}
 
@@ -1230,9 +1016,8 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
         The coil radius used for spacing.
     """
     import warnings
-
     if Nmin_factor <= 2.0:
-        warnings.warn("Nmin_factor should be greater than 2.0 to avoid coil overlap.")
+        warnings.warn('Nmin_factor should be greater than 2.0 to avoid coil overlap.')
 
     # Get (X, Y, Z) coordinates of the two boundaries
     nfp = s_outer.nfp
@@ -1246,22 +1031,28 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
     y_min = 0
     z_max = np.max(z_outer)
     z_min = np.min(z_outer)
-    z_max = min(z_max, abs(z_min))  # Note min here!
-
+    z_max = min(z_max, abs(z_min))  # Note min here! 
+    
     # Initialize uniform grid
     if nfp != 1:
         x_min = 0.0
-
+    
     dx = (x_max - x_min) / (Nx - 1)  # x \in [x_min, x_max], x_min = 0.0 if nfp != 1
     dy = (y_max) / (Ny - 1)  # y \in [0, y_max]
-    # Z-grid spacing should be symmetric around z = 0 to be able
+    # Z-grid spacing should be symmetric around z = 0 to be able 
     # to properly impose stellarator symmetry
     dz = 2 * z_max / (Nz - 1)  # z \in [-z_max, z_max]
 
-    # Shift by dx / 2.0 to the right and dy / 2.0 to the top to continue to have
-    # dx and dy spacing between points on either side of a symmetry plane.
-    X = np.linspace(dx / 2.0 + x_min, x_max - dx / 2.0, Nx, endpoint=True)
-    Y = np.linspace(dy / 2.0 + y_min, y_max - dy / 2.0, Ny, endpoint=True)
+    # Shift by dx / 2.0 to the right and dy / 2.0 to the top to continue to have 
+    # dx and dy spacing between points on either side of a symmetry plane. 
+    X = np.linspace(
+        dx / 2.0 + x_min, x_max - dx / 2.0,
+        Nx, endpoint=True
+    )
+    Y = np.linspace(
+        dy / 2.0 + y_min, y_max - dy / 2.0,
+        Ny, endpoint=True
+    )
     Z = np.linspace(-z_max, z_max, Nz, endpoint=True)
 
     # Now recompute the grid spacing (for setting the coil radius R)
@@ -1273,13 +1064,11 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
 
     # Coils are now spaced so that every coil of radius R is at least 2R away from the next coil'
     R = Nmin / Nmin_factor
-    print("Major radius of the coils is R = ", R)
+    print('Major radius of the coils is R = ', R)
 
     # Make 3D mesh
-    X, Y, Z = np.meshgrid(X, Y, Z, indexing="ij")
-    xyz_uniform = np.transpose(np.array([X, Y, Z]), [1, 2, 3, 0]).reshape(
-        Nx * Ny * Nz, 3
-    )
+    X, Y, Z = np.meshgrid(X, Y, Z, indexing='ij')
+    xyz_uniform = np.transpose(np.array([X, Y, Z]), [1, 2, 3, 0]).reshape(Nx * Ny * Nz, 3)
 
     # Now need to chop off points close to the unique sector [0, (2)pi / nfp]
     # to avoid overlap after discrete symmetry operations.
@@ -1293,12 +1082,8 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
     nt = 100
     t = np.linspace(0, 2 * np.pi, nt)
     circle_xy = np.zeros((nt, Nx * Ny * Nz, 2))
-    circle_xy[:, :, 0] = R * np.outer(np.cos(t), np.ones(Nx * Ny * Nz)) + np.outer(
-        np.ones(nt), xyz_uniform[:, 0]
-    )
-    circle_xy[:, :, 1] = R * np.outer(np.sin(t), np.ones(Nx * Ny * Nz)) + np.outer(
-        np.ones(nt), xyz_uniform[:, 1]
-    )
+    circle_xy[:, :, 0] = R * np.outer(np.cos(t), np.ones(Nx * Ny * Nz)) + np.outer(np.ones(nt), xyz_uniform[:, 0])
+    circle_xy[:, :, 1] = R * np.outer(np.sin(t), np.ones(Nx * Ny * Nz)) + np.outer(np.ones(nt), xyz_uniform[:, 1])
 
     # Remove points where the angle is greater than phi0 or less than 0
     phi = np.arctan2(circle_xy[:, :, 1], circle_xy[:, :, 0])
@@ -1309,15 +1094,8 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
 
 
 def create_planar_curves_between_two_toroidal_surfaces(
-    s,
-    s_inner,
-    s_outer,
-    Nx=10,
-    Ny=10,
-    Nz=10,
-    order=1,
-    use_jax_curve=False,
-    numquadpoints=None,
+    s, s_inner, s_outer, Nx=10, Ny=10, Nz=10, order=1,
+    use_jax_curve=False, numquadpoints=None,
     Nmin_factor=2.01,
 ):
     """
@@ -1367,12 +1145,10 @@ def create_planar_curves_between_two_toroidal_surfaces(
     normal_outer = s_outer.unitnormal().reshape(-1, 3)
     xyz_outer = s_outer.gamma().reshape(-1, 3)
 
-    # Now guarantees that circular coils of radius R on this grid do not overlap
-    xyz_uniform, R = _setup_uniform_grid_in_bounding_box(
-        s_outer, Nx, Ny, Nz, Nmin_factor=Nmin_factor
-    )
-
-    # Have the uniform grid, now need to loop through and eliminate any points that are
+    # Now guarantees that circular coils of radius R on this grid do not overlap 
+    xyz_uniform, R = _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=Nmin_factor)
+    
+    # Have the uniform grid, now need to loop through and eliminate any points that are 
     # not actually between the two toroidal surfaces.
     contig = np.ascontiguousarray
     grid_xyz = sopp.define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(
@@ -1380,13 +1156,13 @@ def create_planar_curves_between_two_toroidal_surfaces(
         contig(normal_outer),
         contig(xyz_uniform),
         contig(xyz_inner),
-        contig(xyz_outer),
+        contig(xyz_outer)
     )
     inds = np.ravel(np.logical_not(np.all(grid_xyz == 0.0, axis=-1)))
     grid_xyz = np.array(grid_xyz[inds, :], dtype=float)
     ncoils = grid_xyz.shape[0]
     if numquadpoints is None:
-        nquad = (order + 1) * 40
+        nquad = (order + 1)*40
     else:
         nquad = numquadpoints
     if use_jax_curve:
@@ -1413,23 +1189,14 @@ def create_planar_curves_between_two_toroidal_surfaces(
         dofs[2 * order + 3] = calpha2 * sdelta2
         dofs[2 * order + 4] = -salpha2 * sdelta2
         # Now specify the center
-        dofs[2 * order + 5 : 2 * order + 8] = grid_xyz[ic, :]
+        dofs[2 * order + 5:2 * order + 8] = grid_xyz[ic, :]
         curves[ic].set_dofs(dofs)
         curves[ic].x = curves[ic].x  # need to do this to transfer data to C++?
     all_curves = apply_symmetries_to_curves(curves, nfp, stellsym)
     return curves, all_curves
 
 
-def create_equally_spaced_curves(
-    ncurves,
-    nfp,
-    stellsym,
-    R0=1.0,
-    R1=0.5,
-    order=6,
-    numquadpoints=None,
-    use_jax_curve=False,
-):
+def create_equally_spaced_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6, numquadpoints=None, use_jax_curve=False):
     """
     Create ``ncurves`` curves of type
     :obj:`~simsopt.geo.curvexyzfourier.CurveXYZFourier` of order
@@ -1469,7 +1236,6 @@ def create_equally_spaced_curves(
             List of CurvePlanarFourier or JaxCurvePlanarFourier objects.
     """
     from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
-
     if numquadpoints is None:
         numquadpoints = 15 * order
     if use_jax_curve:
@@ -1494,15 +1260,8 @@ def create_equally_spaced_curves(
 
 
 def create_equally_spaced_planar_curves(
-    ncurves,
-    nfp,
-    stellsym,
-    R0=1.0,
-    R1=0.5,
-    order=6,
-    numquadpoints=None,
-    use_jax_curve=False,
-):
+        ncurves, nfp, stellsym, R0=1.0, R1=0.5, 
+        order=6, numquadpoints=None, use_jax_curve=False):
     """
     Create ``ncurves`` curves of type
     :obj:`~simsopt.geo.curveplanarfourier.CurvePlanarFourier` of order
@@ -1533,7 +1292,6 @@ def create_equally_spaced_planar_curves(
             List of CurvePlanarFourier or JaxCurvePlanarFourier objects.
     """
     from simsopt.geo.curveplanarfourier import CurvePlanarFourier, JaxCurvePlanarFourier
-
     if numquadpoints is None:
         numquadpoints = 15 * order
     if use_jax_curve:
@@ -1544,7 +1302,7 @@ def create_equally_spaced_planar_curves(
     for k in range(ncurves):
         angle = (k + 0.5) * (2 * np.pi) / ((1 + int(stellsym)) * nfp * ncurves)
         curve = curvefunc(numquadpoints, order)
-        rcCoeffs = np.zeros(order + 1)
+        rcCoeffs = np.zeros(order+1)
         rcCoeffs[0] = R1
         rsCoeffs = np.zeros(order)
         center = [R0 * cos(angle), R0 * sin(angle), 0]
