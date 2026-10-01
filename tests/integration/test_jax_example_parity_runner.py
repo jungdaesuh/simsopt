@@ -1395,7 +1395,7 @@ def _publish_quality_band_run(
     )
     relationship = next(
         item
-        for item in contract_pair.parity.all_relationships
+        for item in contract_pair.parity.relationships
         if item.case_id == _BAND_CASE_ID
     ).resolve_scale("native_default")
     outer_optimizer_policy = next(
@@ -2306,7 +2306,7 @@ def _inject_completed_lane_receipts(
             repo_root=repo_root,
         )
         relationship = next(
-            item for item in pair.parity.all_relationships if item.case_id == case_id
+            item for item in pair.parity.relationships if item.case_id == case_id
         )
         example = next(
             item for item in pair.examples if item.id == relationship.jax_example_id

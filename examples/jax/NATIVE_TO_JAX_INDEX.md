@@ -2,7 +2,6 @@
 
 Generated from `manifest.json` and `parity_manifest.json`. Do not edit this table by hand.
 Official upstream scope: `https://github.com/hiddenSymmetries/simsopt` `master` at `9e027eac38028d57aa23777be52a781aa860e347` (53 source files).
-Local experimental registrations: 0 source files.
 
 ## Official upstream catalog
 

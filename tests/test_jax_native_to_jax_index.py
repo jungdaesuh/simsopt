@@ -22,10 +22,9 @@ def test_native_to_jax_index_matches_validated_contracts() -> None:
     rendered = render_native_to_jax_index(repo_root=repo_root)
 
     assert INDEX_PATH.read_text(encoding="utf-8") == rendered
-    # One row per official source; no experimental source is registered.
+    # One row per official source.
     assert rendered.count("\n| `examples/") == 53
     assert "## Official upstream catalog" in rendered
-    assert "## Experimental local registrations" not in rendered
     assert "examples/1_Simple/periodicfieldline_QA.py" in rendered
     assert "examples/1_Simple/periodicfieldline_QH.py" in rendered
 

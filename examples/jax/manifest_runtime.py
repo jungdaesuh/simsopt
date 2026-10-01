@@ -65,7 +65,7 @@ def _canonical_examples(
 ) -> tuple[RuntimeExample, ...]:
     source_by_example_id = {
         source.mirror_example_id: source.source
-        for source in manifest.all_sources
+        for source in manifest.source_catalog
         if source.mirror_example_id is not None
     }
     return tuple(

@@ -69,7 +69,3 @@ OFFICIAL_NATIVE_EXAMPLE_SOURCES: Final[tuple[str, ...]] = (
     "stellarator_benchmarks/2DOF_vmecOnly_targetIotaAndVolume.py",
     "stellarator_benchmarks/7dof.py",
 )
-
-OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET: Final[frozenset[str]] = frozenset(
-    OFFICIAL_NATIVE_EXAMPLE_SOURCES
-)

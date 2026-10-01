@@ -13,7 +13,7 @@ from examples.jax.manifest_contracts_v3 import (
 from examples.jax.parity._manifest import (
     ParityManifestValidationError,
     ParityRelationship,
-    parse_v2_parity_relationship_groups_document,
+    parse_v2_parity_relationships_document,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,10 +40,7 @@ def _load_pair(parity_document: dict[str, object]) -> ManifestContractPair:
 
 
 def _parse(document: dict[str, object]) -> tuple[ParityRelationship, ...]:
-    official, experimental = parse_v2_parity_relationship_groups_document(
-        document, repo_root=REPO_ROOT
-    )
-    return official + experimental
+    return parse_v2_parity_relationships_document(document, repo_root=REPO_ROOT)
 
 
 def _relationships(document: dict[str, object]) -> list[dict[str, object]]:
@@ -58,16 +55,16 @@ def test_parity_manifest_covers_every_owned_mirror_exactly_once() -> None:
 
     expected = {
         (source.mirror_example_id, source.source)
-        for source in pair.examples.all_sources
+        for source in pair.examples.source_catalog
         if source.mirror_example_id is not None
     }
     actual = {
         (relationship.jax_example_id, relationship.native_source)
-        for relationship in pair.parity.all_relationships
+        for relationship in pair.parity.relationships
     }
 
     assert actual == expected
-    assert len(actual) == len(pair.parity.all_relationships)
+    assert len(actual) == len(pair.parity.relationships)
 
 
 def test_parity_manifest_declares_scientific_workflow_stage_coverage() -> None:

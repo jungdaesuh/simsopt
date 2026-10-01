@@ -8,7 +8,6 @@ from types import MappingProxyType
 from typing import Literal, Mapping
 
 from examples.jax.official_source_catalog import (
-    OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET,
     OFFICIAL_NATIVE_EXAMPLE_SOURCES,
 )
 from examples.jax.outer_optimizer_policy import (
@@ -18,7 +17,7 @@ from examples.jax.outer_optimizer_policy import (
 )
 from examples.jax.parity._manifest import (
     ParityManifest,
-    parse_v2_parity_relationship_groups_document,
+    parse_v2_parity_relationships_document,
 )
 
 SourceDispositionV3 = Literal["eligible", "hybrid", "blocked", "not_applicable"]
@@ -121,17 +120,11 @@ class JaxExampleRecordV3:
 
 @dataclass(frozen=True)
 class JaxExamplesManifestV3:
-    """Official upstream coverage plus explicitly registered local extensions."""
+    """Official upstream coverage and the JAX examples that mirror it."""
 
     source_catalog: tuple[SourceRecordV3, ...]
-    experimental_sources: tuple[SourceRecordV3, ...]
     jax_examples: tuple[JaxExampleRecordV3, ...]
     schema_version: Literal[3] = 3
-
-    @property
-    def all_sources(self) -> tuple[SourceRecordV3, ...]:
-        """Return every source registration without changing official coverage scope."""
-        return self.source_catalog + self.experimental_sources
 
 
 @dataclass(frozen=True)
@@ -397,30 +390,6 @@ def _validate_v3_ownership(manifest: JaxExamplesManifestV3, repo_root: Path) -> 
         raise ManifestV3ValidationError(
             "source catalog does not match the pinned official upstream inventory"
         )
-    experimental_sources = tuple(
-        record.source for record in manifest.experimental_sources
-    )
-    if experimental_sources != tuple(sorted(set(experimental_sources))):
-        raise ManifestV3ValidationError(
-            "experimental source catalog must be sorted and unique"
-        )
-    if set(experimental_sources) & OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET:
-        raise ManifestV3ValidationError(
-            "experimental source catalog overlaps the official upstream inventory"
-        )
-    all_sources = manifest.all_sources
-    if len(all_sources) != len({record.source for record in all_sources}):
-        raise ManifestV3ValidationError("source registrations must be globally unique")
-    missing_experimental_paths = sorted(
-        source.source
-        for source in manifest.experimental_sources
-        if not (repo_root / "examples" / source.source).is_file()
-    )
-    if missing_experimental_paths:
-        raise ManifestV3ValidationError(
-            "experimental source registrations do not exist locally: "
-            f"{missing_experimental_paths}"
-        )
     example_ids = tuple(record.id for record in manifest.jax_examples)
     example_paths = tuple(record.path for record in manifest.jax_examples)
     if len(example_ids) != len(set(example_ids)):
@@ -429,7 +398,7 @@ def _validate_v3_ownership(manifest: JaxExamplesManifestV3, repo_root: Path) -> 
         raise ManifestV3ValidationError("duplicate executable path")
     by_id = {record.id: record for record in manifest.jax_examples}
     owners: dict[str, str] = {}
-    for source in all_sources:
+    for source in manifest.source_catalog:
         mirror_id = source.mirror_example_id
         if mirror_id is None:
             continue
@@ -471,19 +440,6 @@ def _validate_v3_ownership(manifest: JaxExamplesManifestV3, repo_root: Path) -> 
             raise ManifestV3ValidationError(
                 f"source and executable readiness disagree: {source.source}"
             )
-        if (
-            example.outer_optimizer_policy is not None
-            and example.outer_optimizer_policy.registry_scope
-            != (
-                "official"
-                if source.source in OFFICIAL_NATIVE_EXAMPLE_SOURCE_SET
-                else "experimental"
-            )
-        ):
-            raise ManifestV3ValidationError(
-                "outer optimizer policy scope does not match source registration: "
-                f"{example.id}"
-            )
     one_to_one_ids = {
         record.id
         for record in manifest.jax_examples
@@ -515,8 +471,7 @@ def parse_examples_v3_document(
     """Parse schema v3 and enforce sole, exact-name source ownership."""
     root = _mapping(document, "manifest")
     required_fields = frozenset({"schema_version", "source_catalog", "jax_examples"})
-    optional_fields = frozenset({"experimental_sources"})
-    unexpected = set(root) - required_fields - optional_fields
+    unexpected = set(root) - required_fields
     missing = required_fields - set(root)
     if unexpected or missing:
         raise ManifestV3ValidationError(
@@ -532,12 +487,6 @@ def parse_examples_v3_document(
             _source_record(value, index)
             for index, value in enumerate(
                 _sequence(root["source_catalog"], "source_catalog")
-            )
-        ),
-        experimental_sources=tuple(
-            _source_record(value, index)
-            for index, value in enumerate(
-                _sequence(root.get("experimental_sources", []), "experimental_sources")
             )
         ),
         jax_examples=tuple(
@@ -557,34 +506,25 @@ def _parse_parity_v2_document(
     examples_manifest: JaxExamplesManifestV3,
     repo_root: Path,
 ) -> ParityManifest:
-    official_relationships, experimental_relationships = (
-        parse_v2_parity_relationship_groups_document(document, repo_root=repo_root)
+    relationships = parse_v2_parity_relationships_document(
+        document, repo_root=repo_root
     )
     examples_by_id = {record.id: record for record in examples_manifest.jax_examples}
-    relationship_groups = (
-        (examples_manifest.source_catalog, official_relationships, "official"),
-        (
-            examples_manifest.experimental_sources,
-            experimental_relationships,
-            "experimental",
-        ),
+    expected_order = tuple(
+        (source.mirror_example_id, source.source)
+        for source in examples_manifest.source_catalog
+        if source.mirror_example_id is not None
     )
-    for sources, relationships, scope in relationship_groups:
-        expected_order = tuple(
-            (source.mirror_example_id, source.source)
-            for source in sources
-            if source.mirror_example_id is not None
+    actual_order = tuple(
+        (relationship.jax_example_id, relationship.native_source)
+        for relationship in relationships
+    )
+    if actual_order != expected_order:
+        raise ManifestV3ValidationError(
+            "official parity relationships must exactly follow one-to-one "
+            "source ownership"
         )
-        actual_order = tuple(
-            (relationship.jax_example_id, relationship.native_source)
-            for relationship in relationships
-        )
-        if actual_order != expected_order:
-            raise ManifestV3ValidationError(
-                f"{scope} parity relationships must exactly follow one-to-one "
-                "source ownership"
-            )
-    for relationship in (*official_relationships, *experimental_relationships):
+    for relationship in relationships:
         example = examples_by_id[relationship.jax_example_id]
         if example.classification == "tutorial":
             raise ManifestV3ValidationError("tutorial cannot be parity coverage")
@@ -604,11 +544,7 @@ def _parse_parity_v2_document(
             raise ManifestV3ValidationError(
                 f"planned executable cannot claim parity: {example.id}"
             )
-    return ParityManifest(
-        schema_version=2,
-        relationships=official_relationships,
-        experimental_relationships=experimental_relationships,
-    )
+    return ParityManifest(schema_version=2, relationships=relationships)
 
 
 def _schema_version(document: object, contract: str) -> int:

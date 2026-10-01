@@ -356,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
             case = get_case(case_id)
             relationships = tuple(
                 relationship
-                for relationship in parity_manifest.all_relationships
+                for relationship in parity_manifest.relationships
                 if relationship.case_id == case_id
             )
             if len(relationships) != 1:

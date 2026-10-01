@@ -14,8 +14,7 @@ native source it names.
 The generated
 [`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists the native sources,
 their exact JAX mirrors or blockers, device scope, and execution scale.
-Registered branch-only experiments would appear in a separate section and not
-count toward official coverage. Regenerate it from the validated manifests with
+Regenerate it from the validated manifests with
 `python -m examples.jax.native_to_jax_index --write`; use `--check` in
 validation.
 
@@ -116,8 +115,7 @@ example cannot borrow this policy. Missing declarations retain the default ban.
 This permission does not relax transfer guards, source provenance, scientific
 acceptance, or parity comparisons. CPU control is not a GPU-resident optimizer;
 performance claims must state whether they time the JAX region or the complete
-workflow. Experimental policies authorize explicit experimental execution;
-they do not contribute official upstream coverage.
+workflow.
 
 The serial wrappers publish `problem.x` and their bounded log only after a
 successful solve; a failed result raises and leaves caller-owned state
@@ -225,27 +223,22 @@ The authoritative inventory is [`manifest.json`](manifest.json) and
 [`parity_manifest.json`](parity_manifest.json). Nothing else in this directory
 defines coverage.
 
-`manifest.json` separates official coverage from branch-only registrations:
+`manifest.json` holds the official coverage:
 
 - `source_catalog` — 53 official upstream source rows: 25 `eligible`, 1 `hybrid`,
   25 `blocked`, and 2 `not_applicable`. Membership is checked against the pinned
   official catalog, not whatever Python files happen to be in the local tiers.
-- `experimental_sources` — branch-only source rows, which contribute zero
-  official upstream coverage. There are none.
 - `jax_examples` — 26 executable records, 25 `ready` and 1 `planned` (the
   hybrid VMEC single-stage mirror). Each owns one official source.
 
 An owned record must sit at the identical tier and filename as its source, must
 be typed `one_to_one`, and cannot be a tutorial. Each mirror is owned by at
-most one source. `parity_manifest.json` separates 26 official relationships
-(25 `full`, 1 `unsupported`) from experimental relationships, of which there
-are none. Execution scale and verified evidence are separate from source
-coverage.
+most one source. `parity_manifest.json` holds 26 official relationships
+(25 `full`, 1 `unsupported`). Execution scale and verified evidence are
+separate from source coverage.
 
 `run_parity.py --case all-applicable` selects the 25 executable official
-relationships. Experimental cases remain available by explicit case ID;
-registration and safety checks still apply, but their results do not count
-toward official coverage.
+relationships.
 
 List the pairs from the manifest rather than from a hand-maintained table:
 
@@ -338,12 +331,9 @@ audited bundle states which contract produced it. No legacy manifest reader
 exists, so `used_legacy_manifest_adapter` is always `false`; the key stays so
 summary schema 2 keeps its shape, and the auditor rejects any other value.
 
-The active v3/v2 documents separate `experimental_sources` and
-`experimental_relationships` from official coverage. Those arrays may be omitted
-when empty. Historical v3 documents that mixed local extensions into
-`source_catalog` must be split before use with the current validator; historical
-receipts retain their original files and must be audited at their recorded
-source revision.
+The active v3/v2 documents hold official coverage only; a document with any
+other root field is rejected. Historical receipts retain their original files
+and must be audited at their recorded source revision.
 
 ## Author contract
 

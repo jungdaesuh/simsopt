@@ -417,7 +417,7 @@ def _scale_routes(scale: str):
     )
     relationship = next(
         item
-        for item in pair.parity.all_relationships
+        for item in pair.parity.relationships
         if item.case_id == "native-boozer"
     )
     return relationship.resolve_scale(scale).comparison_routes

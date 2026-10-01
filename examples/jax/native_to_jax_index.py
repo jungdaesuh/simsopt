@@ -40,7 +40,7 @@ def render_native_to_jax_index(*, repo_root: Path = REPO_ROOT) -> str:
     examples_by_id = {example.id: example for example in pair.examples.jax_examples}
     parity_by_source = {
         relationship.native_source: relationship
-        for relationship in pair.parity.all_relationships
+        for relationship in pair.parity.relationships
     }
     table_header = (
         "| Native example | JAX mirror | Classification | "
@@ -60,18 +60,12 @@ def render_native_to_jax_index(*, repo_root: Path = REPO_ROOT) -> str:
             f"`{OFFICIAL_UPSTREAM_COMMIT}` "
             f"({len(pair.examples.source_catalog)} source files)."
         ),
-        (
-            f"Local experimental registrations: "
-            f"{len(pair.examples.experimental_sources)} source files."
-        ),
         "",
         "## Official upstream catalog",
         "",
         *table_header,
     ]
-    for source_index, source in enumerate(pair.examples.all_sources):
-        if source_index == len(pair.examples.source_catalog):
-            lines.extend(("", "## Experimental local registrations", "", *table_header))
+    for source in pair.examples.source_catalog:
         example = (
             examples_by_id[source.mirror_example_id]
             if source.mirror_example_id is not None

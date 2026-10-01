@@ -145,7 +145,7 @@ def audit_published_run(
     parity_manifest = contract_pair.parity
     relationships_by_case = {
         relationship.case_id: relationship
-        for relationship in parity_manifest.all_relationships
+        for relationship in parity_manifest.relationships
         if relationship.case_id is not None
     }
     lanes_value = summary.get("lanes")

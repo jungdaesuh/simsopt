@@ -31,7 +31,6 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
     assert host.status == "ready"
     assert host.outer_optimizer_policy is not None
     assert host.outer_optimizer_policy.case_id == HOST_POLICY_ID
-    assert host.outer_optimizer_policy.registry_scope == "official"
     assert (
         next(
             example
@@ -124,7 +123,6 @@ def test_qfm_host_policy_is_bound_to_its_official_example_and_case() -> None:
     assert (
         qfm.outer_optimizer_policy.expected_driver == "scipy_lbfgsb_slsqp_qfm_sequence"
     )
-    assert qfm.outer_optimizer_policy.registry_scope == "official"
     assert qfm.outer_optimizer_policy.case_id == "native-qfm"
 
     borrower = next(

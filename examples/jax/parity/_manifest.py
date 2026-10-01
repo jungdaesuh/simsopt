@@ -56,7 +56,6 @@ PHASES = frozenset(
 LANE_PAIRS = frozenset({"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax-gpu"})
 COMPARATORS = frozenset({"allclose", "exact", "equivalent", "not_worse"})
 V2_ROOT_FIELDS = frozenset({"schema_version", "relationships"})
-V2_OPTIONAL_ROOT_FIELDS = frozenset({"experimental_relationships"})
 RELATIONSHIP_FIELDS = frozenset(
     {
         "case_id",
@@ -149,16 +148,10 @@ class ParityRelationship:
 
 @dataclass(frozen=True)
 class ParityManifest:
-    """Official relationships plus separately registered local experiments."""
+    """The official parity relationships."""
 
     schema_version: int
     relationships: tuple[ParityRelationship, ...]
-    experimental_relationships: tuple[ParityRelationship, ...] = ()
-
-    @property
-    def all_relationships(self) -> tuple[ParityRelationship, ...]:
-        """Return registered relationships for explicit execution and evidence audit."""
-        return self.relationships + self.experimental_relationships
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
@@ -454,12 +447,12 @@ def _relationship(value: object, index: int, repo_root: Path) -> ParityRelations
     )
 
 
-def parse_v2_parity_relationship_groups_document(
+def parse_v2_parity_relationships_document(
     value: object, *, repo_root: Path
-) -> tuple[tuple[ParityRelationship, ...], tuple[ParityRelationship, ...]]:
-    """Parse official and local-extension v2 groups without mixing their scope."""
+) -> tuple[ParityRelationship, ...]:
+    """Parse the official v2 parity relationships."""
     document = _mapping(value, "root")
-    unexpected = set(document) - V2_ROOT_FIELDS - V2_OPTIONAL_ROOT_FIELDS
+    unexpected = set(document) - V2_ROOT_FIELDS
     missing = V2_ROOT_FIELDS - set(document)
     if unexpected or missing:
         raise ParityManifestValidationError(
@@ -471,29 +464,23 @@ def parse_v2_parity_relationship_groups_document(
             f"unsupported parity schema version: {document['schema_version']!r}"
         )
 
-    def parse_group(
-        relationships: object, context: str
-    ) -> tuple[ParityRelationship, ...]:
-        return tuple(
-            _relationship(record, index, repo_root)
-            for index, record in enumerate(_sequence(relationships, context))
+    relationships = tuple(
+        _relationship(record, index, repo_root)
+        for index, record in enumerate(
+            _sequence(document["relationships"], "relationships")
         )
-
-    official = parse_group(document["relationships"], "relationships")
-    experimental = parse_group(
-        document.get("experimental_relationships", []), "experimental_relationships"
     )
     keys = tuple(
         (relationship.jax_example_id, relationship.native_source)
-        for relationship in (*official, *experimental)
+        for relationship in relationships
     )
     if len(keys) != len(set(keys)):
         raise ParityManifestValidationError("duplicate parity relationship")
     case_ids = tuple(
         relationship.case_id
-        for relationship in (*official, *experimental)
+        for relationship in relationships
         if relationship.case_id is not None
     )
     if len(case_ids) != len(set(case_ids)):
         raise ParityManifestValidationError("duplicate parity case_id")
-    return official, experimental
+    return relationships

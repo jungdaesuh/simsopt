@@ -52,19 +52,15 @@ def _assert_native_case_coverage(parity: ParityManifest) -> None:
         case_id for case_id in implemented_case_ids() if case_id.startswith("native-")
     }
     official_case_ids = _executable_case_ids(parity.relationships)
-    experimental_case_ids = _executable_case_ids(parity.experimental_relationships)
-    registered = official_case_ids | experimental_case_ids
-    omitted = sorted(implemented_native_cases - registered)
+    omitted = sorted(implemented_native_cases - official_case_ids)
     assert not omitted, f"Implemented native cases omitted: {omitted}"
     assert official_case_ids <= implemented_native_cases
-    assert experimental_case_ids <= implemented_native_cases
-    assert not official_case_ids & experimental_case_ids
     assert len(official_case_ids) == OFFICIAL_EXECUTABLE_BATCH_SIZE, (
         "official executable batch must remain "
         f"{OFFICIAL_EXECUTABLE_BATCH_SIZE}, got {len(official_case_ids)}"
     )
     combined_cases = set(implemented_case_ids()) - implemented_native_cases
-    assert not combined_cases & registered
+    assert not combined_cases & official_case_ids
 
 
 def _omit_qfm_executable_relationship(parity: dict[str, object]) -> None:
@@ -99,7 +95,6 @@ def test_active_pair_is_the_canonical_exact_mirror_contract() -> None:
     assert {str(row["source"]) for row in _records(catalog, "source_catalog")} == set(
         OFFICIAL_NATIVE_EXAMPLE_SOURCES
     )
-    assert not _records(catalog, "experimental_sources")
     assert len(runtime.examples) == len(jax_examples)
     assert sum(example.status == "ready" for example in runtime.examples) == sum(
         example["status"] == "ready" for example in jax_examples
@@ -133,9 +128,6 @@ def test_in_memory_qfm_omission_cannot_evade_native_case_coverage() -> None:
     pair = load_manifest_contract_pair_documents(examples, parity, repo_root=REPO_ROOT)
     official_case_ids = _executable_case_ids(pair.parity.relationships)
     assert QFM_CASE_ID not in official_case_ids
-    assert QFM_CASE_ID not in _executable_case_ids(
-        pair.parity.experimental_relationships
-    )
     with pytest.raises(
         AssertionError, match=r"Implemented native cases omitted: \['native-qfm'\]"
     ):

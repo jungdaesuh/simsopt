@@ -49,7 +49,7 @@ def _admitted_representatives() -> tuple[tuple[ExecutionScale, int], ...]:
         repo_root=REPO_ROOT,
     )
     relationship = next(
-        item for item in pair.parity.all_relationships if item.case_id == CASE_ID
+        item for item in pair.parity.relationships if item.case_id == CASE_ID
     )
     admitted: list[tuple[ExecutionScale, int]] = []
     for scale in SCALES:
