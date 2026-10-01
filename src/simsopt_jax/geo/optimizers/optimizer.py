@@ -4,7 +4,6 @@ JAX optimizer adapter for the Boozer inner solve.
 Reference/oracle methods:
   - ``method="bfgs"``: host-driven SciPy BFGS loop with JAX value/grad.
   - ``method="lbfgs"``: host-driven SciPy L-BFGS-B loop with JAX value/grad.
-  - ``method="adam"``: host-driven Adam for noisy/stochastic scalar objectives.
 
 Least-squares method:
   - ``method="lm-minpack-ondevice"``: trace-safe dense pivoted-QR
@@ -31,10 +30,6 @@ Target SciPy-control method:
     target-lane value/grad evaluations.
   - ``method="lbfgs-scipy-jax-fullgraph"``: host SciPy L-BFGS-B control with
     JAX value/grad evaluations over a caller-owned full Optimizable graph.
-
-Target public stochastic method:
-  - ``method="adam-ondevice"``: trace-safe Adam for noisy/stochastic scalar
-    objectives on the target lane.
 
 The private methods live in ``optimizer_jax_private/`` and are derived from the
 upstream JAX optimizer implementation pinned by this port, so line-search and
@@ -319,8 +314,6 @@ __all__ = [
     "TraceableExactNewtonVariantContract",
     "TraceableNewtonLinearSolver",
     "adjoint_hessian_stabilization",
-    "adam_optimize",
-    "adam_optimize_traceable",
     "private_optimizer_runtime_is_supported",
     "VALID_LEAST_SQUARES_ALGORITHMS",
     "VALID_OPTIMIZER_BACKENDS",
@@ -392,14 +385,11 @@ TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = TARGET_OUTER_OPTIMIZER_BACKENDS | froze
 )
 VALID_LEAST_SQUARES_ALGORITHMS = frozenset({"quasi-newton", "lm-minpack"})
 _SUPPORTED_METHODS = {
-    "adam",
-    "adam-ondevice",
     "bfgs",
     "lbfgs",
     "lbfgs-scipy-jax",
     "lbfgs-scipy-jax-decomposed",
     "lbfgs-scipy-jax-fullgraph",
-    "lbfgs-trace",
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
@@ -407,22 +397,15 @@ _TARGET_LEAST_SQUARES_METHODS = frozenset({"lm-minpack-ondevice"})
 _SUPPORTED_LEAST_SQUARES_METHODS = _TARGET_LEAST_SQUARES_METHODS
 _RESIDUAL_LEAST_SQUARES_ALGORITHMS = frozenset({"lm-minpack"})
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
-_REFERENCE_TRACE_METHODS = frozenset({"lbfgs-trace"})
-_REFERENCE_JAX_METHODS = frozenset({"adam"})
 _TARGET_PRIVATE_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
 _TARGET_SCIPY_CONTROL_METHODS = frozenset(
     {"lbfgs-scipy-jax", "lbfgs-scipy-jax-decomposed", "lbfgs-scipy-jax-fullgraph"}
 )
-_TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"})
-_TARGET_METHODS = (
-    _TARGET_PRIVATE_METHODS | _TARGET_PUBLIC_METHODS | _TARGET_SCIPY_CONTROL_METHODS
-)
+_TARGET_METHODS = _TARGET_PRIVATE_METHODS | _TARGET_SCIPY_CONTROL_METHODS
 _TARGET_LBFGSB_METHODS = frozenset({"lbfgs-ondevice"}) | _TARGET_SCIPY_CONTROL_METHODS
 _UNSUPPORTED_TARGET_LBFGSB_OPTIONS = frozenset({"initial_step_size", "maxgrad"})
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
-_STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer lane"
 _STRICT_HOST_SCIPY_ADAPTER_DETAIL = "the host SciPy adapter"
-_STRICT_CPP_TRACE_ADAPTER_DETAIL = "the CPU/C++ trace adapter"
 _EISENSTAT_WALKER_GAMMA = 0.9
 # α=2 is inlined as ``ratio * ratio`` inside
 # ``_eisenstat_walker_choice2_tolerance`` for bit-stable evaluation; see
@@ -490,8 +473,6 @@ _DEPRECATION_LOGGER = logging.getLogger("simsopt_jax.solve.deprecation")
 _DEPRECATED_SOLVE_JAX_CALLSITE_LOCK = Lock()
 _DEPRECATED_SOLVE_JAX_CALLSITES: set["_DeprecationCallSite"] = set()
 _DEPRECATED_MINIMIZE_METHOD_TO_DRIVER = {
-    "adam": "simsopt_adam_host",
-    "adam-ondevice": "simsopt_adam",
     "bfgs": "scipy_bfgs",
     "bfgs-ondevice": "simsopt_bfgs",
     "lbfgs": "scipy_lbfgsb",
@@ -499,7 +480,6 @@ _DEPRECATED_MINIMIZE_METHOD_TO_DRIVER = {
     "lbfgs-scipy-jax": "scipy_lbfgsb",
     "lbfgs-scipy-jax-decomposed": "scipy_lbfgsb",
     "lbfgs-scipy-jax-fullgraph": "scipy_lbfgsb",
-    "lbfgs-trace": "simsopt_trace_lbfgs",
 }
 _DEPRECATED_LEAST_SQUARES_METHOD_TO_DRIVER = {
     "lm-minpack-ondevice": "simsopt_lm_qr",
@@ -1088,18 +1068,6 @@ def _require_native_cpu_reference_backend_for_scipy_adapter(
     )
 
 
-def _require_native_cpu_reference_backend_for_trace_adapter(
-    *,
-    component: str,
-    method: str,
-) -> None:
-    _raise_if_target_lane_required(
-        component=component,
-        method=method,
-        detail=_STRICT_CPP_TRACE_ADAPTER_DETAIL,
-    )
-
-
 def _mark_cacheable_jit_linear_operator(fun):
     # Same callable mutability contract as ``mark_cacheable_jit_value_and_grad``.
     setattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, True)
@@ -1685,63 +1653,6 @@ def _dense_lm_state_from_residual_jacobian(residual, jacobian):
     }
 
 
-def _tree_zeros_like(tree):
-    return jax.tree.map(
-        lambda leaf: jnp.zeros_like(jnp.asarray(leaf)),
-        tree,
-    )
-
-
-def _tree_scalar_mul(tree, scalar):
-    scalar = jnp.asarray(scalar)
-    return jax.tree.map(lambda leaf: scalar * jnp.asarray(leaf), tree)
-
-
-def _tree_add(lhs, rhs):
-    return jax.tree.map(
-        lambda lhs_leaf, rhs_leaf: jnp.asarray(lhs_leaf) + jnp.asarray(rhs_leaf),
-        lhs,
-        rhs,
-    )
-
-
-def _tree_sub(lhs, rhs):
-    return jax.tree.map(
-        lambda lhs_leaf, rhs_leaf: jnp.asarray(lhs_leaf) - jnp.asarray(rhs_leaf),
-        lhs,
-        rhs,
-    )
-
-
-def _tree_square(tree):
-    return jax.tree.map(
-        lambda leaf: jnp.square(jnp.asarray(leaf)),
-        tree,
-    )
-
-
-def _tree_bias_correction(tree, correction):
-    correction = jnp.asarray(correction)
-    return jax.tree.map(
-        lambda leaf: jnp.asarray(leaf) / correction,
-        tree,
-    )
-
-
-def _tree_adam_step(mean, variance, *, step_size, eps):
-    step_size = jnp.asarray(step_size)
-    eps = jnp.asarray(eps)
-    return jax.tree.map(
-        lambda mean_leaf, variance_leaf: (
-            step_size
-            * jnp.asarray(mean_leaf)
-            / (jnp.sqrt(jnp.asarray(variance_leaf)) + eps)
-        ),
-        mean,
-        variance,
-    )
-
-
 def _tree_inf_norm(tree):
     leaves = jax.tree.leaves(tree)
     if not leaves:
@@ -1757,298 +1668,12 @@ def _tree_inf_norm(tree):
     return max_value
 
 
-def _tree_all_finite(tree):
-    leaves = jax.tree.leaves(tree)
-    finite = jnp.asarray(True)
-    for leaf in leaves:
-        finite = finite & jnp.all(jnp.isfinite(jnp.asarray(leaf)))
-    return finite
-
-
-def _tree_select(pred, candidate, current):
-    return jax.tree.map(
-        lambda cand, curr: lax.select(pred, jnp.asarray(cand), jnp.asarray(curr)),
-        candidate,
-        current,
-    )
-
-
 def _normalize_solver_args(args):
     if args is None:
         return ()
     if isinstance(args, tuple):
         return args
     return (args,)
-
-
-def _wrap_value_and_grad_fun(fun, x0, *, host_inputs):
-    expected_tree = jax.tree.structure(x0)
-
-    def wrapped(x):
-        call_x = _hostify_optimizer_tree(x) if host_inputs else x
-        value, grad = fun(call_x)
-        if jax.tree.structure(grad) != expected_tree:
-            raise ValueError(
-                "Explicit value-and-gradient objectives must return a gradient "
-                "with the same pytree structure as x0."
-            )
-        return jnp.asarray(value), jax.tree.map(jnp.asarray, grad)
-
-    return wrapped
-
-
-def _prepare_adam_eval_fn(fun, x0, *, value_and_grad, host_inputs):
-    if value_and_grad:
-        return _wrap_value_and_grad_fun(fun, x0, host_inputs=host_inputs)
-    return _cached_jit_value_and_grad(fun)
-
-
-def _adam_defaults(dtype):
-    return {
-        "step_size": _device_scalar(1.0e-2, dtype=dtype),
-        "beta1": _device_scalar(0.9, dtype=dtype),
-        "beta2": _device_scalar(0.999, dtype=dtype),
-        "eps": _device_scalar(1.0e-8, dtype=dtype),
-    }
-
-
-def _adam_hyperparameters(options, *, dtype):
-    defaults = _adam_defaults(dtype)
-    options = options or {}
-    return {
-        "step_size": _device_scalar(
-            options.get("step_size", defaults["step_size"]), dtype=dtype
-        ),
-        "beta1": _device_scalar(options.get("beta1", defaults["beta1"]), dtype=dtype),
-        "beta2": _device_scalar(options.get("beta2", defaults["beta2"]), dtype=dtype),
-        "eps": _device_scalar(options.get("eps", defaults["eps"]), dtype=dtype),
-    }
-
-
-def _adam_result_message(status, success):
-    if _host_bool(success):
-        return "converged"
-    if int(_host_scalar(status, dtype=np.int64)) == 2:
-        return "non-finite objective, gradient, or step encountered"
-    return "maximum iterations reached"
-
-
-def _adam_result_to_optimize_result(result):
-    nit = int(_host_scalar(result["nit"], dtype=np.int64))
-    status = int(_host_scalar(result["status"], dtype=np.int64))
-    success = _host_bool(result["success"])
-    return OptimizeResult(
-        x=result["x"],
-        fun=result["fun"],
-        jac=result["grad"],
-        nit=nit,
-        nfev=nit + 1,
-        njev=nit + 1,
-        status=status,
-        success=success,
-        mean=result["mean"],
-        variance=result["variance"],
-        message=_adam_result_message(status, success),
-    )
-
-
-def _adam_iteration(eval_fn, state, *, hyperparameters, tol):
-    step_number = state["nit"] + 1
-    beta1 = hyperparameters["beta1"]
-    beta2 = hyperparameters["beta2"]
-    one_minus_beta1 = jnp.asarray(1.0, dtype=beta1.dtype) - beta1
-    one_minus_beta2 = jnp.asarray(1.0, dtype=beta2.dtype) - beta2
-    mean = _tree_add(
-        _tree_scalar_mul(state["mean"], beta1),
-        _tree_scalar_mul(state["grad"], one_minus_beta1),
-    )
-    variance = _tree_add(
-        _tree_scalar_mul(state["variance"], beta2),
-        _tree_scalar_mul(_tree_square(state["grad"]), one_minus_beta2),
-    )
-    step_exponent = jnp.asarray(step_number, dtype=beta1.dtype)
-    mean_hat = _tree_bias_correction(mean, 1.0 - jnp.power(beta1, step_exponent))
-    variance_hat = _tree_bias_correction(
-        variance,
-        1.0 - jnp.power(beta2, step_exponent),
-    )
-    step = _tree_adam_step(
-        mean_hat,
-        variance_hat,
-        step_size=hyperparameters["step_size"],
-        eps=hyperparameters["eps"],
-    )
-    x_candidate = _tree_sub(state["x"], step)
-    fun_candidate, grad_candidate = eval_fn(x_candidate)
-    grad_norm_inf = _tree_inf_norm(grad_candidate)
-    finite_candidate = (
-        _tree_all_finite(x_candidate)
-        & jnp.isfinite(fun_candidate)
-        & _tree_all_finite(grad_candidate)
-        & _tree_all_finite(step)
-    )
-    return {
-        "x": _tree_select(finite_candidate, x_candidate, state["x"]),
-        "fun": lax.select(finite_candidate, fun_candidate, state["fun"]),
-        "grad": _tree_select(finite_candidate, grad_candidate, state["grad"]),
-        "grad_norm_inf": lax.select(
-            finite_candidate,
-            grad_norm_inf,
-            state["grad_norm_inf"],
-        ),
-        "mean": _tree_select(finite_candidate, mean, state["mean"]),
-        "variance": _tree_select(finite_candidate, variance, state["variance"]),
-        "nit": step_number,
-        "status": lax.select(
-            finite_candidate,
-            jnp.asarray(1, dtype=jnp.int32),
-            jnp.asarray(2, dtype=jnp.int32),
-        ),
-        "success": finite_candidate & (grad_norm_inf <= tol),
-    }
-
-
-def adam_optimize(
-    fun,
-    x0,
-    *,
-    value_and_grad=False,
-    maxiter=1500,
-    tol=1e-10,
-    options=None,
-    callback=None,
-    progress_callback=None,
-):
-    """Host-driven Adam optimizer for noisy/stochastic scalar objectives."""
-    x = jax.tree.map(jnp.asarray, x0)
-    x_dtype = _require_tree_first_leaf(
-        x,
-        detail="Adam initial state must contain at least one leaf.",
-    ).dtype
-    eval_fn = _prepare_adam_eval_fn(
-        fun, x, value_and_grad=value_and_grad, host_inputs=True
-    )
-    hyperparameters = _adam_hyperparameters(options, dtype=x_dtype)
-    fun_value, grad = eval_fn(x)
-    grad_norm_inf = _tree_inf_norm(grad)
-    mean = _tree_zeros_like(x)
-    variance = _tree_zeros_like(x)
-    nit = 0
-    status = 1
-    success = bool(grad_norm_inf <= tol)
-
-    while nit < maxiter and not success:
-        state = _adam_iteration(
-            eval_fn,
-            {
-                "x": x,
-                "fun": fun_value,
-                "grad": grad,
-                "grad_norm_inf": grad_norm_inf,
-                "mean": mean,
-                "variance": variance,
-                "nit": jnp.asarray(nit, dtype=jnp.int32),
-            },
-            hyperparameters=hyperparameters,
-            tol=_device_scalar(tol, dtype=x_dtype),
-        )
-        nit = int(state["nit"])
-        status = int(state["status"])
-        x = state["x"]
-        fun_value = state["fun"]
-        grad = state["grad"]
-        grad_norm_inf = state["grad_norm_inf"]
-        mean = state["mean"]
-        variance = state["variance"]
-        if callback is not None:
-            callback(_hostify_optimizer_tree(x))
-        if progress_callback is not None:
-            progress_callback(nit, float(fun_value), float(grad_norm_inf))
-        success = bool(state["success"])
-        if status == 2:
-            break
-
-    return {
-        "x": x,
-        "fun": fun_value,
-        "grad": grad,
-        "mean": mean,
-        "variance": variance,
-        "nit": nit,
-        "status": status,
-        "success": success,
-    }
-
-
-def adam_optimize_traceable(
-    fun,
-    x0,
-    *,
-    value_and_grad=False,
-    maxiter=1500,
-    tol=1e-10,
-    options=None,
-    callback=None,
-    progress_callback=None,
-):
-    """Trace-safe Adam optimizer for noisy/stochastic scalar objectives."""
-    x = jax.tree.map(jnp.asarray, x0)
-    x_dtype = _require_tree_first_leaf(
-        x,
-        detail="Adam initial state must contain at least one leaf.",
-    ).dtype
-    eval_fn = _prepare_adam_eval_fn(
-        fun, x, value_and_grad=value_and_grad, host_inputs=False
-    )
-    hyperparameters = _adam_hyperparameters(options, dtype=x_dtype)
-    tol_value = _device_scalar(tol, dtype=x_dtype)
-
-    def run_solver(x_init):
-        fun0, grad0 = eval_fn(x_init)
-        state0 = {
-            "x": x_init,
-            "fun": fun0,
-            "grad": grad0,
-            "grad_norm_inf": _tree_inf_norm(grad0),
-            "mean": _tree_zeros_like(x_init),
-            "variance": _tree_zeros_like(x_init),
-            "nit": jnp.asarray(0, dtype=jnp.int32),
-            "status": jnp.asarray(1, dtype=jnp.int32),
-            "success": _tree_inf_norm(grad0) <= tol_value,
-        }
-
-        def cond_fun(state):
-            return (
-                (state["nit"] < maxiter) & (~state["success"]) & (state["status"] != 2)
-            )
-
-        def body_fun(state):
-            next_state = _adam_iteration(
-                eval_fn,
-                state,
-                hyperparameters=hyperparameters,
-                tol=tol_value,
-            )
-            if callback is not None:
-                jax.debug.callback(
-                    lambda current_x: callback(_hostify_optimizer_tree(current_x)),
-                    next_state["x"],
-                    ordered=False,
-                )
-            if progress_callback is not None:
-                jax.debug.callback(
-                    progress_callback,
-                    next_state["nit"],
-                    next_state["fun"],
-                    next_state["grad_norm_inf"],
-                    ordered=False,
-                )
-            return next_state
-
-        return lax.while_loop(cond_fun, body_fun, state0)
-
-    run_solver.__name__ = "adam_traceable_run_solver"
-    return jax.jit(run_solver)(x)
 
 
 # MINPACK ``lmder`` constants (netlib MINPACK; More 1978) as SciPy's
@@ -5473,45 +5098,9 @@ def reference_minimize(
     value_and_grad=False,
     callback=None,
     progress_callback=None,
-    failure_callback=None,
-    initial_value_and_grad=None,
     allow_jax_host_control=False,
 ):
     """Explicit CPU/reference scalar optimizer entrypoint."""
-    if failure_callback is not None and method not in _REFERENCE_TRACE_METHODS:
-        raise ValueError(
-            "reference_minimize() only supports failure_callback for "
-            "method='lbfgs-trace'."
-        )
-    if initial_value_and_grad is not None and (
-        method not in _REFERENCE_TRACE_METHODS or not value_and_grad
-    ):
-        raise ValueError(
-            "reference_minimize() only supports initial_value_and_grad for "
-            "explicit value-and-gradient objectives with method='lbfgs-trace'."
-        )
-    if method in _REFERENCE_JAX_METHODS:
-        _raise_if_target_lane_required(
-            component="optimizer_jax.reference_minimize",
-            method=method,
-            detail=_STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL,
-        )
-        _raise_if_strict_optimizer_fallback(
-            component="optimizer_jax.reference_minimize",
-            method=method,
-            detail=_STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL,
-        )
-        result = adam_optimize(
-            fun,
-            x0,
-            value_and_grad=value_and_grad,
-            maxiter=maxiter,
-            tol=tol,
-            options=options,
-            callback=callback,
-            progress_callback=progress_callback,
-        )
-        return _adam_result_to_optimize_result(result)
     return optimizer_jax_reference.reference_minimize(
         fun,
         x0,
@@ -5522,8 +5111,6 @@ def reference_minimize(
         value_and_grad=value_and_grad,
         callback=callback,
         progress_callback=progress_callback,
-        failure_callback=failure_callback,
-        initial_value_and_grad=initial_value_and_grad,
         allow_jax_host_control=allow_jax_host_control,
     )
 
@@ -5585,17 +5172,10 @@ def target_minimize(
     value_and_grad=False,
     callback=None,
     progress_callback=None,
-    failure_callback=None,
     initial_value_and_grad=None,
 ):
     """Explicit JAX target scalar optimizer entrypoint."""
     options = dict(options or {})
-    if failure_callback is not None:
-        raise ValueError(
-            "target_minimize() does not support failure_callback. "
-            "Use reference_minimize(method='lbfgs-trace') for host-side "
-            "L-BFGS rejection diagnostics."
-        )
     if initial_value_and_grad is not None and (
         method != "lbfgs-ondevice" or not value_and_grad
     ):
@@ -5643,20 +5223,6 @@ def target_minimize(
             options=options,
         )
         return _finalize_optimizer_result(result, pytree_adapter)
-    if method == "adam-ondevice":
-        require_target_backend_x64("ondevice")
-        result = adam_optimize_traceable(
-            fun,
-            x0,
-            value_and_grad=value_and_grad,
-            maxiter=maxiter,
-            tol=tol,
-            options=options,
-            callback=callback,
-            progress_callback=progress_callback,
-        )
-        return _adam_result_to_optimize_result(result)
-
     if method not in _TARGET_PRIVATE_METHODS:
         raise ValueError(
             "target_minimize() only supports target-lane methods "
@@ -5798,16 +5364,11 @@ def _jax_minimize_legacy(
             f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
         )
 
-    if method in _REFERENCE_METHODS | _REFERENCE_TRACE_METHODS | _REFERENCE_JAX_METHODS:
-        detail = (
-            _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL
-            if method in _REFERENCE_JAX_METHODS
-            else _STRICT_REFERENCE_OPTIMIZER_DETAIL
-        )
+    if method in _REFERENCE_METHODS:
         _raise_if_target_lane_required(
             component="optimizer_jax.jax_minimize",
             method=method,
-            detail=detail,
+            detail=_STRICT_REFERENCE_OPTIMIZER_DETAIL,
         )
         return reference_minimize(
             fun,

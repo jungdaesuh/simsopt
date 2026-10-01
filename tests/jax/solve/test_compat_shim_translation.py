@@ -10,12 +10,9 @@ from simsopt_jax.solve import (
     Driver,
     ScipyBFGSOptions,
     ScipyLBFGSBOptions,
-    SimsoptAdamHostOptions,
-    SimsoptAdamOptions,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
     SimsoptLMQROptions,
-    SimsoptTraceLBFGSOptions,
 )
 
 
@@ -73,32 +70,6 @@ def test_old_bfgs_call_matches_new_scipy_bfgs_driver(monkeypatch, request):
         np.array([0.0, 0.0]),
         driver=Driver.SCIPY_BFGS,
         options=ScipyBFGSOptions(maxiter=20),
-    )
-
-    _assert_same_core_result(old, new)
-
-
-def test_old_lbfgs_trace_call_matches_new_trace_bridge_driver(monkeypatch, request):
-    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
-
-    def value_and_grad(x):
-        residual = x - jnp.array([1.0, -2.0])
-        return jnp.vdot(residual, residual), 2.0 * residual
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        old = jax_minimize(
-            value_and_grad,
-            jnp.array([0.0, 0.0]),
-            method="lbfgs-trace",
-            value_and_grad=True,
-            maxiter=20,
-        )
-    new = minimize(
-        value_and_grad,
-        jnp.array([0.0, 0.0]),
-        driver=Driver.SIMSOPT_TRACE_LBFGS,
-        options=SimsoptTraceLBFGSOptions(maxiter=20),
     )
 
     _assert_same_core_result(old, new)
@@ -201,60 +172,6 @@ def test_old_bfgs_ondevice_call_matches_new_simsopt_bfgs_driver():
         jnp.array([0.0, 0.0]),
         driver=Driver.SIMSOPT_BFGS,
         options=SimsoptBFGSOptions(maxiter=20),
-    )
-
-    _assert_same_core_result(old, new)
-
-
-def test_old_adam_call_matches_new_host_bridge_driver(monkeypatch, request):
-    enable_non_strict_jax_backend(monkeypatch, request, mode="native_cpu")
-
-    def value_and_grad(x):
-        residual = x - jnp.array([1.0, -2.0])
-        return jnp.vdot(residual, residual), 2.0 * residual
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        old = jax_minimize(
-            value_and_grad,
-            jnp.array([0.0, 0.0]),
-            method="adam",
-            value_and_grad=True,
-            maxiter=3,
-            tol=0.0,
-            options={"step_size": 0.1},
-        )
-    new = minimize(
-        value_and_grad,
-        jnp.array([0.0, 0.0]),
-        driver=Driver.SIMSOPT_ADAM_HOST,
-        options=SimsoptAdamHostOptions(maxiter=3, learning_rate=0.1),
-    )
-
-    _assert_same_core_result(old, new)
-
-
-def test_old_adam_ondevice_call_matches_new_target_bridge_driver():
-    def value_and_grad(x):
-        residual = x - jnp.array([1.0, -2.0])
-        return jnp.vdot(residual, residual), 2.0 * residual
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        old = jax_minimize(
-            value_and_grad,
-            jnp.array([0.0, 0.0]),
-            method="adam-ondevice",
-            value_and_grad=True,
-            maxiter=3,
-            tol=0.0,
-            options={"step_size": 0.1},
-        )
-    new = minimize(
-        value_and_grad,
-        jnp.array([0.0, 0.0]),
-        driver=Driver.SIMSOPT_ADAM,
-        options=SimsoptAdamOptions(maxiter=3, learning_rate=0.1),
     )
 
     _assert_same_core_result(old, new)

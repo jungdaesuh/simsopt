@@ -722,52 +722,6 @@ def case_transfer_guard_disallow_allows_target_minimize_structured_pytree_entry(
     np.testing.assert_allclose(result.x["current"], np.zeros(1), atol=1e-12)
 
 
-def case_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes() -> None:
-    import jax
-    import jax.numpy as jnp
-    import numpy as np
-    import simsopt_jax.config as simsopt_config
-    from simsopt_jax.geo.optimizers.optimizer import (
-        PRIVATE_OPTIMIZER_JAX_VERSION,  # noqa: F401
-        private_optimizer_runtime_is_supported,
-    )
-    from simsopt_jax.solve import Driver, SimsoptAdamOptions
-    from simsopt_jax.solve.dispatch import minimize
-
-    simsopt_config.set_backend(
-        "jax_cpu_parity",
-        strict=True,
-        transfer_guard="disallow",
-    )
-    if not private_optimizer_runtime_is_supported(jax.__version__):
-        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
-
-    half = jax.device_put(np.asarray(0.5, dtype=np.float64))
-    target = jax.device_put(np.asarray([0.25, -0.75], dtype=np.float64))
-
-    def quad(x):
-        x = jnp.asarray(x, dtype=jnp.float64)
-        diff = x - target
-        return half * jnp.dot(diff, diff)
-
-    def quad_value_and_grad(x):
-        x = jnp.asarray(x, dtype=jnp.float64)
-        diff = x - target
-        return half * jnp.dot(diff, diff), diff
-
-    x0 = jnp.asarray(np.array([1.5, -2.5], dtype=np.float64))
-    result = minimize(
-        quad_value_and_grad,
-        x0,
-        driver=Driver.SIMSOPT_ADAM,
-        options=SimsoptAdamOptions(maxiter=200, gtol=1e-5, learning_rate=0.05),
-    )
-
-    assert result.success is True
-    assert float(result.fun) < float(quad(x0))
-    assert np.allclose(np.asarray(result.x), np.asarray([0.25, -0.75]), atol=1e-4)
-
-
 def case_transfer_guard_disallow_allows_lm_minpack_ondevice_quadratic_smokes() -> None:
     import jax
     import jax.numpy as jnp

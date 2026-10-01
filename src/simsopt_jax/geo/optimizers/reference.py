@@ -17,16 +17,9 @@ from dataclasses import dataclass, field
 import jax
 import numpy as np
 
-from scipy.optimize import OptimizeResult
 from scipy.optimize import minimize as scipy_minimize
 
-from simsopt_jax.geo.optimizer_host_lbfgs import (
-    LBFGS_STATUS_NONFINITE,
-    host_invalid_step_log_to_list,
-    lbfgs_status_is_success,
-    lbfgs_status_message,
-    minimize_lbfgs_host_core,
-)
+from simsopt_jax.geo.optimizer_host_lbfgs import LBFGS_STATUS_NONFINITE
 from simsopt_jax.runtime.host_boundary import host_value
 from ._shared import (
     _optimizer_dtype,
@@ -62,7 +55,6 @@ def _strip_internal_options(options, method):
         "line_search_maxiter",
         "callback",
         "progress_callback",
-        "failure_callback",
         "record_scipy_callback_trace",
     }
     if method == "bfgs":
@@ -628,77 +620,6 @@ def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
     )
 
 
-def _host_trace_result_to_optimize_result(result):
-    invalid_state = (not np.isfinite(result.f_k)) or (
-        not np.all(np.isfinite(result.g_k))
-    )
-    invalid_step_log = host_invalid_step_log_to_list(result.invalid_step_events)
-    return OptimizeResult(
-        x=np.asarray(result.x_k),
-        fun=float(result.f_k),
-        jac=np.asarray(result.g_k),
-        nit=int(result.k),
-        nfev=int(result.nfev),
-        njev=int(result.ngev),
-        success=lbfgs_status_is_success(result.status, invalid_state),
-        status=int(result.status),
-        message=lbfgs_status_message(result.status, invalid_state),
-        ls_status=int(result.ls_status),
-        line_search_final_status=int(result.ls_status),
-        maxiter_hit=int(result.status) == 1,
-        rejected_step_count=len(invalid_step_log),
-        invalid_step_log=invalid_step_log,
-        optimizer_state_trace=tuple(result.optimizer_state_trace),
-    )
-
-
-def _trace_minimize_value_and_grad(
-    fun,
-    x0,
-    *,
-    method,
-    tol,
-    maxiter,
-    options,
-    initial_value_and_grad=None,
-):
-    _optimizer._require_native_cpu_reference_backend_for_trace_adapter(
-        component="optimizer_jax_reference._trace_minimize_value_and_grad",
-        method=method,
-    )
-    if method != "lbfgs-trace":
-        raise ValueError(f"Unknown CPU/C++ trace optimizer method {method!r}.")
-    x_dtype = _optimizer_dtype(x0)
-
-    def eval_value_and_grad_host(x_np):
-        x_host = np.asarray(x_np, dtype=np.dtype(x_dtype))
-        val, grad = fun(x_host)
-        return float(val), np.asarray(grad, dtype=np.dtype(x_dtype))
-
-    result = minimize_lbfgs_host_core(
-        eval_value_and_grad_host,
-        _scipy_host_array(x0, dtype=x_dtype),
-        maxiter=maxiter,
-        gtol=tol,
-        maxcor=int(options.get("maxcor", 200)),
-        ftol=float(options.get("ftol", tol)),
-        maxfun=options.get("maxfun"),
-        maxgrad=options.get("maxgrad"),
-        maxls=int(options.get("maxls", 20)),
-        initial_step_size=options.get("initial_step_size"),
-        callback=options.get("callback"),
-        progress_callback=options.get("progress_callback"),
-        failure_callback=options.get("failure_callback"),
-        initial_value_and_grad=initial_value_and_grad,
-        record_optimizer_state_trace=bool(
-            options.get("record_optimizer_state_trace", True)
-        ),
-        max_optimizer_state_trace_bytes=options.get("max_optimizer_state_trace_bytes"),
-        invalid_step_log_capacity=options.get("invalid_step_log_capacity"),
-    )
-    return _host_trace_result_to_optimize_result(result)
-
-
 def reference_minimize(
     fun,
     x0,
@@ -710,23 +631,13 @@ def reference_minimize(
     value_and_grad=False,
     callback=None,
     progress_callback=None,
-    failure_callback=None,
-    initial_value_and_grad=None,
     allow_jax_host_control=False,
 ):
     """Run the CPU/reference optimizer lane."""
-    if method in _optimizer._REFERENCE_TRACE_METHODS and not value_and_grad:
-        raise ValueError(
-            "reference_minimize() requires value_and_grad=True for "
-            "method='lbfgs-trace'."
-        )
-    if (
-        method
-        not in _optimizer._REFERENCE_METHODS | _optimizer._REFERENCE_TRACE_METHODS
-    ):
+    if method not in _optimizer._REFERENCE_METHODS:
         raise ValueError(
             "reference_minimize() only supports reference methods "
-            f"{sorted(_optimizer._REFERENCE_METHODS | _optimizer._REFERENCE_TRACE_METHODS)}. "
+            f"{sorted(_optimizer._REFERENCE_METHODS)}. "
             f"Got {method!r}."
         )
 
@@ -745,8 +656,6 @@ def reference_minimize(
         options["callback"] = callback
     if progress_callback is not None:
         options["progress_callback"] = progress_callback
-    if failure_callback is not None:
-        options["failure_callback"] = failure_callback
 
     if not allow_jax_host_control:
         _optimizer._raise_if_target_lane_required(
@@ -758,19 +667,6 @@ def reference_minimize(
             component="optimizer_jax_reference.reference_minimize",
             method=method,
             detail=_optimizer._STRICT_REFERENCE_OPTIMIZER_DETAIL,
-        )
-
-    if method in _optimizer._REFERENCE_TRACE_METHODS:
-        return finalize(
-            _trace_minimize_value_and_grad(
-                fun,
-                x0,
-                method=method,
-                tol=tol,
-                maxiter=maxiter,
-                options=options,
-                initial_value_and_grad=initial_value_and_grad,
-            )
         )
 
     scipy_adapter = (

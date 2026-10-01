@@ -6,7 +6,7 @@ from simsopt_jax.solve import (
     Driver,
     ScipyLBFGSBOptions,
     ScipyLMOptions,
-    SimsoptAdamOptions,
+    SimsoptBFGSOptions,
 )
 
 
@@ -24,7 +24,7 @@ def test_minimize_rejects_options_for_the_wrong_driver():
             _value_and_grad,
             np.zeros(2),
             driver=Driver.SCIPY_LBFGSB,
-            options=SimsoptAdamOptions(maxiter=1),
+            options=SimsoptBFGSOptions(maxiter=1),
         )
 
 
@@ -40,19 +40,6 @@ def test_least_squares_rejects_minimize_options():
             np.zeros(2),
             driver=Driver.SCIPY_LM,
             options=ScipyLBFGSBOptions(maxiter=1),
-        )
-
-
-def test_minimize_rejects_target_subclass_options_for_host_driver():
-    with pytest.raises(
-        TypeError,
-        match="requires options of type SimsoptAdamHostOptions, got SimsoptAdamOptions",
-    ):
-        minimize(
-            _value_and_grad,
-            np.zeros(2),
-            driver=Driver.SIMSOPT_ADAM_HOST,
-            options=SimsoptAdamOptions(maxiter=1),
         )
 
 

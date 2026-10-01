@@ -180,27 +180,6 @@ class SimsoptBFGSCallbackEvent(_OptimizerCallbackEventBase):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class SimsoptTraceLBFGSCallbackEvent(_OptimizerCallbackEventBase):
-    accepted_alpha: float
-    rejected_alphas: tuple[float, ...]
-    line_search_status: LineSearchStatus
-    invalid_step_reason: InvalidStepReason | None
-    driver: Literal[Driver.SIMSOPT_TRACE_LBFGS] = Driver.SIMSOPT_TRACE_LBFGS
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class SimsoptAdamHostCallbackEvent(_OptimizerCallbackEventBase):
-    learning_rate: float
-    driver: Literal[Driver.SIMSOPT_ADAM_HOST] = Driver.SIMSOPT_ADAM_HOST
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class SimsoptAdamCallbackEvent(_OptimizerCallbackEventBase):
-    learning_rate: float
-    driver: Literal[Driver.SIMSOPT_ADAM] = Driver.SIMSOPT_ADAM
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
 class SimsoptLMQRCallbackEvent(_OptimizerCallbackEventBase):
     residual_norm: float
     damping: float
@@ -213,9 +192,6 @@ OptimizerCallbackEvent: TypeAlias = (
     | ScipyBFGSCallbackEvent
     | SimsoptLBFGSBCallbackEvent
     | SimsoptBFGSCallbackEvent
-    | SimsoptTraceLBFGSCallbackEvent
-    | SimsoptAdamHostCallbackEvent
-    | SimsoptAdamCallbackEvent
     | SimsoptLMQRCallbackEvent
 )
 Callback: TypeAlias = Callable[[OptimizerCallbackEvent], None]
@@ -231,9 +207,6 @@ STATUS_CODES: dict[Driver, tuple[int, ...]] = {
         Driver.SCIPY_BFGS: (0, 1, 2, 3, 6),
         Driver.SIMSOPT_LBFGSB: (0, 1, 2, 3, 4, 5, 6),
         Driver.SIMSOPT_BFGS: (-1, 0, 1, 2, 3, 5, 99),
-        Driver.SIMSOPT_TRACE_LBFGS: (0, 1, 2, 3, 4, 5, 6),
-        Driver.SIMSOPT_ADAM_HOST: (0, 1, 2),
-        Driver.SIMSOPT_ADAM: (0, 1, 2),
         Driver.SIMSOPT_LM_QR: (0, 1, 2),
     }.items()
 }

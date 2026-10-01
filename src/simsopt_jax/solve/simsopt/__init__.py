@@ -1,19 +1,13 @@
 """In-tree ``simsopt_jax.solve`` driver contracts."""
 
 from .contracts import (
-    SimsoptAdamHostOptions,
-    SimsoptAdamOptions,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
     SimsoptLMQROptions,
-    SimsoptTraceLBFGSOptions,
 )
 
 __all__ = [
-    "SimsoptAdamHostOptions",
-    "SimsoptAdamOptions",
     "SimsoptBFGSOptions",
     "SimsoptLBFGSBOptions",
     "SimsoptLMQROptions",
-    "SimsoptTraceLBFGSOptions",
 ]

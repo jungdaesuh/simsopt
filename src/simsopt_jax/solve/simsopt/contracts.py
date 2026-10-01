@@ -26,34 +26,6 @@ class SimsoptBFGSOptions(OptionsBase):
 
 
 @dataclass(frozen=True)
-class SimsoptAdamHostOptions(OptionsBase):
-    maxiter: int = 10000
-    learning_rate: float = 1e-3
-    b1: float = 0.9
-    b2: float = 0.999
-    eps: float = 1e-8
-    gtol: float | None = None
-
-
-@dataclass(frozen=True)
-class SimsoptAdamOptions(SimsoptAdamHostOptions):
-    pass
-
-
-@dataclass(frozen=True)
-class SimsoptTraceLBFGSOptions(OptionsBase):
-    maxiter: int = 15000
-    gtol: float = 1e-10
-    maxcor: int = 200
-    ftol: float = 1e-10
-    maxls: int = 20
-    initial_step_size: float | None = None
-    record_optimizer_state_trace: bool = True
-    max_optimizer_state_trace_bytes: int | None = None
-    invalid_step_log_capacity: int = 256
-
-
-@dataclass(frozen=True)
 class SimsoptLMQROptions(OptionsBase):
     maxiter: int = 1500
     ftol: float = 1e-8
@@ -63,10 +35,7 @@ class SimsoptLMQROptions(OptionsBase):
 
 
 __all__ = [
-    "SimsoptAdamHostOptions",
-    "SimsoptAdamOptions",
     "SimsoptBFGSOptions",
     "SimsoptLBFGSBOptions",
     "SimsoptLMQROptions",
-    "SimsoptTraceLBFGSOptions",
 ]

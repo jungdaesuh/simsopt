@@ -829,15 +829,6 @@ def test_structured_ondevice_solver_cache_respects_mutable_objective_state():
     )
 
 
-def test_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes():
-    """Public ondevice Adam lane must stay transfer-clean under disallow."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes",),
-        failure_message="adam-ondevice transfer-guard smoke failed",
-    )
-
-
 def test_transfer_guard_disallow_allows_lm_minpack_ondevice_quadratic_smokes():
     """Ondevice LM least-squares must stay transfer-clean under disallow."""
     _assert_python_script_passes(

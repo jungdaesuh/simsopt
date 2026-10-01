@@ -63,9 +63,6 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
         Driver.SCIPY_BFGS,
         Driver.SIMSOPT_LBFGSB,
         Driver.SIMSOPT_BFGS,
-        Driver.SIMSOPT_TRACE_LBFGS,
-        Driver.SIMSOPT_ADAM_HOST,
-        Driver.SIMSOPT_ADAM,
     ]:
         result = minimize(_value_and_grad, np.zeros(2), driver=driver)
         assert result.driver is driver
@@ -75,9 +72,6 @@ def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
         ("scipy", "scipy_bfgs", "ScipyBFGSOptions", None),
         ("legacy_target", "lbfgs-ondevice"),
         ("legacy_target", "bfgs-ondevice"),
-        ("legacy_reference", "lbfgs-trace"),
-        ("legacy_reference", "adam"),
-        ("legacy_target", "adam-ondevice"),
     ]
 
 
@@ -111,10 +105,6 @@ def test_every_least_squares_driver_reaches_documented_dispatch_path(monkeypatch
 def test_legacy_dispatch_uses_driver_method_ssot(monkeypatch):
     calls = []
 
-    def reference_minimize(*_args, **kwargs):
-        calls.append(("reference_minimize", kwargs["method"]))
-        return _fake_result()
-
     def target_minimize(*_args, **kwargs):
         calls.append(("target_minimize", kwargs["method"]))
         return _fake_result()
@@ -123,14 +113,8 @@ def test_legacy_dispatch_uses_driver_method_ssot(monkeypatch):
         calls.append(("target_least_squares", kwargs["method"]))
         return _fake_result()
 
-    monkeypatch.setattr(legacy_optimizer, "reference_minimize", reference_minimize)
     monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
     monkeypatch.setattr(legacy_optimizer, "target_least_squares", target_least_squares)
-    monkeypatch.setattr(
-        dispatch,
-        "legacy_reference_minimize_method",
-        lambda driver: f"ssot-reference-minimize:{driver.value}",
-    )
     monkeypatch.setattr(
         dispatch,
         "legacy_target_minimize_method",
@@ -142,12 +126,10 @@ def test_legacy_dispatch_uses_driver_method_ssot(monkeypatch):
         lambda driver: f"ssot-target-ls:{driver.value}",
     )
 
-    minimize(_value_and_grad, np.zeros(2), driver=Driver.SIMSOPT_TRACE_LBFGS)
     minimize(_value_and_grad, np.zeros(2), driver=Driver.SIMSOPT_LBFGSB)
     least_squares(_residual, np.zeros(2), driver=Driver.SIMSOPT_LM_QR)
 
     assert calls == [
-        ("reference_minimize", "ssot-reference-minimize:simsopt_trace_lbfgs"),
         ("target_minimize", "ssot-target-minimize:simsopt_lbfgsb"),
         ("target_least_squares", "ssot-target-ls:simsopt_lm_qr"),
     ]

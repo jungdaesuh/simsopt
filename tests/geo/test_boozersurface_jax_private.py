@@ -354,23 +354,6 @@ def test_resolve_lbfgs_limits_normalizes_to_int32_counter_domain():
     assert int(maxgrad) == np.iinfo(np.int32).max
 
 
-@pytest.mark.parametrize("method", ["bfgs-ondevice", "lbfgs-ondevice", "adam-ondevice"])
-def test_target_minimize_rejects_failure_callback(method):
-    def quad(x):
-        return 0.5 * jnp.dot(x, x)
-
-    with pytest.raises(
-        ValueError,
-        match="target_minimize\\(\\) does not support failure_callback",
-    ):
-        _opt.target_minimize(
-            quad,
-            jnp.array([1.0, -2.0], dtype=jnp.float64),
-            method=method,
-            failure_callback=lambda *args: None,
-        )
-
-
 @pytest.mark.parametrize(
     "method",
     ["lbfgs-ondevice", "lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"],

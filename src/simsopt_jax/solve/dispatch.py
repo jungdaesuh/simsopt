@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from threading import Lock
 from typing import Callable, TypeAlias, TypeVar, cast
 
@@ -37,16 +37,12 @@ from .contracts import (
     SCIPY_LBFGSB_UNRESOLVED_STALL_STATUS,
     ScipyBFGSCallbackEvent,
     ScipyLBFGSBCallbackEvent,
-    SimsoptAdamCallbackEvent,
-    SimsoptAdamHostCallbackEvent,
     SimsoptBFGSCallbackEvent,
     SimsoptLBFGSBCallbackEvent,
     SimsoptLMQRCallbackEvent,
-    SimsoptTraceLBFGSCallbackEvent,
     ValueAndGradFn,
 )
 from .driver import (
-    legacy_reference_minimize_method,
     legacy_target_least_squares_method,
     legacy_target_minimize_method,
 )
@@ -56,14 +52,10 @@ from .scipy.contracts import (
     ScipyLBFGSBOptions,
     ScipyLMOptions,
 )
-from .shared import LineSearchStatus
 from .simsopt.contracts import (
-    SimsoptAdamHostOptions,
-    SimsoptAdamOptions,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
     SimsoptLMQROptions,
-    SimsoptTraceLBFGSOptions,
 )
 from .termination import projected_gradient_inf_norm
 
@@ -80,9 +72,6 @@ _MINIMIZE_OPTIONS: dict[Driver, type[OptionsBase]] = {
     Driver.SCIPY_BFGS: ScipyBFGSOptions,
     Driver.SIMSOPT_LBFGSB: SimsoptLBFGSBOptions,
     Driver.SIMSOPT_BFGS: SimsoptBFGSOptions,
-    Driver.SIMSOPT_TRACE_LBFGS: SimsoptTraceLBFGSOptions,
-    Driver.SIMSOPT_ADAM_HOST: SimsoptAdamHostOptions,
-    Driver.SIMSOPT_ADAM: SimsoptAdamOptions,
 }
 
 _LEAST_SQUARES_OPTIONS: dict[Driver, type[OptionsBase]] = {
@@ -856,7 +845,6 @@ def _legacy_minimize_callbacks(
     callback: Callback | None,
     *,
     driver: Driver,
-    options: OptionsBase,
 ):
     if callback is None:
         return None, None
@@ -886,24 +874,6 @@ def _legacy_minimize_callbacks(
                 **base_fields,
                 accepted_alpha=float("nan"),
                 num_linesearch_steps=0,
-            )
-        if driver == Driver.SIMSOPT_TRACE_LBFGS:
-            return SimsoptTraceLBFGSCallbackEvent(
-                **base_fields,
-                accepted_alpha=float("nan"),
-                rejected_alphas=(),
-                line_search_status=LineSearchStatus.SUCCESS,
-                invalid_step_reason=None,
-            )
-        if isinstance(options, SimsoptAdamOptions):
-            return SimsoptAdamCallbackEvent(
-                **base_fields,
-                learning_rate=options.learning_rate,
-            )
-        if isinstance(options, SimsoptAdamHostOptions):
-            return SimsoptAdamHostCallbackEvent(
-                **base_fields,
-                learning_rate=options.learning_rate,
             )
         raise ValueError(f"driver={driver.value!r} does not support callbacks.")
 
@@ -981,7 +951,6 @@ def minimize(
         legacy_callback, legacy_progress_callback = _legacy_minimize_callbacks(
             callback,
             driver=driver,
-            options=options_used,
         )
         result = legacy.target_minimize(
             value_and_grad_fn,
@@ -1002,7 +971,6 @@ def minimize(
         legacy_callback, legacy_progress_callback = _legacy_minimize_callbacks(
             callback,
             driver=driver,
-            options=options_used,
         )
         result = legacy.target_minimize(
             value_and_grad_fn,
@@ -1011,59 +979,6 @@ def minimize(
             tol=options_used.gtol,
             maxiter=options_used.maxiter,
             options=_legacy_bfgs_options(options_used),
-            value_and_grad=True,
-            callback=legacy_callback,
-            progress_callback=legacy_progress_callback,
-        )
-    elif isinstance(options_used, SimsoptTraceLBFGSOptions):
-        trace_options = asdict(options_used)
-        trace_options.pop("gtol")
-        trace_options.pop("maxiter")
-        legacy_callback, legacy_progress_callback = _legacy_minimize_callbacks(
-            callback,
-            driver=driver,
-            options=options_used,
-        )
-        result = legacy.reference_minimize(
-            value_and_grad_fn,
-            x0,
-            method=legacy_reference_minimize_method(driver),
-            tol=options_used.gtol,
-            maxiter=options_used.maxiter,
-            options=trace_options,
-            value_and_grad=True,
-            callback=legacy_callback,
-            progress_callback=legacy_progress_callback,
-        )
-    elif isinstance(options_used, SimsoptAdamHostOptions | SimsoptAdamOptions):
-        is_host_adam = isinstance(
-            options_used, SimsoptAdamHostOptions
-        ) and not isinstance(options_used, SimsoptAdamOptions)
-        method = (
-            legacy_reference_minimize_method(driver)
-            if is_host_adam
-            else legacy_target_minimize_method(driver)
-        )
-        driver_fn = (
-            legacy.reference_minimize if is_host_adam else legacy.target_minimize
-        )
-        legacy_callback, legacy_progress_callback = _legacy_minimize_callbacks(
-            callback,
-            driver=driver,
-            options=options_used,
-        )
-        result = driver_fn(
-            value_and_grad_fn,
-            x0,
-            method=method,
-            tol=options_used.gtol if options_used.gtol is not None else 0.0,
-            maxiter=options_used.maxiter,
-            options={
-                "step_size": options_used.learning_rate,
-                "beta1": options_used.b1,
-                "beta2": options_used.b2,
-                "eps": options_used.eps,
-            },
             value_and_grad=True,
             callback=legacy_callback,
             progress_callback=legacy_progress_callback,

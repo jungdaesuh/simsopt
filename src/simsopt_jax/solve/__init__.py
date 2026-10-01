@@ -14,21 +14,15 @@ from .contracts import (
     STATUS_CODES,
     ScipyBFGSCallbackEvent,
     ScipyLBFGSBCallbackEvent,
-    SimsoptAdamCallbackEvent,
-    SimsoptAdamHostCallbackEvent,
     SimsoptBFGSCallbackEvent,
     SimsoptLBFGSBCallbackEvent,
     SimsoptLMQRCallbackEvent,
-    SimsoptTraceLBFGSCallbackEvent,
 )
 from .scipy import ScipyBFGSOptions, ScipyBounds, ScipyLBFGSBOptions, ScipyLMOptions
 from .simsopt import (
-    SimsoptAdamHostOptions,
-    SimsoptAdamOptions,
     SimsoptBFGSOptions,
     SimsoptLBFGSBOptions,
     SimsoptLMQROptions,
-    SimsoptTraceLBFGSOptions,
 )
 
 __all__ = [
@@ -49,16 +43,10 @@ __all__ = [
     "ScipyLBFGSBOptions",
     "ScipyLBFGSBCallbackEvent",
     "ScipyLMOptions",
-    "SimsoptAdamHostOptions",
-    "SimsoptAdamHostCallbackEvent",
-    "SimsoptAdamOptions",
-    "SimsoptAdamCallbackEvent",
     "SimsoptBFGSOptions",
     "SimsoptBFGSCallbackEvent",
     "SimsoptLBFGSBOptions",
     "SimsoptLBFGSBCallbackEvent",
     "SimsoptLMQROptions",
     "SimsoptLMQRCallbackEvent",
-    "SimsoptTraceLBFGSOptions",
-    "SimsoptTraceLBFGSCallbackEvent",
 ]

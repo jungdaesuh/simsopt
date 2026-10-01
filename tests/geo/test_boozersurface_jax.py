@@ -66,7 +66,6 @@ from simsopt_jax.solve import (
     Driver,
     ScipyBFGSOptions,
     ScipyLBFGSBOptions,
-    SimsoptAdamHostOptions,
     SimsoptLBFGSBOptions,
 )
 from simsopt_jax.solve.dispatch import minimize
@@ -996,24 +995,6 @@ def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A, expected_device=No
     return dense_calls
 
 
-def _make_structured_quadratic_problem():
-    target_surface = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
-    target_iota = jnp.asarray(0.25, dtype=jnp.float64)
-
-    def objective_fn(state):
-        surface = jnp.asarray(state["surface"], dtype=jnp.float64)
-        iota = jnp.asarray(state["iota"], dtype=jnp.float64)
-        return 0.5 * (
-            jnp.sum((surface - target_surface) ** 2) + (iota - target_iota) ** 2
-        )
-
-    x0 = {
-        "surface": jnp.asarray([5.0, 3.0], dtype=jnp.float64),
-        "iota": jnp.asarray(0.0, dtype=jnp.float64),
-    }
-    return objective_fn, x0, np.asarray(target_surface), float(target_iota)
-
-
 def _assert_lu_is_not_called(message):
     raise AssertionError(message)
 
@@ -1163,7 +1144,7 @@ _TARGET_ONDEVICE_JAX_BACKEND_MODES = (
     "jax_gpu_fast",
 )
 _NON_ONDEVICE_LS_BACKENDS = ("scipy",)
-_NON_TARGET_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs")
+_NON_TARGET_MINIMIZE_METHODS = ("bfgs", "lbfgs")
 
 
 _EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
@@ -1606,7 +1587,6 @@ class TestOptimizerAdapter:
         captured = {}
         callback_marker = object()
         progress_marker = object()
-        failure_marker = object()
 
         def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
             captured["method"] = method
@@ -1641,7 +1621,6 @@ class TestOptimizerAdapter:
                 options={
                     "callback": callback_marker,
                     "progress_callback": progress_marker,
-                    "failure_callback": failure_marker,
                     "maxcor": 33,
                     "ftol": 1e-12,
                     "maxfun": 55,
@@ -1952,52 +1931,6 @@ class TestOptimizerAdapter:
                 method="lbfgs-scipy-jax-fullstate",
                 value_and_grad=True,
             )
-
-    def test_reference_lbfgs_trace_uses_host_core_without_scipy(self, monkeypatch):
-        """CPU/C++ trace lane must use the shared host L-BFGS core, not SciPy."""
-
-        def forbidden_scipy_minimize(*_args, **_kwargs):
-            raise AssertionError("lbfgs-trace must not enter scipy_minimize().")
-
-        monkeypatch.setattr(_opt_ref, "scipy_minimize", forbidden_scipy_minimize)
-        observed_argument_types = []
-
-        def explicit_quad(x):
-            observed_argument_types.append(type(x))
-            x = np.asarray(x, dtype=np.float64)
-            return float(0.5 * np.dot(x, x)), np.asarray(x, dtype=np.float64)
-
-        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        from simsopt_jax.backend import get_backend_config
-
-        previous_backend = get_backend_config()
-        _select_native_cpu_reference_backend()
-        try:
-            result = _opt.reference_minimize(
-                explicit_quad,
-                x0,
-                method="lbfgs-trace",
-                tol=1e-10,
-                maxiter=3,
-                options={"ftol": 0.0, "initial_step_size": 1.0},
-                value_and_grad=True,
-                initial_value_and_grad=explicit_quad(np.asarray(x0)),
-            )
-        finally:
-            _restore_backend_config(previous_backend)
-
-        assert result.success is True
-        assert int(result.status) == 0
-        np.testing.assert_allclose(np.asarray(result.x), np.zeros(2), atol=1e-12)
-        np.testing.assert_allclose(np.asarray(result.jac), np.zeros(2), atol=1e-12)
-        assert observed_argument_types
-        assert all(arg_type is np.ndarray for arg_type in observed_argument_types)
-        assert len(result.optimizer_state_trace) == 1
-        trace = result.optimizer_state_trace[0]
-        assert trace["iteration"] == 1
-        assert trace["line_search_status"] == 0
-        assert trace["accepted"] is True
-        assert trace["wolfe_satisfied"] is True
 
     def test_scipy_minimize_does_not_cache_unmarked_objective(self, monkeypatch):
         """Generic optimizer callables should keep the historical fresh-jit semantics."""
@@ -5641,7 +5574,6 @@ class TestBoozerSurfaceJAXClass:
                 jnp.array([1.0]),
                 method=method,
                 value_and_grad=False,
-                options={"step_size": 0.1} if method == "adam" else None,
             )
 
     def test_jax_minimize_rejects_removed_hybrid_without_dynamic_private_loader(
@@ -5661,7 +5593,7 @@ class TestBoozerSurfaceJAXClass:
             )
 
     @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
-    @pytest.mark.parametrize("method", ("adam", "bfgs", "lbfgs"))
+    @pytest.mark.parametrize("method", ("bfgs", "lbfgs"))
     def test_jax_minimize_rejects_reference_methods_in_jax_backend_mode(
         self,
         monkeypatch,
@@ -5682,7 +5614,6 @@ class TestBoozerSurfaceJAXClass:
                 method=method,
                 maxiter=5,
                 tol=1e-8,
-                options={"step_size": 0.1} if method == "adam" else None,
             )
 
     def test_jax_least_squares_solves_simple_structured_problem(self):
@@ -5717,66 +5648,6 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(result.x["iota"], 0.25)
         np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-10)
         np.testing.assert_allclose(result.jac["iota"], 0.0, atol=1e-10)
-
-    def test_jax_minimize_adam_solves_simple_structured_problem(self):
-        objective_fn, x0, target_surface, target_iota = (
-            _make_structured_quadratic_problem()
-        )
-
-        with _native_cpu_reference_context():
-            result = _opt.reference_minimize(
-                objective_fn,
-                x0,
-                method="adam",
-                maxiter=800,
-                tol=1e-8,
-                options={"step_size": 0.1},
-            )
-
-        assert result.success is True
-        np.testing.assert_allclose(result.x["surface"], target_surface, atol=1e-4)
-        np.testing.assert_allclose(result.x["iota"], target_iota, atol=1e-4)
-
-    def test_jax_minimize_adam_supports_explicit_value_and_grad(self):
-        target = np.asarray([2.0, -1.0], dtype=float)
-
-        def objective_value_and_grad(x):
-            x = np.asarray(x, dtype=float)
-            diff = x - target
-            return 0.5 * float(np.dot(diff, diff)), diff
-
-        with _native_cpu_reference_context():
-            result = minimize(
-                objective_value_and_grad,
-                np.asarray([5.0, 3.0], dtype=float),
-                driver=Driver.SIMSOPT_ADAM_HOST,
-                options=SimsoptAdamHostOptions(
-                    maxiter=800,
-                    gtol=1e-8,
-                    learning_rate=0.1,
-                ),
-            )
-
-        assert result.success is True
-        np.testing.assert_allclose(result.x, target, atol=1e-4)
-
-    def test_jax_minimize_adam_ondevice_solves_simple_structured_problem(self):
-        objective_fn, x0, target_surface, target_iota = (
-            _make_structured_quadratic_problem()
-        )
-
-        result = _opt.target_minimize(
-            objective_fn,
-            x0,
-            method="adam-ondevice",
-            maxiter=800,
-            tol=1e-8,
-            options={"step_size": 0.1},
-        )
-
-        assert result.success is True
-        np.testing.assert_allclose(result.x["surface"], target_surface, atol=1e-4)
-        np.testing.assert_allclose(result.x["iota"], target_iota, atol=1e-4)
 
     def test_reference_minimize_supports_structured_explicit_value_and_grad(self):
         target_surface = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
