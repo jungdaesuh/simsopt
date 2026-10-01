@@ -89,11 +89,10 @@ def _make_planar_curve(seed: int) -> CurvePlanarFourier:
     dofs[0] = 1.0
     dofs[1] = 0.1
     dofs[order + 1] = 0.1
-    # Non-trivial quaternion: near-zero-norm quaternions hit a documented
+    # Non-trivial quaternion: near-zero-norm quaternions hit a known
     # divergence between the native epsilon-regularized normalization and
-    # the JAX-port's exact-zero branch (see row CV-2 in
-    # tests/fixtures/jax_native_unit_coverage_manifest.json), which this
-    # parity suite deliberately does not probe.
+    # the JAX-port's exact-zero branch, which this parity suite deliberately
+    # does not probe.
     q_start = 2 * order + 1
     dofs[q_start : q_start + 4] = np.array([0.9, 0.2, -0.15, 0.05])
     dofs[-3:] = np.array([2.0, -0.5, 0.3])

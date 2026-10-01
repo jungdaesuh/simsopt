@@ -610,7 +610,6 @@ _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
 _NATIVE_CPU_REFERENCE_TEST_FILES = frozenset(
     {
         "jax/solve/test_compat_shim_translation.py",
-        "jax/test_native_unit_coverage_manifest.py",
     }
 )
 

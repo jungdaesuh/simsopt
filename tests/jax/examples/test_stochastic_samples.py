@@ -225,9 +225,7 @@ def test_materialized_samples_reproduce_native_perturbed_coil_geometry() -> None
 
 # The remaining functions mirror tests/geo/test_curveperturbed.py behavior-by-behavior
 # against this file's data reformulation. Two native behaviors have no equivalent here
-# and are deliberately NOT given tests (see the mirror-wave plan, formerly
-# docs/jax_native_test_mirror_wave_implementation_plan.md at commit 2221b542a — removed
-# from the branch by the 2026-08-24 docs curation — unit 4, and the coverage manifest):
+# and are deliberately NOT given tests:
 #   - in-place `CurvePerturbed.resample()`: `StochasticPerturbationBundle` is a frozen
 #     dataclass (immutable by design); there is no mutation API to mirror.
 #   - `tests/geo/test_curveperturbed.py::test_serialization` (GSONEncoder/GSONDecoder
@@ -242,8 +240,7 @@ def test_materialized_samples_reproduce_native_perturbed_coil_geometry() -> None
 # `assert err_new < 0.55 * err` over shrinking finite-difference steps), not just
 # its scalar value. `test_perturbed_curve_distance_objective_matches_native_through_bundle`
 # only reproduces the scalar `J()` value -- the JAX side exposes no curve-DOF gradient
-# graph for this bundle, so there is nothing to Taylor-test against `dJ()` (see
-# coverage manifest row CP-4).
+# graph for this bundle, so there is nothing to Taylor-test against `dJ()`.
 
 
 def test_materialized_gammadash_matches_finite_difference_of_gamma() -> None:

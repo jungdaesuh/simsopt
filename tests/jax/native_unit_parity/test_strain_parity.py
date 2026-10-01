@@ -6,9 +6,7 @@ Mirrors the three ``unittest`` methods in ``tests/geo/test_strainopt.py``
 implementation (``simsopt.geo.strain_optimization`` /
 ``simsopt.geo.framedcurve``) as the in-process oracle.
 
-Scope note (see the coverage manifest rows ST-1/ST-2/ST-3 in
-``tests/fixtures/jax_native_unit_coverage_manifest.json`` for the full
-manifest-fact list): the native suite exercises BOTH the coil-centroid and
+Scope note: the native suite exercises BOTH the coil-centroid and
 Frenet reference frames, and its LP strain penalties differentiate with
 respect to the full free-DOF vector of ``LPTorsionalStrainPenalty``/
 ``LPBinormalCurvatureStrainPenalty`` -- which includes the underlying
@@ -22,10 +20,8 @@ arrays, never generated from curve DOFs under JAX autodiff. Every test below
 therefore fixes the native curve's DOFs (``curve.fix_all()``, matching
 native's own ``test_strain_opt`` and isolating exactly the rotation-DOF
 subspace the JAX example implements) and restricts value/gradient
-comparisons to the centroid frame. The Frenet-frame and curve-shape-gradient
-gaps are NOT silently skipped -- they are recorded as manifest-facts
-(jax_missing / jax_partial) in ST-1 (Frenet-frame branch, disposition
-jax_partial) and ST-2 (curve-shape-DOF gradients, disposition jax_missing).
+comparisons to the centroid frame. The Frenet-frame branch and the
+curve-shape-DOF gradients are known gaps of the JAX example, not covered here.
 """
 
 from __future__ import annotations
@@ -235,8 +231,8 @@ def _assert_torsion_gradient_matches_native(
     LP-penalty gradient for one strain component to check against native's
     ``dJ()`` at native's own threshold. This is a deliberate, disclosed
     substitution, not a claim of equivalence with native's LP-penalty
-    gradient check; the strain domain is `jax_partial` in the coverage
-    manifest (ST-1/ST-3) precisely because of gaps like this one.
+    gradient check; the JAX strain example is a partial port precisely
+    because of gaps like this one.
 
     Reference derivative: a central finite difference of the NATIVE
     ``CoilStrain.torsional_strain()`` sum (a true cross-implementation
