@@ -333,7 +333,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
     def test_module_line_budgets(self):
         budgets = {
             "boundary.py": 290,
-            "checkpoint.py": 624,
+            "checkpoint.py": 616,
             "continuation.py": 225,
             "control.py": 2059,
             "core.py": 929,

@@ -6,6 +6,12 @@ turns a boundary into an immutable :class:`ALMTransitionSnapshot` (the content
 of an ``alm_transition_checkpoint_v1`` checkpoint: finite scalars, tuples and
 tagged mappings, no constraint Jacobians) and a snapshot back into a boundary.
 :func:`alm_checkpointing` wires both into one ``minimize_alm`` call.
+
+:func:`transition_snapshot` is where values are encoded: every raw value
+(arrays, lists and tuples as sequences, mappings, scalars), once, so any raw
+value round-trips, a raw tuple shaped like a tag included. The snapshot
+constructors take encoded values only and check them (``TypeError`` for a
+raw one): the shape of a value cannot tell raw from encoded.
 """
 
 from __future__ import annotations
@@ -171,7 +177,7 @@ class ALMTransitionSnapshot(Generic[AcceptedStateT]):
                 self,
                 "inner_options",
                 tuple(
-                    (key, _frozen_transition_value(value, f"inner_options[{key!r}]"))
+                    (key, _checked_encoded_value(value, f"inner_options[{key!r}]"))
                     for key, value in inner_option_items
                 ),
             )
@@ -299,6 +305,8 @@ def _encoded_transition_value(
 def _canonical_transition_evaluation(
     evaluation: Sequence[Tuple[str, object]],
 ) -> ALMTransitionEvaluation:
+    """``evaluation``'s key/value pairs, sorted by key, every value checked
+    to be encoded (:func:`_checked_encoded_value`)."""
     entries: List[Tuple[str, ALMTransitionValue]] = []
     for item in evaluation:
         if not isinstance(item, (tuple, list)) or len(item) != 2:
@@ -306,58 +314,40 @@ def _canonical_transition_evaluation(
         key, value = item
         if not isinstance(key, str) or not key:
             raise ValueError("ALM transition evaluation keys must be non-empty strings")
-        entries.append((key, _frozen_transition_value(value, f"evaluation[{key!r}]")))
+        entries.append((key, _checked_encoded_value(value, f"evaluation[{key!r}]")))
     return tuple(sorted(entries, key=lambda pair: pair[0]))
 
-def _frozen_transition_value(value: object, path: str) -> ALMTransitionValue:
-    """Encode ``value`` (named ``path`` in errors) once; an already-encoded
-    value passes through.
-
-    Snapshot constructors and checkpoint reloads both call this, so a value
-    is never wrapped in a second sequence/mapping marker.
-    """
-    if _is_frozen_transition_value(value):
+def _checked_encoded_value(value: object, path: str) -> ALMTransitionValue:
+    """``value`` when it is an encoded transition value (what
+    :func:`_transition_json_value` returns: a str, None, bool, int or finite
+    float, or a sequence or mapping marker with its encoded payload);
+    ``TypeError`` naming ``path`` otherwise. Snapshot constructors take the
+    checkpoint's content as it is stored, so they check and never encode: a
+    raw value (an array, a list, a raw tuple) cannot be told from an encoded
+    one by its shape, and ``transition_snapshot`` is where raw values are
+    encoded."""
+    if isinstance(value, (str, bool, int)) or value is None:
         return value
-    return _transition_json_value(value, path)
-
-def _is_frozen_transition_value(value: object) -> bool:
-    if isinstance(value, str) or value is None or isinstance(value, bool):
-        return True
-    if isinstance(value, int):
-        return True
-    if isinstance(value, float):
-        return np.isfinite(value)
-    if not isinstance(value, tuple) or len(value) != 2:
-        return False
-    marker, payload = value
-    if marker == _ALM_SEQUENCE_MARKER and isinstance(payload, tuple):
-        return all(_is_frozen_transition_value(item) for item in payload)
-    if marker == _ALM_MAPPING_MARKER and isinstance(payload, tuple):
-        return all(
-            isinstance(item, tuple)
-            and len(item) == 2
-            and isinstance(item[0], str)
-            and _is_frozen_transition_value(item[1])
-            for item in payload
-        )
-    return False
-
-def _validate_frozen_transition_value(value: object) -> None:
-    if isinstance(value, str) or value is None or isinstance(value, bool):
-        return
-    if isinstance(value, int):
-        return
     if isinstance(value, float):
         if not np.isfinite(value):
-            raise ValueError("ALM transition values must be finite")
-        return
-    if isinstance(value, tuple):
-        for item in value:
-            _validate_frozen_transition_value(item)
-        return
+            raise ValueError(f"ALM transition value {path} must be finite")
+        return value
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], str):
+        marker, payload = value
+        if marker == _ALM_SEQUENCE_MARKER and isinstance(payload, tuple):
+            for index, item in enumerate(payload):
+                _checked_encoded_value(item, f"{path}[{index}]")
+            return value
+        if marker == _ALM_MAPPING_MARKER and isinstance(payload, tuple):
+            for entry in payload:
+                if not (isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[0], str)):
+                    break
+                _checked_encoded_value(entry[1], f"{path}[{entry[0]!r}]")
+            else:
+                return value
     raise TypeError(
-        "ALM transition snapshots must contain recursively immutable values; "
-        f"received {type(value).__name__}"
+        f"ALM transition value {path} is not encoded ({type(value).__name__}); "
+        "snapshots hold encoded values: build them with transition_snapshot"
     )
 
 def _validate_frozen_transition_evaluation(
@@ -375,7 +365,7 @@ def _validate_frozen_transition_evaluation(
         if key in seen_keys:
             raise ValueError("ALM transition evaluation keys must be unique")
         seen_keys.add(key)
-        _validate_frozen_transition_value(value)
+        _checked_encoded_value(value, f"evaluation[{key!r}]")
 
 _TRANSITION_OMITTED_JACOBIAN_KEYS = frozenset(
     {
@@ -389,13 +379,15 @@ _TRANSITION_OMITTED_JACOBIAN_KEYS = frozenset(
 def _snapshot_transition_evaluation(
     evaluation: Mapping[str, object],
 ) -> ALMTransitionEvaluation:
-    """Freeze vector fields. Constraint Jacobians stay out of the checkpoint."""
-    projected = {
-        key: value
-        for key, value in evaluation.items()
-        if key not in _TRANSITION_OMITTED_JACOBIAN_KEYS
-    }
-    return _canonical_transition_evaluation(tuple(projected.items()))
+    """The encoded evaluation (every value encoded once, sorted by key).
+    Constraint Jacobians stay out of the checkpoint."""
+    return _canonical_transition_evaluation(
+        tuple(
+            (key, _transition_json_value(value, f"evaluation[{key!r}]"))
+            for key, value in evaluation.items()
+            if key not in _TRANSITION_OMITTED_JACOBIAN_KEYS
+        )
+    )
 
 def _restore_transition_json_value(value: object) -> object:
     # Current checkpoints encode the marker as a JSON list after tuple
@@ -495,7 +487,7 @@ def transition_snapshot(
             None
             if inner_options is None
             else tuple(
-                (str(key), value)
+                (str(key), _transition_json_value(value, f"inner_options[{key!r}]"))
                 for key, value in sorted(
                     inner_options.items(), key=lambda pair: str(pair[0])
                 )

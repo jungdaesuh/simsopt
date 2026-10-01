@@ -12,6 +12,7 @@ The golden resume scenarios resume through the plugin.
 
 import ast
 import dataclasses
+import pickle
 import subprocess
 import sys
 import unittest
@@ -130,6 +131,125 @@ class AlmCheckpointFromBoundariesTests(unittest.TestCase):
                     golden.encode(snapshot), golden.encode(round_trip)
                 )
             )
+
+
+def _diagnostic_run(diagnostic, completed_outer_callback=None):
+    """min (x - 1)^2 s.t. x <= 0 from x = 0 (a feasible start, so every
+    boundary carries a best-feasible incumbent) with ``diagnostic`` in every
+    evaluation; checkpointed through ``alm_checkpointing``. Returns the
+    published boundaries and the plugin's inner options."""
+
+    def physics(x):
+        return alm.ALMPhysics(
+            (x[0] - 1.0) ** 2, [2.0 * (x[0] - 1.0)], [x[0]], ([1.0],),
+            extras={"diagnostic": diagnostic},
+        )
+
+    plugin = alm_checkpoint.alm_checkpointing(
+        {"maxiter": 20}, completed_outer_callback=completed_outer_callback
+    )
+    boundaries = []
+
+    def observe(boundary):
+        boundaries.append(boundary)
+        if plugin.on_outer_boundary is not None:
+            plugin.on_outer_boundary(boundary)
+
+    alm.minimize_alm(
+        [0.0], ["g"], alm.cached_alm_evaluator(physics),
+        alm.ALMSettings(max_outer_iterations=3), plugin.inner_options,
+        on_outer_boundary=observe,
+    )
+    return boundaries, plugin.inner_options
+
+
+# Diagnostics the checkpoint must carry unchanged (arrays and lists come
+# back as tuples, the documented sequence form): a pair of arrays, and raw
+# values shaped like the codec's own tagged tuples.
+RAW_DIAGNOSTICS = {
+    "array_pair": (
+        (np.array([1.0, 2.0]), np.array([3.0, 4.0])),
+        ((1.0, 2.0), (3.0, 4.0)),
+    ),
+    "sequence_marker_tuple": (
+        ("__alm_sequence__", ("a", "b")),
+        ("__alm_sequence__", ("a", "b")),
+    ),
+    "mapping_marker_tuple": (
+        ("__alm_mapping__", (("k", 1.0),)),
+        ("__alm_mapping__", (("k", 1.0),)),
+    ),
+    "marker_list": (["__alm_sequence__", ["a"]], ("__alm_sequence__", ("a",))),
+    "mapping_with_marker_key": ({"__alm_mapping__": 1.0}, {"__alm_mapping__": 1.0}),
+}
+
+
+class AlmCheckpointRawValueTests(unittest.TestCase):
+    """SR-01: a checkpoint encodes every raw value; nothing raw is mistaken
+    for an encoded one (an array-valued tuple crashed the codec, and a raw
+    marker-shaped tuple lost its marker)."""
+
+    def test_raw_diagnostics_round_trip_through_snapshot_and_resume_boundary(self):
+        for name, (diagnostic, expected) in RAW_DIAGNOSTICS.items():
+            with self.subTest(diagnostic=name):
+                boundaries, inner_options = _diagnostic_run(diagnostic)
+                snapshot = alm_checkpoint.transition_snapshot(boundaries[0], inner_options)
+                restored = alm_checkpoint.resume_boundary(snapshot)
+                self.assertEqual(
+                    restored.state.best_feasible.evaluation["diagnostic"], expected
+                )
+
+    def test_raw_diagnostics_round_trip_through_alm_checkpointing(self):
+        for name, (diagnostic, expected) in RAW_DIAGNOSTICS.items():
+            with self.subTest(diagnostic=name):
+                snapshots = []
+                boundaries, inner_options = _diagnostic_run(diagnostic, snapshots.append)
+                self.assertEqual(len(snapshots), len(boundaries))
+                reloaded = pickle.loads(pickle.dumps(snapshots[0]))
+                plugin = alm_checkpoint.alm_checkpointing(
+                    {"maxiter": 20}, resume_state=reloaded
+                )
+                self.assertEqual(
+                    plugin.resume_from.state.best_feasible.evaluation["diagnostic"],
+                    expected,
+                )
+                resumed = alm.minimize_alm(
+                    np.asarray(reloaded.x, dtype=float), ["g"],
+                    alm.cached_alm_evaluator(
+                        lambda x: alm.ALMPhysics(
+                            (x[0] - 1.0) ** 2, [2.0 * (x[0] - 1.0)], [x[0]], ([1.0],),
+                            extras={"diagnostic": diagnostic},
+                        )
+                    ),
+                    alm.ALMSettings(max_outer_iterations=3), plugin.inner_options,
+                    resume_from=plugin.resume_from,
+                )
+                self.assertEqual(resumed.evaluation["diagnostic"], expected)
+
+    def test_raw_inner_options_round_trip(self):
+        boundaries, _inner_options = _diagnostic_run(1.0)
+        for name, (value, expected) in RAW_DIAGNOSTICS.items():
+            with self.subTest(option=name):
+                snapshot = alm_checkpoint.transition_snapshot(
+                    boundaries[0], {"maxiter": 20, "note": value}
+                )
+                resumed_options = alm_checkpoint.alm_checkpointing(
+                    {"maxiter": 7}, resume_state=snapshot
+                ).inner_options
+                self.assertEqual(resumed_options, {"maxiter": 7, "note": expected})
+
+    def test_snapshot_constructors_take_encoded_values_only(self):
+        # transition_snapshot encodes; a constructor only checks, so a raw
+        # value is rejected instead of guessed at.
+        for name, (raw, _expected) in RAW_DIAGNOSTICS.items():
+            if name in ("sequence_marker_tuple", "mapping_marker_tuple"):
+                continue  # also well-formed encoded values (of ("a", "b") and {"k": 1.0})
+            with self.subTest(value=name):
+                with self.assertRaisesRegex(TypeError, "encoded"):
+                    alm_checkpoint.ALMFeasibleIncumbentSnapshot(
+                        x=(0.0,), evaluation=(("diagnostic", raw),), multipliers=(0.0,),
+                        penalty=1.0, accepted_state=None,
+                    )
 
 
 class AlmTerminalSnapshotTests(unittest.TestCase):

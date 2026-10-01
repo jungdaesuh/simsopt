@@ -28,7 +28,7 @@ and the help of each module named below.
 | `ALMHistoryRecorder` | `simsopt_alm.history` | Opt-in history: pass `recorder.record` as `on_outer_step`, read `recorder.history()`. An entry's `constraint_values` is the signed g (as `result.constraint_values`), `violation_values` the per-row violation (`feasibility_values`). |
 | `alm_checkpointing` | `simsopt_alm.checkpoint` | `alm_checkpointing(inner_options, resume_state, completed_outer_callback)` returns the `inner_options`, `resume_from` and `on_outer_boundary` arguments of one checkpointed run. |
 | `ALMCheckpointing` | `simsopt_alm.checkpoint` | The frozen triple `alm_checkpointing` returns. |
-| `ALMTransitionSnapshot` | `simsopt_alm.checkpoint` | Immutable checkpoint (no Jacobians): `x`, `total_inner_iterations`, `completed_outer_iterations`, `resume_eligible`, `accepted_state`, ... |
+| `ALMTransitionSnapshot` | `simsopt_alm.checkpoint` | Immutable checkpoint (no Jacobians): `x`, `total_inner_iterations`, `completed_outer_iterations`, `resume_eligible`, `accepted_state`, ... Built by `alm_checkpointing`, which encodes every evaluation value (arrays and lists come back as tuples). |
 | `DefaultContinuationPolicy` | `simsopt_alm.policy` | The default `continuation_policy`; its vetoes give the success guarantees. |
 | `ALMContinuationPolicy` | `simsopt_alm.policy` | Protocol of a custom policy (advanced; keep the default's convergence vetoes). |
 | `ALMProcessBudgetExhausted` | `simsopt_alm.control` | Raise it from `accepted_callback` to stop with `process_budget_exhausted` (your own budget, e.g. wall clock). |

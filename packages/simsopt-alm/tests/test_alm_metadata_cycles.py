@@ -15,10 +15,7 @@ import numpy as np
 
 import simsopt_alm as alm
 from simsopt_alm.boundary import ALMOuterBoundary
-from simsopt_alm.checkpoint import (
-    ALMFeasibleIncumbentSnapshot,
-    _transition_json_value,
-)
+from simsopt_alm.checkpoint import _transition_json_value, transition_snapshot
 
 X0 = np.array([3.0, 2.0])
 
@@ -144,16 +141,37 @@ class AlmPhysicsCycleTests(unittest.TestCase):
         np.testing.assert_array_equal(evaluation["b"]["again"][0], [1.0])
 
 
+def _boundary_with_cyclic_incumbent():
+    """A resumable boundary of a real run whose best-feasible incumbent
+    carries a cyclic mapping (the loop itself never builds one)."""
+    boundaries = []
+    _solve(
+        _halfspace_evaluator(lambda x: {}, []),
+        on_outer_boundary=boundaries.append,
+    )
+    start = boundaries[0]
+    extra, path_message = _self_mapping()
+    incumbent = alm.ALMFeasibleIncumbent(
+        x=np.array([1.0, 0.0]), evaluation=extra, multipliers=np.array([2.0]),
+        penalty=1.0, inner_result=None,
+    )
+    state = alm.ALMLoopState(**{**vars(start.state), "best_feasible": incumbent})
+    boundary = ALMOuterBoundary(
+        completed_outer_iterations=0, completed_action="dual_update",
+        termination_reason=None, constraint_names=start.constraint_names,
+        constraint_blocks=None, accepted_state=None, geometry_identity=None,
+        state=state,
+    )
+    return boundary, path_message
+
+
 class AlmCheckpointCycleTests(unittest.TestCase):
     def test_cyclic_snapshot_evaluation_is_rejected_when_encoded(self):
-        extra, _path_message = _self_mapping()
+        boundary, path_message = _boundary_with_cyclic_incumbent()
         with self.assertRaises(ValueError) as caught:
-            ALMFeasibleIncumbentSnapshot(
-                x=(1.0, 0.0), evaluation=tuple(extra.items()), multipliers=(2.0,),
-                penalty=1.0, accepted_state=None,
-            )
+            transition_snapshot(boundary, {"maxiter": 200})
         self.assertIn("ALM transition value is cyclic", str(caught.exception))
-        self.assertIn("evaluation['metadata']['self'] is evaluation['metadata']", str(caught.exception))
+        self.assertIn(path_message, str(caught.exception))
 
     def test_encoder_rejects_a_cycle_and_accepts_a_shared_subtree(self):
         rows = []
@@ -176,24 +194,8 @@ class AlmCheckpointCycleTests(unittest.TestCase):
 
 class AlmResumeCycleTests(unittest.TestCase):
     def test_resume_boundary_with_a_cyclic_incumbent_is_rejected_before_evaluating(self):
-        boundaries = []
-        _solve(
-            _halfspace_evaluator(lambda x: {}, []),
-            on_outer_boundary=boundaries.append,
-        )
-        start = boundaries[0]
-        extra, _path_message = _self_mapping()
-        incumbent = alm.ALMFeasibleIncumbent(
-            x=np.array([1.0, 0.0]), evaluation=extra, multipliers=np.array([2.0]),
-            penalty=1.0, inner_result=None,
-        )
-        state = alm.ALMLoopState(**{**vars(start.state), "best_feasible": incumbent})
-        resumable = ALMOuterBoundary(
-            completed_outer_iterations=0, completed_action="dual_update",
-            termination_reason=None, constraint_names=start.constraint_names,
-            constraint_blocks=None, accepted_state=None, geometry_identity=None,
-            state=state,
-        )
+        resumable, _path_message = _boundary_with_cyclic_incumbent()
+        state = resumable.state
         calls = []
         with self.assertRaises(ValueError) as caught:
             alm.minimize_alm(
