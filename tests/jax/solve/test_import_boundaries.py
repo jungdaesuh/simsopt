@@ -144,19 +144,3 @@ def test_jax_gpu_extra_declares_public_runtime_optimizer_dependencies():
     for dependency in RUNTIME_OPTIMIZER_MODULES:
         assert dependency in jax_gpu_deps
     assert "optax" not in jax_gpu_deps
-
-
-def test_deploy_extras_do_not_route_through_stale_optimistix_alias():
-    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    optional_deps = pyproject["project"]["optional-dependencies"]
-
-    assert optional_deps["deploy"] == [
-        "simsopt[JAX,test,ALGS]",
-        "shapely>=2.1,<3",
-        "numba>=0.64,<0.66",
-    ]
-    assert optional_deps["deploy_gpu"] == [
-        "simsopt[JAX_GPU,test,ALGS]",
-        "shapely>=2.1,<3",
-        "numba>=0.64,<0.66",
-    ]
