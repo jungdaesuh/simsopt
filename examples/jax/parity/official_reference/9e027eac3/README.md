@@ -48,8 +48,8 @@ by the loader.
 rounding level. Nine runs of the unmodified official script on the official build, one thread: `k = 0` unperturbed
 (it reproduces the canonical capture bitwise, which the tests check) and `k = 1..8` with ONLY the first provider
 call's start vector moved by one unit in the last place per entry, `x0' = np.nextafter(x0, s * np.inf)` with
-`s = np.random.RandomState(20260920 + k).choice([-1.0, 1.0], size=x0.size)`. The protocol was pre-registered in
-`.artifacts/official-mirror-closure-20260919/d1-diagnostic/NOTES.md` (rule v2) before any sample existed.
+`s = np.random.RandomState(20260920 + k).choice([-1.0, 1.0], size=x0.size)`. The protocol (rule v2) was
+pre-registered before any sample existed; each record's `protocol.pre_registered_in` says where and when.
 
 Each record carries the observable name (upstream's capture key), the `lane_observable` (the port lane's key of the same
 quantity, which the quality band judges; identical to `observable` unless the capture names it differently, as coil forces'
@@ -93,18 +93,18 @@ derivation there.
 ## `tracing/`
 
 `tracing/<case_id>.json` records UPSTREAM's OWN trajectory scatter for the three tracing mirrors, whose observable is
-a whole set of trajectories rather than one optimizer end value. It was produced by the tracing-sampling
-investigation and is read with `load_official_tracing_scatter(case_id)` and `official_tracing_scatter_case_ids()`. Nine runs of the
+a whole set of trajectories rather than one optimizer end value. It is read with
+`load_official_tracing_scatter(case_id)` and `official_tracing_scatter_case_ids()`. Nine runs of the
 official script bytes on the official build, one thread: `k = 0` unperturbed and `k = 1..8` with ONLY the start data
 of the traced objects moved by one unit in the last place per entry, `start' = np.nextafter(start, s * np.inf)` with
 `s = np.random.RandomState(20260920 + k).choice([-1.0, 1.0], size=start.size)` (field lines: the `R0` and `Z0`
-arrays of `compute_fieldlines`; particles: the `xyz_inits` of `trace_particles`). The protocol was pre-registered in
-`.artifacts/official-mirror-closure-20260919/d1-diagnostic/NOTES.md` before any sample existed.
+arrays of `compute_fieldlines`; particles: the `xyz_inits` of `trace_particles`). The protocol was pre-registered
+before any sample existed; each record's `protocol.pre_registered_in` says where and when.
 
 Each record carries the line count, the protocol, the unperturbed run's terminal-status histogram, its total number
 of recorded hits and the sha256 of every canonical observable this fixture holds element-exact, and per `k` the
 sha256 of that run's `capture.json` and of its perturbation record, what the perturbation moved, and the scatter
-quantities (a)-(e) of the investigation report: status changes, hit-count differences per line and per plane, the
+quantities (a)-(e): status changes, hit-count differences per line and per plane, the
 final-time difference, the final-state and final-position distances, and the hit-to-section geometry. A quantity that
 only some cases have is recorded only by those cases: (f) the final parallel-speed fraction, which the guiding-centre
 case has and a field line has not, so the RECORD is what says which case measured which quantity.
