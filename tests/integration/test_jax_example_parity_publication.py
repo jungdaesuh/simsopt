@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import examples.jax.parity.publication as publication
 from examples.jax.parity.publication import (
     PublicationError,
     begin_run,
@@ -28,7 +27,7 @@ def test_run_publication_is_atomic_and_never_overwrites(tmp_path: Path) -> None:
         begin_run(tmp_path, paths.run_id)
 
 
-@pytest.mark.parametrize("collision", ["empty-directory", "symlink"])
+@pytest.mark.parametrize("collision", ["prior-run", "symlink"])
 def test_publish_time_collision_never_replaces_final_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -40,37 +39,24 @@ def test_publish_time_collision_never_replaces_final_entry(
     outside.mkdir()
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("collision-owned\n", encoding="utf-8")
+    original_rename = Path.rename
 
-    def create_collision(target: Path) -> None:
-        if collision == "empty-directory":
+    def collide_then_rename(source: Path, target: Path) -> Path:
+        if collision == "prior-run":
             target.mkdir()
+            (target / "summary.json").write_text("prior\n", encoding="utf-8")
         else:
             target.symlink_to(outside, target_is_directory=True)
+        return original_rename(source, target)
 
-    if hasattr(publication, "_rename_no_replace"):
-        original_no_replace = publication._rename_no_replace
-
-        def collide_then_publish(source: Path, target: Path) -> None:
-            create_collision(target)
-            original_no_replace(source, target)
-
-        monkeypatch.setattr(publication, "_rename_no_replace", collide_then_publish)
-    else:
-        original_rename = Path.rename
-
-        def collide_then_rename(source: Path, target: Path) -> Path:
-            create_collision(target)
-            return original_rename(source, target)
-
-        monkeypatch.setattr(Path, "rename", collide_then_rename)
+    monkeypatch.setattr(Path, "rename", collide_then_rename)
 
     with pytest.raises(PublicationError, match="already exists"):
         publish_run(paths)
 
-    if collision == "empty-directory":
-        assert paths.final.is_dir()
+    if collision == "prior-run":
         assert not paths.final.is_symlink()
-        assert not any(paths.final.iterdir())
+        assert (paths.final / "summary.json").read_text(encoding="utf-8") == "prior\n"
     else:
         assert paths.final.is_symlink()
         assert paths.final.resolve() == outside.resolve()

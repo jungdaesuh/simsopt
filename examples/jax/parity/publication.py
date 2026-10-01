@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import ctypes
 import errno
 import hashlib
 import json
-import os
 import re
-import stat
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,8 +18,6 @@ from examples.jax.parity.artifacts import (
 
 _RUN_ID = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8,32}$")
 _COMPLETION_MARKER = "COMPLETED.json"
-_RENAME_NOREPLACE = 1
-_AT_FDCWD = -100
 
 
 class PublicationError(RuntimeError):
@@ -43,25 +37,6 @@ def _validate_run_id(run_id: str) -> None:
         raise PublicationError(f"invalid parity run ID: {run_id!r}")
 
 
-def _fsync_directory(directory: Path) -> None:
-    required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
-    if sys.platform != "linux" or any(not hasattr(os, name) for name in required):
-        raise PublicationError("durable no-follow publication is unavailable")
-    try:
-        descriptor = os.open(
-            directory,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
-    except OSError as error:
-        raise PublicationError(
-            f"publication directory is not trusted: {directory}"
-        ) from error
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def begin_run(root: Path, run_id: str) -> RunPaths:
     """Claim one unique partial directory without overwriting prior evidence."""
     _validate_run_id(run_id)
@@ -74,7 +49,6 @@ def begin_run(root: Path, run_id: str) -> RunPaths:
         partial.mkdir()
     except FileExistsError as error:
         raise PublicationError(f"parity run already exists: {run_id}") from error
-    _fsync_directory(root)
     return RunPaths(run_id=run_id, root=root, partial=partial, final=final)
 
 
@@ -96,87 +70,25 @@ def mark_run_failed(paths: RunPaths, reason: str) -> Path:
     return marker
 
 
-def _fsync_tree_descriptor(directory_fd: int, context: Path) -> None:
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-    for name in sorted(os.listdir(directory_fd)):
-        try:
-            descriptor = os.open(name, flags, dir_fd=directory_fd)
-        except OSError as error:
-            raise PublicationError(
-                f"published run contains a substituted or unreadable entry: {context / name}"
-            ) from error
-        try:
-            mode = os.fstat(descriptor).st_mode
-            if stat.S_ISDIR(mode):
-                _fsync_tree_descriptor(descriptor, context / name)
-            elif not stat.S_ISREG(mode):
-                raise PublicationError(
-                    f"published run contains a non-regular entry: {context / name}"
-                )
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
-
-def _fsync_tree(root: Path) -> None:
-    required = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
-    if sys.platform != "linux" or any(not hasattr(os, name) for name in required):
-        raise PublicationError("durable no-follow publication is unavailable")
-    try:
-        descriptor = os.open(
-            root,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
-    except OSError as error:
-        raise PublicationError(
-            f"partial run is not a trusted directory: {root}"
-        ) from error
-    try:
-        _fsync_tree_descriptor(descriptor, root)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _rename_no_replace(source: Path, target: Path) -> None:
-    """Atomically publish one directory without replacing any target entry."""
-    if sys.platform != "linux":
-        raise PublicationError("atomic no-replace directory publication is unavailable")
-    library = ctypes.CDLL(None, use_errno=True)
+    """Rename a directory into place without replacing prior evidence.
+
+    POSIX ``rename`` refuses a non-empty directory or a non-directory target;
+    Windows refuses any existing target. An empty directory holds no evidence.
+    """
     try:
-        renameat2 = library.renameat2
-    except AttributeError as error:
-        raise PublicationError(
-            "atomic no-replace directory publication is unavailable"
-        ) from error
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    result = renameat2(
-        _AT_FDCWD,
-        os.fsencode(source),
-        _AT_FDCWD,
-        os.fsencode(target),
-        _RENAME_NOREPLACE,
-    )
-    if result == 0:
-        return
-    error_number = ctypes.get_errno()
-    if error_number in {
-        errno.EEXIST,
-        errno.EISDIR,
-        errno.ENOTDIR,
-        errno.ENOTEMPTY,
-    }:
-        raise PublicationError(f"parity run already exists: {target.name}")
-    raise PublicationError(
-        f"atomic no-replace publication failed: {os.strerror(error_number)}"
-    )
+        source.rename(target)
+    except OSError as error:
+        if error.errno in {
+            errno.EEXIST,
+            errno.EISDIR,
+            errno.ENOTDIR,
+            errno.ENOTEMPTY,
+        }:
+            raise PublicationError(
+                f"parity run already exists: {target.name}"
+            ) from error
+        raise PublicationError(f"parity run publication failed: {error}") from error
 
 
 def _completion_payload(paths: RunPaths) -> bytes:
@@ -205,7 +117,6 @@ def publish_run(paths: RunPaths) -> Path:
         raise PublicationError("partial parity run requires summary.json")
     if paths.final.exists():
         raise PublicationError(f"parity run already exists: {paths.run_id}")
-    _fsync_tree(paths.partial)
     _rename_no_replace(paths.partial, paths.final)
     try:
         write_bytes_exclusive(
@@ -217,8 +128,6 @@ def publish_run(paths: RunPaths) -> Path:
         raise PublicationError(
             f"completion marker cannot be published: {paths.run_id}"
         ) from error
-    _fsync_directory(paths.final)
-    _fsync_directory(paths.root)
     return paths.final
 
 
