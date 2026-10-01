@@ -472,26 +472,6 @@ def _run_target_compile_count_case() -> None:
     )
 
 
-def _assert_implicit_host_transfer_rejected(
-    fn,
-    *args,
-    case_name: str,
-    **kwargs,
-) -> None:
-    try:
-        fn(*args, **kwargs)
-    except RuntimeError as exc:
-        message = str(exc)
-        normalized_message = message.lower()
-        assert "transfer" in normalized_message and (
-            "guard" in normalized_message or "disallow" in normalized_message
-        ), f"{case_name} raised the wrong transfer-guard error: {message}"
-    else:
-        raise AssertionError(
-            f"{case_name} should reject implicit host input under transfer guard"
-        )
-
-
 def _host_scalar_float64(value) -> float:
     return float(jax.device_get(value))
 
@@ -507,12 +487,6 @@ def _assert_finite_scalar(value, *, label: str | None = None) -> float:
     else:
         assert np.isfinite(scalar), label
     return scalar
-
-
-def _assert_finite_scalar_matches_host(device_value, host_value) -> None:
-    device_scalar = _assert_finite_scalar(device_value)
-    host_scalar = _host_scalar_float64(host_value)
-    np.testing.assert_allclose(host_scalar, device_scalar)
 
 
 def _assert_finite_array(value, *, expected_shape=None) -> np.ndarray:

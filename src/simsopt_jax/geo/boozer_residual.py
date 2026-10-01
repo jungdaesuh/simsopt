@@ -156,48 +156,6 @@ def _split_decision_vector_lax(x_jax, *, optimize_G):
     return sdofs, iota, None
 
 
-@jax.custom_vjp
-def _split_decision_vector_with_G_vjp_safe(x_jax):
-    return _split_decision_vector_lax(x_jax, optimize_G=True)
-
-
-def _split_decision_vector_with_G_vjp_safe_fwd(x_jax):
-    return _split_decision_vector_lax(x_jax, optimize_G=True), None
-
-
-def _split_decision_vector_with_G_vjp_safe_bwd(_residual, cotangents):
-    sdofs_ct, iota_ct, G_ct = cotangents
-    return (jnp.concatenate((sdofs_ct, jnp.ravel(iota_ct), jnp.ravel(G_ct))),)
-
-
-_split_decision_vector_with_G_vjp_safe.defvjp(
-    _split_decision_vector_with_G_vjp_safe_fwd,
-    _split_decision_vector_with_G_vjp_safe_bwd,
-)
-
-
-@jax.custom_vjp
-def _split_decision_vector_without_G_vjp_safe(x_jax):
-    sdofs, iota, _G = _split_decision_vector_lax(x_jax, optimize_G=False)
-    return sdofs, iota
-
-
-def _split_decision_vector_without_G_vjp_safe_fwd(x_jax):
-    sdofs, iota, _G = _split_decision_vector_lax(x_jax, optimize_G=False)
-    return (sdofs, iota), None
-
-
-def _split_decision_vector_without_G_vjp_safe_bwd(_residual, cotangents):
-    sdofs_ct, iota_ct = cotangents
-    return (jnp.concatenate((sdofs_ct, jnp.ravel(iota_ct))),)
-
-
-_split_decision_vector_without_G_vjp_safe.defvjp(
-    _split_decision_vector_without_G_vjp_safe_fwd,
-    _split_decision_vector_without_G_vjp_safe_bwd,
-)
-
-
 def _inverse_modB(B2):
     """Return ``1 / |B|``; degenerate zero-field inputs surface as non-finite."""
     return _explicit_rsqrt(B2)

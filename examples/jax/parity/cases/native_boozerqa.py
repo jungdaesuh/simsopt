@@ -1162,26 +1162,6 @@ def _prepare_jax_variant_runtime(
     )
 
 
-def _prepare_jax_variant_execution(
-    lane: ParityLane,
-    bundle: InputBundle,
-    arrays: dict[str, np.ndarray],
-    spec: BoozerSingleStageSpec,
-    measurement: MeasurementExecution,
-) -> _PreparedJaxVariantExecution:
-    """Prepare one exact runtime for a warm run followed by a measured run."""
-
-    if lane == "native-cpu":
-        raise ValueError("prepared JAX execution requires a JAX lane")
-    return _PreparedJaxVariantExecution(
-        lane=lane,
-        bundle=bundle,
-        arrays=arrays,
-        spec=spec,
-        _runtime=_prepare_jax_variant_runtime(bundle, arrays, spec, measurement),
-    )
-
-
 def _jax(
     lane: ParityLane,
     bundle: InputBundle,

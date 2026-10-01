@@ -46,7 +46,6 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _DEFAULT_TRANSFER_GUARD_BY_MODE,
     _DISABLE_JIT_ENV,
     _EXPLICIT_SELECTOR_ENV_VARS,
-    _GUARDRAIL_ENV_VARS,
     _JAX_COMPILATION_CACHE_DIR_ENV,
     _JAX_PLATFORMS_ENV,
     _MODE_ENV,

@@ -118,10 +118,6 @@ def _host_optional_array(value) -> np.ndarray | None:
     return host_array_after_ready(value)
 
 
-def _legacy_minimize_options(options: OptionsBase) -> dict[str, object]:
-    return asdict(options)
-
-
 def _legacy_lbfgsb_options(
     options: SimsoptLBFGSBOptions,
     *,
@@ -1020,7 +1016,7 @@ def minimize(
             progress_callback=legacy_progress_callback,
         )
     elif isinstance(options_used, SimsoptTraceLBFGSOptions):
-        trace_options = _legacy_minimize_options(options_used)
+        trace_options = asdict(options_used)
         trace_options.pop("gtol")
         trace_options.pop("maxiter")
         legacy_callback, legacy_progress_callback = _legacy_minimize_callbacks(

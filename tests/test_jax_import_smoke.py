@@ -107,25 +107,6 @@ def _build_clean_subprocess_env(
     return env
 
 
-def _run_python_script(
-    script_path: Path,
-    *,
-    args: Sequence[str] = (),
-    timeout: int = 30,
-    extra_env: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Run a repo-local Python script in a clean subprocess."""
-    result = subprocess.run(
-        [sys.executable, str(script_path), *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=_REPO_ROOT,
-        env=_build_clean_subprocess_env(extra_env),
-    )
-    return result.returncode, result.stderr.strip()
-
-
 def _run_python_script_capture(
     script_path: Path,
     *,

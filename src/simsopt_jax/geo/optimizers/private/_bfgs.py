@@ -119,37 +119,6 @@ class _CompiledStep(Protocol):
     def memory_analysis(self) -> _CompiledMemoryAnalysis: ...
 
 
-def _bfgs_memory_contract(
-    dimension: int,
-    dtype: jax.typing.DTypeLike,
-) -> dict[str, int | bool]:
-    """Return conservative logical byte accounting for one dense update.
-
-    The accounting assumes no buffer donation: old and new inverse Hessians,
-    four matrix-shaped update intermediates, and four vector-shaped operands
-    may coexist. XLA fusion can reduce physical live bytes; this is an upper
-    bound for published records, not a routing threshold.
-    """
-
-    n = int(dimension)
-    itemsize = int(np.dtype(dtype).itemsize)
-    matrix_bytes = n * n * itemsize
-    vector_bytes = n * itemsize
-    return {
-        "dimension": n,
-        "dtype_itemsize": itemsize,
-        "inverse_hessian_bytes": matrix_bytes,
-        "simultaneous_old_new_hessian_bytes": 2 * matrix_bytes,
-        "matrix_intermediate_bytes": 4 * matrix_bytes,
-        "vector_intermediate_bytes": 4 * vector_bytes,
-        "fixed_scalar_overhead_bytes": 1024,
-        "derived_peak_live_upper_bound_bytes": (
-            6 * matrix_bytes + 4 * vector_bytes + 1024
-        ),
-        "buffer_donation": False,
-    }
-
-
 def _compiled_step_memory_analysis(compiled: _CompiledStep) -> dict[str, int]:
     """Return XLA buffer-accounting fields for one compiled BFGS step."""
 

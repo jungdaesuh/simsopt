@@ -154,13 +154,6 @@ def _mode_range(reference, start, stop):
     return _staged_like(reference, np.arange(start, stop))
 
 
-def _selector_matrix(size, positions):
-    matrix = np.zeros((len(positions), size), dtype=np.float64)
-    if positions:
-        matrix[np.arange(len(positions)), positions] = 1.0
-    return _as_jax_float64(matrix)
-
-
 def _slice_indices(start: int, size: int):
     return _as_jax_int32(start) + jnp.arange(size, dtype=jnp.int32)
 
