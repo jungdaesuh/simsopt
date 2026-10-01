@@ -13,7 +13,7 @@ same trajectory.  This file asks it where the question has an answer, early:
 The rule, fixed before the numbers it judges were computed:
 
 * twins are each lane restarted from upstream's one-ulp protocol
-  (``build_official_reference.SENSITIVITY_PERTURBATION_RULE`` and ``_SEED_RULE``:
+  (the sensitivity protocol recorded in the official-reference fixture:
   ``x0' = nextafter(x0, s inf)``, ``s`` from ``RandomState(20260920 + k)``,
   ``k = 1..8``), so a twin starts at exactly the state upstream's own draw ``k``
   recorded; the envelope is the largest of the sixteen twin distances;

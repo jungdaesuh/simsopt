@@ -33,9 +33,6 @@ SENSITIVITY_ROOT: Final[Path] = REFERENCE_ROOT / "sensitivity"
 #: An array with at most this many elements is stored element-exact; a larger one is stored as a digest only.
 INLINE_ELEMENT_LIMIT: Final[int] = 1024
 
-#: Schema version of the per-case JSON files.
-SCHEMA_VERSION: Final[int] = 1
-
 #: Name of the record stored at the top level of a fixture file: the official run at the script's shipped scale.
 #: Every other captured run of the same official script lives under the optional ``variants`` key.
 CANONICAL_VARIANT: Final[str] = "canonical"
@@ -56,21 +53,8 @@ ScalarValue = float | int | bool | str | None
 JsonValue = ScalarValue | Mapping[str, object] | Sequence[object]
 
 
-def encode_nonfinite(value: object) -> object:
-    """Replace every non-finite float in ``value`` by the sentinel object, recursively."""
-    if isinstance(value, Mapping):
-        return {str(key): encode_nonfinite(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [encode_nonfinite(item) for item in value]
-    if isinstance(value, float) and not math.isfinite(value):
-        if math.isnan(value):
-            return {NONFINITE_KEY: "nan"}
-        return {NONFINITE_KEY: "inf" if value > 0.0 else "-inf"}
-    return value
-
-
 def decode_nonfinite(value: object) -> JsonValue:
-    """Invert :func:`encode_nonfinite`."""
+    """Replace every non-finite sentinel object in ``value`` by its float, recursively."""
     if isinstance(value, Mapping):
         if len(value) == 1 and NONFINITE_KEY in value:
             return _NONFINITE_TO_FLOAT[str(value[NONFINITE_KEY])]
@@ -145,18 +129,6 @@ class ArrayDigest:
             sum=float(np.sum(flat)),
             l2=float(np.sqrt(np.sum(flat * flat))),
         )
-
-    def as_payload(self) -> dict[str, object]:
-        return {
-            "shape": list(self.shape),
-            "dtype": self.dtype,
-            "count": self.count,
-            "sha256": self.sha256,
-            "min": encode_nonfinite(self.min),
-            "max": encode_nonfinite(self.max),
-            "sum": encode_nonfinite(self.sum),
-            "l2": encode_nonfinite(self.l2),
-        }
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> ArrayDigest:
@@ -806,8 +778,8 @@ UPSTREAM_SCATTER_ROOT: Final[Path] = REFERENCE_ROOT / "scatter"
 UPSTREAM_SCATTER_SCHEMA_VERSION: Final[int] = 2
 
 #: Per case, the capture keys of upstream's OWN stage success flags a scatter run must report true to count as a
-#: successful workflow. The generator records exactly these and the loader refuses any other set, so a record can
-#: never be regenerated with a stage's success unchecked. Planar coils' official script publishes no success flag
+#: successful workflow. The loader refuses any other set, so a record cannot hold a stage's success unchecked.
+#: Planar coils' official script publishes no success flag
 #: (its L-BFGS-B outcome is in ``provider_calls``), and its record feeds a band, never an end-state set.
 UPSTREAM_SCATTER_SUCCESS_KEYS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {

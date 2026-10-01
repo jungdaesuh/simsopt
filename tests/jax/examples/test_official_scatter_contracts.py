@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 from pathlib import Path
 
 import numpy as np
@@ -26,9 +25,6 @@ from examples.jax.parity.cases.native_boozer import (
 from examples.jax.parity.cases.native_boozer import create_input as create_boozer_input
 from examples.jax.parity.input_bundle import load_input_bundle
 from examples.jax.parity.official_reference import (
-    OfficialUpstreamScatter,
-    build_upstream_scatter,
-    load_official_reference,
     load_upstream_scatter,
 )
 from examples.jax.parity.official_scatter_contracts import (
@@ -201,106 +197,6 @@ def test_an_end_state_set_needs_upstreams_own_success_flags() -> None:
             load_upstream_scatter(PLANAR, "bounded"),
             ("final:objective",),
             same_state_proof="test",
-        )
-
-
-def _write_synthetic_boozer_run(
-    runs_root: Path, k: int, area_iota: float, *, flux_success: bool
-) -> None:
-    directory = runs_root / "native-boozer" / "bounded" / f"k{k}"
-    directory.mkdir(parents=True)
-    (directory / "run.json").write_text(
-        json.dumps({"exit_code": 0, "k": k}), encoding="utf-8"
-    )
-    (directory / "perturbation.json").write_text(json.dumps({"k": k}), encoding="utf-8")
-    (directory / "capture.json").write_text(
-        json.dumps(
-            {
-                "threads": {"OMP_NUM_THREADS": "1"},
-                "observables": {
-                    "area:iota": area_iota,
-                    "area:solver_success": True,
-                    "flux:solver_success": flux_success,
-                },
-                "optimizer_calls": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_a_regenerated_record_keeps_a_failed_solve_out_of_the_end_state_set(
-    tmp_path: Path,
-) -> None:
-    """Generator -> loader -> contract: a draw whose flux solve failed never enters the set.
-
-    The generator takes the case's own success flags (never an argument), records
-    each run's flags as captured, and the contract admits a draw only when all
-    are true -- so a regeneration can no longer mark a failed solve successful.
-    """
-    official = load_official_reference("native-boozer")
-    receipt = tmp_path / "receipt.json"
-    receipt.write_text(
-        json.dumps(
-            {
-                "case_id": "native-boozer",
-                "scale": "bounded",
-                "official_script_sha256": official.official_script_sha256,
-                "verbatim_body_verified": False,
-                "derived_body_equals_official_with_listed_edits": True,
-                "body_sha256": "0" * 64,
-                "body_unified_diff_vs_official": "-mpol = 6\n+mpol = 2\n",
-            }
-        ),
-        encoding="utf-8",
-    )
-    failed_k = 3
-    for k in PRE_REGISTERED_DRAWS:
-        _write_synthetic_boozer_run(
-            tmp_path / "runs",
-            k,
-            -0.19 if k % 2 == 0 else -0.41,
-            flux_success=k != failed_k,
-        )
-    payload = build_upstream_scatter.build_payload(
-        case_id="native-boozer",
-        scale="bounded",
-        runs_root=tmp_path / "runs",
-        runner_receipt=receipt,
-        capture_keys={"area:iota": "area:iota"},
-        ks=PRE_REGISTERED_DRAWS,
-        pre_registered_in="test",
-    )
-    scatter = OfficialUpstreamScatter.from_payload(payload)
-    end_states = upstream_end_states(scatter, ("area:iota",), same_state_proof="test")
-
-    assert payload["success_keys"] == ["area:solver_success", "flux:solver_success"]
-    assert scatter.run(failed_k).success_flags == {
-        "area:solver_success": True,
-        "flux:solver_success": False,
-    }
-    assert not scatter.run(failed_k).workflow_success
-    assert [state.k for state in end_states.states] == [
-        k for k in PRE_REGISTERED_DRAWS if k != failed_k
-    ]
-    assert "failed: [3]" in end_states.derivation
-    assert "--success-key" not in build_upstream_scatter.build_parser().format_help()
-
-
-def test_the_generator_refuses_a_run_without_a_success_flag(tmp_path: Path) -> None:
-    _write_synthetic_boozer_run(tmp_path, 0, -0.19, flux_success=True)
-    directory = tmp_path / "native-boozer" / "bounded" / "k0"
-    capture = json.loads((directory / "capture.json").read_text(encoding="utf-8"))
-    del capture["observables"]["flux:solver_success"]
-    (directory / "capture.json").write_text(json.dumps(capture), encoding="utf-8")
-
-    with pytest.raises(SystemExit, match="flux:solver_success"):
-        build_upstream_scatter.build_run(
-            directory,
-            0,
-            {"area:iota": "area:iota"},
-            ("area:solver_success", "flux:solver_success"),
-            None,
         )
 
 
