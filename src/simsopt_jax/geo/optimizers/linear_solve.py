@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from contextlib import nullcontext
 from enum import IntEnum
 from functools import partial
 from threading import Lock
@@ -45,7 +44,6 @@ from simsopt_jax.geo.optimizers.exact_final_linearization import (
 )
 from simsopt_jax.numerical_policy import mixed_dense_ir_accuracy_policy
 from simsopt_jax.runtime.host_boundary import host_array, host_int
-from simsopt_jax.runtime.trace_annotations import PhaseId, device_scope
 
 _HAGER_HIGHAM_CONDITION_ITERATIONS = 5
 
@@ -294,8 +292,6 @@ def _linearize_and_materialize_dense_square_jacobian(
     *,
     assembler: _DenseJacobianAssembler = _DenseJacobianAssembler.LINEARIZE_ONCE,
     batch_width: int | None = None,
-    jacobian_construction_phase: PhaseId | None = None,
-    dense_materialization_phase: PhaseId | None = None,
 ) -> _DenseJacobianMaterialization:
     """Materialize one square Jacobian using a statically selected assembler."""
 
@@ -310,29 +306,14 @@ def _linearize_and_materialize_dense_square_jacobian(
         dimension=int(x.shape[0]),
     )
     if assembler is _DenseJacobianAssembler.LINEARIZE_ONCE:
-        with (
-            device_scope(jacobian_construction_phase)
-            if jacobian_construction_phase is not None
-            else nullcontext()
-        ):
-            residual, linearized_fn = jax.linearize(residual_fn, x)
-        with (
-            device_scope(dense_materialization_phase)
-            if dense_materialization_phase is not None
-            else nullcontext()
-        ):
-            jacobian = _dense_square_operator_matrix(
-                linearized_fn,
-                residual,
-                batch_width=configured_batch_width,
-            )
+        residual, linearized_fn = jax.linearize(residual_fn, x)
+        jacobian = _dense_square_operator_matrix(
+            linearized_fn,
+            residual,
+            batch_width=configured_batch_width,
+        )
     else:
-        with (
-            device_scope(jacobian_construction_phase)
-            if jacobian_construction_phase is not None
-            else nullcontext()
-        ):
-            residual = residual_fn(x)
+        residual = residual_fn(x)
         checkpointed_residual_fn = jax.checkpoint(
             residual_fn,
             policy=jax.checkpoint_policies.nothing_saveable,
@@ -346,16 +327,11 @@ def _linearize_and_materialize_dense_square_jacobian(
                 (tangent,),
             )[1]
 
-        with (
-            device_scope(dense_materialization_phase)
-            if dense_materialization_phase is not None
-            else nullcontext()
-        ):
-            jacobian = _dense_square_operator_matrix(
-                checkpointed_jvp,
-                residual,
-                batch_width=configured_batch_width,
-            )
+        jacobian = _dense_square_operator_matrix(
+            checkpointed_jvp,
+            residual,
+            batch_width=configured_batch_width,
+        )
     return _DenseJacobianMaterialization(
         residual=residual,
         jacobian=jacobian,
@@ -1596,20 +1572,18 @@ def _solve_retained_jacobian_transpose_adjoint(
 
         def nonzero_rhs(_nonzero_operand):
             lu_piv = (payload.lu, payload.pivots)
-            with device_scope(PhaseId.ADJOINT_LU_SOLVE):
-                solution = _lu_solve_dense_hessian(
-                    lu_piv,
-                    rhs,
-                    transpose=True,
-                )
-            with device_scope(PhaseId.ADJOINT_REFINEMENT):
-                correction = _lu_solve_dense_hessian(
-                    lu_piv,
-                    rhs - jacobian.T @ solution,
-                    transpose=True,
-                )
-                solution = solution + correction
-                residual = rhs - jacobian.T @ solution
+            solution = _lu_solve_dense_hessian(
+                lu_piv,
+                rhs,
+                transpose=True,
+            )
+            correction = _lu_solve_dense_hessian(
+                lu_piv,
+                rhs - jacobian.T @ solution,
+                transpose=True,
+            )
+            solution = solution + correction
+            residual = rhs - jacobian.T @ solution
             status = _linear_solve_status(
                 solution,
                 residual,
@@ -2190,68 +2164,62 @@ def _solve_dense_square_operator_lu_system_with_status(
     resolve.
     """
     rhs_dtype = jnp.asarray(rhs).dtype
-    with device_scope(PhaseId.ADJOINT_DENSE_MATRIX):
-        matrix = _dense_square_operator_matrix(
-            matvec,
-            rhs,
-            sweep_dtype=sweep_dtype,
-        )
+    matrix = _dense_square_operator_matrix(
+        matvec,
+        rhs,
+        sweep_dtype=sweep_dtype,
+    )
     rhs = jnp.asarray(rhs, dtype=matrix.dtype)
-    with device_scope(PhaseId.ADJOINT_LU_FACTOR):
-        lu_piv = jsp_linalg.lu_factor(matrix)
-    with device_scope(PhaseId.ADJOINT_LU_SOLVE):
-        solution = jsp_linalg.lu_solve(lu_piv, rhs)
+    lu_piv = jsp_linalg.lu_factor(matrix)
+    solution = jsp_linalg.lu_solve(lu_piv, rhs)
     # One step of iterative refinement against the cached factors: resolves the
     # rounding error of the direct solve back to the matrix's backward-error
     # floor without a second factorization (O(n^2) per step).
-    with device_scope(PhaseId.ADJOINT_REFINEMENT):
-        correction = jsp_linalg.lu_solve(lu_piv, rhs - matrix @ solution)
-        solution = solution + correction
-        residual = rhs - matrix @ solution
-        status = _linear_solve_status(
-            solution,
-            residual,
-            rhs,
-            tol=tol,
-            iterations=_device_int32(0, like=rhs),
-        )
-        backward_error_success = _dense_matrix_backward_error_success(
+    correction = jsp_linalg.lu_solve(lu_piv, rhs - matrix @ solution)
+    solution = solution + correction
+    residual = rhs - matrix @ solution
+    status = _linear_solve_status(
+        solution,
+        residual,
+        rhs,
+        tol=tol,
+        iterations=_device_int32(0, like=rhs),
+    )
+    backward_error_success = _dense_matrix_backward_error_success(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+    )
+    # Numerical-safety guard: a backward-stable solve of a singular or
+    # near-singular operator still yields a forward-garbage solution that the
+    # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
+    # condition estimate exceeds the dtype-specific degeneracy threshold; float32
+    # smoke solves that pass the broader threshold must also satisfy the forward
+    # error bound.  A degenerate J^T then fails closed instead of silently
+    # returning a wrong adjoint, while the well-conditioned production J^T
+    # (cond ~ 1e3-1e6) passes with many orders of margin.  The cached ``lu_piv``
+    # is reused by the Hager-Higham inner solves (O(n^2)), avoiding a second
+    # factorization and keeping the strict transfer-guard path on device.
+    condition_estimate, condition_factorizations, condition_lu_solves = (
+        _dense_matrix_condition_estimate_with_telemetry(
             matrix,
-            solution,
-            rhs,
-            tol=tol,
-        )
-        # Numerical-safety guard: a backward-stable solve of a singular or
-        # near-singular operator still yields a forward-garbage solution that the
-        # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
-        # condition estimate exceeds the dtype-specific degeneracy threshold; float32
-        # smoke solves that pass the broader threshold must also satisfy the forward
-        # error bound.  A degenerate J^T then fails closed instead of silently
-        # returning a wrong adjoint, while the well-conditioned production J^T
-        # (cond ~ 1e3-1e6) passes with many orders of margin.  The cached ``lu_piv``
-        # is reused by the Hager-Higham inner solves (O(n^2)), avoiding a second
-        # factorization and keeping the strict transfer-guard path on device.
-        condition_estimate, condition_factorizations, condition_lu_solves = (
-            _dense_matrix_condition_estimate_with_telemetry(
-                matrix,
-                lu_piv=lu_piv,
-            )
-        )
-        solve_safe = _dense_matrix_solve_numerically_safe(
-            matrix,
-            solution,
-            rhs,
-            tol=tol,
             lu_piv=lu_piv,
-            solve_dtype=rhs_dtype,
-            condition_estimate=condition_estimate,
         )
-        return solution, status._replace(
-            success=(status.success | backward_error_success) & solve_safe,
-            dense_materialization_count=_device_int32(1, like=rhs),
-            lu_factorization_count=(
-                _device_int32(1, like=rhs) + condition_factorizations
-            ),
-            lu_solve_count=(_device_int32(2, like=rhs) + condition_lu_solves),
-            refinement_correction_count=_device_int32(1, like=rhs),
-        )
+    )
+    solve_safe = _dense_matrix_solve_numerically_safe(
+        matrix,
+        solution,
+        rhs,
+        tol=tol,
+        lu_piv=lu_piv,
+        solve_dtype=rhs_dtype,
+        condition_estimate=condition_estimate,
+    )
+    return solution, status._replace(
+        success=(status.success | backward_error_success) & solve_safe,
+        dense_materialization_count=_device_int32(1, like=rhs),
+        lu_factorization_count=(_device_int32(1, like=rhs) + condition_factorizations),
+        lu_solve_count=(_device_int32(2, like=rhs) + condition_lu_solves),
+        refinement_correction_count=_device_int32(1, like=rhs),
+    )

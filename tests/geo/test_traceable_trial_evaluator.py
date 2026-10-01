@@ -7,13 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from simsopt_jax.runtime.host_boundary import host_transfer_audit
-from simsopt_jax.runtime.trace_annotations import (
-    EvaluationKind,
-    HostEvent,
-    PhaseId,
-    evaluation_context,
-    trace_session,
-)
 from simsopt_jax_adapters.geo import surface_objectives_traceable
 
 
@@ -575,7 +568,7 @@ def test_accepted_incumbent_controller_is_transfer_guard_safe() -> None:
     np.testing.assert_array_equal(gradient, np.asarray([1.25, -2.5]))
 
 
-def test_accepted_incumbent_controller_emits_one_correlated_host_event_set() -> None:
+def test_accepted_incumbent_controller_attributes_its_host_transfers() -> None:
     initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
     candidate_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=True)
     controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
@@ -583,33 +576,15 @@ def test_accepted_incumbent_controller_emits_one_correlated_host_event_set() -> 
         initial_state,
     )
     parameters = np.asarray([8.0, 9.0], dtype=np.float64)
-    parameter_sha256 = controller._parameter_sha256(parameters)
 
-    with trace_session() as timeline_audit, host_transfer_audit() as transfer_audit, evaluation_context(
-        "evaluation-7",
-        parameter_sha256,
-        EvaluationKind.TRIAL,
-    ):
+    with host_transfer_audit() as transfer_audit:
         value, gradient = controller.value_and_grad(parameters)
 
     assert value == 17.5
     np.testing.assert_array_equal(gradient, np.asarray([1.25, -2.5]))
-    assert [event.event for event in timeline_audit.events()] == [
-        HostEvent.EVALUATOR_ENTRY,
-        HostEvent.DEVICE_READY,
-        HostEvent.EVALUATOR_RETURN,
-    ]
-    assert all(
-        event.evaluation.evaluation_id == "evaluation-7"
-        for event in timeline_audit.events()
-    )
-    assert [record.phase for record in timeline_audit.records()] == [
-        PhaseId.HOST_H2D_SUBMIT,
-        PhaseId.HOST_D2H_MATERIALIZE,
-    ]
     [transfer_summary] = transfer_audit.summary()
-    assert transfer_summary.phase == PhaseId.HOST_D2H_MATERIALIZE.value
-    assert transfer_summary.evaluation_id == "evaluation-7"
+    assert transfer_summary.phase == "host.d2h_materialize"
+    assert transfer_summary.evaluation_id == controller._parameter_sha256(parameters)
     assert transfer_summary.calls == 2
     assert transfer_summary.leaves == 2
     assert transfer_summary.bytes == 24
@@ -641,22 +616,6 @@ def test_accepted_incumbent_controller_does_not_hostify_evidence(
     controller.value_and_grad(np.asarray([8.0, 9.0], dtype=np.float64))
 
     assert host_bool_calls == 0
-
-
-def test_accepted_incumbent_controller_rejects_mismatched_trace_identity() -> None:
-    initial_state = _inner_state((-1.0, -2.0), (-3.0, -4.0), 5.0, eligible=True)
-    candidate_state = _inner_state((8.0, 9.0), (3.0, 4.0), 7.5, eligible=True)
-    controller = surface_objectives_traceable.AcceptedIncumbentHostValueAndGrad(
-        lambda _parameters, _incumbent: _incumbent_evaluation(candidate_state),
-        initial_state,
-    )
-
-    with trace_session(), evaluation_context(
-        "evaluation-8",
-        "0" * 64,
-        EvaluationKind.TRIAL,
-    ), pytest.raises(ValueError, match="parameter SHA-256"):
-        controller.value_and_grad(np.asarray([8.0, 9.0], dtype=np.float64))
 
 
 def test_accepted_incumbent_session_factory_is_transfer_guard_safe() -> None:

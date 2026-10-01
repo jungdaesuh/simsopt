@@ -22,7 +22,6 @@ from simsopt_jax.backend import (
     get_field_kernel_tuning,
     register_backend_cache_clear,
 )
-from simsopt_jax.runtime.trace_annotations import PhaseId, device_scope
 
 from ._device_scalars import device_one as _device_one
 from ._math_utils import (
@@ -744,15 +743,13 @@ def _make_kernel(
     )
 
     def kernel(points, gammas, gammadashs, currents):
-        with device_scope(PhaseId.BIOTSAVART_FORWARD):
+        def chunk_fn(chunk_points):
+            return jax.vmap(
+                lambda x: per_point(x, gammas, gammadashs, currents),
+                in_axes=(0,),
+            )(chunk_points)
 
-            def chunk_fn(chunk_points):
-                return jax.vmap(
-                    lambda x: per_point(x, gammas, gammadashs, currents),
-                    in_axes=(0,),
-                )(chunk_points)
-
-            return _point_chunk_reduce(points, chunk_fn, kernel_point_cs)
+        return _point_chunk_reduce(points, chunk_fn, kernel_point_cs)
 
     kernel.__name__ = "biotsavart_forward"
     return jax.jit(kernel)
@@ -790,18 +787,16 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
     )
 
     def kernel(points, v, gammas, gammadashs, currents):
-        with device_scope(PhaseId.BIOTSAVART_VJP):
+        def fwd(group_gammas, group_gammadashs, group_currents):
+            return forward_kernel(
+                points,
+                group_gammas,
+                group_gammadashs,
+                group_currents,
+            )
 
-            def fwd(group_gammas, group_gammadashs, group_currents):
-                return forward_kernel(
-                    points,
-                    group_gammas,
-                    group_gammadashs,
-                    group_currents,
-                )
-
-            _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
-            return pullback(v)
+        _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
+        return pullback(v)
 
     kernel.__name__ = "biotsavart_vjp"
     return jax.jit(kernel)

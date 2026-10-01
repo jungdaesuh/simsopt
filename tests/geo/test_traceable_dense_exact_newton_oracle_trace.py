@@ -3,9 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.extend import core as jax_core
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
-from simsopt_jax.runtime.trace_annotations import PhaseId, trace_session
 
 
 def _quadratic_residual(values: jax.Array) -> jax.Array:
@@ -30,89 +28,6 @@ def _identity_residual(values: jax.Array) -> jax.Array:
 
 def _cubic_residual(values: jax.Array) -> jax.Array:
     return values**3 - 1.0
-
-
-def _jaxpr_name_stacks(value: object) -> list[str]:
-    names: list[str] = []
-    if isinstance(value, jax_core.ClosedJaxpr):
-        return _jaxpr_name_stacks(value.jaxpr)
-    if isinstance(value, jax_core.Jaxpr):
-        for equation in value.eqns:
-            name = str(equation.source_info.name_stack)
-            if name:
-                names.append(name)
-            for parameter in equation.params.values():
-                names.extend(_jaxpr_name_stacks(parameter))
-        return names
-    if isinstance(value, dict):
-        for item in value.values():
-            names.extend(_jaxpr_name_stacks(item))
-        return names
-    if isinstance(value, (tuple, list)):
-        for item in value:
-            names.extend(_jaxpr_name_stacks(item))
-    return names
-
-
-def test_dense_direction_scopes_are_opt_in_disjoint_and_numerically_inert() -> None:
-    initial = jnp.asarray([1.25, 1.75], dtype=jnp.float64)
-
-    def unannotated_run(values: jax.Array) -> _optimizer._DenseExactNewtonDirection:
-        return _optimizer._dense_direct_exact_newton_direction(
-            _quadratic_residual,
-            values,
-            tol=1.0e-12,
-        )
-
-    def annotated_run(values: jax.Array) -> _optimizer._DenseExactNewtonDirection:
-        return _optimizer._dense_direct_exact_newton_direction(
-            _quadratic_residual,
-            values,
-            tol=1.0e-12,
-        )
-
-    unannotated_result = unannotated_run(initial)
-    unannotated_jaxpr = jax.make_jaxpr(unannotated_run)(initial)
-    with trace_session():
-        annotated_result = annotated_run(initial)
-        annotated_jaxpr = jax.make_jaxpr(annotated_run)(initial)
-
-    for unannotated_leaf, annotated_leaf in zip(
-        jax.tree.leaves(unannotated_result),
-        jax.tree.leaves(annotated_result),
-        strict=True,
-    ):
-        np.testing.assert_array_equal(
-            np.asarray(annotated_leaf),
-            np.asarray(unannotated_leaf),
-        )
-
-    phases = (
-        PhaseId.NEWTON_JACOBIAN_CONSTRUCTION,
-        PhaseId.NEWTON_DENSE_MATERIALIZATION,
-        PhaseId.NEWTON_LU_FACTOR,
-        PhaseId.NEWTON_REFINEMENT,
-    )
-    unannotated_names = _jaxpr_name_stacks(unannotated_jaxpr)
-    annotated_names = _jaxpr_name_stacks(annotated_jaxpr)
-    assert all(
-        phase.value not in name for phase in phases for name in unannotated_names
-    )
-    assert all(any(phase.value in name for name in annotated_names) for phase in phases)
-    assert all(
-        not (
-            PhaseId.NEWTON_JACOBIAN_CONSTRUCTION.value in name
-            and PhaseId.NEWTON_DENSE_MATERIALIZATION.value in name
-        )
-        for name in annotated_names
-    )
-    assert all(
-        not (
-            PhaseId.NEWTON_LU_FACTOR.value in name
-            and PhaseId.NEWTON_REFINEMENT.value in name
-        )
-        for name in annotated_names
-    )
 
 
 def test_c0_oracle_replay_is_separate_fixed_shape_and_source_equivalent() -> None:

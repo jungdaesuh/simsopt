@@ -13,7 +13,6 @@ import jax.scipy.linalg as jsp_linalg
 import numpy as np
 import pytest
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
-from simsopt_jax.runtime.trace_annotations import PhaseId, trace_session
 from simsopt_jax_adapters.geo import surface_objectives_traceable as _traceable
 
 _JACOBIAN = np.asarray(
@@ -464,22 +463,6 @@ def test_valid_producer_masks_forced_adjoint_numerical_rejection():
     assert int(result.evidence.consumer_reuse_counts.refinement_correction_count) == 1
     assert int(result.evidence.full_graph_counts.dense_materialization_count) == 1
     assert int(result.evidence.full_graph_counts.lu_factorization_count) == 1
-
-
-def test_closed_builder_stablehlo_exposes_dense_matrix_and_lu_factor_paths():
-    device = jax.devices("cpu")[0]
-    coil_dofs = jax.device_put(np.asarray([0.6, -0.35]), device)
-    evaluator = _closed_evaluator(device)
-
-    with trace_session():
-        lowered = evaluator.lower(coil_dofs)
-    stablehlo = lowered.compiler_ir(dialect="stablehlo").operation.get_asm(
-        enable_debug_info=True,
-        pretty_debug_info=True,
-    )
-
-    assert PhaseId.ADJOINT_DENSE_MATRIX.value in stablehlo
-    assert PhaseId.ADJOINT_LU_FACTOR.value in stablehlo
 
 
 def test_closed_runtime_accepts_only_coil_dofs():

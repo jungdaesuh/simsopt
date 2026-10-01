@@ -82,14 +82,6 @@ from simsopt_jax.runtime.host_boundary import (
 from simsopt_jax.runtime.host_boundary import (
     host_transfer_phase as _host_transfer_phase,
 )
-from simsopt_jax.runtime.trace_annotations import (
-    HostEvent,
-    PhaseId,
-    current_evaluation_context,
-    device_scope,
-    host_span,
-    record_host_event,
-)
 
 from simsopt_jax_adapters.geo.curve_objectives import curve_length_pure
 from simsopt_jax_adapters.geo.factor_handoff_identity import (
@@ -311,32 +303,6 @@ class TraceableObjectiveIncumbentEvaluation(NamedTuple):
     candidate_inner_state: TraceableObjectiveInnerState
 
 
-def _host_evaluation_identity(parameters):
-    """Canonicalize one host candidate and bind its active trace identity."""
-
-    canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
-    parameter_sha256 = hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
-    trace_evaluation = current_evaluation_context()
-    if (
-        trace_evaluation is not None
-        and trace_evaluation.parameter_sha256 != parameter_sha256
-    ):
-        raise ValueError(
-            "evaluation trace parameter SHA-256 does not match the candidate"
-        )
-    evaluation_id = (
-        parameter_sha256 if trace_evaluation is None else trace_evaluation.evaluation_id
-    )
-    trace_attributes = {
-        "evaluation_id": evaluation_id,
-        "evaluation_kind": (
-            "uncorrelated" if trace_evaluation is None else trace_evaluation.kind.value
-        ),
-        "parameter_sha256": parameter_sha256,
-    }
-    return canonical, evaluation_id, trace_attributes
-
-
 class AcceptedIncumbentHostValueAndGrad:
     """Host boundary that promotes Boozer continuation only after acceptance.
 
@@ -371,33 +337,24 @@ class AcceptedIncumbentHostValueAndGrad:
             return self._incumbent
 
     def value_and_grad(self, parameters) -> tuple[float, np.ndarray]:
-        record_host_event(HostEvent.EVALUATOR_ENTRY)
-        canonical, evaluation_id, trace_attributes = _host_evaluation_identity(
-            parameters
-        )
-        parameter_sha256 = str(trace_attributes["parameter_sha256"])
-        with _host_transfer_evaluation(evaluation_id):
+        canonical = np.ascontiguousarray(parameters, dtype=np.dtype("<f8")).reshape(-1)
+        parameter_sha256 = self._parameter_sha256(canonical)
+        with _host_transfer_evaluation(parameter_sha256):
             # Explicit H2D: host optimizer parameters cross the device boundary
             # here, and guarded runs (JAX_TRANSFER_GUARD=disallow) forbid the
             # implicit conversion.
-            with host_span(PhaseId.HOST_H2D_SUBMIT, attributes=trace_attributes):
-                candidate = _runtime_device_put(canonical, dtype=jnp.float64)
+            candidate = _runtime_device_put(canonical, dtype=jnp.float64)
             with self._lock:
                 incumbent = self._incumbent
                 generation = self._generation
             evaluation = self._compiled_evaluate(candidate, incumbent)
             _block_until_ready(evaluation)
-            record_host_event(HostEvent.DEVICE_READY)
             with self._lock:
                 if generation == self._generation:
                     self._pending[parameter_sha256] = evaluation
-            with host_span(
-                PhaseId.HOST_D2H_MATERIALIZE,
-                attributes=trace_attributes,
-            ), _host_transfer_phase(PhaseId.HOST_D2H_MATERIALIZE.value):
+            with _host_transfer_phase("host.d2h_materialize"):
                 value = float(_host_scalar(evaluation.value, dtype=np.float64))
                 gradient = _host_array(evaluation.gradient, dtype=np.float64)
-        record_host_event(HostEvent.EVALUATOR_RETURN)
         return value, gradient
 
     def __call__(self, parameters) -> tuple[float, np.ndarray]:
@@ -1759,14 +1716,13 @@ def _traceable_general_forward_result(
                 coil_set_spec=coil_set_spec,
             )
         )
-        with device_scope(PhaseId.NEWTON_SOLVER_CONTROL):
-            solve_result = booz_jax.run_code_traceable(
-                coil_set_spec,
-                warmstart_sdofs,
-                warmstart_iota,
-                warmstart_G,
-                materialize_dense_linearization=False,
-            )
+        solve_result = booz_jax.run_code_traceable(
+            coil_set_spec,
+            warmstart_sdofs,
+            warmstart_iota,
+            warmstart_G,
+            materialize_dense_linearization=False,
+        )
         solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
             booz_jax,
             solve_result,
@@ -2174,21 +2130,19 @@ def _traceable_objective_gradient_parts(
                     coil_set_spec_from_dofs(current_coil_dofs),
                 )
 
-            with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
-                objective_value, pullback = jax.vjp(
-                    _evaluate_objective_of_x_and_coils,
-                    solved_x,
-                    coil_dofs,
-                )
-                dJ_dx, direct_grad = pullback(
-                    _explicit_scalar_pullback_seed(objective_value)
-                )
+            objective_value, pullback = jax.vjp(
+                _evaluate_objective_of_x_and_coils,
+                solved_x,
+                coil_dofs,
+            )
+            dJ_dx, direct_grad = pullback(
+                _explicit_scalar_pullback_seed(objective_value)
+            )
         else:
-            with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
-                dJ_dx = _strict_scalar_grad(
-                    lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
-                    solved_x,
-                )
+            dJ_dx = _strict_scalar_grad(
+                lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec),
+                solved_x,
+            )
 
         def zero_adjoint(_):
             zero_adjoint_output = _runtime_zeros_like(solved_x)
@@ -2294,11 +2248,10 @@ def _traceable_objective_gradient_parts(
                 **inner_objective_kwargs,
             )
 
-    with device_scope(PhaseId.ADJOINT_IMPLICIT_COIL_VJP):
-        implicit_grad = _strict_scalar_grad(
-            directional_stationarity_of_coils,
-            coil_dofs,
-        )
+    implicit_grad = _strict_scalar_grad(
+        directional_stationarity_of_coils,
+        coil_dofs,
+    )
     total_grad = _traceable_adjoint_gradient_or_nan(
         direct_grad - implicit_grad,
         linear_solve_success,
@@ -2393,15 +2346,14 @@ def _traceable_fused_total_gradient_canary(
             zero_evidence,
         )
 
-    with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
-        dJ_dx = _strict_scalar_grad(
-            lambda x_inner: evaluate_objective(
-                x_inner,
-                stopped_coil_dofs,
-                stopped_coil_set_spec,
-            ),
-            solved_x,
-        )
+    dJ_dx = _strict_scalar_grad(
+        lambda x_inner: evaluate_objective(
+            x_inner,
+            stopped_coil_dofs,
+            stopped_coil_set_spec,
+        ),
+        solved_x,
+    )
 
     def zero_rhs_total(_):
         return (
@@ -2456,8 +2408,7 @@ def _traceable_fused_total_gradient_canary(
                 - directional_stationarity
             )
 
-        with device_scope(PhaseId.ADJOINT_IMPLICIT_COIL_VJP):
-            total_gradient = _strict_scalar_grad(lagrangian, coil_dofs)
+        total_gradient = _strict_scalar_grad(lagrangian, coil_dofs)
         total_gradient = _traceable_adjoint_gradient_or_nan(
             total_gradient,
             linear_solve_success,
@@ -2573,16 +2524,15 @@ def _traceable_exact_payload_fused_value_and_gradient(
         rebuilt_coil_dynamic_inputs,
         residual_configuration,
     )
-    with device_scope(PhaseId.ADJOINT_OUTER_VJP_RHS):
-        objective_state_gradient = _strict_scalar_grad(
-            lambda current_state: scalar_objective_fn(
-                current_state,
-                stopped_coil_dofs,
-                rebuilt_coil_dynamic_inputs,
-                residual_configuration,
-            ),
-            solved_state,
-        )
+    objective_state_gradient = _strict_scalar_grad(
+        lambda current_state: scalar_objective_fn(
+            current_state,
+            stopped_coil_dofs,
+            rebuilt_coil_dynamic_inputs,
+            residual_configuration,
+        ),
+        solved_state,
+    )
 
     retained_solve = _linear_solve._solve_retained_jacobian_transpose_adjoint(
         payload,
@@ -2610,8 +2560,7 @@ def _traceable_exact_payload_fused_value_and_gradient(
             ),
         )
 
-    with device_scope(PhaseId.ADJOINT_IMPLICIT_COIL_VJP):
-        gradient = _strict_scalar_grad(stopped_state_lagrangian, coil_dofs)
+    gradient = _strict_scalar_grad(stopped_state_lagrangian, coil_dofs)
     finite_outputs = (
         jnp.all(jnp.isfinite(value))
         & jnp.all(jnp.isfinite(gradient))
@@ -2698,21 +2647,19 @@ def _build_traceable_exact_payload_fused_value_and_gradient(
                     fixed_residual_configuration,
                 )
 
-            with device_scope(PhaseId.ADJOINT_DENSE_MATRIX):
-                materialization = (
-                    _linear_solve._linearize_and_materialize_dense_square_jacobian(
-                        residual_at_returned_coils,
-                        returned_state.solved_state,
-                    )
-                )
-        else:
-            with device_scope(PhaseId.ADJOINT_DENSE_MATRIX):
-                residual, jacobian = exact_value_jacobian_fn(
+            materialization = (
+                _linear_solve._linearize_and_materialize_dense_square_jacobian(
+                    residual_at_returned_coils,
                     returned_state.solved_state,
-                    coil_dofs,
-                    coil_dynamic_inputs,
-                    fixed_residual_configuration,
                 )
+            )
+        else:
+            residual, jacobian = exact_value_jacobian_fn(
+                returned_state.solved_state,
+                coil_dofs,
+                coil_dynamic_inputs,
+                fixed_residual_configuration,
+            )
             residual = jnp.asarray(residual)
             jacobian = jnp.asarray(jacobian)
             materialization = _linear_solve._DenseJacobianMaterialization(
@@ -2784,8 +2731,7 @@ def _build_traceable_exact_payload_fused_value_and_gradient(
             coil_dynamic_inputs=coil_dynamic_inputs,
             residual_configuration=fixed_residual_configuration,
         )
-        with device_scope(PhaseId.ADJOINT_LU_FACTOR):
-            lu_piv = jsp_linalg.lu_factor(materialization.jacobian)
+        lu_piv = jsp_linalg.lu_factor(materialization.jacobian)
         payload = _linear_solve._build_exact_final_linearization(
             inputs,
             residual=materialization.residual,
@@ -2905,46 +2851,43 @@ def _traceable_predict_warmstart_result_from_anchor(
     predictor_coil_dofs = _as_jax_float64(coil_dofs)
     delta = predictor_coil_dofs - predictor_anchor_coil_dofs
 
-    with device_scope(PhaseId.NEWTON_WARM_START):
-        if predictor_kind == "exact":
-            exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
+    if predictor_kind == "exact":
+        exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
 
-            def anchor_residual_of_coils(cd):
-                return _boozer_exact_residual(
-                    anchor_x,
-                    coil_set_spec=coil_set_spec_from_dofs(cd),
-                    **exact_residual_kwargs,
-                )
-
-            with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-                forcing = jax.jvp(
-                    anchor_residual_of_coils,
-                    (predictor_anchor_coil_dofs,),
-                    (delta,),
-                )[1]
-        else:
-            inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
-            forcing = _traceable_inner_stationarity_coil_jvp(
+        def anchor_residual_of_coils(cd):
+            return _boozer_exact_residual(
                 anchor_x,
-                predictor_anchor_coil_dofs,
-                delta,
-                coil_set_spec_from_dofs,
-                **inner_objective_kwargs,
+                coil_set_spec=coil_set_spec_from_dofs(cd),
+                **exact_residual_kwargs,
             )
 
-        with device_scope(PhaseId.NEWTON_LINEAR_SOLVE):
-            dx, linear_solve_status = _traceable_solve_linearization(
-                booz_jax,
-                _as_jax_float64(anchor_x),
-                _as_jax_float64(-forcing),
-                coil_set_spec_from_dofs(predictor_anchor_coil_dofs),
-                objective_kwargs,
-                linear_solve_factors=anchor_linear_solve_factors,
-                linearization_kind=linearization_kind,
-                linear_solve_tol=linear_solve_tol,
-                linear_solve_stab=linear_solve_stab,
-                transpose=False,
-            )
+        forcing = jax.jvp(
+            anchor_residual_of_coils,
+            (predictor_anchor_coil_dofs,),
+            (delta,),
+        )[1]
+    else:
+        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
+        forcing = _traceable_inner_stationarity_coil_jvp(
+            anchor_x,
+            predictor_anchor_coil_dofs,
+            delta,
+            coil_set_spec_from_dofs,
+            **inner_objective_kwargs,
+        )
+
+    dx, linear_solve_status = _traceable_solve_linearization(
+        booz_jax,
+        _as_jax_float64(anchor_x),
+        _as_jax_float64(-forcing),
+        coil_set_spec_from_dofs(predictor_anchor_coil_dofs),
+        objective_kwargs,
+        linear_solve_factors=anchor_linear_solve_factors,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        transpose=False,
+    )
     linear_solve_success = _linear_solve._linear_solve_status_success(
         linear_solve_status
     )

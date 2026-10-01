@@ -256,7 +256,6 @@ from simsopt_jax.runtime.host_boundary import (
     host_int as _host_int,
     host_scalar as _host_scalar,
 )
-from simsopt_jax.runtime.trace_annotations import PhaseId, device_scope
 from simsopt_jax.solve.driver import (
     Driver,
     legacy_reference_least_squares_method,
@@ -4776,13 +4775,8 @@ def newton_exact(
     res_fn = jax.jit(residual_fn)
     jvp_fn = _jacobian_vector_product_fn(residual_fn)
 
-    def scoped_jvp(current_x, vector):
-        with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-            return jvp_fn(current_x, vector)
-
     x = x0
-    with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-        r = res_fn(x)
+    r = res_fn(x)
     norm = jnp.linalg.norm(r)
     accuracy_policy = mixed_dense_ir_accuracy_policy()
     linear_tol = min(
@@ -4797,28 +4791,26 @@ def newton_exact(
     exact_newton_linear_residual_rel = None
     exact_refinement_correction_rel = None
     while nit < maxiter and float(norm) > tol:
-        with device_scope(PhaseId.NEWTON_LINEAR_SOLVE):
-            dx, linear_residual, _ = _gmres_solve_exact_newton_system(
-                scoped_jvp,
-                x,
-                r,
-                tol=linear_tol,
-            )
-            dx_before_refinement = dx
-            exact_newton_linear_residual_rel = float(
-                _relative_residual_norm(linear_residual, r)
-            )
-            linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
+        dx, linear_residual, _ = _gmres_solve_exact_newton_system(
+            jvp_fn,
+            x,
+            r,
+            tol=linear_tol,
+        )
+        dx_before_refinement = dx
+        exact_newton_linear_residual_rel = float(
+            _relative_residual_norm(linear_residual, r)
+        )
+        linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
         if not np.all(np.isfinite(np.asarray(dx))):
             break
         if linear_residual_norm > linear_tol:
-            with device_scope(PhaseId.NEWTON_LINEAR_SOLVE):
-                correction, _, _ = _gmres_solve_exact_newton_system(
-                    scoped_jvp,
-                    x,
-                    linear_residual,
-                    tol=linear_tol,
-                )
+            correction, _, _ = _gmres_solve_exact_newton_system(
+                jvp_fn,
+                x,
+                linear_residual,
+                tol=linear_tol,
+            )
             if np.all(np.isfinite(np.asarray(correction))):
                 dx = dx + correction
                 denominator = np.linalg.norm(np.asarray(dx_before_refinement))
@@ -4826,8 +4818,7 @@ def newton_exact(
                     np.linalg.norm(np.asarray(correction)) / max(denominator, 1e-30)
                 )
         x_candidate = x - dx
-        with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-            r_candidate = res_fn(x_candidate)
+        r_candidate = res_fn(x_candidate)
         norm_candidate = jnp.linalg.norm(r_candidate)
         if float(norm_candidate) <= float(norm):
             x = x_candidate
@@ -4946,18 +4937,12 @@ def _materialize_traceable_dense_exact_newton_c2_state(
 
     x = jnp.asarray(x)
     if value_jacobian_fn is None:
-        with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-            return _linearize_and_materialize_dense_square_jacobian(
-                residual_fn,
-                x,
-                jacobian_construction_phase=PhaseId.NEWTON_JACOBIAN_CONSTRUCTION,
-                dense_materialization_phase=PhaseId.NEWTON_DENSE_MATERIALIZATION,
-            )
+        return _linearize_and_materialize_dense_square_jacobian(
+            residual_fn,
+            x,
+        )
 
-    with device_scope(PhaseId.NEWTON_JACOBIAN_CONSTRUCTION), device_scope(
-        PhaseId.NEWTON_DENSE_MATERIALIZATION
-    ):
-        residual, jacobian = value_jacobian_fn(x, *fn_args)
+    residual, jacobian = value_jacobian_fn(x, *fn_args)
     residual = jnp.asarray(residual)
     jacobian = jnp.asarray(jacobian)
     return _DenseJacobianMaterialization(
@@ -5092,13 +5077,10 @@ def _dense_direct_exact_newton_direction_with_telemetry(
     """Build and certify one C1 dense-direct correction at exactly ``x``."""
 
     x = jnp.asarray(x)
-    with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-        materialization = _linearize_and_materialize_dense_square_jacobian(
-            residual_fn,
-            x,
-            jacobian_construction_phase=PhaseId.NEWTON_JACOBIAN_CONSTRUCTION,
-            dense_materialization_phase=PhaseId.NEWTON_DENSE_MATERIALIZATION,
-        )
+    materialization = _linearize_and_materialize_dense_square_jacobian(
+        residual_fn,
+        x,
+    )
     direction = _dense_direct_exact_newton_direction_from_jacobian(
         materialization.residual,
         materialization.jacobian,
@@ -5147,66 +5129,63 @@ def _dense_direct_exact_newton_direction_from_jacobian(
     residual = jnp.asarray(residual)
     jacobian = jnp.asarray(jacobian)
     rhs_dtype = residual.dtype
-    with device_scope(PhaseId.NEWTON_LINEAR_SOLVE):
-        with device_scope(PhaseId.NEWTON_LU_FACTOR):
-            lu, pivots = _factor_dense_hessian(
-                jacobian,
-                optimizer_backend="ondevice",
-            )
-        lu_piv = (lu, pivots)
-        initial_solve = _lu_solve_dense_hessian(
-            lu_piv,
-            residual,
-            transpose=False,
-        )
-        with device_scope(PhaseId.NEWTON_REFINEMENT):
-            refinement_rhs = residual - jacobian @ initial_solve
-            correction = _lu_solve_dense_hessian(
-                lu_piv,
-                refinement_rhs,
-                transpose=False,
-            )
-            direction = initial_solve + correction
-            linear_residual = residual - jacobian @ direction
-        status = _linear_solve_status(
-            direction,
-            linear_residual,
-            residual,
-            tol=tol,
-            iterations=_device_int32(0, like=residual),
-        )
-        backward_error_success = _dense_matrix_backward_error_success(
-            jacobian,
-            direction,
-            residual,
-            tol=tol,
-        )
-        (
-            condition_estimate,
-            condition_factorizations,
-            condition_lu_solves,
-        ) = _dense_matrix_condition_estimate_with_telemetry(
-            jacobian,
-            lu_piv=lu_piv,
-        )
-        solve_safe = _dense_matrix_solve_numerically_safe(
-            jacobian,
-            direction,
-            residual,
-            tol=tol,
-            lu_piv=lu_piv,
-            solve_dtype=rhs_dtype,
-            condition_estimate=condition_estimate,
-        )
-        status = status._replace(
-            success=(status.success | backward_error_success) & solve_safe,
-            lu_factorization_count=(
-                _device_int32(1, like=residual) + condition_factorizations
-            ),
-            lu_solve_count=(_device_int32(2, like=residual) + condition_lu_solves),
-            refinement_correction_count=_device_int32(1, like=residual),
-        )
-        direction = _linear_solve_solution_or_nan(direction, status)
+    lu, pivots = _factor_dense_hessian(
+        jacobian,
+        optimizer_backend="ondevice",
+    )
+    lu_piv = (lu, pivots)
+    initial_solve = _lu_solve_dense_hessian(
+        lu_piv,
+        residual,
+        transpose=False,
+    )
+    refinement_rhs = residual - jacobian @ initial_solve
+    correction = _lu_solve_dense_hessian(
+        lu_piv,
+        refinement_rhs,
+        transpose=False,
+    )
+    direction = initial_solve + correction
+    linear_residual = residual - jacobian @ direction
+    status = _linear_solve_status(
+        direction,
+        linear_residual,
+        residual,
+        tol=tol,
+        iterations=_device_int32(0, like=residual),
+    )
+    backward_error_success = _dense_matrix_backward_error_success(
+        jacobian,
+        direction,
+        residual,
+        tol=tol,
+    )
+    (
+        condition_estimate,
+        condition_factorizations,
+        condition_lu_solves,
+    ) = _dense_matrix_condition_estimate_with_telemetry(
+        jacobian,
+        lu_piv=lu_piv,
+    )
+    solve_safe = _dense_matrix_solve_numerically_safe(
+        jacobian,
+        direction,
+        residual,
+        tol=tol,
+        lu_piv=lu_piv,
+        solve_dtype=rhs_dtype,
+        condition_estimate=condition_estimate,
+    )
+    status = status._replace(
+        success=(status.success | backward_error_success) & solve_safe,
+        lu_factorization_count=(
+            _device_int32(1, like=residual) + condition_factorizations
+        ),
+        lu_solve_count=(_device_int32(2, like=residual) + condition_lu_solves),
+        refinement_correction_count=_device_int32(1, like=residual),
+    )
+    direction = _linear_solve_solution_or_nan(direction, status)
     return _DenseExactNewtonDirection(
         residual=residual,
         jacobian=jacobian,
@@ -5241,15 +5220,11 @@ def _build_traceable_exact_newton_runner(
         # intermediates out of the compiled loop's live set; this trades a
         # bounded amount of recomputation for materially lower compile/RSS
         # pressure on GPU backends.
-        residual_eval_unscoped = jax.checkpoint(
+        residual_eval = jax.checkpoint(
             jax.jit(lambda x: residual_fn(x, *fn_args)),
             policy=jax.checkpoint_policies.nothing_saveable,
             prevent_cse=False,
         )
-
-        def residual_eval(x):
-            with device_scope(PhaseId.NEWTON_RESIDUAL_JVP):
-                return residual_eval_unscoped(x)
 
         def jvp_fn(x, v):
             return jax.jvp(residual_eval, (x,), (v,))[1]
@@ -5356,67 +5331,65 @@ def _build_traceable_exact_newton_runner(
                 jnp.minimum(eisenstat_walker_tol, strict_cap_tol),
                 eisenstat_walker_tol,
             )
-            with device_scope(PhaseId.NEWTON_LINEAR_SOLVE):
+            if execution_counts_enabled:
+                (
+                    dx,
+                    linear_residual,
+                    _,
+                    solve_telemetry,
+                ) = _gmres_solve_exact_newton_system_counted(
+                    jvp_fn,
+                    state["x"],
+                    state["residual"],
+                    tol=linear_tol_iteration,
+                )
+            else:
+                dx, linear_residual, _ = _gmres_solve_exact_newton_system(
+                    jvp_fn,
+                    state["x"],
+                    state["residual"],
+                    tol=linear_tol_iteration,
+                )
+                solve_telemetry = _CountedIncrementalGmresTelemetry(
+                    linear_operator_application_count=zero_count,
+                )
+            linear_residual_norm = jnp.linalg.norm(linear_residual)
+            linear_residual_rel = _relative_residual_norm(
+                linear_residual,
+                state["residual"],
+            )
+
+            def add_correction(current_dx):
                 if execution_counts_enabled:
                     (
-                        dx,
-                        linear_residual,
+                        correction,
                         _,
-                        solve_telemetry,
+                        _,
+                        correction_telemetry,
                     ) = _gmres_solve_exact_newton_system_counted(
                         jvp_fn,
                         state["x"],
-                        state["residual"],
+                        linear_residual,
                         tol=linear_tol_iteration,
                     )
                 else:
-                    dx, linear_residual, _ = _gmres_solve_exact_newton_system(
+                    correction, _, _ = _gmres_solve_exact_newton_system(
                         jvp_fn,
                         state["x"],
-                        state["residual"],
+                        linear_residual,
                         tol=linear_tol_iteration,
                     )
-                    solve_telemetry = _CountedIncrementalGmresTelemetry(
+                    correction_telemetry = _CountedIncrementalGmresTelemetry(
                         linear_operator_application_count=zero_count,
                     )
-                linear_residual_norm = jnp.linalg.norm(linear_residual)
-                linear_residual_rel = _relative_residual_norm(
-                    linear_residual,
-                    state["residual"],
+                correction_rel = jnp.linalg.norm(correction) / jnp.maximum(
+                    jnp.linalg.norm(current_dx),
+                    _device_scalar(
+                        jnp.finfo(current_dx.dtype).tiny,
+                        dtype=current_dx.dtype,
+                    ),
                 )
-
-            def add_correction(current_dx):
-                with device_scope(PhaseId.NEWTON_LINEAR_SOLVE):
-                    if execution_counts_enabled:
-                        (
-                            correction,
-                            _,
-                            _,
-                            correction_telemetry,
-                        ) = _gmres_solve_exact_newton_system_counted(
-                            jvp_fn,
-                            state["x"],
-                            linear_residual,
-                            tol=linear_tol_iteration,
-                        )
-                    else:
-                        correction, _, _ = _gmres_solve_exact_newton_system(
-                            jvp_fn,
-                            state["x"],
-                            linear_residual,
-                            tol=linear_tol_iteration,
-                        )
-                        correction_telemetry = _CountedIncrementalGmresTelemetry(
-                            linear_operator_application_count=zero_count,
-                        )
-                    correction_rel = jnp.linalg.norm(correction) / jnp.maximum(
-                        jnp.linalg.norm(current_dx),
-                        _device_scalar(
-                            jnp.finfo(current_dx.dtype).tiny,
-                            dtype=current_dx.dtype,
-                        ),
-                    )
-                    correction_finite = jnp.all(jnp.isfinite(correction))
+                correction_finite = jnp.all(jnp.isfinite(correction))
                 return (
                     lax.cond(
                         correction_finite,
