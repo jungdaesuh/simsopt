@@ -54,8 +54,7 @@ _LANES = frozenset({"native-cpu", "jax-cpu", "jax-gpu"})
 #: Names only what the check below reads: JAX's own x64 flag in THIS process.
 _FLOAT64_LAUNCH_HINT = (
     "set JAX_ENABLE_X64=1 in the runner process's own environment before it "
-    "imports JAX (for example by launching it through "
-    ".artifacts/official-scope-cleanup-20260919/run-python.sh); "
+    "imports JAX (for example JAX_ENABLE_X64=1 python examples/jax/run_parity.py ...); "
     "examples/jax/_lane_environment.py sets that flag for the lane "
     "subprocesses only, and it is the only setting this check reads"
 )
@@ -71,8 +70,7 @@ def require_input_construction_float64() -> None:
     the one wrong bundle and agrees with the others: the
     ``native-permanent-magnet-qa`` TF-coil pre-optimization froze after two
     L-BFGS-B iterations on a float32-quantized objective, and all three lanes
-    solved a permanent-magnet problem built from the wrong coil currents
-    (``.artifacts/official-mirror-closure-20260919/investigations/pm-qa-coils/REPORT.md``).
+    solved a permanent-magnet problem built from the wrong coil currents.
     This is a loud check at the boundary, never a silent ``config.update``: the
     x64 policy of ``simsopt.geo`` is owned elsewhere and float32 modes depend
     on it.

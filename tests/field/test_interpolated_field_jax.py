@@ -1,7 +1,5 @@
 """Parity tests for ``InterpolatedFieldJAX``.
 
-These tests close the architectural blocker recorded in
-``.artifacts/jax_port_goal/blockers/15-interpolatedfield-debug.md``.
 The CPU :class:`simsopt.field.InterpolatedField` is the parity oracle.
 Tolerances come from
 :func:`simsopt_jax.parity_tolerances.parity_ladder_tolerances`

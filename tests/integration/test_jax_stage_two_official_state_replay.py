@@ -14,8 +14,7 @@ quality band rather than an equality: a band says the two paths landed in
 upstream's own scatter, and these tests say the function and the gradient
 being walked are upstream's.
 
-Fixture keys, read from the capture instrumentation rather than guessed
-(``.artifacts/official-mirror-closure-20260919/reference-simple/build_capture_runners.py``):
+Fixture keys, read from the capture instrumentation rather than guessed:
 upstream's finite-build provider call is ``fun -> (1e-4 * J, 1e-4 * dJ)``
 (``examples/3_Advanced/stage_two_optimization_finitebuild.py:148``), so its
 ``taylor:*`` entries carry that scale, while its ``final:*`` entries are

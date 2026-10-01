@@ -1,8 +1,7 @@
-"""The shipped-scale tracing contract is exactly the one fixed in the campaign notes, and it can fail.
+"""The shipped-scale tracing contract is exactly the one fixed before any lane value was seen, and it can fail.
 
-The expected ceilings below are the numbers of
-``.artifacts/official-mirror-closure-20260919/d1-diagnostic/NOTES.md`` (section of 2026-09-20 06:54 EDT), written
-here as literals on purpose: the module must derive them from the tracked record, so a changed rule, a changed
+The expected ceilings below are the numbers that rule fixed (see ``examples/jax/parity/official_tracing_contract.py``),
+written here as literals on purpose: the module must derive them from the tracked record, so a changed rule, a changed
 factor or an edited record fails here instead of silently widening the shipped-scale verdict.
 """
 
@@ -45,8 +44,7 @@ LANE_PAIRS = frozenset({"native-cpu:jax-cpu", "native-cpu:jax-gpu", "jax-cpu:jax
 
 #: case_id -> quantity -> the ceiling the notes state, or None where the notes say upstream is exact.
 #: The guiding-centre parallel-speed fraction was added in fix wave 8 in the registered form, from upstream's own
-#: maximum over its eight one-ulp runs (7.635197511514785e-02, re-derived in
-#: ``.artifacts/official-mirror-closure-20260919/fix-wave-8/probes/derive_vpar_fraction_scatter.log``).
+#: maximum over its eight one-ulp runs (7.635197511514785e-02, the tracked record's ``maxima_over_k``).
 EXPECTED = {
     "native-tracing-fieldlines-ncsx": {
         "status_changes": None,

@@ -10,8 +10,7 @@ The same fixtures are then replayed under
 ``jax.transfer_guard("disallow")`` to prove the JAX kernels do not trigger
 implicit host transfers when consuming device-resident point arrays.
 
-``CircularCoil`` is explicitly deferred (see
-``.artifacts/jax_port_goal/blockers/12-circularcoil-debug.md``) because
+``CircularCoil`` is explicitly deferred because
 ``jax.scipy.special.ellipk`` / ``ellipe`` are not available in the repo's
 ``jaxlib`` 0.10.0 runtime.
 """

@@ -1,7 +1,7 @@
 """Exact matched workflow for ``3_Advanced/wireframe_gsco_multistep.py``.
 
 Correspondence of this case's published endpoint state to the official capture
-``A/claude/runs/native-wireframe-gsco-multistep/captured-omp1`` of upstream
+(reference record ``native-wireframe-gsco-multistep``) of upstream
 ``9e027eac38028d57aa23777be52a781aa860e347``:
 
 * ``final:loop_count`` is the loop count the LAST solve returned, i.e. the

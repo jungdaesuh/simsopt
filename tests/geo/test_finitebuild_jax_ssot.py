@@ -7,9 +7,6 @@ kernel-level filament construction used by
 methods in the pure split, so this module constructs explicit specs for
 the SSOT kernels and checks geometry against a hand-derived closed-form
 planar-circle oracle.
-
-Audit finding #3 reference:
-``.artifacts/jax-test-audit-2026-05-13/TEST_QUALITY_TODOS.md``.
 """
 
 from __future__ import annotations

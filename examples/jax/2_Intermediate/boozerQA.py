@@ -152,7 +152,7 @@ def solve(
     # tol = 1e-15 (upstream examples/2_Intermediate/boozerQA.py:143-145), and
     # the official capture ends at status 1 after 1000 iterations with
     # "Maximum number of iterations has been exceeded."
-    # (A/claude/runs/native-boozerqa/captured-omp1/capture.json). So
+    # (the official reference record native-boozerqa). So
     # ``solver_success`` false here is the honest report of the SAME budget
     # exit, not a failure of the example: the stopping reason below names it.
     # The reason comes from the repository's single owner of the emitter

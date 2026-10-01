@@ -1,7 +1,6 @@
 """Shipped-scale contract of the three tracing mirrors, derived from upstream's own one-ulp scatter.
 
-Rule (pre-registered in ``.artifacts/official-mirror-closure-20260919/d1-diagnostic/NOTES.md``, section of
-2026-09-20 06:54 EDT, fixed before any post-fix lane value was seen; it may not be re-tuned here).
+Rule (fixed before any post-fix lane value was seen; it may not be re-tuned here).
 
 At shipped scale a long trace amplifies rounding differences, so upstream itself does not reproduce its own final
 states or every hit when the start data of the traced objects move by one unit in the last place.  The tracked record

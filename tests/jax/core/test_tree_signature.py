@@ -1,7 +1,6 @@
-"""Regression coverage for §6 of the JAX silent-fallback removal plan.
+"""Regression coverage for the removed pytree-signature fallbacks.
 
-Plan: ``.artifacts/jax-silent-fallback-removal-2026-05-13/PLAN.md`` §6 deleted
-dead ``except TypeError`` branches that wrapped five pytree signature and
+The silent-fallback cleanup deleted dead ``except TypeError`` branches that wrapped five pytree signature and
 transform helpers:
 
 - ``simsopt_jax_adapters.geo.boozer_surface._runtime_cache_tree_signature``

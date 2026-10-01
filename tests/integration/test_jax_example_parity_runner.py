@@ -1847,8 +1847,7 @@ def test_run_parity_cli_refuses_to_build_input_bundles_without_float64(
     ``examples/jax/_lane_environment.py`` pins ``JAX_ENABLE_X64=1`` for the lane
     subprocesses only. A runner launched without it built the
     ``native-permanent-magnet-qa`` bundle from a float32-quantized TF-coil
-    pre-optimization, and all three lanes then agreed on the wrong problem
-    (``.artifacts/official-mirror-closure-20260919/investigations/pm-qa-coils/REPORT.md``).
+    pre-optimization, and all three lanes then agreed on the wrong problem.
     The runner now refuses before it touches the artifact root.
     """
 

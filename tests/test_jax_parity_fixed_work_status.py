@@ -87,7 +87,7 @@ def test_gpmo_baseline_has_no_early_exit() -> None:
 def test_official_muse_endpoint_is_the_magnet_cap() -> None:
     """Official MUSE: 5000 magnets of a 7530-dipole grid, cap 5000.
 
-    ``A/claude/runs/native-permanent-magnet-muse/captured-omp1/capture.json``
+    The official reference record ``native-permanent-magnet-muse``:
     ``final:nonzero_count`` 5000, ``configuration.max_nMagnets`` 5000,
     ``configuration.ndipoles`` 7530, ``configuration.K`` 10000.
     """
@@ -138,7 +138,7 @@ def test_official_pm4stell_objective_rise_is_not_a_failure() -> None:
 def test_gsco_official_history_tail_reads_as_minimum_objective_reached() -> None:
     """Official gsco-modular ends on an accepted undo pair, below its cap.
 
-    ``A/claude/runs/native-wireframe-gsco-modular/captured-omp1/capture-arrays.npz``
+    The official capture of ``native-wireframe-gsco-modular``:
     ``final:history:loops[-3:] == [2073, 2073, 2073]`` and
     ``final:history:currents[-3:] == [+208333.33, -208333.33, +208333.33]``,
     with ``final:history:iterations[-1] == 1848`` of ``max_iter`` 2000 and the
@@ -295,7 +295,7 @@ def test_baseline_places_exactly_one_new_site_per_iteration() -> None:
     """``permanent_magnet_optimization.cpp:1280-1325``: equality, not ``<=``.
 
     Official pm-simple: ``K`` 500 and ``final:nonzero_count`` 500
-    (``A/claude/runs/native-permanent-magnet-simple/captured-omp1``).
+    (the official reference record ``native-permanent-magnet-simple``).
     """
 
     moments = np.zeros((14336, 3), dtype=np.float64)
@@ -392,7 +392,7 @@ def test_gsco_without_a_single_accepted_update_is_failed() -> None:
 def test_multistep_label_reads_the_per_stage_budget() -> None:
     """Official multistep: 2167/763/539/379/155/2/136 accepted of 2500 each.
 
-    ``A/claude/runs/native-wireframe-gsco-multistep/captured-omp1``
+    The official reference record ``native-wireframe-gsco-multistep``:
     ``step<k>:iterations`` and ``step<k>:allocated_iteration_budget``.
     """
 

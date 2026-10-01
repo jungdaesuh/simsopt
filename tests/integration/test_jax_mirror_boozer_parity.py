@@ -363,8 +363,8 @@ def test_exact_boozer_surface_workflow_matches_native_and_jax_cpu(
 
     # The official first stage is published on both lanes, with the provider's
     # own outcome, so a stage-by-stage comparison against the official capture
-    # is possible (A/claude/runs/native-boozer/captured-omp1/capture.json
-    # records that stage's iota, G, residual_norm, iter 300 of 300 and
+    # is possible (the official reference record native-boozer holds that
+    # stage's iota, G, residual_norm, iter 300 of 300 and
     # solver_success False under its own lbfgs_area: prefix).
     for observation in (native, jax):
         maxiter = _rough_maxiter(observation)
