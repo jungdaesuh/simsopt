@@ -49,7 +49,7 @@ OFFICIAL_FLUX_MULTIPLIER = 3.0
 # objective, hence weight 0.  ``sDIM=20`` is the upstream default of
 # ``NonQuasiSymmetricRatio`` (geo/surfaceobjectives.py:711).  The outer solve is
 # ``minimize(..., method='BFGS', options={'maxiter': 1e3}, tol=1e-15)``; its
-# gradient tolerance is owned by ``simsopt.single_stage_boozer_vacuum``
+# gradient tolerance is owned by ``simsopt_jax.examples.single_stage_boozer_vacuum``
 # (``OUTER_GRADIENT_TOLERANCE``) and is not restated here.
 OFFICIAL_QA_SURFACE_RESOLUTION = 6
 OFFICIAL_QA_SURFACE_DISTANCE = 0.10

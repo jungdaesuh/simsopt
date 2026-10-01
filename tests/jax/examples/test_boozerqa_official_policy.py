@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from conftest import ast_names_used
 from examples.jax.parity.cases import native_boozerqa
-from simsopt.single_stage_boozer_vacuum import OUTER_GRADIENT_TOLERANCE
 from simsopt_contracts.optimization_endpoint import (
     OptimizationEndpointCertificate,
     certify_optimization_endpoint,
@@ -21,6 +20,7 @@ from simsopt_jax.examples.boozer_official import (
     OFFICIAL_QA_OUTER_MAXITER,
     OFFICIAL_QA_SURFACE_RESOLUTION,
 )
+from simsopt_jax.examples.single_stage_boozer_vacuum import OUTER_GRADIENT_TOLERANCE
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax_adapters.geo import boozer_qa_problem
 

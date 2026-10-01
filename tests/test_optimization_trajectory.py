@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import examples.jax.parity.cases.native_boozerqa as single_stage_case
+import examples.jax.parity.optimization_trajectory as trajectory_module
 import numpy as np
 import pytest
-import simsopt.optimization_trajectory as trajectory_module
 from examples.jax.parity.measurement import MeasurementExecution
-from simsopt.optimization_trajectory import (
+from examples.jax.parity.optimization_trajectory import (
     OptimizationMeasurementWindow,
     OptimizationTrajectoryRecorder,
     read_optimization_window_timing,

@@ -19,18 +19,13 @@ from examples.jax.parity.input_bundle import (
     effective_construction_fingerprint,
 )
 from examples.jax.parity.measurement import MeasurementExecution
-from examples.jax.parity.runtime import ParityLane
-from simsopt.configs import get_data
-from simsopt.geo import SurfaceXYZTensorFourier
-from simsopt.optimization_trajectory import (
+from examples.jax.parity.optimization_trajectory import (
     OptimizationMeasurementWindow,
     OptimizationTrajectoryRecorder,
 )
-from simsopt.single_stage_boozer_vacuum import (
-    JAX_FAST_DRIVER_ID,
-    JAX_PARITY_DRIVER_ID,
-    OUTER_GRADIENT_TOLERANCE,
-)
+from examples.jax.parity.runtime import ParityLane
+from simsopt.configs import get_data
+from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt_contracts.optimization_endpoint import (
     OptimizationEndpointCertificate,
     StoppingReason,
@@ -51,6 +46,11 @@ from simsopt_jax.examples.boozer_official import (
     OFFICIAL_QA_SURFACE_DISTANCE,
     OFFICIAL_QA_SURFACE_RESOLUTION,
     boozer_qa_outer_objective_config,
+)
+from simsopt_jax.examples.single_stage_boozer_vacuum import (
+    JAX_FAST_DRIVER_ID,
+    JAX_PARITY_DRIVER_ID,
+    OUTER_GRADIENT_TOLERANCE,
 )
 from simsopt_jax.geo.optimizer_host_lbfgs import (
     line_search_value_and_grad_more_thuente_host,

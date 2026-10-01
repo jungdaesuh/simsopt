@@ -72,9 +72,9 @@ from examples.jax.parity.runner import (
     execute_child_process,
 )
 from examples.jax.parity.work_budget import WorkBudgetContract
-from simsopt.single_stage_boozer_vacuum import JAX_FAST_DRIVER_ID
 from simsopt_jax.config import ExecutionIntent
 from simsopt_jax.examples import ExecutionScale
+from simsopt_jax.examples.single_stage_boozer_vacuum import JAX_FAST_DRIVER_ID
 
 
 def _routes() -> tuple[ComparisonRoute, ...]:

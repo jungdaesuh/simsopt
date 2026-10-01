@@ -32,7 +32,6 @@ import numpy as np
 from simsopt.configs import get_data
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.curve import Curve
-from simsopt.single_stage_boozer_vacuum import OUTER_GRADIENT_TOLERANCE
 from simsopt_contracts.optimization_endpoint import certify_optimization_endpoint
 from simsopt_jax.examples import (
     ExampleResult,
@@ -50,6 +49,7 @@ from simsopt_jax.examples.boozer_official import (
     OFFICIAL_QA_SURFACE_DISTANCE,
     OFFICIAL_QA_SURFACE_RESOLUTION,
 )
+from simsopt_jax.examples.single_stage_boozer_vacuum import OUTER_GRADIENT_TOLERANCE
 from simsopt_jax.geo.optimizer_host_lbfgs import (
     line_search_value_and_grad_more_thuente_host,
     minimize_bfgs_host_core,
