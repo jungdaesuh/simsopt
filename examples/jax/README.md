@@ -206,17 +206,6 @@ so preallocation is off under any supported GPU mode unless the user sets
 that selects a device through `JAX_PLATFORMS` alone, without going through
 `set_backend`, gets JAX's own preallocating default instead.
 
-Generate a results table from an independently audited authority bundle with:
-
-```console
-python examples/jax/parity/report.py \
-  --summary <run>/summary.json \
-  --output <reviewed-output-path>
-```
-
-The intended documentation path is not tracked yet; do not overwrite a
-pre-existing worktree file without reviewing it first.
-
 ## The one-to-one identity contract
 
 The authoritative inventory is [`manifest.json`](manifest.json) and
