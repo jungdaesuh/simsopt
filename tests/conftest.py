@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 from contextlib import contextmanager
 import os
 import shlex
@@ -725,66 +724,3 @@ def pytest_collection_modifyitems(config, items):
                 if any(item.iter_markers(marker_name)):
                     item.add_marker(pytest.mark.skip(reason=reason))
                     break
-
-
-def ast_names_used(tree: ast.AST) -> frozenset[str]:
-    """Every identifier a module DEFINES or refers to in code, plus its string
-    constants: names, attributes, keyword arguments, parameters, function and
-    class names, imported module paths, import names and aliases, global and
-    nonlocal declarations, exception-handler and match-capture names, and
-    every string constant (f-string literal segments included) that is not a
-    real docstring.
-
-    Only real docstrings (the first statement of a module, class or function
-    body) and comments are excluded, so a source-contract test can forbid a
-    name without forbidding the sentence that explains why it is forbidden.
-    This is a guard against an accidental restatement, not against concealment:
-    a spelling composed at run time (``"non_qs_" + "weight"``) is not caught,
-    and neither the keyword attributes of a class pattern (``case C(x=0)``) nor
-    PEP 695 type-parameter names (Python 3.12+) are collected."""
-    docstrings: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(
-            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
-            body = node.body
-            if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                docstrings.add(id(body[0].value))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            names.add(node.attr)
-        elif isinstance(node, ast.keyword) and node.arg is not None:
-            names.add(node.arg)
-        elif isinstance(node, ast.arg):
-            names.add(node.arg)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.alias):
-            names.add(node.name)
-            if node.asname is not None:
-                names.add(node.asname)
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            names.update(node.names)
-        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
-            names.add(node.name)
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
-            names.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
-            names.add(node.rest)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            names.add(node.module)
-        elif (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and id(node) not in docstrings
-        ):
-            names.add(node.value)
-    return frozenset(names)

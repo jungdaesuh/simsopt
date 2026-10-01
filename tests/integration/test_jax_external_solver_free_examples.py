@@ -126,7 +126,22 @@ EXTERNAL_SOLVER_FREE_CONTRACTS = (
                 "iota",
                 "volume",
                 "solver_success",
+                "solver_status",
+                "solver_iterations",
+                "outer_solver_success",
+                "outer_solver_iteration_budget",
+                "outer_stopping_reason",
+                "inner_solver_success",
             }
+        ),
+        # Upstream's own run ends on its outer iteration budget, so the
+        # example reports that budget exit by name and still publishes
+        # ``status: ok``; it never relabels it converged.
+        (
+            ("outer_stopping_reason", "iteration-limit"),
+            ("outer_solver_success", False),
+            ("solver_success", False),
+            ("inner_solver_success", True),
         ),
     ),
     ExampleContract(

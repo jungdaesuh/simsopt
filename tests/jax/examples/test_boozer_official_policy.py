@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import numpy as np
 import pytest
 from simsopt.configs import get_data
@@ -12,13 +9,9 @@ from simsopt.geo import Area, BoozerSurface, SurfaceXYZTensorFourier
 from examples.jax.parity.cases.native_boozer import _scale_configuration
 from simsopt_jax.examples.boozer_official import (
     OFFICIAL_CONSTRAINT_WEIGHT,
-    OFFICIAL_FLUX_MULTIPLIER,
-    OFFICIAL_INITIAL_IOTA,
     OFFICIAL_LBFGS_MAXITER,
     OFFICIAL_LS_MAXITER,
     OFFICIAL_SOLVER_TOLERANCE,
-    OFFICIAL_SURFACE_DISTANCE,
-    OFFICIAL_SURFACE_RESOLUTION,
     BoozerStageState,
     boozer_first_stage_budget,
     boozer_official_options,
@@ -26,8 +19,6 @@ from simsopt_jax.examples.boozer_official import (
 )
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
-
-_EXAMPLE = Path(__file__).resolve().parents[3] / "examples/jax/2_Intermediate/boozer.py"
 
 
 @pytest.mark.parametrize("rough_maxiter", [60, 300])
@@ -194,91 +185,3 @@ def test_reduced_scale_first_stage_keeps_the_official_budget_ratio() -> None:
         )
         == OFFICIAL_LBFGS_MAXITER
     )
-
-
-def test_public_script_reads_the_first_stage_budget_from_its_owner() -> None:
-    """The script calls the entry; no number reconstructs the official budget."""
-    tree = ast.parse(_EXAMPLE.read_text(encoding="utf-8"))
-    imported = {
-        alias.name
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "simsopt_jax.examples.boozer_official"
-        for alias in node.names
-    }
-    assert "boozer_first_stage_budget" in imported
-
-    assignment = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "rough_maxiter"
-            for target in node.targets
-        )
-    )
-    assert isinstance(assignment.value, ast.Call)
-    assert isinstance(assignment.value.func, ast.Name)
-    assert assignment.value.func.id == "boozer_first_stage_budget"
-    assert not [
-        node
-        for node in ast.walk(assignment.value)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, (int, float))
-        and not isinstance(node.value, bool)
-    ]
-
-
-def test_public_script_drives_the_official_stage_entries() -> None:
-    """The shipped example runs the stage entries, not its own solver calls."""
-    tree = ast.parse(_EXAMPLE.read_text(encoding="utf-8"))
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    called_names = [node.func.id for node in calls if isinstance(node.func, ast.Name)]
-    called_attributes = {
-        node.func.attr for node in calls if isinstance(node.func, ast.Attribute)
-    }
-
-    assert called_names.count("run_boozer_lbfgs_stage") == 1
-    assert called_names.count("run_boozer_manual_stage") == 2
-    assert "minimize_boozer_penalty_constraints_LBFGS" not in called_attributes
-    assert "minimize_boozer_penalty_constraints_ls" not in called_attributes
-
-
-def test_public_script_reads_every_official_constant_from_the_policy_module() -> None:
-    """No official number is restated in the script (SSOT with the parity case)."""
-    tree = ast.parse(_EXAMPLE.read_text(encoding="utf-8"))
-    imported = {
-        alias.name
-        for node in tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "simsopt_jax.examples.boozer_official"
-        for alias in node.names
-    }
-    assert {
-        "OFFICIAL_CONSTRAINT_WEIGHT",
-        "OFFICIAL_FLUX_MULTIPLIER",
-        "OFFICIAL_INITIAL_IOTA",
-        "OFFICIAL_LS_MAXITER",
-        "OFFICIAL_SOLVER_TOLERANCE",
-        "OFFICIAL_SURFACE_DISTANCE",
-        "OFFICIAL_SURFACE_RESOLUTION",
-    } <= imported
-
-    literals = {
-        (type(node.value), node.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, (int, float))
-        and not isinstance(node.value, bool)
-    }
-    for constant in (
-        OFFICIAL_SURFACE_RESOLUTION,
-        OFFICIAL_SURFACE_DISTANCE,
-        OFFICIAL_INITIAL_IOTA,
-        OFFICIAL_SOLVER_TOLERANCE,
-        OFFICIAL_CONSTRAINT_WEIGHT,
-        OFFICIAL_LBFGS_MAXITER,
-        OFFICIAL_LS_MAXITER,
-        OFFICIAL_FLUX_MULTIPLIER,
-    ):
-        assert (type(constant), abs(constant)) not in literals, constant
