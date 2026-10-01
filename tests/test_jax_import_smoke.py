@@ -414,21 +414,42 @@ def test_import_package_root_with_generated_version_file():
     )
 
 
+def _run_tests_module(
+    module: str, *, drop_xla_flags: bool
+) -> subprocess.CompletedProcess[str]:
+    """Run ``python -m module`` with ``tests`` and ``tests/subprocess`` importable."""
+    env = _build_clean_subprocess_env()
+    tests_root = Path(_REPO_ROOT) / "tests"
+    env["PYTHONPATH"] = os.pathsep.join(
+        (str(tests_root), str(tests_root / "subprocess"), env["PYTHONPATH"])
+    )
+    if drop_xla_flags:
+        env.pop("XLA_FLAGS", None)
+    return subprocess.run(
+        [sys.executable, "-m", module],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=_REPO_ROOT,
+        env=env,
+        check=False,
+    )
+
+
 def test_root_conftest_import_leaves_jax_runtime_alone():
     """Upstream's native tests see no JAX import or XLA_FLAGS edit from the conftest."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_root_conftest_import_leaves_jax_runtime_alone",),
-        failure_message="root tests/conftest.py should not touch the JAX runtime",
+    result = _run_tests_module("root_conftest_import_probe", drop_xla_flags=False)
+    assert result.returncode == 0, (
+        "root tests/conftest.py should not touch the JAX runtime:\n" + result.stderr
     )
 
 
 def test_jax_test_support_import_applies_jax_test_runtime():
     """JAX test modules get the XLA pins and x64 from their first import."""
-    _assert_python_script_passes(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_jax_test_support_import_applies_jax_test_runtime",),
-        failure_message="tests/jax_test_support.py should pin XLA_FLAGS and force x64",
+    result = _run_tests_module("jax_test_support_import_probe", drop_xla_flags=True)
+    assert result.returncode == 0, (
+        "tests/jax_test_support.py should pin XLA_FLAGS and force x64:\n"
+        + result.stderr
     )
 
 

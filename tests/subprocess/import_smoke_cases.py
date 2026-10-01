@@ -13,8 +13,6 @@ from __future__ import annotations
 import ast
 import importlib.abc
 import json
-import os
-import runpy
 import sys
 from pathlib import Path
 
@@ -203,46 +201,6 @@ def case_import_package_root_with_generated_version_file() -> None:
         assert Path(simsopt.__file__).resolve().is_relative_to(package_root.resolve())
         assert simsopt.__version__ == "0.0.dev0+fixture"
         assert simsopt.__built_with_xsimd__ is False
-
-
-_JAX_RUNTIME_PACKAGES = frozenset(
-    {"jax", "simsopt", "simsopt_jax", "simsopt_jax_adapters"}
-)
-
-
-def _loaded_jax_runtime_packages() -> list[str]:
-    return sorted(
-        name for name in sys.modules if name.partition(".")[0] in _JAX_RUNTIME_PACKAGES
-    )
-
-
-def case_root_conftest_import_leaves_jax_runtime_alone() -> None:
-    """The root conftest imports no JAX or simsopt module and keeps ``XLA_FLAGS``."""
-    assert _loaded_jax_runtime_packages() == []
-    xla_flags = os.environ.get("XLA_FLAGS")
-
-    runpy.run_path(
-        str(_REPO_ROOT / "tests" / "conftest.py"), run_name="simsopt_tests_conftest"
-    )
-
-    assert _loaded_jax_runtime_packages() == []
-    assert os.environ.get("XLA_FLAGS") == xla_flags
-
-
-def case_jax_test_support_import_applies_jax_test_runtime() -> None:
-    """Importing ``jax_test_support`` pins the CUDA autotuners and forces x64."""
-    assert "jax" not in sys.modules
-    os.environ.pop("XLA_FLAGS", None)
-
-    runpy.run_path(
-        str(_REPO_ROOT / "tests" / "jax_test_support.py"), run_name="jax_test_support"
-    )
-
-    runtime = sys.modules["simsopt_jax.backend.runtime"]
-    assert os.environ.get("XLA_FLAGS") == (
-        f"{runtime._GPU_FUSION_AUTOTUNER_DISABLED} {runtime._GPU_AUTOTUNE_LEVEL_PINNED}"
-    )
-    assert sys.modules["jax"].config.jax_enable_x64 is True
 
 
 def case_legacy_magneticfield_source_avoids_jax_import() -> None:
