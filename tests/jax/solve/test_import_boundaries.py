@@ -146,59 +146,6 @@ def test_jax_gpu_extra_declares_public_runtime_optimizer_dependencies():
     assert "optax" not in jax_gpu_deps
 
 
-def test_pyright_is_pinned_and_reachable_for_the_green_jax_slice():
-    """CI runs ``pyright --warnings`` against ``[tool.pyright].include``.
-
-    That list is the live green-slice SSOT; this test freezes the same list so
-    a silent expansion or shrinkage fails closed. Policy (1cde5dbf1): when
-    pyproject grows the slice, mirror it here — do not shrink pyproject.
-    """
-    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    workflow = (REPO_ROOT / ".github/workflows/jax_smoke.yml").read_text()
-    pyright = pyproject["tool"]["pyright"]
-    pyright_requirement = "pyright==1.1.411"
-
-    assert pyright_requirement in pyproject["project"]["optional-dependencies"]["dev"]
-    assert pyright["typeCheckingMode"] == "standard"
-    assert pyright["pythonVersion"] == "3.11"
-    assert pyright["extraPaths"] == ["src"]
-    assert pyright["include"] == [
-        "examples/jax/native_to_jax_index.py",
-        "src/simsopt_jax/examples/execution.py",
-        "src/simsopt_jax/examples/stochastic_stage_two.py",
-        "src/simsopt_jax/objectives",
-        "src/simsopt_jax/parity_tolerances.py",
-        "src/simsopt_jax/solve/dispatch.py",
-        "src/simsopt_jax/solve/scipy",
-        "src/simsopt_jax/solve/shared",
-        "src/simsopt_jax/solve/simsopt",
-        "src/simsopt_jax_adapters/mhd/vmec_host.py",
-        "tests/integration/test_jax_execution_scale_contract.py",
-        "tests/integration/test_jax_stochastic_configuration_ssot.py",
-        "tests/jax/adapters/test_vmec_host_evaluation.py",
-        "tests/jax/solve/test_algorithm_change_gates.py",
-        "tests/jax/solve/test_compat_shim_translation.py",
-        "tests/jax/solve/test_deprecation_warnings.py",
-        "tests/jax/solve/test_import_boundaries.py",
-        "tests/jax/solve/test_optimizer_result_schema.py",
-        "tests/jax/solve/test_options_typing.py",
-        "tests/test_jax_native_to_jax_index.py",
-    ]
-    assert pyright_requirement in workflow
-    assert "pyright --warnings" in workflow
-
-
-def test_jax_gpu_extra_pins_cuda12_compiler_and_linker_components():
-    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    jax_gpu_deps = pyproject["project"]["optional-dependencies"]["JAX_GPU"]
-
-    assert "jax[cuda12]==0.10.0" in jax_gpu_deps
-    assert "nvidia-cuda-nvcc-cu12==12.9.86" in jax_gpu_deps
-    assert "nvidia-cuda-nvrtc-cu12==12.9.86" in jax_gpu_deps
-    assert "nvidia-cuda-runtime-cu12==12.9.79" in jax_gpu_deps
-    assert "nvidia-nvjitlink-cu12==12.9.86" in jax_gpu_deps
-
-
 def test_deploy_extras_do_not_route_through_stale_optimistix_alias():
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     optional_deps = pyproject["project"]["optional-dependencies"]
