@@ -8,7 +8,6 @@ Optimization*, Section 3.5.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 
 import jax
@@ -20,7 +19,6 @@ from ._common import (
     _bool_scalar,
     _cubicmin,
     _dot,
-    _emit_debug_callback,
     _int_scalar,
     _line_search_sample_valid,
     _promote_dtypes_inexact,
@@ -35,51 +33,6 @@ _RestrictedValueAndGrad = Callable[
 ]
 _ScalarObjective = Callable[[jax.Array], jax.Array]
 _ValueAndGrad = Callable[[jax.Array], tuple[jax.Array, jax.Array]]
-
-
-_LINE_SEARCH_DEBUG_ENABLED = os.environ.get("SIMSOPT_LBFGS_DEBUG", "").lower() not in {
-    "",
-    "0",
-    "false",
-    "no",
-    "off",
-}
-
-
-def _emit_line_search_runtime_debug(
-    stage,
-    *,
-    iteration,
-    alpha,
-    phi,
-    dphi,
-):
-    """Emit runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled.
-
-    The callback routes through ``_emit_debug_callback`` (``ordered=False``) so
-    strict ``transfer_guard='disallow'`` lanes do not trip on the host token
-    associated with ``ordered=True``. One consequence is that debug prints from
-    the line search may interleave with other unordered callbacks (e.g. the
-    L-BFGS body debug). Use SIMSOPT_LBFGS_DEBUG only for ad-hoc tracing; do not
-    rely on print ordering across stages.
-    """
-    if not _LINE_SEARCH_DEBUG_ENABLED:
-        return
-    _emit_debug_callback(
-        lambda i, a, f, df: print(
-            "[line-search-debug] "
-            f"stage={stage} "
-            f"iter={int(i)} "
-            f"alpha={float(a):.16e} "
-            f"phi={float(f):.16e} "
-            f"dphi={float(df):.16e}",
-            flush=True,
-        ),
-        iteration,
-        alpha,
-        phi,
-        dphi,
-    )
 
 
 def _binary_replace(replace_bit, original_dict, new_dict, keys=None):
@@ -225,13 +178,6 @@ def _zoom(
         phi_j = phi_j.astype(state.phi_lo.dtype)
         dphi_j = dphi_j.astype(state.dphi_lo.dtype)
         g_j = g_j.astype(state.g_star.dtype)
-        _emit_line_search_runtime_debug(
-            "zoom_trial",
-            iteration=state.j + _int_scalar(1),
-            alpha=a_j,
-            phi=phi_j,
-            dphi=dphi_j,
-        )
         state = state._replace(
             nfev=state.nfev + sample_eval_count,
             ngev=state.ngev + sample_eval_count,
@@ -476,25 +422,11 @@ def _line_search_from_restricted_func_and_grad(
         dphi_star=dphi_0,
         g_star=gfk,
     )
-    _emit_line_search_runtime_debug(
-        "search_entry",
-        iteration=state.i,
-        alpha=start_value,
-        phi=phi_0,
-        dphi=dphi_0,
-    )
 
     def body(state):
         a_i = jnp.where(state.i == _int_scalar(1), start_value, state.a_i1 * two)
 
         phi_i, dphi_i, g_i = restricted_func_and_grad(a_i)
-        _emit_line_search_runtime_debug(
-            "trial",
-            iteration=state.i,
-            alpha=a_i,
-            phi=phi_i,
-            dphi=dphi_i,
-        )
         state = state._replace(
             nfev=state.nfev + _int_scalar(1),
             ngev=state.ngev + _int_scalar(1),
@@ -643,13 +575,6 @@ def _line_search_from_restricted_func_and_grad(
             state.best_g,
             state.g_star,
         ),
-    )
-    _emit_line_search_runtime_debug(
-        "search_exit",
-        iteration=state.i - _int_scalar(1),
-        alpha=state.a_star,
-        phi=state.phi_star,
-        dphi=state.dphi_star,
     )
 
     status = jnp.where(
