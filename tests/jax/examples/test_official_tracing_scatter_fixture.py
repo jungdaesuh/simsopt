@@ -78,7 +78,9 @@ def test_every_tracing_record_round_trips_with_nine_runs_k0_to_k8() -> None:
         assert "20260920 + k" in scatter.protocol.seed_rule
         assert scatter.protocol.threads["OMP_NUM_THREADS"] == "1"
         assert scatter.protocol.perturbed_arguments
-        assert "d1-diagnostic/NOTES.md" in scatter.protocol.pre_registered_in
+        assert scatter.protocol.pre_registered_in.startswith(
+            "examples/jax/parity/official_reference/9e027eac3/README.md"
+        )
         unperturbed = scatter.run(TRACING_UNPERTURBED_K)
         assert unperturbed.scatter is None
         assert unperturbed.perturbation.perturbed_arguments is None

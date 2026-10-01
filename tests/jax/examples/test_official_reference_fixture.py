@@ -35,6 +35,10 @@ from examples.jax.parity.official_reference import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = REPO_ROOT / "examples" / "jax" / "manifest.json"
 README = REFERENCE_ROOT / "README.md"
+PROTOCOL_DOCUMENT = (
+    "examples/jax/parity/official_reference/9e027eac3/README.md, "
+    "fixed before any sample existed"
+)
 
 
 def _official_case_ids_from_manifest() -> tuple[str, ...]:
@@ -235,9 +239,7 @@ def test_every_sensitivity_record_round_trips_with_nine_runs_k0_to_k8() -> None:
         assert "nextafter" in sensitivity.protocol.perturbation_rule
         assert "20260920 + k" in sensitivity.protocol.seed_rule
         assert sensitivity.protocol.threads["OMP_NUM_THREADS"] == "1"
-        assert sensitivity.protocol.pre_registered_in.endswith(
-            "v2, fixed 2026-09-20 02:52 EDT)"
-        )
+        assert sensitivity.protocol.pre_registered_in == PROTOCOL_DOCUMENT
         call_counts = {len(run.provider_calls) for run in sensitivity.runs}
         assert len(call_counts) == 1, case_id
         for run in sensitivity.runs:

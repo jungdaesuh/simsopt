@@ -15,7 +15,7 @@ One `<case_id>.json` per official case. A case is official iff an upstream sourc
 `examples/jax/manifest.json` names it as its `mirror_example_id` with `port_status` `ready`.
 
 Each file is compact JSON (sorted keys, `repr`-exact floats, one trailing newline) holding: the upstream commit, the
-official script path and its sha256, the capture provenance (campaign-relative directory, sha256 of `capture.json`
+official script path and its sha256, the capture provenance (a capture label `upstream-9e027eac3/<case_id>/<lane>`, sha256 of `capture.json`
 and of `capture-arrays.npz`, thread environment, interpreter/library versions the capture recorded), every provider
 call the official run made, and every observable.
 
@@ -49,7 +49,7 @@ rounding level. Nine runs of the unmodified official script on the official buil
 (it reproduces the canonical capture bitwise, which the tests check) and `k = 1..8` with ONLY the first provider
 call's start vector moved by one unit in the last place per entry, `x0' = np.nextafter(x0, s * np.inf)` with
 `s = np.random.RandomState(20260920 + k).choice([-1.0, 1.0], size=x0.size)`. The protocol (rule v2) was
-pre-registered before any sample existed; each record's `protocol.pre_registered_in` says where and when.
+fixed before any sample existed; it is the one described here, which each record's `protocol.pre_registered_in` names.
 
 Each record carries the observable name (upstream's capture key), the `lane_observable` (the port lane's key of the same
 quantity, which the quality band judges; identical to `observable` unless the capture names it differently, as coil forces'
@@ -98,8 +98,8 @@ a whole set of trajectories rather than one optimizer end value. It is read with
 official script bytes on the official build, one thread: `k = 0` unperturbed and `k = 1..8` with ONLY the start data
 of the traced objects moved by one unit in the last place per entry, `start' = np.nextafter(start, s * np.inf)` with
 `s = np.random.RandomState(20260920 + k).choice([-1.0, 1.0], size=start.size)` (field lines: the `R0` and `Z0`
-arrays of `compute_fieldlines`; particles: the `xyz_inits` of `trace_particles`). The protocol was pre-registered
-before any sample existed; each record's `protocol.pre_registered_in` says where and when.
+arrays of `compute_fieldlines`; particles: the `xyz_inits` of `trace_particles`). The protocol was fixed before
+any sample existed; it is the one described here, which each record's `protocol.pre_registered_in` names.
 
 Each record carries the line count, the protocol, the unperturbed run's terminal-status histogram, its total number
 of recorded hits and the sha256 of every canonical observable this fixture holds element-exact, and per `k` the
@@ -120,28 +120,28 @@ change together.
 
 | case_id | official_script | official_script_sha256 | canonical capture | variants |
 | --- | --- | --- | --- | --- |
-| `native-boozer` | `examples/2_Intermediate/boozer.py` | `5d4e8c2c06c11d078ebfaea0dc8924d93d4b63b9d6ec5f9db1736298b9fe0c01` | `claude/runs/native-boozer/captured-omp1` | -- |
-| `native-boozerqa` | `examples/2_Intermediate/boozerQA.py` | `6dc68a55b31765f9c0bd54445bc2ed9c6c0cc76f1938992bacc1be28c1c89f93` | `claude/runs/native-boozerqa/captured-omp1` | `ci` |
-| `native-coil-forces` | `examples/3_Advanced/coil_forces.py` | `bc486d35780216fbc11fae2bdd8371db07f7585ce060b53a439d520f399feda0` | `claude/runs/native-coil-forces/captured-omp1` | `ci` |
-| `native-just-a-quadratic` | `examples/1_Simple/just_a_quadratic.py` | `9a157cb2c203cbda3be54165e0e7a8798b7f0061ce9e508003252ce09ca36810` | `reference-simple/runs/native-just-a-quadratic/captured-natural-omp1` | -- |
-| `native-minimize-curve-length` | `examples/1_Simple/minimize_curve_length.py` | `f7f182e209cbce1035b02a1b8bece376dbcb8ae3a2b541e38f73703ace7f1b07` | `reference-simple/runs/native-minimize-curve-length/captured-controlled-omp1` | -- |
-| `native-permanent-magnet-muse` | `examples/2_Intermediate/permanent_magnet_MUSE.py` | `8a00c70f6f79faf411f563ab1f713ae12ec1f2b95ee6c934a7c9f6ae3d64da6a` | `claude/runs/native-permanent-magnet-muse/captured-omp1` | `ci` |
-| `native-permanent-magnet-pm4stell` | `examples/2_Intermediate/permanent_magnet_PM4Stell.py` | `cd82e1f207c73665da9ff09c635f5e26f800feda1e470a507c28a961102075d8` | `claude/runs/native-permanent-magnet-pm4stell/captured-omp1` | `ci` |
-| `native-permanent-magnet-qa` | `examples/2_Intermediate/permanent_magnet_QA.py` | `f438dd9f2635d91965a50d8ff6074c7f250e68d9bcdb2625d8c52cf15d4d9bba` | `claude/runs/native-permanent-magnet-qa/captured-omp1` | `ci` |
-| `native-permanent-magnet-simple` | `examples/1_Simple/permanent_magnet_simple.py` | `116a4a18493023a52b573441be387ba9f64bc4692af03e5e4240840d44d8e685` | `claude/runs/native-permanent-magnet-simple/captured-omp1` | `ci` |
-| `native-qfm` | `examples/1_Simple/qfm.py` | `5c80abbd47a038ea367e70441d76d4789ba4ed198ea210e54a601e1d2c9edb92` | `claude/runs/native-qfm/captured-omp1` | -- |
-| `native-stage-two-optimization` | `examples/2_Intermediate/stage_two_optimization.py` | `df7fde4474d9983849faa7bd4a2543298d885fe9cc9e66a9f30e2c8224e11bd3` | `reference-simple/runs/native-stage-two-optimization/captured-natural-omp1` | -- |
-| `native-stage-two-optimization-finitebuild` | `examples/3_Advanced/stage_two_optimization_finitebuild.py` | `a3faf4d5b6af2292495525a9ab3acf01fd89d7a3ec4ec12f3610e92373a9c822` | `reference-simple/runs/native-stage-two-optimization-finitebuild/captured-natural-omp1` | -- |
-| `native-stage-two-optimization-minimal` | `examples/1_Simple/stage_two_optimization_minimal.py` | `2b909a201841e627e0ef89f542d68b16d7a7e6a114e58f16e34340b227fa7b9d` | `reference-simple/runs/native-stage-two-optimization-minimal/captured-natural-omp1` | -- |
-| `native-stage-two-optimization-planar-coils` | `examples/2_Intermediate/stage_two_optimization_planar_coils.py` | `d117f6ae01a932e664add32e4626161d72f25e9375c3ea01eeeb4b33731c61d6` | `reference-simple/runs/native-stage-two-optimization-planar-coils/captured-natural-omp1` | -- |
-| `native-stage-two-optimization-stochastic` | `examples/2_Intermediate/stage_two_optimization_stochastic.py` | `6140547bfc9dc500c40e32ff1e493a43252e12dff96c5ae6676ac5fcffc9595e` | `reference-simple/runs/native-stage-two-optimization-stochastic/captured-natural-omp1` | -- |
-| `native-strain-optimization` | `examples/2_Intermediate/strain_optimization.py` | `f65676388e2743ab49d64eddb0420cc8159564daa2369a1898890f35d2fc2b9d` | `reference-simple/runs/native-strain-optimization/captured-natural-omp1` | -- |
-| `native-surf-vol-area` | `examples/1_Simple/surf_vol_area.py` | `9b04967f1dbd69efee17f755bdfe1a5e81042751c48472d3d9c88ec9cdea2518` | `reference-simple/runs/native-surf-vol-area/captured-natural-omp1` | -- |
-| `native-tracing-fieldlines-ncsx` | `examples/1_Simple/tracing_fieldlines_NCSX.py` | `498d6670a7fdb7651196d2a7150133f9019ca39a187d50cef991fab141696ae6` | `claude/runs/native-tracing-fieldlines-ncsx/captured-omp1` | `ci` |
-| `native-tracing-fieldlines-qa` | `examples/1_Simple/tracing_fieldlines_QA.py` | `b14eb146e2fc600eb6f5f75eeb60303b071ccfdf9d3830aa41abeec1f1dc106a` | `claude/runs/native-tracing-fieldlines-qa/captured-omp1` | `ci` |
-| `native-tracing-particle` | `examples/1_Simple/tracing_particle.py` | `99385bc7bafb87e401226d5c3924214f9ef39ce65920d5cf4ced7e75570807ad` | `claude/runs/native-tracing-particle/captured-omp1` | `ci` |
-| `native-wireframe-gsco-modular` | `examples/2_Intermediate/wireframe_gsco_modular.py` | `a5e6b91478823c50e173355204e6441521f04d01aa16522c0e59acfdf2346d9d` | `claude/runs/native-wireframe-gsco-modular/captured-omp1` | `ci` |
-| `native-wireframe-gsco-multistep` | `examples/3_Advanced/wireframe_gsco_multistep.py` | `6a0bf19a4cda2b1db3344c428324f0ef95d65f438689be2e904147b1835a7336` | `claude/runs/native-wireframe-gsco-multistep/captured-omp1` | `ci` |
-| `native-wireframe-gsco-sector-saddle` | `examples/2_Intermediate/wireframe_gsco_sector_saddle.py` | `3823580e4a0dc358f3309443e1c05f6d97680349a71385ea594c084fa607fd22` | `claude/runs/native-wireframe-gsco-sector-saddle/captured-omp1` | `ci` |
-| `native-wireframe-rcls-basic` | `examples/2_Intermediate/wireframe_rcls_basic.py` | `47c07e1594481f5a3e4b583437e0f0ac077cbe39005534fa87993af07728cdcb` | `reference-simple/runs/native-wireframe-rcls-basic/captured-natural-omp1` | -- |
-| `native-wireframe-rcls-with-ports` | `examples/2_Intermediate/wireframe_rcls_with_ports.py` | `636cbf4dd99a107a5d5b0567cb3aa483954d4395d717fffd8d31089e2c9f273a` | `claude/runs/native-wireframe-rcls-with-ports/captured-omp1` | `ci` |
+| `native-boozer` | `examples/2_Intermediate/boozer.py` | `5d4e8c2c06c11d078ebfaea0dc8924d93d4b63b9d6ec5f9db1736298b9fe0c01` | `upstream-9e027eac3/native-boozer/captured-omp1` | -- |
+| `native-boozerqa` | `examples/2_Intermediate/boozerQA.py` | `6dc68a55b31765f9c0bd54445bc2ed9c6c0cc76f1938992bacc1be28c1c89f93` | `upstream-9e027eac3/native-boozerqa/captured-omp1` | `ci` |
+| `native-coil-forces` | `examples/3_Advanced/coil_forces.py` | `bc486d35780216fbc11fae2bdd8371db07f7585ce060b53a439d520f399feda0` | `upstream-9e027eac3/native-coil-forces/captured-omp1` | `ci` |
+| `native-just-a-quadratic` | `examples/1_Simple/just_a_quadratic.py` | `9a157cb2c203cbda3be54165e0e7a8798b7f0061ce9e508003252ce09ca36810` | `upstream-9e027eac3/native-just-a-quadratic/captured-natural-omp1` | -- |
+| `native-minimize-curve-length` | `examples/1_Simple/minimize_curve_length.py` | `f7f182e209cbce1035b02a1b8bece376dbcb8ae3a2b541e38f73703ace7f1b07` | `upstream-9e027eac3/native-minimize-curve-length/captured-controlled-omp1` | -- |
+| `native-permanent-magnet-muse` | `examples/2_Intermediate/permanent_magnet_MUSE.py` | `8a00c70f6f79faf411f563ab1f713ae12ec1f2b95ee6c934a7c9f6ae3d64da6a` | `upstream-9e027eac3/native-permanent-magnet-muse/captured-omp1` | `ci` |
+| `native-permanent-magnet-pm4stell` | `examples/2_Intermediate/permanent_magnet_PM4Stell.py` | `cd82e1f207c73665da9ff09c635f5e26f800feda1e470a507c28a961102075d8` | `upstream-9e027eac3/native-permanent-magnet-pm4stell/captured-omp1` | `ci` |
+| `native-permanent-magnet-qa` | `examples/2_Intermediate/permanent_magnet_QA.py` | `f438dd9f2635d91965a50d8ff6074c7f250e68d9bcdb2625d8c52cf15d4d9bba` | `upstream-9e027eac3/native-permanent-magnet-qa/captured-omp1` | `ci` |
+| `native-permanent-magnet-simple` | `examples/1_Simple/permanent_magnet_simple.py` | `116a4a18493023a52b573441be387ba9f64bc4692af03e5e4240840d44d8e685` | `upstream-9e027eac3/native-permanent-magnet-simple/captured-omp1` | `ci` |
+| `native-qfm` | `examples/1_Simple/qfm.py` | `5c80abbd47a038ea367e70441d76d4789ba4ed198ea210e54a601e1d2c9edb92` | `upstream-9e027eac3/native-qfm/captured-omp1` | -- |
+| `native-stage-two-optimization` | `examples/2_Intermediate/stage_two_optimization.py` | `df7fde4474d9983849faa7bd4a2543298d885fe9cc9e66a9f30e2c8224e11bd3` | `upstream-9e027eac3/native-stage-two-optimization/captured-natural-omp1` | -- |
+| `native-stage-two-optimization-finitebuild` | `examples/3_Advanced/stage_two_optimization_finitebuild.py` | `a3faf4d5b6af2292495525a9ab3acf01fd89d7a3ec4ec12f3610e92373a9c822` | `upstream-9e027eac3/native-stage-two-optimization-finitebuild/captured-natural-omp1` | -- |
+| `native-stage-two-optimization-minimal` | `examples/1_Simple/stage_two_optimization_minimal.py` | `2b909a201841e627e0ef89f542d68b16d7a7e6a114e58f16e34340b227fa7b9d` | `upstream-9e027eac3/native-stage-two-optimization-minimal/captured-natural-omp1` | -- |
+| `native-stage-two-optimization-planar-coils` | `examples/2_Intermediate/stage_two_optimization_planar_coils.py` | `d117f6ae01a932e664add32e4626161d72f25e9375c3ea01eeeb4b33731c61d6` | `upstream-9e027eac3/native-stage-two-optimization-planar-coils/captured-natural-omp1` | -- |
+| `native-stage-two-optimization-stochastic` | `examples/2_Intermediate/stage_two_optimization_stochastic.py` | `6140547bfc9dc500c40e32ff1e493a43252e12dff96c5ae6676ac5fcffc9595e` | `upstream-9e027eac3/native-stage-two-optimization-stochastic/captured-natural-omp1` | -- |
+| `native-strain-optimization` | `examples/2_Intermediate/strain_optimization.py` | `f65676388e2743ab49d64eddb0420cc8159564daa2369a1898890f35d2fc2b9d` | `upstream-9e027eac3/native-strain-optimization/captured-natural-omp1` | -- |
+| `native-surf-vol-area` | `examples/1_Simple/surf_vol_area.py` | `9b04967f1dbd69efee17f755bdfe1a5e81042751c48472d3d9c88ec9cdea2518` | `upstream-9e027eac3/native-surf-vol-area/captured-natural-omp1` | -- |
+| `native-tracing-fieldlines-ncsx` | `examples/1_Simple/tracing_fieldlines_NCSX.py` | `498d6670a7fdb7651196d2a7150133f9019ca39a187d50cef991fab141696ae6` | `upstream-9e027eac3/native-tracing-fieldlines-ncsx/captured-omp1` | `ci` |
+| `native-tracing-fieldlines-qa` | `examples/1_Simple/tracing_fieldlines_QA.py` | `b14eb146e2fc600eb6f5f75eeb60303b071ccfdf9d3830aa41abeec1f1dc106a` | `upstream-9e027eac3/native-tracing-fieldlines-qa/captured-omp1` | `ci` |
+| `native-tracing-particle` | `examples/1_Simple/tracing_particle.py` | `99385bc7bafb87e401226d5c3924214f9ef39ce65920d5cf4ced7e75570807ad` | `upstream-9e027eac3/native-tracing-particle/captured-omp1` | `ci` |
+| `native-wireframe-gsco-modular` | `examples/2_Intermediate/wireframe_gsco_modular.py` | `a5e6b91478823c50e173355204e6441521f04d01aa16522c0e59acfdf2346d9d` | `upstream-9e027eac3/native-wireframe-gsco-modular/captured-omp1` | `ci` |
+| `native-wireframe-gsco-multistep` | `examples/3_Advanced/wireframe_gsco_multistep.py` | `6a0bf19a4cda2b1db3344c428324f0ef95d65f438689be2e904147b1835a7336` | `upstream-9e027eac3/native-wireframe-gsco-multistep/captured-omp1` | `ci` |
+| `native-wireframe-gsco-sector-saddle` | `examples/2_Intermediate/wireframe_gsco_sector_saddle.py` | `3823580e4a0dc358f3309443e1c05f6d97680349a71385ea594c084fa607fd22` | `upstream-9e027eac3/native-wireframe-gsco-sector-saddle/captured-omp1` | `ci` |
+| `native-wireframe-rcls-basic` | `examples/2_Intermediate/wireframe_rcls_basic.py` | `47c07e1594481f5a3e4b583437e0f0ac077cbe39005534fa87993af07728cdcb` | `upstream-9e027eac3/native-wireframe-rcls-basic/captured-natural-omp1` | -- |
+| `native-wireframe-rcls-with-ports` | `examples/2_Intermediate/wireframe_rcls_with_ports.py` | `636cbf4dd99a107a5d5b0567cb3aa483954d4395d717fffd8d31089e2c9f273a` | `upstream-9e027eac3/native-wireframe-rcls-with-ports/captured-omp1` | `ci` |
