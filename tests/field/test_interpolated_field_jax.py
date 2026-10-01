@@ -1,4 +1,4 @@
-"""Parity tests for ``InterpolatedFieldJAX`` (item 15-sub closeout).
+"""Parity tests for ``InterpolatedFieldJAX``.
 
 These tests close the architectural blocker recorded in
 ``.artifacts/jax_port_goal/blockers/15-interpolatedfield-debug.md``.

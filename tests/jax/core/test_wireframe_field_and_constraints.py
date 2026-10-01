@@ -1,4 +1,4 @@
-"""Item 29 parity tests for ``simsopt_jax.core.wireframe``.
+"""Parity tests for ``simsopt_jax.core.wireframe``.
 
 Oracle: the existing C++-backed ``simsopt.field.WireframeField`` path through
 ``simsoptpp/wireframe_field_impl.h`` and

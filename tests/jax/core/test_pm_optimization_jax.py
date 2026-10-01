@@ -1,4 +1,4 @@
-"""Item 25 parity tests for ``simsopt_jax.core.pm_optimization``.
+"""Parity tests for ``simsopt_jax.core.pm_optimization``.
 
 Validates the MwPGP solver port against:
 

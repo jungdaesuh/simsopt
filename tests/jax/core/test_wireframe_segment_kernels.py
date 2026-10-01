@@ -1,4 +1,4 @@
-"""Item 29 parity tests for ``simsopt_jax.core.wireframe``.
+"""Parity tests for ``simsopt_jax.core.wireframe``.
 
 Exercises the new pure-JAX wireframe magnetic-field kernels against the
 upstream C++ oracle ``simsoptpp.WireframeField`` at the
@@ -341,7 +341,7 @@ def test_combined_B_and_dB_matches_separate():
     """``wireframe_B_and_dB_by_dX`` agrees with the standalone entry points.
 
     Validates the combined entry point that the future ``Optimizable``
-    wrapper (item 30) will rely on for caching efficiency. Tolerance
+    wrapper (``WireframeFieldJAX``) will rely on for caching efficiency. Tolerance
     lane: ``direct_kernel``.
     """
     nodes_hp = _closed_loop_nodes()

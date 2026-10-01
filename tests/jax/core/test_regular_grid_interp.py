@@ -1,4 +1,4 @@
-"""Parity tests for the JAX ``regular_grid_interp`` port (item 13).
+"""Parity tests for the JAX ``regular_grid_interp`` port.
 
 Each test imports tolerances from
 ``simsopt_jax.parity_tolerances.parity_ladder_tolerances`` so the

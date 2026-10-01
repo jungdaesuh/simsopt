@@ -1,7 +1,6 @@
-"""Historical item-19 optimizer routing/import regression tests.
+"""Optimizer routing and import regression tests.
 
-The filename tracks the original review item for optimizer dispatch cleanup;
-the Boozer M1 Hessian split regression lives in ``test_boozer_residual_jax.py``.
+The Boozer M1 Hessian split regression lives in ``test_boozer_residual_jax.py``.
 """
 
 import inspect
@@ -13,7 +12,7 @@ import pytest
 import simsopt_jax.geo.optimizers.optimizer as _opt
 
 
-def test_item19_optimizer_jax_product_code_has_no_dynamic_private_import():
+def test_optimizer_jax_product_code_has_no_dynamic_private_import():
     source = Path(_opt.__file__).read_text()
 
     assert "import importlib" not in source
@@ -21,13 +20,13 @@ def test_item19_optimizer_jax_product_code_has_no_dynamic_private_import():
     assert "__import__(" not in source
 
 
-def test_item19_optimizer_jax_exposes_no_dynamic_private_loader():
+def test_optimizer_jax_exposes_no_dynamic_private_loader():
     assert not hasattr(_opt, "_private_pkg")
     assert not hasattr(_opt, "_load_private_pkg")
     assert not hasattr(_opt, "_load_reference_optimizer_module")
 
 
-def test_item19_host_dense_hessian_is_independent_from_device_materializer(
+def test_host_dense_hessian_is_independent_from_device_materializer(
     monkeypatch,
 ):
     def forbidden_device_materializer(*_args, **_kwargs):
@@ -52,7 +51,7 @@ def test_item19_host_dense_hessian_is_independent_from_device_materializer(
     np.testing.assert_array_equal(np.asarray(actual), np.asarray(operator))
 
 
-def test_item19_host_dense_hessian_agrees_with_device_materializer():
+def test_host_dense_hessian_agrees_with_device_materializer():
     operator = jnp.asarray(
         [
             [2.0, 0.5 + 1.0e-8, -0.25],
@@ -77,18 +76,18 @@ def test_item19_host_dense_hessian_agrees_with_device_materializer():
     )
 
 
-def test_item19_dense_hessian_damping_avoids_identity_allocation():
+def test_dense_hessian_damping_avoids_identity_allocation():
     stabilize_source = inspect.getsource(_opt._stabilize_dense_hessian)
 
     assert "jnp.diag_indices" in stabilize_source
     assert "jnp.eye" not in stabilize_source
 
 
-def test_item19_target_outer_loop_contract_defaults_to_ondevice_lbfgs():
+def test_target_outer_loop_contract_defaults_to_ondevice_lbfgs():
     contract = _opt.resolve_target_outer_loop_optimizer_contract(
         "jax",
         "ondevice",
-        component_label="item19 target optimizer",
+        component_label="target optimizer",
     )
 
     assert contract == _opt.TargetOptimizerContract(
@@ -111,7 +110,7 @@ def test_item19_target_outer_loop_contract_defaults_to_ondevice_lbfgs():
         ("ondevice", False, "lm-minpack", _opt.Driver.SIMSOPT_LM_QR),
     ],
 )
-def test_item19_boozer_inner_driver_contract_stays_typed(
+def test_boozer_inner_driver_contract_stays_typed(
     optimizer_backend,
     limited_memory,
     least_squares_algorithm,
@@ -127,11 +126,11 @@ def test_item19_boozer_inner_driver_contract_stays_typed(
     )
 
 
-def test_item19_reference_and_target_optimizer_lanes_stay_explicit():
+def test_reference_and_target_optimizer_lanes_stay_explicit():
     reference_contract = _opt.resolve_reference_outer_loop_optimizer_contract(
         "cpu",
         "scipy",
-        component_label="item19 reference optimizer",
+        component_label="reference optimizer",
     )
     assert reference_contract == _opt.ReferenceOptimizerContract(
         driver=_opt.Driver.SCIPY_LBFGSB,
@@ -141,18 +140,18 @@ def test_item19_reference_and_target_optimizer_lanes_stay_explicit():
         _opt.resolve_target_outer_loop_optimizer_contract(
             "jax",
             "scipy",
-            component_label="item19 target optimizer",
+            component_label="target optimizer",
         )
 
     with pytest.raises(ValueError, match="SciPy/reference optimizer lane"):
         _opt.resolve_reference_outer_loop_optimizer_contract(
             "jax",
             "ondevice",
-            component_label="item19 reference optimizer",
+            component_label="reference optimizer",
         )
 
 
-def test_item19_reference_minimize_host_control_permission_is_explicit(monkeypatch):
+def test_reference_minimize_host_control_permission_is_explicit(monkeypatch):
     class _StrictJaxConfig:
         backend = "jax"
         mode = "jax_gpu_parity"

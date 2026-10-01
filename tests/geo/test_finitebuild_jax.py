@@ -1,4 +1,4 @@
-"""Wave R4 item 20 parity tests for finite-build CurveFilament JAX paths."""
+"""Parity tests for finite-build CurveFilament JAX paths."""
 
 from __future__ import annotations
 

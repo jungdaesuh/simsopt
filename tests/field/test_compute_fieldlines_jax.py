@@ -1,4 +1,4 @@
-"""Item 16 parity tests: canonical ``compute_fieldlines`` JAX tracing API.
+"""Parity tests: canonical ``compute_fieldlines`` JAX tracing API.
 
 These tests validate that :func:`simsopt_jax_adapters.field.tracing.compute_fieldlines`
 uses the in-repo batched JAX fieldline driver
@@ -6,7 +6,7 @@ uses the in-repo batched JAX fieldline driver
 canonical JAX wrapper raises explicit :class:`NotImplementedError` for
 argument shapes outside the JAX path's current carve-outs.
 
-The routing carve-outs mirror the item 14 / item 16 scoped JAX surface:
+The routing carve-outs mirror the scoped JAX fieldline surface:
 
 - ``phis`` plane-crossing events and translated Cartesian stopping criteria
   are wired through the public JAX fieldline surface.

@@ -1,4 +1,4 @@
-"""Parity tests for the JAX ``boozer_radial_interp`` port (item 32).
+"""Parity tests for the JAX ``boozer_radial_interp`` port.
 
 The cross-oracle tests compare the JAX kernels against the C++
 ``simsoptpp.compute_kmnc_kmns``, ``simsoptpp.compute_kmns``,

@@ -1,4 +1,4 @@
-"""Public-wrapper parity tests for item 30 ``WireframeFieldJAX``."""
+"""Public-wrapper parity tests for ``WireframeFieldJAX``."""
 
 from __future__ import annotations
 

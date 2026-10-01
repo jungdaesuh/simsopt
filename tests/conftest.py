@@ -597,7 +597,7 @@ _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
         "geo/test_surface_henneberg_jax.py",
         "geo/test_surface_objectives_jax.py",
         "geo/test_surface_rzfourier_jax.py",
-        "geo/test_surface_rzfourier_jax_item06_closeout.py",
+        "geo/test_surface_rzfourier_jax_non_stellsym_production_scale.py",
         "geo/test_surface_rzfourier_transfer_guard_jax.py",
         "geo/test_surface_xyz_tensor_clamped_jax.py",
         "jax/native_unit_parity/test_curve_subclasses_parity.py",

@@ -1,4 +1,4 @@
-"""Item 33 private fixed-state Boozer radial evaluator tests."""
+"""Private fixed-state Boozer radial evaluator tests."""
 
 from __future__ import annotations
 
@@ -315,7 +315,7 @@ def test_fixed_state_restart_payload_round_trips():
 
 
 def test_public_boozer_jax_wrapper_module_exists_but_is_opt_in():
-    # Item 33 ships ``simsopt_jax_adapters.field.boozer_field`` as an
+    # ``simsopt_jax_adapters.field.boozer_field`` ships as an
     # explicit-import module. The class is deliberately NOT registered
     # in the lazy-export map for ``simsopt.field``; users must import
     # the module path directly.

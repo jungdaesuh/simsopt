@@ -1,6 +1,6 @@
 """SSOT analytic-oracle and runtime tests for the pure JAX finite-build kernel.
 
-Wave R4 item 20 closure: ``simsopt_jax.core.finitebuild`` exposes the
+``simsopt_jax.core.finitebuild`` exposes the
 kernel-level filament construction used by
 ``simsopt.geo.finitebuild.create_multifilament_grid``. The legacy
 ``CurveFilament`` class does not own immutable JAX specs or JAX graft

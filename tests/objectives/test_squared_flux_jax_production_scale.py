@@ -1,4 +1,4 @@
-"""Item 03 closeout test for SquaredFluxJAX.
+"""Production-scale strict-transfer parity test for SquaredFluxJAX.
 
 This test bundles, in a single parametrized fixture, four attributes
 that are not co-located in any other existing test:

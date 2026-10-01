@@ -1,4 +1,4 @@
-"""Item 12 (partial) parity tests for ``simsopt_jax.core.analytic_pure_fields``.
+"""Parity tests for ``simsopt_jax.core.analytic_pure_fields``.
 
 The tests exercise the new JAX kernels for ``ToroidalField``,
 ``PoloidalField``, and ``MirrorModel`` against the upstream CPU classes at

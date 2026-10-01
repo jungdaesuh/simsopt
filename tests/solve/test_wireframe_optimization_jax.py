@@ -1,4 +1,4 @@
-"""Item 31 tests for fixed-state wireframe RCLS JAX solve helpers."""
+"""Tests for fixed-state wireframe RCLS JAX solve helpers."""
 
 from __future__ import annotations
 

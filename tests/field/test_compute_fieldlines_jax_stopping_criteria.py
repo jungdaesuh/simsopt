@@ -1,6 +1,6 @@
-"""Item 16 follow-up tests: phi-plane crossings + non-Levelset stopping criteria.
+"""Follow-up tests: phi-plane crossings + non-Levelset stopping criteria.
 
-The original item 16 test suite verified the CPU/JAX backend-routing
+The original ``compute_fieldlines`` JAX test suite verified the CPU/JAX backend-routing
 contract and rejected ``phis``/non-Levelset stopping criteria with
 :class:`NotImplementedError`. With the phi-plane localizer and stopping
 criterion translation now wired through
@@ -106,7 +106,7 @@ def test_compute_fieldlines_jax_accepts_minR_stopping_criterion():
 
     This is the explicit follow-up to
     ``test_compute_fieldlines_jax_raises_on_unsupported_stopping_criterion``
-    in ``test_tracing_jax_item16.py``: the carve-out is lifted and the
+    in ``test_compute_fieldlines_jax.py``: the carve-out is lifted and the
     isinstance dispatch must translate ``MinRStoppingCriterion`` to
     its JAX dataclass mirror without raising ``NotImplementedError``.
     """

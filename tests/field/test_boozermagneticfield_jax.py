@@ -1,4 +1,4 @@
-"""Public-wrapper parity tests for ``BoozerRadialInterpolantJAX`` (item 33).
+"""Public-wrapper parity tests for ``BoozerRadialInterpolantJAX``.
 
 These tests construct a real ``BoozerRadialInterpolant`` from a checked-in
 VMEC ``wout`` fixture, freeze its splines into the JAX wrapper, and

@@ -1,4 +1,4 @@
-"""Item 12 Carlson elliptic-helper parity tests.
+"""Carlson elliptic-helper parity tests.
 
 ``simsopt_jax.core._elliptic`` provides JAX-native replacements for the
 SciPy complete elliptic integrals used by ``CircularCoil``. These tests

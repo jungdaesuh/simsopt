@@ -1,4 +1,4 @@
-"""Item 28 tests for the fixed-state PM solve-level JAX wrapper."""
+"""Tests for the fixed-state PM solve-level JAX wrapper."""
 
 from __future__ import annotations
 

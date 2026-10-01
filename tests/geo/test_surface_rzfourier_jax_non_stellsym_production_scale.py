@@ -1,4 +1,4 @@
-"""JAX port goal item 06 closeout coverage witness.
+"""Production-scale non-stellsym SurfaceRZFourier JAX parity.
 
 The existing repo-wide JAX SurfaceRZFourier parity suite at
 ``tests/geo/test_surface_rzfourier_jax.py`` covers ``stellsym=False`` only
@@ -7,11 +7,9 @@ HLO probe in the same module raises ``nphi`` and ``ntheta`` (17/18,
 32/33) but pins ``stellsym=True``, leaving the non-stellsym SurfaceRZFourier
 geometry kernel without a production-scale CPU/JAX parity fixture.
 
-This module installs that missing witness for prompt item 06 of the
-JAX port goal manifest. It exercises the JAX SurfaceRZFourier adapter
-at ``stellsym=False``, ``nphi=32``, ``ntheta=16`` (above the
-``nphi >= 16, ntheta >= 8`` production-scale floor in section 4c of
-``jax_port_goal_prompt_2026-05-12.md``), covering ``gamma``,
+This module adds that missing fixture. It exercises the JAX SurfaceRZFourier
+adapter at ``stellsym=False``, ``nphi=32``, ``ntheta=16`` (above an
+``nphi >= 16, ntheta >= 8`` production-scale floor), covering ``gamma``,
 ``gammadash1``, ``gammadash2``, ``normal``, ``area``, and ``volume``
 against the simsoptpp-backed CPU oracle. Tolerances come from the
 ``direct_kernel`` parity-ladder lane
@@ -58,7 +56,7 @@ _NFP = 2
 def _parity_device_scope():
     """Pin the JAX default device to the CPU parity lane.
 
-    Item 06 declared CPU-only validation; user requested no GPU runs.
+    This fixture is validated on CPU only.
     """
     with parity_default_device("cpu"):
         yield
@@ -189,12 +187,12 @@ def _assert_production_scale_non_stellsym_parity(
 
 
 def test_surface_rzfourier_jax_production_scale_non_stellsym_parity():
-    """Closeout coverage witness: production-scale non-stellsym parity.
+    """Production-scale non-stellsym parity.
 
     Closes the gap left by ``_make_surface(stellsym=False)`` in
     ``tests/geo/test_surface_rzfourier_jax.py`` which runs at ``nphi=9,
     ntheta=10`` only. This test runs the same JAX SurfaceRZFourier paths
-    at the prompt's production-scale floor (``nphi=32, ntheta=16``)
+    at a production-scale floor (``nphi=32, ntheta=16``)
     against the simsoptpp CPU oracle at the ``direct_kernel`` parity-ladder
     lane.
     """

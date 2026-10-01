@@ -1,4 +1,4 @@
-"""Parity tests for the JAX tracing RK path (item 14 fieldline MVP).
+"""Parity tests for the JAX tracing RK path.
 
 This module validates three slices of the new
 ``simsopt_jax.core.tracing`` and ``simsopt_jax.core.surface_classifier``
