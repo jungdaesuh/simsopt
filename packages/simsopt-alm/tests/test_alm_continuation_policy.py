@@ -538,7 +538,8 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
 
     def test_feasible_stall_continues_with_a_tighter_stationarity_tolerance(self):
         # Stationarity 5 misses the update tolerance 4 but is within twice
-        # it, so the tolerance tightens to half the stationarity.
+        # it, so the tolerance tightens to half the stationarity: 2.5 (above
+        # the 1e-6 floor, below 4).
         measured = _measure(FEASIBLE_NOT_STATIONARY, update_stationarity_tol=4.0)
         self.assertEqual(measured.stationarity_norm, 5.0)
         decision = self.after_inner(
@@ -548,10 +549,7 @@ class AlmDefaultAfterInnerTests(unittest.TestCase):
             decision,
             ALMContinue(
                 trust_radius=0.3,
-                update_stationarity_tol=min(
-                    4.0,
-                    max(SETTINGS.stationarity_tol, 0.5 * measured.stationarity_norm),
-                ),
+                update_stationarity_tol=2.5,
                 feasible_stall_count=1,
             ),
         )

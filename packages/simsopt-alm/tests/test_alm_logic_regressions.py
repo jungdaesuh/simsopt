@@ -476,9 +476,13 @@ class ScalarArrayDiagnosticCheckpointTests(unittest.TestCase):
         boundaries = []
         minimize_alm([0.0], [], evaluate, ALMSettings(), {"maxiter": 100}, on_outer_boundary=boundaries.append)
         snapshot = transition_snapshot(boundaries[0], {"maxiter": 100})
-        self.assertEqual(dict(snapshot.best_feasible.evaluation)["diagnostic"], 1.5)
-        restored = resume_boundary(snapshot)
-        self.assertEqual(restored.state.best_feasible.evaluation["diagnostic"], 1.5)
+        stored = dict(snapshot.best_feasible.evaluation)["diagnostic"]
+        # A 0-d ndarray also compares equal to 1.5: the type is the conversion.
+        self.assertIs(type(stored), float)
+        self.assertEqual(stored, 1.5)
+        restored = resume_boundary(snapshot).state.best_feasible.evaluation["diagnostic"]
+        self.assertIs(type(restored), float)
+        self.assertEqual(restored, 1.5)
 
 
 class TrustRadiusValidationTests(unittest.TestCase):

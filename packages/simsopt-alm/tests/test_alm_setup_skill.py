@@ -29,7 +29,7 @@ import tempfile
 import unittest
 from dataclasses import MISSING, fields
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -120,7 +120,7 @@ import numpy as np
 
 from simsopt_alm import ALMPhysics
 
-OBJECTIVE, ROWS = OBJECTIVE_VALUE, ROWS_VALUE
+OBJECTIVE, ROWS, NAMES = OBJECTIVE_VALUE, ROWS_VALUE, NAMES_VALUE
 
 
 def noisy(x, salt, noise, delta, kind="uniform"):
@@ -141,10 +141,7 @@ def physics(x):
 
 
 def build_problem(smoke=False):
-    return SimpleNamespace(name="noisy", x0=np.zeros(2), physics=physics,
-                           constraint_names=tuple("_".join(f"{item:g}" if not isinstance(item, str) else item
-                                                           for item in ("noise",) + row[:1] + ("delta",) + row[1:])
-                                                  for row in ROWS))
+    return SimpleNamespace(name="noisy", x0=np.zeros(2), physics=physics, constraint_names=NAMES)
 """
 # Crucible round 7: quantities whose finite differences depend on the step
 # size, at x0 = X0_VALUE (every dof), with f = sum(x). Rows are
@@ -166,7 +163,7 @@ import numpy as np
 
 from simsopt_alm import ALMPhysics
 
-X0, ROWS = X0_VALUE, ROWS_VALUE
+X0, ROWS, NAMES = X0_VALUE, ROWS_VALUE, NAMES_VALUE
 
 
 def row(x, case, parameter, claim):
@@ -212,8 +209,7 @@ def physics(x):
 
 
 def build_problem(smoke=False):
-    return SimpleNamespace(name="step", x0=np.full(2, X0), physics=physics,
-                           constraint_names=tuple(f"{case}_{parameter:g}_{claim}" for case, parameter, claim in ROWS))
+    return SimpleNamespace(name="step", x0=np.full(2, X0), physics=physics, constraint_names=NAMES)
 """
 # Crucible round 7 (C4): the round's own noisy objective, (1 + sum x + sum x^2
 # + sum sin x) (1 + LEVEL u) with u from sha256 of the point and TRIAL
@@ -248,6 +244,17 @@ def build_problem(smoke=False):
 NOISE_TRIALS = (("tri", 1e-3, 13), ("cauchy", 1e-4, 33))
 # Round-6 seeds of the noise.
 NOISY_HASH_SEEDS = tuple(range(8))
+
+
+def probe_row_names(specs: Iterable[tuple]) -> Tuple[str, ...]:
+    """The constraint name of each probe row spec (``NAMES_VALUE`` of the
+    probe problems): its items joined by "_", numbers in ``:g`` form."""
+    return tuple("_".join(item if isinstance(item, str) else f"{item:g}" for item in spec) for spec in specs)
+
+
+def noisy_row_names(rows: Iterable[tuple]) -> Tuple[str, ...]:
+    """``NOISY_PROBE_PROBLEM``'s row names: noise_NOISE_delta_DELTA[_KIND]."""
+    return probe_row_names(("noise",) + tuple(row[:1]) + ("delta",) + tuple(row[1:]) for row in rows)
 
 
 # f alone, for the round-off cases of Crucible round 2: a huge value with a
@@ -294,7 +301,7 @@ import numpy as np
 
 from simsopt_alm import ALMPhysics
 
-ROWS = ROWS_VALUE
+ROWS, NAMES = ROWS_VALUE, NAMES_VALUE
 
 
 def row(x, case, parameter, delta):
@@ -312,8 +319,7 @@ def physics(x):
 
 
 def build_problem(smoke=False):
-    return SimpleNamespace(name="sweep", x0=np.zeros(2), physics=physics,
-                           constraint_names=tuple(f"{case}_{parameter:g}_{delta:g}" for case, parameter, delta in ROWS))
+    return SimpleNamespace(name="sweep", x0=np.zeros(2), physics=physics, constraint_names=NAMES)
 """
 
 
@@ -328,7 +334,7 @@ import numpy as np
 
 from simsopt_alm import ALMPhysics
 
-ROWS = ROWS_VALUE
+ROWS, NAMES = ROWS_VALUE, NAMES_VALUE
 
 
 def row(x, case, parameter, relative, absolute):
@@ -373,9 +379,7 @@ def physics(x):
 
 
 def build_problem(smoke=False):
-    return SimpleNamespace(name="shape", x0=np.zeros(2), physics=physics,
-                           constraint_names=tuple("_".join(f"{item:g}" if not isinstance(item, str) else item
-                                                           for item in spec) for spec in ROWS))
+    return SimpleNamespace(name="shape", x0=np.zeros(2), physics=physics, constraint_names=NAMES)
 """
 
 
@@ -1066,8 +1070,14 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertEqual(set(verdicts.values()), {"passed"})
         self.assertEqual(len(verdicts), 11)
 
+    def assert_reported_rows(self, reported: Iterable[str], expected: Iterable[str]) -> None:
+        """The checker judged exactly the requested rows, in order: a verdict
+        loop over fewer (or no) rows would check nothing."""
+        self.assertEqual(list(reported), list(expected), "the checker did not report the requested rows")
+
     def run_sweep(self, rows: list, *arguments: str) -> Dict[str, str]:
-        (self.scratch / "alm_problem.py").write_text(SWEEP_PROBE_PROBLEM.replace("ROWS_VALUE", repr(rows)))
+        (self.scratch / "alm_problem.py").write_text(SWEEP_PROBE_PROBLEM.replace("ROWS_VALUE", repr(rows))
+                                                     .replace("NAMES_VALUE", repr(probe_row_names(rows))))
         completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments], cwd=self.scratch,
                                problem_dir=self.scratch)
         verdicts = self.verdicts(completed)
@@ -1078,18 +1088,23 @@ class SkillScriptsRunTests(unittest.TestCase):
         """q = sum(x) + K sum(x^3), K up to 1e10: every gradient 0.1% to 5% wrong
         fails and every right one passes (Crucible round 3)."""
         rows = [("cubic", k, delta) for k in SWEEP_CUBIC_K for delta in (0.0,) + SWEEP_DELTAS]
-        for name, verdict in self.run_sweep(rows).items():
+        verdicts = self.run_sweep(rows)
+        self.assert_reported_rows(verdicts, probe_row_names(rows))
+        for name, verdict in verdicts.items():
             self.assertEqual(verdict, "passed" if name.endswith("_0") else "failed", name)
 
     def test_gradient_check_fails_wrong_gradients_on_offset_values(self):
         """q = F + sum(x), F up to 1e8: every gradient 0.1% to 5% wrong fails and
         every right one passes (Crucible round 3)."""
         rows = [("offset", f, delta) for f in SWEEP_OFFSET_F for delta in (0.0,) + SWEEP_DELTAS]
-        for name, verdict in self.run_sweep(rows).items():
+        verdicts = self.run_sweep(rows)
+        self.assert_reported_rows(verdicts, probe_row_names(rows))
+        for name, verdict in verdicts.items():
             self.assertEqual(verdict, "passed" if name.endswith("_0") else "failed", name)
 
     def run_shape(self, rows: list, *arguments: str) -> Dict[str, dict]:
-        (self.scratch / "alm_problem.py").write_text(SHAPE_PROBE_PROBLEM.replace("ROWS_VALUE", repr(rows)))
+        (self.scratch / "alm_problem.py").write_text(SHAPE_PROBE_PROBLEM.replace("ROWS_VALUE", repr(rows))
+                                                     .replace("NAMES_VALUE", repr(probe_row_names(rows))))
         completed = run_python([str(SCRIPTS_DIR / "gradient_check.py"), *arguments], cwd=self.scratch,
                                problem_dir=self.scratch)
         self.last_completed = completed
@@ -1130,6 +1145,7 @@ class SkillScriptsRunTests(unittest.TestCase):
         rows = [("tanh", k, 0.0, 0.0) for k in (1e3, 1e5)] + [("sin", k, 0.0, 0.0) for k in (1e3, 1e4, 1e5)]
         rows += [(case, k, 1e-3, 0.0) for case, k, _relative, _absolute in rows]
         quantities = self.run_shape(rows)
+        self.assert_reported_rows(quantities, probe_row_names(rows))
         for name, quantity in quantities.items():
             with self.subTest(row=name):
                 self.assertEqual(quantity["verdict"], "failed" if "_0.001_" in name else "passed", quantity["note"])
@@ -1139,6 +1155,7 @@ class SkillScriptsRunTests(unittest.TestCase):
         gradients passing and 0.1% wrong ones failing."""
         rows = [("exp", c, relative, 0.0) for c in (0.0, 1.0, 100.0) for relative in (0.0, 1e-3)]
         quantities = self.run_shape(rows)
+        self.assert_reported_rows(quantities, probe_row_names(rows))
         for name, quantity in quantities.items():
             with self.subTest(row=name):
                 self.assertEqual(quantity["verdict"], "failed" if "_0.001_" in name else "passed", quantity["note"])
@@ -1180,7 +1197,7 @@ class SkillScriptsRunTests(unittest.TestCase):
 
     def run_noisy(self, objective: tuple, rows: list, hash_seed: int) -> Dict[str, dict]:
         source = (NOISY_PROBE_PROBLEM.replace("OBJECTIVE_VALUE", repr(objective))
-                  .replace("ROWS_VALUE", repr(rows)))
+                  .replace("ROWS_VALUE", repr(rows)).replace("NAMES_VALUE", repr(noisy_row_names(rows))))
         (self.scratch / "alm_problem.py").write_text(source)
         completed = run_python([str(SCRIPTS_DIR / "gradient_check.py")], cwd=self.scratch,
                                problem_dir=self.scratch, overrides={"PYTHONHASHSEED": str(hash_seed)})
@@ -1198,6 +1215,7 @@ class SkillScriptsRunTests(unittest.TestCase):
         unresolved = [(noise, delta) for noise in (1e-4, 1e-3) for delta in (0.05, 0.5, 5.0)]
         for hash_seed in NOISY_HASH_SEEDS:
             quantities = self.run_noisy((1e-6, 5.0), failing + unresolved, hash_seed)
+            self.assert_reported_rows(quantities, ("f",) + noisy_row_names(failing + unresolved))
             for name, quantity in quantities.items():
                 with self.subTest(hash_seed=hash_seed, quantity=name):
                     if name == "f" or any(name == f"noise_{noise:g}_delta_{delta:g}" for noise, delta in failing):
@@ -1212,6 +1230,7 @@ class SkillScriptsRunTests(unittest.TestCase):
         rows = [(noise, 0.0) for noise in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3)]
         for hash_seed in NOISY_HASH_SEEDS:
             quantities = self.run_noisy((1e-6, 0.0), rows, hash_seed)
+            self.assert_reported_rows(quantities, ("f",) + noisy_row_names(rows))
             for name, quantity in quantities.items():
                 with self.subTest(hash_seed=hash_seed, quantity=name):
                     self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
@@ -1228,7 +1247,8 @@ class SkillScriptsRunTests(unittest.TestCase):
         self.assertNotEqual(quantities["max_tie_0_0_0"]["verdict"], "passed")
 
     def run_step(self, x0: float, rows: list) -> Dict[str, dict]:
-        source = STEP_PROBE_PROBLEM.replace("X0_VALUE", repr(x0)).replace("ROWS_VALUE", repr(rows))
+        source = (STEP_PROBE_PROBLEM.replace("X0_VALUE", repr(x0)).replace("ROWS_VALUE", repr(rows))
+                  .replace("NAMES_VALUE", repr(probe_row_names(rows))))
         (self.scratch / "alm_problem.py").write_text(source)
         completed = run_python([str(SCRIPTS_DIR / "gradient_check.py")], cwd=self.scratch,
                                problem_dir=self.scratch)
@@ -1243,7 +1263,9 @@ class SkillScriptsRunTests(unittest.TestCase):
         rows = [(case, parameter, claim) for case, parameter in (("fp32term", 1.0), ("fp32term", 0.01),
                                                                  ("quant", 1e-7), ("stale", 1e-8))
                 for claim in ("full", "partial")]
-        for name, quantity in self.run_step(0.5, rows).items():
+        quantities = self.run_step(0.5, rows)
+        self.assert_reported_rows(quantities, probe_row_names(rows))
+        for name, quantity in quantities.items():
             with self.subTest(row=name):
                 if name.endswith("_full"):
                     self.assertEqual(quantity["verdict"], "not_tested", quantity["note"])
@@ -1266,7 +1288,9 @@ class SkillScriptsRunTests(unittest.TestCase):
         small steps; claims of 0 and twice the truth never pass, and the right
         one never fails."""
         rows = [("bigval", value, claim) for value in (1e10, 1e11, 1e12) for claim in ("full", "zero", "double")]
-        for name, quantity in self.run_step(0.5, rows).items():
+        quantities = self.run_step(0.5, rows)
+        self.assert_reported_rows(quantities, probe_row_names(rows))
+        for name, quantity in quantities.items():
             with self.subTest(row=name):
                 if name.endswith("_full"):
                     self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
@@ -1280,7 +1304,9 @@ class SkillScriptsRunTests(unittest.TestCase):
         sum(x)) with V = 1e4."""
         rows = [("fp32row", value, claim) for value in (1e-1, 1e-2, 1e-3) for claim in ("full", "zero", "double")]
         rows += [("fp32value", 1e4, claim) for claim in ("full", "zero")]
-        for name, quantity in self.run_step(0.3, rows).items():
+        quantities = self.run_step(0.3, rows)
+        self.assert_reported_rows(quantities, probe_row_names(rows))
+        for name, quantity in quantities.items():
             with self.subTest(row=name):
                 if name.endswith("_full"):
                     self.assertEqual(quantity["verdict"], "not_tested", quantity["note"])
@@ -1296,7 +1322,9 @@ class SkillScriptsRunTests(unittest.TestCase):
                                                                    ("ripple_fine", (1e3, 3e4)),
                                                                    ("tanh_step", (1e5,)))
                 for frequency in frequencies for claim in ("full", "partial")]
-        for name, quantity in self.run_step(0.0, rows).items():
+        quantities = self.run_step(0.0, rows)
+        self.assert_reported_rows(quantities, probe_row_names(rows))
+        for name, quantity in quantities.items():
             with self.subTest(row=name):
                 if name.endswith("_full"):
                     self.assertNotEqual(quantity["verdict"], "failed", quantity["note"])
@@ -1321,6 +1349,7 @@ class SkillScriptsRunTests(unittest.TestCase):
                 (1e-3, 0.5, "tri"), (1e-4, 0.5, "cauchy")]
         for hash_seed in NOISY_HASH_SEEDS:
             quantities = self.run_noisy((1e-8, 0.0), rows, hash_seed)
+            self.assert_reported_rows(quantities, ("f",) + noisy_row_names(rows))
             for name, quantity in quantities.items():
                 with self.subTest(hash_seed=hash_seed, quantity=name):
                     if "_delta_0_" in name:

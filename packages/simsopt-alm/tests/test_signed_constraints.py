@@ -749,6 +749,20 @@ class AccuracyContractTests(unittest.TestCase):
         self.assertLessEqual(abs(actual - expected), 64.0 * EPS * scale,
                              f"{label}: {actual!r} vs oracle {expected!r}, scale {scale:.3g}")
 
+    def assert_derivative_resolved(self, actual, expected, label):
+        """Relative error <= 64 eps against the oracle. The distance rows'
+        contract allowance, 64 eps x scale / T, is about 1.4e86 at scale 1e100
+        and T = 1, which no wrong sign or a zero would exceed. There every
+        sampled pair is effectively tied (the binary64 distances are identical,
+        the geometric differences tiny), so the log-sum-exp weights may be
+        uniform; but every pair's unit-vector z component is the same +-1, and
+        a weighted average of identical values is that value whatever the
+        weights, so the derivative is resolved to a few ulp of its O(1) size
+        even though the value is not."""
+        self.assertNotEqual(expected, 0.0, f"{label}: the oracle derivative must be nonzero")
+        self.assertLessEqual(abs(actual - expected), 64.0 * EPS * abs(expected),
+                             f"{label}: {actual!r} vs oracle {expected!r}")
+
     def test_the_helper_meets_the_contract_under_cancellation(self):
         left, right, temperature = np.array([[1.366289638048277e99, 0.0, 0.0]]), np.zeros((2, 3)), 1.0e99
         hard, soft, gradients = signed_constraints.soft_min_pair_distance(
@@ -781,6 +795,7 @@ class AccuracyContractTests(unittest.TestCase):
         self.assert_within_contract(signed, oracle_signed, scale, "curve_curve signed")
         self.assert_within_contract(grad[index], -oracle_derivative, scale / temperature,
                                     "curve_curve gradient")
+        self.assert_derivative_resolved(grad[index], -oracle_derivative, "curve_curve gradient")
 
         curve, surface = _circle(1.3, 1.0e100, 16), _fixed_torus(1.0, 0.3)
         surface_owner = _JointDofs([curve])
@@ -795,6 +810,7 @@ class AccuracyContractTests(unittest.TestCase):
         self.assert_within_contract(signed, oracle_signed, scale, "curve_surface signed")
         self.assert_within_contract(grad[index], -oracle_derivative, scale / temperature,
                                     "curve_surface gradient")
+        self.assert_derivative_resolved(grad[index], -oracle_derivative, "curve_surface gradient")
 
 
 class CurvatureBackendTests(unittest.TestCase):

@@ -80,7 +80,18 @@ def _run_demo(module, timeout_seconds):
 
 
 class AlmDemoSmokeTests(unittest.TestCase):
-    def _run_demo_and_check_feasibility(self, module, timeout_seconds):
+    """Each CI-size demo makes progress: at least one outer iteration, its max
+    violation and its objective cut to at most the given fractions of their
+    start values. Measured (2026-09-30, three runs, 4 and 1 OpenMP threads):
+    Stage-2 one outer, violation 0.207 -> 0.0132-0.0150 (ratio <= 0.073),
+    objective 0.0331 -> 0.00190-0.00195 (<= 0.059); Boozer two outers,
+    violation 0.0294 -> 0.0136 (0.463), objective 8.33e-5 -> 7.71e-5 (0.926),
+    the same to 1e-11 in every run. The bounds leave a margin of at least
+    2.7x on each Stage-2 ratio and on each Boozer decrease."""
+
+    def _run_demo_and_check_feasibility(
+        self, module, timeout_seconds, *, max_violation_ratio, objective_ratio
+    ):
         completed, probe_lines, elapsed_seconds = _run_demo(module, timeout_seconds)
 
         self.assertEqual(
@@ -102,16 +113,30 @@ class AlmDemoSmokeTests(unittest.TestCase):
             ["simsopt_alm.control.ALMResult"],
             f"{module} must read the library's lean result",
         )
+        self.assertGreater(
+            summary["initial_max_violation"], 0.0, f"{module} must start infeasible: {summary}"
+        )
+        self.assertGreater(summary["initial_objective"], 0.0, summary)
+        self.assertGreaterEqual(
+            summary["outer_iterations"], 1, f"{module} ran no outer iteration: {summary}"
+        )
         self.assertLessEqual(
             summary["final_max_violation"],
-            summary["initial_max_violation"],
-            f"{module} ended less feasible than it started: {summary}",
+            max_violation_ratio * summary["initial_max_violation"],
+            f"{module} did not cut its max violation to {max_violation_ratio} of the start: "
+            f"{summary}",
+        )
+        self.assertLessEqual(
+            summary["final_objective"],
+            objective_ratio * summary["initial_objective"],
+            f"{module} did not cut its objective to {objective_ratio} of the start: {summary}",
         )
         return summary
 
     def test_stage_two_demo(self):
         summary = self._run_demo_and_check_feasibility(
-            "stage_two_optimization_alm", timeout_seconds=300
+            "stage_two_optimization_alm", timeout_seconds=300,
+            max_violation_ratio=0.25, objective_ratio=0.25,
         )
         self.assertIs(
             summary["taylor_passed"],
@@ -121,7 +146,8 @@ class AlmDemoSmokeTests(unittest.TestCase):
 
     def test_boozer_qa_demo(self):
         summary = self._run_demo_and_check_feasibility(
-            "boozerQA_alm", timeout_seconds=600
+            "boozerQA_alm", timeout_seconds=600,
+            max_violation_ratio=0.8, objective_ratio=0.975,
         )
         self.assertIs(
             summary["final_surface_solved"],

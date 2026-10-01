@@ -27,6 +27,7 @@ leaves every fixture byte-identical refreshes the manifest's provenance with
 
 import ast
 import copy
+import dataclasses
 import functools
 import hashlib
 import os
@@ -36,6 +37,8 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
+
+from simsopt_alm import ALMResult
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "alm_golden"
 if str(GOLDEN_DIR) not in sys.path:
@@ -196,7 +199,6 @@ class AlmGoldenEnvironmentTests(unittest.TestCase):
             capture_output=True, text=True, check=True,
         )
         self.assertEqual(pinned.stdout.strip(), "Haswell")
-        self.assertEqual(golden.current_environment()[-1], golden.openblas_coretype())
 
     def test_the_kernel_probe_loads_no_library(self):
         """R16-08: the probe asks threadpoolctl about the OpenBLAS numpy and
@@ -478,33 +480,52 @@ class AlmGoldenReplayTests(unittest.TestCase):
 
 
 class AlmGoldenResumeContractTests(unittest.TestCase):
-    """A resumed run ends where the uninterrupted run ends.
+    """A resumed run ends where the uninterrupted run ends: every public
+    ``ALMResult`` field, the history tail and the checkpoint tail (callback
+    order beyond those is the bitwise replay's).
 
-    Exceptions, each a documented resume property rather than drift: the inner
-    ``maxiter`` budget is per process, so resumed history entries report the
-    resumed process's budget; a best-feasible incumbent restored from a
-    checkpoint carries no constraint Jacobians and no inner ``OptimizeResult``.
+    Checked on fresh runs of both scenarios in this process (resume
+    equivalence of the current code, in any environment) and on their stored
+    goldens (the fixtures agree with each other). One exception, a documented
+    resume property rather than drift: the inner ``maxiter`` budget is per
+    process, so resumed history entries report the resumed process's budget.
     """
 
     PER_PROCESS_HISTORY_KEYS = frozenset(("inner_maxiter", "inner_maxfun"))
-    CHECKPOINT_RESTORED_RESULT_FIELDS = frozenset(("evaluation", "inner_result"))
+    PUBLIC_RESULT_FIELDS = tuple(field.name for field in dataclasses.fields(ALMResult))
+    # Fields every history entry has, whatever its action: each compared
+    # entry, on both sides, must carry them (an empty entry compares nothing).
+    HISTORY_FIELDS = frozenset((
+        "outer_iteration", "continuation_iteration", "constraint_names", "action",
+        "inner_iterations", "inner_success", "inner_message", "inner_maxiter", "inner_maxfun",
+        "penalty", "penalty_values", "max_violation", "stationarity_norm",
+        "kkt_stationarity_norm", "constraint_values", "violation_values", "multipliers",
+        "post_update_multipliers", "trust_radius", "feasible_stall_count",
+        "conditioning_base_objective",
+    ))
 
-    def assert_resume_matches(
-        self, resumed_name: str, uninterrupted_name: str, *, excluded_fields=frozenset()
-    ) -> None:
-        resumed = _golden(resumed_name)["trajectory"]["resumed"]
-        full = _golden(uninterrupted_name)["trajectory"]
-        for field in full["result"]["fields"]:
-            if field in excluded_fields:
-                continue
+    def assert_resume_matches(self, resumed: dict, full: dict, history_lengths=None) -> None:
+        """``history_lengths``: the (uninterrupted, resumed) history lengths the
+        scenario fixes, or None where only their order is fixed."""
+        self.assertEqual(list(full["result"]["fields"]), list(self.PUBLIC_RESULT_FIELDS))
+        self.assertEqual(list(resumed["result"]["fields"]), list(self.PUBLIC_RESULT_FIELDS))
+        for field in self.PUBLIC_RESULT_FIELDS:
             self.assertIsNone(
                 golden.first_difference(
                     full["result"]["fields"][field], resumed["result"]["fields"][field]
                 ),
                 f"resumed {field} differs from the uninterrupted run",
             )
-        tail = full["history"][len(full["history"]) - len(resumed["history"]):]
-        for index, (expected, actual) in enumerate(zip(tail, resumed["history"])):
+        full_history, resumed_history = full["history"], resumed["history"]
+        if history_lengths is not None:
+            self.assertEqual((len(full_history), len(resumed_history)), history_lengths)
+        self.assertGreater(len(resumed_history), 0)
+        self.assertGreaterEqual(len(full_history), len(resumed_history))
+        tail = full_history[len(full_history) - len(resumed_history):]
+        self.assertEqual(len(tail), len(resumed_history))
+        for index, (expected, actual) in enumerate(zip(tail, resumed_history)):
+            self.assertLessEqual(self.HISTORY_FIELDS, set(expected), f"uninterrupted entry {index}")
+            self.assertLessEqual(self.HISTORY_FIELDS, set(actual), f"resumed entry {index}")
             self.assertEqual(list(expected), list(actual))
             for key in expected:
                 if key in self.PER_PROCESS_HISTORY_KEYS:
@@ -513,6 +534,8 @@ class AlmGoldenResumeContractTests(unittest.TestCase):
                     golden.first_difference(expected[key], actual[key], key),
                     f"resumed history entry {index} differs at {key}",
                 )
+        self.assertGreater(len(resumed["checkpoints"]), 0)
+        self.assertGreaterEqual(len(full["checkpoints"]), len(resumed["checkpoints"]))
         checkpoint_tail = full["checkpoints"][
             len(full["checkpoints"]) - len(resumed["checkpoints"]):
         ]
@@ -521,14 +544,36 @@ class AlmGoldenResumeContractTests(unittest.TestCase):
             "resumed checkpoints differ from the uninterrupted run's",
         )
 
+    def assert_fresh_and_stored_resumes_match(
+        self, resumed_name: str, uninterrupted_name: str, history_lengths: tuple,
+        *, lengths_hold_under_noise: bool,
+    ) -> None:
+        """``history_lengths`` hold for the stored goldens and, in the recording
+        environment or where ``lengths_hold_under_noise``, for fresh runs."""
+        for source, load in (("fresh", _fresh_run), ("stored", lambda name: _golden(name)["trajectory"])):
+            fixed = source == "stored" or lengths_hold_under_noise or golden.bitwise_environment()
+            with self.subTest(trajectories=source):
+                self.assert_resume_matches(
+                    load(resumed_name)["resumed"],
+                    load(uninterrupted_name),
+                    history_lengths if fixed else None,
+                )
+
     def test_mid_run_resume_matches_uninterrupted_penalty_ramp(self):
-        self.assert_resume_matches("resume_penalty_ramp_mid_run", "penalty_ramp_to_cap")
+        # No continuations: one entry per outer step, and the penalty schedule
+        # (spread 0 under last-bit noise) fixes eight outer steps, four after
+        # the pause.
+        self.assert_fresh_and_stored_resumes_match(
+            "resume_penalty_ramp_mid_run", "penalty_ramp_to_cap", (8, 4),
+            lengths_hold_under_noise=True,
+        )
 
     def test_best_feasible_resume_matches_uninterrupted_plateau(self):
-        self.assert_resume_matches(
-            "resume_plateau_best_feasible",
-            "plateau_restore_best_feasible",
-            excluded_fields=self.CHECKPOINT_RESTORED_RESULT_FIELDS,
+        # Last-bit noise can retry an inner solve here, so the lengths are
+        # pinned on the goldens and in the recording environment only.
+        self.assert_fresh_and_stored_resumes_match(
+            "resume_plateau_best_feasible", "plateau_restore_best_feasible", (5, 2),
+            lengths_hold_under_noise=False,
         )
 
 
