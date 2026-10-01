@@ -262,7 +262,6 @@ def _case_summary_record(
                 "stderr": execution.stderr,
                 "returncode": execution.returncode,
                 "elapsed_seconds": execution.elapsed_seconds,
-                "parent_peak_rss_bytes": execution.parent_peak_rss_bytes,
                 "result_directory": str(
                     execution.result_directory.relative_to(paths.partial)
                 ),

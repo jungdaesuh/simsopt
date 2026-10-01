@@ -685,7 +685,7 @@ def collect_lane_provenance(
         jax_effective_transfer_guards=effective_guards,
         devices=devices,
         host_peak_rss_bytes=host_peak_rss_bytes,
-        host_peak_rss_method="child getrusage(RUSAGE_SELF).ru_maxrss fallback",
+        host_peak_rss_method="child getrusage(RUSAGE_SELF).ru_maxrss",
         device_memory_peak_bytes=device_peak,
         device_memory_status=device_status,
         memory_measurement_scope=(

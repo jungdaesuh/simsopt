@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import subprocess
-import tempfile
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,66 +21,22 @@ class RunnerError(RuntimeError):
     """One or more isolated lane children failed their execution contract."""
 
 
-@dataclass(frozen=True)
-class ChildProcessResult:
-    stdout: str
-    stderr: str
-    returncode: int
-    parent_peak_rss_bytes: int | None
-
-
 ChildExecutor = Callable[
-    [tuple[str, ...], Path, dict[str, str]],
-    subprocess.CompletedProcess[str] | ChildProcessResult,
+    [tuple[str, ...], Path, dict[str, str]], subprocess.CompletedProcess[str]
 ]
-
-
-def _linux_process_peak_rss_bytes(process_id: int) -> int | None:
-    try:
-        status = Path(f"/proc/{process_id}/status").read_text(encoding="utf-8")
-    except (FileNotFoundError, PermissionError):
-        return None
-    for line in status.splitlines():
-        if line.startswith("VmHWM:"):
-            fields = line.split()
-            if len(fields) == 3 and fields[2] == "kB":
-                return int(fields[1]) * 1024
-    return None
 
 
 def execute_child_process(
     command: tuple[str, ...], cwd: Path, environment: dict[str, str]
-) -> ChildProcessResult:
-    """Execute one child while the parent samples Linux's process RSS high-water."""
-    with tempfile.TemporaryFile(
-        mode="w+t", encoding="utf-8"
-    ) as stdout_file, tempfile.TemporaryFile(
-        mode="w+t", encoding="utf-8"
-    ) as stderr_file:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=environment,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            text=True,
-        )
-        parent_peak_rss_bytes: int | None = None
-        while process.poll() is None:
-            sampled = _linux_process_peak_rss_bytes(process.pid)
-            if sampled is not None:
-                parent_peak_rss_bytes = max(parent_peak_rss_bytes or 0, sampled)
-            time.sleep(0.005)
-        returncode = process.wait()
-        stdout_file.seek(0)
-        stderr_file.seek(0)
-        stdout = stdout_file.read()
-        stderr = stderr_file.read()
-    return ChildProcessResult(
-        stdout=stdout,
-        stderr=stderr,
-        returncode=returncode,
-        parent_peak_rss_bytes=parent_peak_rss_bytes,
+) -> subprocess.CompletedProcess[str]:
+    """Execute one child and capture its output."""
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=environment,
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
     )
 
 
@@ -96,7 +49,6 @@ class ChildExecution:
     returncode: int
     elapsed_seconds: float
     result_directory: Path
-    parent_peak_rss_bytes: int | None
 
 
 def build_child_command(
@@ -165,11 +117,6 @@ def execute_case_lanes(
         )
         started = perf_counter()
         completed = executor(command, result_directory, environment)
-        parent_peak_rss_bytes = (
-            completed.parent_peak_rss_bytes
-            if isinstance(completed, ChildProcessResult)
-            else None
-        )
         execution = ChildExecution(
             lane=lane,
             command=command,
@@ -178,7 +125,6 @@ def execute_case_lanes(
             returncode=completed.returncode,
             elapsed_seconds=perf_counter() - started,
             result_directory=result_directory,
-            parent_peak_rss_bytes=parent_peak_rss_bytes,
         )
         executions.append(execution)
         if completed.returncode != 0:
@@ -202,19 +148,6 @@ def execute_case_lanes(
                 f"{lane}: lane receipt scale {observation.scale} does not match {scale}"
             )
             continue
-        if parent_peak_rss_bytes is not None:
-            provenance = observation.provenance
-            if provenance is None:
-                failures.append(f"{lane}: lane receipt omitted provenance")
-                continue
-            observation = dataclasses.replace(
-                observation,
-                provenance=dataclasses.replace(
-                    provenance,
-                    host_peak_rss_bytes=parent_peak_rss_bytes,
-                    host_peak_rss_method="parent-sampled /proc child VmHWM",
-                ),
-            )
         observations[lane] = observation
     if failures:
         raise RunnerError("; ".join(failures))

@@ -215,13 +215,6 @@ def audit_published_run(
                 raise ValueError(f"unexpected result directory: {result_path}")
             if execution.get("returncode") != 0:
                 raise ValueError(f"nonzero child receipt: {case_id}:{lane}")
-            parent_peak = execution.get("parent_peak_rss_bytes")
-            if (
-                isinstance(parent_peak, bool)
-                or not isinstance(parent_peak, int)
-                or parent_peak <= 0
-            ):
-                raise ValueError(f"missing parent-observed RSS: {case_id}:{lane}")
             observation = load_lane_observation(run_directory / case_id / lane)
             if observation.lane != lane:
                 raise ValueError(f"lane identity mismatch: {case_id}:{lane}")

@@ -65,11 +65,9 @@ from examples.jax.parity.publication import begin_run, publish_run
 from examples.jax.parity.receipts import write_lane_observation
 from examples.jax.parity.runner import (
     ChildExecution,
-    ChildProcessResult,
     RunnerError,
     build_child_command,
     execute_case_lanes,
-    execute_child_process,
 )
 from examples.jax.parity.work_budget import WorkBudgetContract
 from simsopt_jax.config import ExecutionIntent
@@ -1538,7 +1536,6 @@ def _publish_quality_band_run(
                 "stderr": "",
                 "returncode": 0,
                 "elapsed_seconds": 1.0,
-                "parent_peak_rss_bytes": 1024,
                 "result_directory": f"{_BAND_CASE_ID}/{lane}",
             }
             for lane in lanes
@@ -1684,23 +1681,6 @@ def test_child_command_is_exact_and_bounded(tmp_path: Path) -> None:
         "--scale",
         "bounded",
     )
-
-
-def test_parent_observes_child_peak_rss(tmp_path: Path) -> None:
-    completed: ChildProcessResult = execute_child_process(
-        (
-            sys.executable,
-            "-c",
-            "payload = bytearray(32_000_000); print(len(payload))",
-        ),
-        tmp_path,
-        {},
-    )
-
-    assert completed.returncode == 0
-    assert completed.stdout.strip() == "32000000"
-    assert completed.parent_peak_rss_bytes is not None
-    assert completed.parent_peak_rss_bytes >= 32_000_000
 
 
 def test_runner_executes_isolated_lanes_and_loads_hash_bound_receipts(
@@ -1881,11 +1861,11 @@ def test_run_parity_cli_publishes_complete_wave_a_cpu_artifact(
     assert summary["cases"][0]["scale_tier"] == "bounded"
     assert summary["cases"][0]["oracle_kind"] == "native_source_owned_simsopt"
     assert len(summary["cases"][0]["comparisons"]) == 10
-    executions = {
-        execution["lane"]: execution for execution in summary["cases"][0]["executions"]
+    executed_lanes = {
+        execution["lane"] for execution in summary["cases"][0]["executions"]
     }
+    assert executed_lanes == {"native-cpu", "jax-cpu"}
     for lane in ("native-cpu", "jax-cpu"):
-        assert executions[lane]["parent_peak_rss_bytes"] > 0
         receipt = json.loads(
             (
                 published[0] / "native-just-a-quadratic" / lane / "lane_result.json"
@@ -2385,7 +2365,6 @@ def _inject_completed_lane_receipts(
                     returncode=0,
                     elapsed_seconds=0.01,
                     result_directory=result_directory,
-                    parent_peak_rss_bytes=1,
                 )
             )
         return tuple(executions), observations
