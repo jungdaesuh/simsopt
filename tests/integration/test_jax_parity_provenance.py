@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import os
 import subprocess
 import sys
-from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -171,77 +169,6 @@ def test_native_build_receipt_binds_clean_source_and_binary(tmp_path: Path) -> N
     binding = provenance.verify_native_build_receipt(tmp_path, binary)
     assert binding is not None
     assert binding[1] == hashlib.sha256(receipt.read_bytes()).hexdigest()
-
-
-@pytest.mark.parametrize("outside_checkout", (False, True))
-def test_snapshot_native_binding_uses_contained_source_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    outside_checkout: bool,
-) -> None:
-    binary, _ = _clean_build_fixture(tmp_path)
-    binding = provenance.verify_native_build_receipt(tmp_path, binary)
-    assert binding is not None
-    relative = binary.relative_to(tmp_path).as_posix()
-    source = _source(relative, binary.read_bytes(), tracked=False)
-    if outside_checkout:
-        external = tmp_path.parent / f"{tmp_path.name}-external.so"
-        external.write_bytes(binary.read_bytes())
-        binary = external
-    identity = provenance.SnapshotLaneIdentity(
-        profile_id="native_cpu",
-        lane="native-cpu",
-        backend_mode="native_cpu",
-        driver="test-native",
-        execution_platform="cpu",
-        runtime_identity_sha256="a" * 64,
-        source_sha256="b" * 64,
-        gpu_uuid="",
-        snapshot_root=tmp_path,
-        repository_commit=binding[0],
-        repository_dirty=False,
-        tracked_diff_sha256=hashlib.sha256(b"").hexdigest(),
-        untracked_files=(),
-        manifest_entries={relative: source.sha256},
-        native_extension_path=binary,
-        native_extension_sha256=source.sha256,
-        interpreter_path=Path(sys.executable).resolve(),
-        python_version=sys.version.split()[0],
-        jax_version="test-jax",
-        jaxlib_version=version("jaxlib"),
-        bound_environment={},
-        static_environment=provenance.normalize_snapshot_lane_environment(os.environ),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "simsoptpp",
-        SimpleNamespace(__file__=str(binary), __version__="test"),
-    )
-    monkeypatch.delitem(sys.modules, "simsopt._version", raising=False)
-    monkeypatch.setattr(
-        provenance,
-        "_device_metadata",
-        lambda: ((), None, "unavailable", "test-jax", {}),
-    )
-    monkeypatch.setattr(provenance, "_snapshot_executed_sources", lambda _id: (source,))
-    if outside_checkout:
-        with pytest.raises(
-            ValueError, match="snapshot native extension is outside its snapshot root"
-        ):
-            provenance.collect_snapshot_lane_provenance(
-                identity, measurement_synchronization="native synchronous execution"
-            )
-        return
-    receipt = provenance.collect_snapshot_lane_provenance(
-        identity, measurement_synchronization="native synchronous execution"
-    )
-    assert receipt.authoritative
-    assert receipt.generated_source_bindings == {
-        relative: f"local-build-receipt-sha256:{binding[1]}"
-    }
-    # This isolates the native binding; copied snapshot source manifests have
-    # their own verification and do not thereby become Git-checkout authority.
-    provenance.validate_authoritative_provenance(tmp_path, receipt)
 
 
 @pytest.mark.parametrize("mutation", ("binary", "source", "omitted_input"))
@@ -459,73 +386,3 @@ def test_generated_version_module_rejects_executable_and_unknown_additions(
         )
         assert receipt.authoritative
         provenance.validate_authoritative_provenance(tmp_path, receipt)
-
-
-def _lane_identity(
-    tmp_path: Path, static_environment: dict[str, str]
-) -> provenance.SnapshotLaneIdentity:
-    return provenance.SnapshotLaneIdentity(
-        profile_id="native_cpu",
-        lane="native-cpu",
-        backend_mode="native_cpu",
-        driver="test-native",
-        execution_platform="cpu",
-        runtime_identity_sha256="a" * 64,
-        source_sha256="b" * 64,
-        gpu_uuid="",
-        snapshot_root=tmp_path,
-        repository_commit="c" * 40,
-        repository_dirty=False,
-        tracked_diff_sha256=hashlib.sha256(b"").hexdigest(),
-        untracked_files=(),
-        manifest_entries={},
-        native_extension_path=tmp_path / "simsoptpp.so",
-        native_extension_sha256="d" * 64,
-        interpreter_path=Path(sys.executable).resolve(),
-        python_version=sys.version.split()[0],
-        jax_version="test-jax",
-        jaxlib_version=version("jaxlib"),
-        bound_environment={},
-        static_environment=static_environment,
-    )
-
-
-_PINNED_LANE_ENVIRONMENT = {
-    "JAX_PLATFORMS": "cpu",
-    "OMP_NUM_THREADS": "1",
-    "OPENBLAS_NUM_THREADS": "1",
-    "MKL_NUM_THREADS": "1",
-}
-
-
-def test_snapshot_lane_environment_accepts_the_pinned_host_threading(
-    tmp_path: Path,
-) -> None:
-    identity = _lane_identity(
-        tmp_path,
-        provenance.normalize_snapshot_lane_environment(_PINNED_LANE_ENVIRONMENT),
-    )
-    provenance.validate_snapshot_lane_environment(
-        identity, dict(_PINNED_LANE_ENVIRONMENT)
-    )
-
-
-@pytest.mark.parametrize(
-    "name", ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
-)
-@pytest.mark.parametrize("drift", ("8", None), ids=("changed", "unset"))
-def test_snapshot_lane_environment_rejects_host_threading_drift(
-    tmp_path: Path, name: str, drift: str | None
-) -> None:
-    """A lane that silently changes host threading must not validate as the same lane."""
-    identity = _lane_identity(
-        tmp_path,
-        provenance.normalize_snapshot_lane_environment(_PINNED_LANE_ENVIRONMENT),
-    )
-    observed = dict(_PINNED_LANE_ENVIRONMENT)
-    if drift is None:
-        del observed[name]
-    else:
-        observed[name] = drift
-    with pytest.raises(ValueError, match="snapshot static runtime environment changed"):
-        provenance.validate_snapshot_lane_environment(identity, observed)

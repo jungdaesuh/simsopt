@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import simsoptpp
-from examples.jax.parity.provenance import normalize_snapshot_lane_environment
+from examples.jax.parity.provenance import lane_environment_policy
 from examples.jax.parity.runtime import build_parity_lane_environment
 from simsopt_jax_adapters.isolated_kernel import (
     isolated_child_command,
@@ -102,7 +102,7 @@ def test_lane_environment_policy_retains_host_threading() -> None:
         "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
     }
-    retained = normalize_snapshot_lane_environment(observed)
+    retained = lane_environment_policy(observed)
     for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         assert retained.get(name) == "1", f"{name} is not retained in lane provenance"
 

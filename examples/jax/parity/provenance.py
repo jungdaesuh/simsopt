@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import dataclasses
 import hashlib
-import importlib.metadata
 import importlib.util
 import json
 import os
@@ -13,16 +12,11 @@ import resource
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, Mapping
+from typing import Mapping
 
 from examples.jax._lane_environment import HOST_THREAD_VARIABLES
-
-SNAPSHOT_LANE_IDENTITY_SCHEMA_ID: Final = (
-    "single-stage-compute-graph-lane-snapshot-identity-v2"
-)
-SnapshotProfileId = Literal["native_cpu", "jax_gpu_fast"]
 
 
 @dataclass(frozen=True)
@@ -98,34 +92,6 @@ class LaneProvenance:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotLaneIdentity:
-    """Pre-execution identity whose referenced evidence is byte-validated."""
-
-    profile_id: SnapshotProfileId
-    lane: str
-    backend_mode: str
-    driver: str
-    execution_platform: str
-    runtime_identity_sha256: str
-    source_sha256: str
-    gpu_uuid: str
-    snapshot_root: Path
-    repository_commit: str
-    repository_dirty: bool
-    tracked_diff_sha256: str
-    untracked_files: tuple[str, ...]
-    manifest_entries: Mapping[str, str]
-    native_extension_path: Path
-    native_extension_sha256: str
-    interpreter_path: Path
-    python_version: str
-    jax_version: str
-    jaxlib_version: str
-    bound_environment: Mapping[str, str]
-    static_environment: Mapping[str, str]
-
-
 _LANE_ENVIRONMENT_KEYS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_BACKEND_STRICT",
@@ -141,25 +107,12 @@ _LANE_ENVIRONMENT_KEYS = (
 )
 
 
-def normalize_snapshot_lane_environment(
-    environment: Mapping[str, str],
-) -> dict[str, str]:
-    """Return the exact allowlisted static policy observed by a snapshot child."""
+def lane_environment_policy(environment: Mapping[str, str]) -> dict[str, str]:
+    """Return the allowlisted lane selectors a receipt records."""
 
     return {
         key: environment[key] for key in _LANE_ENVIRONMENT_KEYS if key in environment
     }
-
-
-def validate_snapshot_lane_environment(
-    identity: SnapshotLaneIdentity, environment: Mapping[str, str]
-) -> None:
-    """Reject any missing, changed, or additional allowlisted lane selector."""
-
-    if normalize_snapshot_lane_environment(environment) != dict(
-        identity.static_environment
-    ):
-        raise ValueError("snapshot static runtime environment changed")
 
 
 REQUIRED_PROVENANCE_SOURCE_PATHS = (
@@ -167,15 +120,6 @@ REQUIRED_PROVENANCE_SOURCE_PATHS = (
     "examples/jax/parity_manifest.json",
     "examples/jax/run_parity.py",
     "examples/jax/parity/child.py",
-)
-
-_SNAPSHOT_EVIDENCE_NAMES: Final = (
-    "publication",
-    "manifest",
-    "import_attestation",
-    "runner_spec",
-    "runtime_provenance",
-    "device_probe",
 )
 
 
@@ -469,16 +413,6 @@ def validate_authoritative_provenance(
         raise ValueError("authoritative provenance has an unbound generated source")
 
 
-def _lower_sha256(value: object, context: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"{context} must be a lowercase SHA-256 digest")
-    return value
-
-
 def _json_object(path: Path, context: str) -> dict[str, object]:
     def reject_duplicate_keys(
         pairs: list[tuple[str, object]],
@@ -506,280 +440,6 @@ def _json_object(path: Path, context: str) -> dict[str, object]:
     if payload != _canonical_json_bytes(value):
         raise ValueError(f"{context} bytes are not canonical")
     return value
-
-
-def _evidence_reference(
-    evidence: Mapping[str, object], name: str
-) -> tuple[Path, str, dict[str, object]]:
-    reference = evidence.get(name)
-    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
-        raise ValueError(f"snapshot identity evidence {name} reference is invalid")
-    path_value = reference.get("path")
-    if not isinstance(path_value, str) or not path_value:
-        raise ValueError(f"snapshot identity evidence {name} path is invalid")
-    path = Path(path_value)
-    expected_sha256 = _lower_sha256(
-        reference.get("sha256"), f"snapshot identity evidence {name} SHA"
-    )
-    if not path.is_absolute() or not path.is_file():
-        raise ValueError(f"snapshot identity evidence {name} path is unavailable")
-    if _sha256_file(path) != expected_sha256:
-        raise ValueError(f"snapshot identity evidence {name} bytes changed")
-    return path, expected_sha256, _json_object(path, f"snapshot identity {name}")
-
-
-def load_snapshot_lane_identity(path: Path) -> SnapshotLaneIdentity:
-    """Load and cross-check one static snapshot identity before lane execution."""
-
-    document = _json_object(path, "snapshot lane identity")
-    expected_fields = {
-        "schema_id",
-        "profile_id",
-        "lane",
-        "backend_mode",
-        "driver",
-        "execution_platform",
-        "runtime_identity_sha256",
-        "source_sha256",
-        "gpu_uuid",
-        "snapshot_root",
-        "static_environment",
-        "evidence",
-    }
-    if (
-        set(document) != expected_fields
-        or document.get("schema_id") != SNAPSHOT_LANE_IDENTITY_SCHEMA_ID
-    ):
-        raise ValueError("snapshot lane identity schema is invalid")
-    profile_value = document.get("profile_id")
-    if profile_value not in ("native_cpu", "jax_gpu_fast"):
-        raise ValueError("snapshot lane identity profile is invalid")
-    profile_id: SnapshotProfileId = profile_value
-    expected_lane = "native-cpu" if profile_id == "native_cpu" else "jax-gpu"
-    expected_platform = "cpu" if profile_id == "native_cpu" else "gpu"
-    lane = document.get("lane")
-    execution_platform = document.get("execution_platform")
-    if lane != expected_lane or execution_platform != expected_platform:
-        raise ValueError("snapshot lane identity profile route is invalid")
-    for field in ("backend_mode", "driver", "gpu_uuid", "snapshot_root"):
-        if not isinstance(document.get(field), str) or not document[field]:
-            raise ValueError(f"snapshot lane identity {field} is invalid")
-    runtime_sha256 = _lower_sha256(
-        document.get("runtime_identity_sha256"), "snapshot runtime identity"
-    )
-    source_sha256 = _lower_sha256(
-        document.get("source_sha256"), "snapshot source identity"
-    )
-    snapshot_root = Path(str(document["snapshot_root"]))
-    if not snapshot_root.is_absolute() or not snapshot_root.is_dir():
-        raise ValueError("snapshot lane identity root is unavailable")
-    evidence = document.get("evidence")
-    if not isinstance(evidence, dict) or set(evidence) != set(_SNAPSHOT_EVIDENCE_NAMES):
-        raise ValueError("snapshot lane identity evidence schema is invalid")
-    loaded = {
-        name: _evidence_reference(evidence, name) for name in _SNAPSHOT_EVIDENCE_NAMES
-    }
-    manifest_path, manifest_sha256, manifest = loaded["manifest"]
-    if manifest_path != snapshot_root / "phase0-source-manifest.json":
-        raise ValueError("snapshot lane identity manifest path is invalid")
-    entries_value = manifest.get("entries")
-    if (
-        manifest.get("schema_id") != "single-stage-compute-graph-source-manifest-v1"
-        or not isinstance(entries_value, list)
-        or not entries_value
-    ):
-        raise ValueError("snapshot lane identity manifest schema is invalid")
-    manifest_entries: dict[str, str] = {}
-    native_entries: list[tuple[Path, str]] = []
-    for raw_entry in entries_value:
-        if not isinstance(raw_entry, dict) or set(raw_entry) != {
-            "role",
-            "relative_path",
-            "size_bytes",
-            "sha256",
-        }:
-            raise ValueError("snapshot lane identity manifest entry is invalid")
-        relative = raw_entry.get("relative_path")
-        size = raw_entry.get("size_bytes")
-        digest = _lower_sha256(raw_entry.get("sha256"), "manifest entry SHA")
-        relative_path = PurePosixPath(relative) if isinstance(relative, str) else None
-        if (
-            not isinstance(relative, str)
-            or not relative
-            or relative_path is None
-            or relative_path.is_absolute()
-            or ".." in relative_path.parts
-            or "." in relative_path.parts
-            or str(relative_path) != relative
-            or isinstance(size, bool)
-            or not isinstance(size, int)
-            or raw_entry.get("role")
-            not in {
-                "execution_source",
-                "configuration",
-                "benchmark",
-                "test",
-                "native_extension",
-            }
-        ):
-            raise ValueError("snapshot lane identity manifest entry is invalid")
-        source_path = (snapshot_root / relative).resolve()
-        if (
-            not source_path.is_relative_to(snapshot_root.resolve())
-            or not source_path.is_file()
-            or source_path.stat().st_size != size
-            or _sha256_file(source_path) != digest
-            or relative in manifest_entries
-        ):
-            raise ValueError("snapshot lane identity manifest bytes are stale")
-        manifest_entries[relative] = digest
-        if raw_entry.get("role") == "native_extension":
-            native_entries.append((source_path, digest))
-    if len(native_entries) != 1:
-        raise ValueError("snapshot lane identity must bind one native extension")
-    publication = loaded["publication"][2]
-    publication_worktree = publication.get("worktree")
-    if (
-        set(publication)
-        != {
-            "schema_id",
-            "repository_root",
-            "snapshot_root",
-            "snapshot_manifest_sha256",
-            "cross_host_source_sha256",
-            "native_extension",
-            "worktree",
-        }
-        or publication.get("schema_id")
-        != "single-stage-compute-graph-snapshot-publication-v1"
-        or publication.get("snapshot_root") != str(snapshot_root)
-        or publication.get("snapshot_manifest_sha256") != manifest_sha256
-        or not isinstance(publication_worktree, dict)
-        or publication_worktree.get("source_state_sha256") != source_sha256
-    ):
-        raise ValueError("snapshot lane identity publication binding is invalid")
-    runtime = loaded["runtime_provenance"][2]
-    runner_spec = loaded["runner_spec"][2]
-    if (
-        set(runner_spec)
-        != {
-            "schema_id",
-            "lane_id",
-            "warm_sample_count",
-            "output_root",
-            "input_root",
-            "candidate_path",
-            "native_reference_path",
-            "provenance",
-            "receipt_template",
-        }
-        or runner_spec.get("schema_id")
-        != "single-stage-compute-graph-c0-runner-spec-v3"
-        or runner_spec.get("provenance") != runtime
-    ):
-        raise ValueError("snapshot lane identity runner runtime binding is invalid")
-    runtime_allocation = runtime.get("allocation")
-    runtime_fields = runtime.get("runtime")
-    if (
-        runtime.get("source_state_sha256") != source_sha256
-        or not isinstance(runtime_allocation, dict)
-        or runtime_allocation.get("gpu_uuid") != document.get("gpu_uuid")
-        or not isinstance(runtime_fields, dict)
-    ):
-        raise ValueError("snapshot lane identity runtime/device binding is invalid")
-    device_probe = loaded["device_probe"][2]
-    probe_gpu = device_probe.get("gpu")
-    probe_native = device_probe.get("native_binary")
-    if (
-        set(device_probe)
-        != {
-            "schema_id",
-            "lane_id",
-            "source_state_sha256",
-            "runtime_identity_sha256",
-            "qualification_sha256",
-            "gpu",
-            "native_binary",
-        }
-        or device_probe.get("schema_id") != "single-stage-compute-graph-device-probe-v1"
-        or device_probe.get("source_state_sha256") != source_sha256
-        or device_probe.get("runtime_identity_sha256") != runtime_sha256
-        or not isinstance(probe_gpu, dict)
-        or set(probe_gpu) != {"uuid", "name", "memory_bytes"}
-        or probe_gpu.get("uuid") != document.get("gpu_uuid")
-        or not isinstance(probe_native, dict)
-        or set(probe_native) != {"path", "sha256"}
-    ):
-        raise ValueError("snapshot lane identity device probe binding is invalid")
-    attestation = loaded["import_attestation"][2]
-    if (
-        attestation.get("schema_id")
-        != "single-stage-compute-graph-import-attestation-v1"
-        or attestation.get("state") != "pass"
-        or attestation.get("snapshot_manifest_sha256") != manifest_sha256
-    ):
-        raise ValueError("snapshot lane identity import binding is invalid")
-    repository_commit = publication_worktree.get("repository_commit")
-    tracked_diff = publication_worktree.get("tracked_diff_sha256")
-    status = publication_worktree.get("git_status_short")
-    if (
-        not isinstance(repository_commit, str)
-        or not repository_commit
-        or not isinstance(tracked_diff, str)
-        or not tracked_diff
-        or not isinstance(status, list)
-        or not all(isinstance(item, str) for item in status)
-    ):
-        raise ValueError("snapshot lane identity repository binding is invalid")
-    python_version = runtime_fields.get("python_version")
-    jax_version = runtime_fields.get("jax_version")
-    jaxlib_version = runtime_fields.get("jaxlib_version")
-    interpreter_value = runtime.get("interpreter_path")
-    runtime_environment = runtime.get("environment")
-    static_environment = document.get("static_environment")
-    if (
-        not isinstance(python_version, str)
-        or not isinstance(jax_version, str)
-        or not isinstance(jaxlib_version, str)
-        or not isinstance(interpreter_value, str)
-        or not Path(interpreter_value).is_absolute()
-        or not isinstance(runtime_environment, dict)
-        or not all(
-            isinstance(key, str) and isinstance(item, str)
-            for key, item in runtime_environment.items()
-        )
-        or not isinstance(static_environment, dict)
-        or not all(
-            isinstance(key, str) and isinstance(item, str)
-            for key, item in static_environment.items()
-        )
-        or normalize_snapshot_lane_environment(static_environment) != static_environment
-    ):
-        raise ValueError("snapshot lane identity runtime versions are invalid")
-    return SnapshotLaneIdentity(
-        profile_id=profile_id,
-        lane=expected_lane,
-        backend_mode=str(document["backend_mode"]),
-        driver=str(document["driver"]),
-        execution_platform=expected_platform,
-        runtime_identity_sha256=runtime_sha256,
-        source_sha256=source_sha256,
-        gpu_uuid=str(document["gpu_uuid"]),
-        snapshot_root=snapshot_root,
-        repository_commit=repository_commit,
-        repository_dirty=bool(status),
-        tracked_diff_sha256=tracked_diff,
-        untracked_files=tuple(item[3:] for item in status if item.startswith("?? ")),
-        manifest_entries=MappingProxyType(manifest_entries),
-        native_extension_path=native_entries[0][0],
-        native_extension_sha256=native_entries[0][1],
-        interpreter_path=Path(interpreter_value),
-        python_version=python_version,
-        jax_version=jax_version,
-        jaxlib_version=jaxlib_version,
-        bound_environment=MappingProxyType(dict(runtime_environment)),
-        static_environment=MappingProxyType(dict(static_environment)),
-    )
 
 
 def generated_version_matches_checkout(
@@ -1021,9 +681,7 @@ def collect_lane_provenance(
         simsopt_version=simsopt_version,
         simsopt_version_commit=version_commit,
         simsopt_version_checkout_compatible=version_compatible,
-        lane_environment_policy={
-            key: os.environ[key] for key in _LANE_ENVIRONMENT_KEYS if key in os.environ
-        },
+        lane_environment_policy=lane_environment_policy(os.environ),
         jax_effective_transfer_guards=effective_guards,
         devices=devices,
         host_peak_rss_bytes=host_peak_rss_bytes,
@@ -1065,144 +723,6 @@ def collect_lane_provenance(
     if authoritative:
         validate_authoritative_provenance(repo_root, provenance)
     return provenance
-
-
-def _snapshot_executed_sources(
-    identity: SnapshotLaneIdentity,
-) -> tuple[ExecutedSource, ...]:
-    resolved_root = identity.snapshot_root.resolve()
-    relative_paths: set[str] = set(REQUIRED_PROVENANCE_SOURCE_PATHS)
-    for module_name, module in tuple(sys.modules.items()):
-        module_file = getattr(module, "__file__", None)
-        if not isinstance(module_file, str):
-            continue
-        source_path = _module_source_path(module_file).resolve()
-        project_module = (
-            module_name == "simsoptpp"
-            or module_name.startswith(
-                ("simsopt.", "simsopt_jax.", "simsopt_jax_adapters.", "examples.jax.")
-            )
-            or module_name in {"simsopt", "simsopt_jax", "simsopt_jax_adapters"}
-        )
-        if project_module and not source_path.is_relative_to(resolved_root):
-            raise ValueError(
-                f"snapshot project module escaped immutable root: {module_name}"
-            )
-        if source_path.is_file() and source_path.is_relative_to(resolved_root):
-            relative_paths.add(source_path.relative_to(resolved_root).as_posix())
-    sources: list[ExecutedSource] = []
-    for relative in sorted(relative_paths):
-        source_path = (resolved_root / relative).resolve()
-        expected_sha256 = identity.manifest_entries.get(relative)
-        if (
-            not source_path.is_relative_to(resolved_root)
-            or not source_path.is_file()
-            or expected_sha256 is None
-            or _sha256_file(source_path) != expected_sha256
-        ):
-            raise ValueError(
-                f"snapshot executed source is not manifest-bound: {relative}"
-            )
-        sources.append(ExecutedSource(relative, expected_sha256, None))
-    return tuple(sources)
-
-
-def collect_snapshot_lane_provenance(
-    identity: SnapshotLaneIdentity, *, measurement_synchronization: str
-) -> LaneProvenance:
-    """Collect dynamic lane facts after work against validated immutable identity."""
-
-    devices, device_peak, device_status, jax_version, effective_guards = (
-        _device_metadata()
-    )
-    if Path(sys.executable).resolve() != identity.interpreter_path.resolve():
-        raise ValueError("snapshot runtime interpreter changed")
-    if sys.version.split()[0] != identity.python_version:
-        raise ValueError("snapshot runtime Python version changed")
-    if jax_version != identity.jax_version:
-        raise ValueError("snapshot runtime JAX version changed")
-    if importlib.metadata.version("jaxlib") != identity.jaxlib_version:
-        raise ValueError("snapshot runtime jaxlib version changed")
-    validate_snapshot_lane_environment(identity, os.environ)
-    observed_platforms = {device.platform for device in devices}
-    if identity.execution_platform == "gpu":
-        if not observed_platforms.intersection({"cuda", "gpu"}):
-            raise ValueError("snapshot GPU lane has no observed GPU device")
-    elif observed_platforms and observed_platforms != {"cpu"}:
-        raise ValueError("snapshot native lane observed a non-CPU JAX device")
-    simsopt_module = sys.modules.get("simsopt")
-    simsopt_version = str(getattr(simsopt_module, "__version__", "unknown"))
-    version_module = sys.modules.get("simsopt._version")
-    version_commit_value = getattr(version_module, "commit_id", None)
-    version_commit = (
-        version_commit_value if isinstance(version_commit_value, str) else None
-    )
-    version_compatible = (
-        generated_version_matches_checkout(identity.repository_commit, version_commit)
-        if version_module is not None
-        else None
-    )
-    simsoptpp_module = sys.modules.get("simsoptpp")
-    if simsoptpp_module is None:
-        raise ValueError("snapshot lane did not load the bound native extension")
-    build_commit = None
-    build_receipt_sha256 = None
-    binary_path = Path(str(simsoptpp_module.__file__)).resolve()
-    snapshot_root = identity.snapshot_root.resolve()
-    if not binary_path.is_relative_to(snapshot_root):
-        raise ValueError("snapshot native extension is outside its snapshot root")
-    binary_relative = binary_path.relative_to(snapshot_root).as_posix()
-    simsoptpp_path = str(binary_path)
-    simsoptpp_sha256 = _sha256_file(binary_path)
-    simsoptpp_version = str(getattr(simsoptpp_module, "__version__", "unknown"))
-    build_binding = verify_native_build_receipt(identity.snapshot_root, binary_path)
-    compatible = build_binding is not None
-    if build_binding is not None:
-        build_commit, build_receipt_sha256 = build_binding
-    if (
-        binary_path != identity.native_extension_path
-        or simsoptpp_sha256 != identity.native_extension_sha256
-    ):
-        raise ValueError("snapshot native extension identity changed")
-    executed_sources = _snapshot_executed_sources(identity)
-    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return LaneProvenance(
-        repository_commit=identity.repository_commit,
-        repository_dirty=identity.repository_dirty,
-        tracked_diff_sha256=identity.tracked_diff_sha256,
-        untracked_files=identity.untracked_files,
-        executed_sources=executed_sources,
-        python_version=identity.python_version,
-        jax_version=jax_version,
-        simsopt_version=simsopt_version,
-        simsopt_version_commit=version_commit,
-        simsopt_version_checkout_compatible=version_compatible,
-        lane_environment_policy={
-            key: os.environ[key] for key in _LANE_ENVIRONMENT_KEYS if key in os.environ
-        },
-        jax_effective_transfer_guards=effective_guards,
-        devices=devices,
-        host_peak_rss_bytes=int(peak_rss) * 1024,
-        host_peak_rss_method="child getrusage(RUSAGE_SELF).ru_maxrss fallback",
-        device_memory_peak_bytes=device_peak,
-        device_memory_status=device_status,
-        memory_measurement_scope=(
-            "combined import, compile/warmup, and one bounded execution"
-        ),
-        steady_state_memory_measured=False,
-        measurement_synchronization=measurement_synchronization,
-        simsoptpp_path=simsoptpp_path,
-        simsoptpp_sha256=simsoptpp_sha256,
-        simsoptpp_version=simsoptpp_version,
-        simsoptpp_build_commit=build_commit,
-        simsoptpp_checkout_compatible=compatible,
-        generated_source_bindings={
-            binary_relative: f"local-build-receipt-sha256:{build_receipt_sha256}"
-        }
-        if compatible
-        else {},
-        authoritative=not identity.repository_dirty and compatible is True,
-    )
 
 
 def lane_provenance_payload(provenance: LaneProvenance) -> dict[str, object]:
