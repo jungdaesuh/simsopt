@@ -46,9 +46,6 @@ well; both paths use public JAX APIs.
 
 from __future__ import annotations
 
-import logging
-import sys
-import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -315,8 +312,6 @@ __all__ = [
     "BOOZER_INNER_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "render_invalid_optimizer_backend_message",
     "render_invalid_boozer_inner_optimizer_backend_message",
-    "jax_least_squares",
-    "jax_minimize",
     "levenberg_marquardt_minpack_traceable",
     "make_traceable_exact_newton_variant_contract",
     "newton_polish",
@@ -372,17 +367,7 @@ TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = TARGET_OUTER_OPTIMIZER_BACKENDS | froze
     {HOST_JAX_OUTER_OPTIMIZER_BACKEND}
 )
 VALID_LEAST_SQUARES_ALGORITHMS = frozenset({"quasi-newton", "lm-minpack"})
-_SUPPORTED_METHODS = {
-    "bfgs",
-    "lbfgs",
-    "lbfgs-scipy-jax",
-    "lbfgs-scipy-jax-decomposed",
-    "lbfgs-scipy-jax-fullgraph",
-    "bfgs-ondevice",
-    "lbfgs-ondevice",
-}
 _TARGET_LEAST_SQUARES_METHODS = frozenset({"lm-minpack-ondevice"})
-_SUPPORTED_LEAST_SQUARES_METHODS = _TARGET_LEAST_SQUARES_METHODS
 _RESIDUAL_LEAST_SQUARES_ALGORITHMS = frozenset({"lm-minpack"})
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 _TARGET_PRIVATE_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
@@ -450,23 +435,6 @@ def _resolve_traceable_newton_linear_solver(
     return cast(TraceableNewtonLinearSolver, value)
 
 
-_DEPRECATION_LOGGER = logging.getLogger("simsopt_jax.solve.deprecation")
-_DEPRECATED_SOLVE_JAX_CALLSITE_LOCK = Lock()
-_DEPRECATED_SOLVE_JAX_CALLSITES: set["_DeprecationCallSite"] = set()
-_DEPRECATED_MINIMIZE_METHOD_TO_DRIVER = {
-    "bfgs": "scipy_bfgs",
-    "bfgs-ondevice": "simsopt_bfgs",
-    "lbfgs": "scipy_lbfgsb",
-    "lbfgs-ondevice": "simsopt_lbfgsb",
-    "lbfgs-scipy-jax": "scipy_lbfgsb",
-    "lbfgs-scipy-jax-decomposed": "scipy_lbfgsb",
-    "lbfgs-scipy-jax-fullgraph": "scipy_lbfgsb",
-}
-_DEPRECATED_LEAST_SQUARES_METHOD_TO_DRIVER = {
-    "lm-minpack-ondevice": "simsopt_lm_qr",
-}
-
-
 @contextmanager
 def target_optimizer_diagnostic_events(callback):
     """Route target optimizer diagnostic events to a stack-scoped callback."""
@@ -484,14 +452,6 @@ def _target_optimizer_diagnostic_event_callback():
 def _record_target_optimizer_diagnostic_event(callback, label, **fields):
     if callback is not None:
         callback(label, **fields)
-
-
-@dataclass(frozen=True)
-class _DeprecationCallSite:
-    api: str
-    filename: str
-    lineno: int
-    function: str
 
 
 class _ArrayValueAndJacobianWithArgs(Protocol):
@@ -754,47 +714,6 @@ def _cached_traceable_runner(cache, callable_fn, cache_key, build_runner):
             runner = build_runner(callable_cell)
             callable_cache[cache_key] = runner
         return runner
-
-
-def _shim_caller_stack(caller_frame) -> str:
-    code = caller_frame.f_code
-    return f"{code.co_filename}:{caller_frame.f_lineno}:{code.co_name}"
-
-
-def _warn_deprecated_solve_jax_call(
-    *,
-    api: str,
-    method: str,
-    translated_driver: str,
-    caller_frame,
-) -> None:
-    callsite = _DeprecationCallSite(
-        api=api,
-        filename=caller_frame.f_code.co_filename,
-        lineno=caller_frame.f_lineno,
-        function=caller_frame.f_code.co_name,
-    )
-    with _DEPRECATED_SOLVE_JAX_CALLSITE_LOCK:
-        should_warn = callsite not in _DEPRECATED_SOLVE_JAX_CALLSITES
-        if should_warn:
-            _DEPRECATED_SOLVE_JAX_CALLSITES.add(callsite)
-    if should_warn:
-        warnings.warn(
-            f"simsopt_jax.geo.optimizers.optimizer.{api} is deprecated; use "
-            "simsopt_jax.solve instead. Translation: "
-            f"method={method!r} -> driver={translated_driver!r}.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-    _DEPRECATION_LOGGER.info(
-        "deprecated_solve_jax_call",
-        extra={
-            "old_api": api,
-            "old_method": method,
-            "translated_driver": translated_driver,
-            "stack": _shim_caller_stack(caller_frame),
-        },
-    )
 
 
 def _traceable_callback_token_operand(token: int) -> jax.Array:
@@ -5176,125 +5095,6 @@ def target_minimize(
         )
         return finalize(result)
     raise ValueError(f"Unknown target optimizer method {method!r}.")
-
-
-def _jax_minimize_legacy(
-    fun,
-    x0,
-    *,
-    method="bfgs",
-    tol=1e-10,
-    maxiter=1500,
-    options=None,
-    value_and_grad=False,
-    callback=None,
-    progress_callback=None,
-):
-    """Compatibility scalar optimizer entrypoint that dispatches by lane."""
-    if method not in _SUPPORTED_METHODS:
-        raise ValueError(
-            f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
-        )
-
-    if method in _REFERENCE_METHODS:
-        _raise_if_target_lane_required(
-            component="optimizer_jax.jax_minimize",
-            method=method,
-            detail=_STRICT_REFERENCE_OPTIMIZER_DETAIL,
-        )
-        return reference_minimize(
-            fun,
-            x0,
-            method=method,
-            tol=tol,
-            maxiter=maxiter,
-            options=options,
-            value_and_grad=value_and_grad,
-            callback=callback,
-            progress_callback=progress_callback,
-        )
-    return target_minimize(
-        fun,
-        x0,
-        method=method,
-        tol=tol,
-        maxiter=maxiter,
-        options=options,
-        value_and_grad=value_and_grad,
-        callback=callback,
-        progress_callback=progress_callback,
-    )
-
-
-def jax_least_squares(
-    residual_fn,
-    x0,
-    *,
-    method="lm-minpack-ondevice",
-    tol=1e-10,
-    maxiter=1500,
-    options=None,
-    callback=None,
-    progress_callback=None,
-):
-    """Deprecated compatibility least-squares entrypoint."""
-    if method not in _SUPPORTED_LEAST_SQUARES_METHODS:
-        raise ValueError(
-            "Unknown least-squares method "
-            f"{method!r}. Supported: {sorted(_SUPPORTED_LEAST_SQUARES_METHODS)}."
-        )
-    _warn_deprecated_solve_jax_call(
-        api="jax_least_squares",
-        method=method,
-        translated_driver=_DEPRECATED_LEAST_SQUARES_METHOD_TO_DRIVER[method],
-        caller_frame=sys._getframe(1),
-    )
-    return target_least_squares(
-        residual_fn,
-        x0,
-        method=method,
-        tol=tol,
-        maxiter=maxiter,
-        options=options,
-        callback=callback,
-        progress_callback=progress_callback,
-    )
-
-
-def jax_minimize(
-    fun,
-    x0,
-    *,
-    method="bfgs",
-    tol=1e-10,
-    maxiter=1500,
-    options=None,
-    value_and_grad=False,
-    callback=None,
-    progress_callback=None,
-):
-    """Deprecated compatibility scalar optimizer entrypoint."""
-    if method not in _SUPPORTED_METHODS:
-        raise ValueError(
-            f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
-        )
-    _warn_deprecated_solve_jax_call(
-        api="jax_minimize",
-        method=method,
-        translated_driver=_DEPRECATED_MINIMIZE_METHOD_TO_DRIVER[method],
-        caller_frame=sys._getframe(1),
-    )
-    return _jax_minimize_legacy(
-        fun,
-        x0,
-        method=method,
-        tol=tol,
-        maxiter=maxiter,
-        options=options,
-        value_and_grad=value_and_grad,
-        callback=callback,
-        progress_callback=progress_callback,
-    )
 
 
 from . import reference as optimizer_jax_reference  # noqa: E402

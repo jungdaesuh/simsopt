@@ -41,8 +41,6 @@ area_jax = _lc.area_jax
 toroidal_flux_jax = _lc.toroidal_flux_jax
 compute_G_from_currents = _lc.compute_G_from_currents
 
-jax_minimize = _opt.jax_minimize
-jax_least_squares = _opt.jax_least_squares
 newton_polish = _opt.newton_polish
 newton_exact = _opt.newton_exact
 PRIVATE_OPTIMIZER_JAX_VERSION = _opt.PRIVATE_OPTIMIZER_JAX_VERSION

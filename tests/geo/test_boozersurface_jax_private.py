@@ -1896,15 +1896,6 @@ class TestOptimizerAdapterPrivate:
         assert callable(kernel)
         assert observed["donate_argnums"] is None
 
-    def test_hybrid_method_is_removed_from_public_optimizer_surface(self):
-        with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):
-            _opt.jax_minimize(
-                lambda x: jnp.sum(x**2),
-                jnp.array([1.0, -1.0], dtype=jnp.float64),
-                method="bfgs-hybrid",
-                maxiter=8,
-            )
-
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_accepts_pytree_x0_and_restores_result_structure(self):

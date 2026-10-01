@@ -114,7 +114,6 @@ from .boozersurface_jax_test_helpers import (
     biot_savart_dA_by_dX,
     compute_G_from_currents,
     dofs_to_xyzc,
-    jax_minimize,
     newton_exact,
     newton_polish,
     require_target_backend_x64,
@@ -1133,18 +1132,12 @@ _enable_fast_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_fast",
 )
-_ALL_JAX_BACKEND_MODES = (
-    "jax_cpu_parity",
-    "jax_gpu_parity",
-    "jax_gpu_fast",
-)
 _TARGET_ONDEVICE_JAX_BACKEND_MODES = (
     "jax_cpu_parity",
     "jax_gpu_parity",
     "jax_gpu_fast",
 )
 _NON_ONDEVICE_LS_BACKENDS = ("scipy",)
-_NON_TARGET_MINIMIZE_METHODS = ("bfgs", "lbfgs")
 
 
 _EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
@@ -1204,15 +1197,6 @@ def _native_cpu_reference_context():
         yield
     finally:
         _restore_backend_config(previous_backend)
-
-
-def _target_lane_rejection_pattern(
-    component: str, method: str, backend_mode: str
-) -> str:
-    return (
-        rf"{component}.*method='{method}'.*{backend_mode}.*requires an "
-        r"ondevice optimizer method"
-    )
 
 
 _LEGACY_CURVE_X = np.array([1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -5550,70 +5534,6 @@ class TestBoozerSurfaceJAXClass:
             match=rf"optimizer_backend='{optimizer_backend}'.*{backend_mode}.*requires optimizer_backend='ondevice'",
         ):
             booz._resolve_optimizer_method()
-
-    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
-    @pytest.mark.parametrize("method", _NON_TARGET_MINIMIZE_METHODS)
-    def test_jax_minimize_rejects_fallback_methods_in_any_jax_backend_mode(
-        self,
-        monkeypatch,
-        request,
-        backend_mode,
-        method,
-    ):
-        """Any JAX backend mode must keep direct minimization on the ondevice lane."""
-        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
-        with pytest.raises(
-            RuntimeError,
-            match=_target_lane_rejection_pattern(
-                r"optimizer_jax\.jax_minimize", method, backend_mode
-            ),
-        ):
-            jax_minimize(
-                lambda x: jnp.sum(x**2),
-                jnp.array([1.0]),
-                method=method,
-                value_and_grad=False,
-            )
-
-    def test_jax_minimize_rejects_removed_hybrid_without_dynamic_private_loader(
-        self,
-        monkeypatch,
-        request,
-    ):
-        _enable_non_strict_jax_backend(monkeypatch, request)
-
-        assert not hasattr(_opt, "_load_private_pkg")
-
-        with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):
-            jax_minimize(
-                lambda x: jnp.sum(x**2),
-                jnp.array([1.0], dtype=jnp.float64),
-                method="bfgs-hybrid",
-            )
-
-    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
-    @pytest.mark.parametrize("method", ("bfgs", "lbfgs"))
-    def test_jax_minimize_rejects_reference_methods_in_jax_backend_mode(
-        self,
-        monkeypatch,
-        request,
-        backend_mode,
-        method,
-    ):
-        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
-        with pytest.raises(
-            RuntimeError,
-            match=_target_lane_rejection_pattern(
-                r"optimizer_jax\.jax_minimize", method, backend_mode
-            ),
-        ):
-            jax_minimize(
-                lambda x: 0.5 * jnp.dot(x, x),
-                jnp.asarray([5.0, 3.0], dtype=jnp.float64),
-                method=method,
-                maxiter=5,
-                tol=1e-8,
-            )
 
     def test_jax_least_squares_solves_simple_structured_problem(self):
         def residual_fn(state):

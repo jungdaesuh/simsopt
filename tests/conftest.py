@@ -597,11 +597,7 @@ _ADAPTER_BOUNDARY_TEST_FILES = frozenset(
     }
 )
 
-_NATIVE_CPU_REFERENCE_TEST_FILES = frozenset(
-    {
-        "jax/solve/test_compat_shim_translation.py",
-    }
-)
+_NATIVE_CPU_REFERENCE_TEST_FILES: frozenset[str] = frozenset()
 
 _NATIVE_CPU_REFERENCE_NODE_PREFIXES = frozenset(
     {
