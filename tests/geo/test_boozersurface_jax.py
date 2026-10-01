@@ -7184,7 +7184,7 @@ class TestBoozerSurfaceJAXClass:
         """The ondevice Newton polish lane must stay callback-free inside the traced loop."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
-        booz.options["newton_linear_solver"] = "hybrid_final_dense_ir"
+        booz.options["newton_linear_solver"] = "hybrid_final_dense_lu"
 
         observed = []
         captured = {}
@@ -7248,7 +7248,7 @@ class TestBoozerSurfaceJAXClass:
         assert res is not None
         assert res["success"] is True
         assert captured["progress_callback"] is None
-        assert captured["linear_solver"] == "hybrid_final_dense_ir"
+        assert captured["linear_solver"] == "hybrid_final_dense_lu"
         assert "after_boozer_lbfgs" in labels
         assert "before_boozer_newton" in labels
         assert "after_boozer_newton" in labels

@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 import simsopt_jax.geo.optimizers.reference as _opt_ref
 from simsopt_jax.geo.optimizers import adjoint_linear_solve as _adjoint_linear_solve
-from simsopt_jax.geo.optimizers import dense_ir as _dense_ir
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 import simsopt_jax.geo.optimizers.private._bfgs as _private_bfgs
 import simsopt_jax.geo.optimizers.private._common as _opt_common
@@ -3472,7 +3471,6 @@ class TestBoozerSurfaceJAXClassPrivate:
             "operator_gmres",
             "dense_lu",
             "hybrid_final_dense_lu",
-            "hybrid_final_dense_ir",
         ),
     )
     def test_traceable_newton_linear_solver_accepts_exact_canonical_values(
@@ -3484,7 +3482,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @pytest.mark.parametrize(
         "linear_solver",
-        ("operator", "gmres", "dense", "lu", "dense-ir", ""),
+        ("operator", "gmres", "dense", "lu", "dense-ir", "hybrid_final_dense_ir", ""),
     )
     def test_traceable_newton_linear_solver_rejects_aliases(self, linear_solver):
         with pytest.raises(ValueError, match="linear_solver must be one of"):
@@ -3507,9 +3505,9 @@ class TestBoozerSurfaceJAXClassPrivate:
             *common_arguments,
             "operator_gmres",
         )
-        dense_ir_runner = _opt._make_traceable_newton_polish_runner(
+        hybrid_runner = _opt._make_traceable_newton_polish_runner(
             *common_arguments,
-            "hybrid_final_dense_ir",
+            "hybrid_final_dense_lu",
         )
         repeated_operator_runner = _opt._make_traceable_newton_polish_runner(
             *common_arguments,
@@ -3517,7 +3515,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         )
 
         assert operator_runner is repeated_operator_runner
-        assert operator_runner is not dense_ir_runner
+        assert operator_runner is not hybrid_runner
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -3526,7 +3524,7 @@ class TestBoozerSurfaceJAXClassPrivate:
     ):
         monkeypatch.setenv(
             "SIMSOPT_TRACEABLE_NEWTON_LINEAR_SOLVER",
-            "hybrid_final_dense_ir",
+            "hybrid_final_dense_lu",
         )
         result = _opt.newton_polish_traceable(
             lambda x: 0.5 * jnp.dot(x, x),
@@ -3547,123 +3545,6 @@ class TestBoozerSurfaceJAXClassPrivate:
         np.testing.assert_array_equal(
             backend_codes,
             np.asarray([operator_code], dtype=np.int32),
-        )
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_newton_polish_traceable_dense_ir_uses_lazy_near_target_chord(self):
-        tol = 1e-6
-        x0 = jnp.full((5,), 2e-5, dtype=jnp.float64) / np.sqrt(5.0)
-        result = _opt.newton_polish_traceable(
-            lambda x: jnp.dot(x, x),
-            x0,
-            maxiter=4,
-            tol=tol,
-            stab=0.0,
-            materialize_hessian=False,
-            linear_solver="hybrid_final_dense_ir",
-        )
-        active = np.asarray(result["newton_trace_active"], dtype=bool)
-        backend_codes = np.asarray(result["newton_trace_linear_solve_backend_code"])[
-            active
-        ]
-        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
-            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
-        ]
-
-        assert bool(result["success"]) is True
-        assert int(result["nit"]) == 1
-        np.testing.assert_array_equal(
-            backend_codes,
-            np.asarray([dense_ir_code], dtype=np.int32),
-        )
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_solve_dense_ir_system_refines_against_current_operator(self):
-        matrix_live = jnp.diag(jnp.asarray([2.0, 3.0, 4.0, 5.0]))
-        matrix_stale = 1.02 * matrix_live
-        lu_piv = _opt.jsp_linalg.lu_factor(matrix_stale)
-        rhs = jnp.asarray([1.0, -2.0, 3.0, -4.0], dtype=jnp.float64)
-
-        solution, status = _dense_ir._solve_dense_ir_system_with_status(
-            lambda vector: matrix_live @ vector,
-            lu_piv,
-            rhs,
-            tol=1e-4,
-        )
-
-        # FP64 parity policy caps the effective tolerance at 1e-10 even when
-        # callers request a looser diagnostic tolerance; two corrections still
-        # improve the live residual below the requested 1e-4 bound.
-        assert bool(status.success) is False
-        assert float(status.requested_tolerance) == pytest.approx(1e-4)
-        assert float(status.effective_tolerance) == pytest.approx(1e-10)
-        assert int(status.iterations) == _dense_ir._DENSE_IR_NEWTON_REFINEMENT_STEPS
-        np.testing.assert_allclose(
-            np.asarray(matrix_live @ solution),
-            np.asarray(rhs),
-            rtol=0.0,
-            atol=1e-4,
-        )
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_solve_dense_ir_system_stale_factors_fail_loud(self):
-        matrix_live = 3.0 * jnp.eye(3, dtype=jnp.float64)
-        lu_piv = _opt.jsp_linalg.lu_factor(jnp.eye(3, dtype=jnp.float64))
-        rhs = jnp.asarray([1.0, 2.0, 3.0], dtype=jnp.float64)
-
-        _solution, status = _dense_ir._solve_dense_ir_system_with_status(
-            lambda vector: matrix_live @ vector,
-            lu_piv,
-            rhs,
-            tol=1e-10,
-        )
-
-        assert bool(status.success) is False
-        assert np.isfinite(float(status.residual_relative))
-        assert float(status.residual_relative) > 1e-10
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_newton_polish_traceable_dense_ir_matches_dense_lu(self):
-        tol = 1e-6
-        hessian_diag = jnp.asarray(np.logspace(0.0, 5.0, 6), dtype=jnp.float64)
-        minimum = jnp.ones((6,), dtype=jnp.float64)
-
-        def objective(x):
-            delta = x - minimum
-            return 0.5 * jnp.dot(delta, hessian_diag * delta)
-
-        gradient_scale = 4e-5 / np.sqrt(6.0)
-        x0 = minimum + gradient_scale / hessian_diag
-        common_options = {
-            "maxiter": 6,
-            "tol": tol,
-            "stab": 0.0,
-            "materialize_hessian": False,
-        }
-        result_ir = _opt.newton_polish_traceable(
-            objective,
-            x0,
-            linear_solver="hybrid_final_dense_ir",
-            **common_options,
-        )
-        result_lu = _opt.newton_polish_traceable(
-            objective,
-            x0,
-            linear_solver="dense_lu",
-            **common_options,
-        )
-
-        assert bool(result_ir["success"]) is True
-        assert bool(result_lu["success"]) is True
-        np.testing.assert_allclose(
-            np.asarray(result_ir["x"]),
-            np.asarray(result_lu["x"]),
-            rtol=0.0,
-            atol=1e-12,
         )
 
     @PRIVATE_OPTIMIZER_RUNTIME
@@ -3710,52 +3591,6 @@ class TestBoozerSurfaceJAXClassPrivate:
         np.testing.assert_array_equal(accepted, np.asarray([False, True]))
         assert linear_tols[0] > float(strict_cap)
         assert linear_tols[1] <= float(strict_cap)
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_newton_polish_traceable_dense_ir_factors_at_near_target(self, monkeypatch):
-        def objective(x):
-            return 0.5 * jnp.dot(x, x) + (8.0 / 6.0) * jnp.sum(x**3)
-
-        def damped_far_operator_solve(matvec, rhs, *, tol):
-            del tol
-            hessian_diagonal = matvec(jnp.ones_like(rhs))
-            return 0.55 * rhs / hessian_diagonal, _linear_solve._LinearSolveStatus(
-                success=jnp.asarray(True),
-                residual=jnp.asarray(0.0, dtype=jnp.float64),
-                residual_relative=jnp.asarray(0.0, dtype=jnp.float64),
-                iterations=jnp.asarray(3, dtype=jnp.int32),
-            )
-
-        monkeypatch.setattr(
-            _opt,
-            "_solve_traceable_newton_operator_gmres_with_status",
-            damped_far_operator_solve,
-        )
-        tol = 1e-9
-        maxiter = 40
-        result = _opt.newton_polish_traceable(
-            objective,
-            jnp.asarray([2.5], dtype=jnp.float64),
-            maxiter=maxiter,
-            tol=tol,
-            stab=0.0,
-            materialize_hessian=False,
-            linear_solver="hybrid_final_dense_ir",
-        )
-        active = np.asarray(result["newton_trace_active"], dtype=bool)
-        backend_codes = np.asarray(result["newton_trace_linear_solve_backend_code"])[
-            active
-        ]
-        dense_ir_code = _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
-            _opt._TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
-        ]
-        dense_ir_iterations = int((backend_codes == dense_ir_code).sum())
-
-        assert bool(result["success"]) is True
-        assert float(result["final_gradient_norm"]) <= tol
-        assert int(result["nit"]) < maxiter
-        assert dense_ir_iterations <= 3
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME

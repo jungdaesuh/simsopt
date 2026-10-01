@@ -7,7 +7,6 @@ import sys
 from dataclasses import dataclass
 from typing import Final
 
-PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE: Final[int] = 4
 MIXED_DENSE_IR_MAX_REFINEMENT_CORRECTIONS: Final[int] = sys.float_info.mant_dig
 NEWTON_ARMIJO_C1: Final[float] = 1.0e-4
 

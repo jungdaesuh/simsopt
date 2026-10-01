@@ -199,14 +199,6 @@ from simsopt_jax.geo.optimizers.linear_solve import (
     _solve_square_vector_system_operator_only_nonzero_rhs as _solve_square_vector_system_operator_only_nonzero_rhs,
     _terminal_linear_solve_status as _terminal_linear_solve_status,
 )
-from simsopt_jax.geo.optimizers.dense_ir import (
-    _DENSE_IR_NEWTON_MATVEC_BUDGET as _DENSE_IR_NEWTON_MATVEC_BUDGET,
-    _DENSE_IR_NEWTON_REFINEMENT_STEPS as _DENSE_IR_NEWTON_REFINEMENT_STEPS,
-    _DenseIrContractionTelemetry as _DenseIrContractionTelemetry,
-    _DenseIrRefinementState as _DenseIrRefinementState,
-    _run_dense_ir_refinement as _run_dense_ir_refinement,
-    _solve_dense_ir_system_with_status as _solve_dense_ir_system_with_status,
-)
 from simsopt_jax.geo.optimizers.adjoint_linear_solve import (
     _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS as _EXACT_JACOBIAN_OPERATOR_GMRES_REFINEMENT_STEPS,
     _hessian_linear_operator as _hessian_linear_operator,
@@ -238,7 +230,6 @@ from simsopt_jax.geo.optimizers.private import (
 )
 from simsopt_jax.numerical_policy import (
     NEWTON_ARMIJO_C1,
-    PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE,
     mixed_dense_ir_accuracy_policy,
 )
 from simsopt_jax.runtime.host_boundary import (
@@ -435,24 +426,17 @@ _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU: TraceableNewtonLinearSolver = "dense_l
 _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU: TraceableNewtonLinearSolver = (
     "hybrid_final_dense_lu"
 )
-_TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR: TraceableNewtonLinearSolver = (
-    "hybrid_final_dense_ir"
-)
 _TRACEABLE_NEWTON_LINEAR_SOLVERS = frozenset(
     {
         _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES,
         _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU,
         _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU,
-        _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR,
     }
 )
 _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES = {
     _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES: 1,
     _TRACEABLE_NEWTON_LINEAR_SOLVER_DENSE_LU: 2,
     _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU: 3,
-    _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR: (
-        PRODUCTION_HYBRID_FINAL_DENSE_IR_BACKEND_CODE
-    ),
 }
 
 
@@ -3366,10 +3350,6 @@ def _build_traceable_newton_polish_runner(
             linear_solver == _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
             and dense_lu_materialization_allowed
         )
-        traceable_dense_ir_enabled = (
-            linear_solver == _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
-            and dense_lu_materialization_allowed
-        )
         operator_linear_solver_code = _device_int32(
             _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
                 _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES
@@ -3385,26 +3365,14 @@ def _build_traceable_newton_polish_runner(
                 _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_LU
             ]
         )
-        dense_ir_linear_solver_code = _device_int32(
-            _TRACEABLE_NEWTON_LINEAR_SOLVER_CODES[
-                _TRACEABLE_NEWTON_LINEAR_SOLVER_HYBRID_FINAL_DENSE_IR
-            ]
-        )
         initial_linear_solver_code = (
             dense_linear_solver_code
             if traceable_dense_lu_enabled
             else (
                 hybrid_linear_solver_code
                 if traceable_hybrid_dense_lu_enabled
-                else (
-                    dense_ir_linear_solver_code
-                    if traceable_dense_ir_enabled
-                    else operator_linear_solver_code
-                )
+                else operator_linear_solver_code
             )
-        )
-        dense_ir_linear_solve_matvec_budget = _device_int32(
-            _DENSE_IR_NEWTON_MATVEC_BUDGET
         )
         dense_linear_solve_matvec_budget = _device_int32(hessian_size)
         operator_linear_solve_matvec_budget = _device_int32(
@@ -3435,31 +3403,6 @@ def _build_traceable_newton_polish_runner(
                 max_dense_hessian_bytes,
             )
         )
-
-        if traceable_dense_ir_enabled:
-            # v2 lazy chord: the LU factors are carried in the loop state and
-            # materialized on the FIRST near-target iteration (a warm chord),
-            # not at the runner's entry iterate.  A chord factored at a cold
-            # entry point (an x_init still far from target) yields stale
-            # directions whose <= _DENSE_IR_NEWTON_MATVEC_BUDGET IR steps
-            # cannot reach the tight near-target tolerance -- an ondevice
-            # cold-start polish measured a plateau at ||grad|| ~4e-11 versus
-            # the operator path's ~1e-13.  Factoring at the near-target entry
-            # keeps the chord warm on both the warm-restart decomposed K1 path
-            # and cold ondevice starts.  These placeholders are never the
-            # active factors: on the first near-target iteration the loop
-            # rematerializes before the dense-IR solve reads them, and
-            # far-from-target iterations take the operator branch.
-            # Never-read carry placeholders: the first near-target iteration
-            # rematerializes before any dense-IR solve reads them.  Use cheap
-            # broadcast zeros rather than an embedded ``n x n`` identity
-            # constant -- smaller HLO in this compile-graph-sensitive file, and
-            # the same transfer-guard-clean form as the ``trace_*`` carry seeds.
-            dense_ir_matrix_dtype = _dense_square_operator_matrix_dtype(grad0)
-            dense_ir_placeholder_lu = jnp.zeros(
-                (hessian_size, hessian_size), dtype=dense_ir_matrix_dtype
-            )
-            dense_ir_placeholder_piv = jnp.zeros(hessian_size, dtype=jnp.int32)
 
         def cond_fun(state):
             return (
@@ -3607,94 +3550,6 @@ def _build_traceable_newton_polish_runner(
                     operator_gmres_solve,
                     operand=None,
                 )
-            elif traceable_dense_ir_enabled:
-                # Same routing as hybrid: exact-by-refinement directions for
-                # near-target iterations AND for the strict-cap retry; loose
-                # far-from-target iterations stay on single-pass operator
-                # GMRES.  A rejected dense-IR direction stalls immediately
-                # (active code is not the operator code), so the mode has no
-                # strict-tolerance GMRES entry point and no retry churn.
-                near_target_now = _eisenstat_walker_strict_cap_applies(
-                    state["norm"],
-                    tol_value,
-                    dtype=state["x"].dtype,
-                )
-                use_dense_ir_iteration = (
-                    near_target_now | state["retry_linear_solve_at_strict_cap"]
-                )
-
-                # Materialize the chord factors at the current iterate the
-                # first time the polish enters the near-target region, then
-                # reuse those warm factors for the remaining near-target
-                # iterations.  The build's HVPs go through ``entry_matvec``
-                # (uncounted), so only the <=3 IR matvecs register in the
-                # per-iteration telemetry, exactly as the v1 pre-loop build
-                # did.  ``factors_ready`` latches only for a NEAR-TARGET build:
-                # a strict-cap retry can fire while still far from target, and
-                # latching a far chord would let later near-target iterations
-                # reuse stale factors (the plateau v2 fixes).  A far retry thus
-                # re-materializes an exact direction at its own iterate without
-                # persisting it.  This trades v1's factor-once amortization for
-                # a fresh uncounted n-HVP build + LU per far retry (not in the
-                # matvec budget) -- the deliberate price of an exact direction
-                # over a stale chord; retries are rare, maxiter-bounded, and one
-                # such build is cheaper than the strict-cap operator grind it
-                # replaces.
-                def materialize_dense_ir_factors(_):
-                    def entry_matvec(vector):
-                        return hvp_fn(state["x"], vector) + stab_value * vector
-
-                    lu_new, piv_new = jsp_linalg.lu_factor(
-                        _dense_square_operator_matrix(entry_matvec, state["grad"])
-                    )
-                    return lu_new, piv_new, near_target_now
-
-                def keep_dense_ir_factors(_):
-                    return (
-                        state["dense_ir_hessian_lu"],
-                        state["dense_ir_hessian_piv"],
-                        state["dense_ir_factors_ready"],
-                    )
-
-                needs_dense_ir_factors = use_dense_ir_iteration & (
-                    ~state["dense_ir_factors_ready"]
-                )
-                (
-                    dense_ir_hessian_lu,
-                    dense_ir_hessian_piv,
-                    dense_ir_factors_ready,
-                ) = lax.cond(
-                    needs_dense_ir_factors,
-                    materialize_dense_ir_factors,
-                    keep_dense_ir_factors,
-                    operand=None,
-                )
-
-                def dense_ir_solve(_):
-                    dx_ir, ir_status = _solve_dense_ir_system_with_status(
-                        matvec,
-                        (dense_ir_hessian_lu, dense_ir_hessian_piv),
-                        state["grad"],
-                        tol=linear_tol,
-                    )
-                    return (
-                        dx_ir,
-                        ir_status,
-                        dense_ir_linear_solver_code,
-                        dense_ir_linear_solve_matvec_budget,
-                    )
-
-                (
-                    dx,
-                    linear_status,
-                    active_linear_solver_code,
-                    active_linear_solve_matvec_budget,
-                ) = lax.cond(
-                    use_dense_ir_iteration,
-                    dense_ir_solve,
-                    operator_gmres_solve,
-                    operand=None,
-                )
             else:
                 (
                     dx,
@@ -3830,14 +3685,6 @@ def _build_traceable_newton_polish_runner(
                 .set(accepted_alpha),
                 "newton_linear_solve_backend_code": active_linear_solver_code,
             }
-            if traceable_dense_ir_enabled:
-                # Thread the lazily materialized chord factors and the
-                # "factors ready" flag through the loop carry so the first
-                # near-target iteration factors once and later iterations
-                # reuse it.
-                next_state["dense_ir_hessian_lu"] = dense_ir_hessian_lu
-                next_state["dense_ir_hessian_piv"] = dense_ir_hessian_piv
-                next_state["dense_ir_factors_ready"] = dense_ir_factors_ready
             return next_state
 
         initial_state = {
@@ -3881,10 +3728,6 @@ def _build_traceable_newton_polish_runner(
             "newton_trace_accepted_alpha": trace_nan,
             "newton_linear_solve_backend_code": initial_linear_solver_code,
         }
-        if traceable_dense_ir_enabled:
-            initial_state["dense_ir_hessian_lu"] = dense_ir_placeholder_lu
-            initial_state["dense_ir_hessian_piv"] = dense_ir_placeholder_piv
-            initial_state["dense_ir_factors_ready"] = jnp.asarray(False)
         state = lax.while_loop(cond_fun, body_fun, initial_state)
 
         val_final, grad_final = val_and_grad_fn(state["x"])

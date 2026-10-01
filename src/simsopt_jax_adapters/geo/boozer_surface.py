@@ -4690,7 +4690,7 @@ class BoozerSurfaceJAX(Optimizable):
             preserves the historical BFGS/L-BFGS route; ``"lm-minpack"``
             enables the MINPACK-style residual-vector Levenberg-Marquardt
             route (the ``host-jax`` default).
-            ``newton_linear_solver`` selects one of the four exact traceable
+            ``newton_linear_solver`` selects one of the three exact traceable
             Newton solver names and defaults to ``"dense_lu"``, matching
             native C++ LS Newton (``np.linalg.solve``). Pass
             ``"operator_gmres"`` to keep the matrix-free polish. Legacy

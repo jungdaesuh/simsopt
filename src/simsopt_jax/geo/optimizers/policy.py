@@ -8,7 +8,6 @@ TraceableNewtonLinearSolver = Literal[
     "operator_gmres",
     "dense_lu",
     "hybrid_final_dense_lu",
-    "hybrid_final_dense_ir",
 ]
 
 __all__ = ("TraceableNewtonLinearSolver",)

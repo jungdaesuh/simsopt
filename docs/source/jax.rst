@@ -395,21 +395,20 @@ value takes precedence over the environment.  The compatibility value
 The Newton linear solver has no environment selector; set it through the typed
 ``newton_linear_solver`` option described below.
 
-Dense iterative refinement is opt-in through the typed Newton policy.
 ``BoozerSurfaceJAX`` least-squares Newton defaults to ``"dense_lu"``, matching
 native ``np.linalg.solve``.  The generic ``newton_polish_traceable`` kernel
 still defaults to matrix-free ``"operator_gmres"``; pass
 ``newton_linear_solver="operator_gmres"`` on a Boozer LS solve to keep that
-route.  Select the hybrid dense-IR path only at an explicit solver boundary::
+route.  The typed Newton policy selects the solver at an explicit boundary::
 
     from simsopt_jax.geo.optimizers import TraceableNewtonLinearSolver
 
-    linear_solver: TraceableNewtonLinearSolver = "hybrid_final_dense_ir"
+    linear_solver: TraceableNewtonLinearSolver = "hybrid_final_dense_lu"
     boozer.options["newton_linear_solver"] = linear_solver
 
-The other exact LS selections are ``"operator_gmres"`` and
-``"hybrid_final_dense_lu"``.  Dense-IR is not self-selected from problem size
-or environment state.
+The exact LS selections are ``"dense_lu"``, ``"operator_gmres"`` and
+``"hybrid_final_dense_lu"``.  None is self-selected from problem size or
+environment state.
 
 VJP callback convention
 ~~~~~~~~~~~~~~~~~~~~~~~
