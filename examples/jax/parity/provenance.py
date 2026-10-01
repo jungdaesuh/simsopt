@@ -246,6 +246,21 @@ def validate_sources_current(
             raise ValueError(f"executed source changed: {source.path}")
 
 
+def validate_extension_current(provenance: LaneProvenance) -> None:
+    """Reject a receipt whose loaded simsoptpp binary no longer has its bytes.
+
+    The extension may live outside the checkout, where executed-source
+    validation cannot see it. A lane that loaded no extension records none.
+    """
+    if provenance.simsoptpp_path is None:
+        return
+    binary_path = Path(provenance.simsoptpp_path)
+    if not binary_path.is_file():
+        raise ValueError(f"recorded simsoptpp extension is missing: {binary_path}")
+    if _sha256_file(binary_path) != provenance.simsoptpp_sha256:
+        raise ValueError(f"simsoptpp extension changed: {binary_path}")
+
+
 def _device_metadata() -> tuple[
     tuple[DeviceMetadata, ...], int | None, str, str | None, dict[str, str]
 ]:
@@ -487,6 +502,12 @@ def lane_provenance_from_payload(value: object) -> LaneProvenance:
     host_peak = _optional_int(value["host_peak_rss_bytes"], "host_peak_rss_bytes")
     if host_peak is None:
         raise ValueError("host_peak_rss_bytes must not be null")
+    simsoptpp_path = _optional_string(value["simsoptpp_path"], "simsoptpp_path")
+    simsoptpp_sha256 = _optional_string(value["simsoptpp_sha256"], "simsoptpp_sha256")
+    if (simsoptpp_path is None) != (simsoptpp_sha256 is None):
+        raise ValueError(
+            "simsoptpp_path and simsoptpp_sha256 must be recorded together"
+        )
     return LaneProvenance(
         repository_commit=_required_string(
             value["repository_commit"], "repository_commit"
@@ -520,10 +541,8 @@ def lane_provenance_from_payload(value: object) -> LaneProvenance:
         measurement_synchronization=_required_string(
             value["measurement_synchronization"], "measurement_synchronization"
         ),
-        simsoptpp_path=_optional_string(value["simsoptpp_path"], "simsoptpp_path"),
-        simsoptpp_sha256=_optional_string(
-            value["simsoptpp_sha256"], "simsoptpp_sha256"
-        ),
+        simsoptpp_path=simsoptpp_path,
+        simsoptpp_sha256=simsoptpp_sha256,
         simsoptpp_version=_optional_string(
             value["simsoptpp_version"], "simsoptpp_version"
         ),

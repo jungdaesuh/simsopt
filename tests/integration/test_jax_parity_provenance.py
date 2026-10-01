@@ -111,3 +111,17 @@ def test_payload_rejects_fields_outside_the_receipt_schema(
 
     with pytest.raises(ValueError, match="invalid fields"):
         provenance.lane_provenance_from_payload(payload)
+
+
+@pytest.mark.parametrize("cleared_field", ("simsoptpp_path", "simsoptpp_sha256"))
+def test_payload_rejects_an_extension_path_or_digest_recorded_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleared_field: str,
+) -> None:
+    receipt, _binary, _relative = _untracked_extension_receipt(tmp_path, monkeypatch)
+    payload = provenance.lane_provenance_payload(receipt)
+    payload[cleared_field] = None
+
+    with pytest.raises(ValueError, match="must be recorded together"):
+        provenance.lane_provenance_from_payload(payload)

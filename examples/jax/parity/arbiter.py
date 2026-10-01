@@ -372,11 +372,16 @@ def _validate_lanes(
         if len(values) != 1:
             raise ArbitrationError(f"{label} fingerprint mismatch")
     commits: set[str] = set()
+    # A lane that loaded no simsoptpp records none and executed no extension
+    # bytes; every lane that loaded it must have loaded the same bytes.
+    extension_digests: set[str] = set()
     source_manifests: dict[str, dict[str, str]] = {}
     for lane in sorted(required_lanes):
         provenance = observations[lane].provenance
         assert provenance is not None
         commits.add(provenance.repository_commit)
+        if provenance.simsoptpp_sha256 is not None:
+            extension_digests.add(provenance.simsoptpp_sha256)
         source_map = {
             source.path: source.sha256 for source in provenance.executed_sources
         }
@@ -385,6 +390,8 @@ def _validate_lanes(
         source_manifests[lane] = source_map
     if len(commits) != 1:
         raise ArbitrationError("repository provenance mismatch: repository_commit")
+    if len(extension_digests) > 1:
+        raise ArbitrationError("simsoptpp extension mismatch: simsoptpp_sha256")
     lanes = sorted(required_lanes)
     for left_index, left_lane in enumerate(lanes):
         for right_lane in lanes[left_index + 1 :]:

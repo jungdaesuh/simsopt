@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -679,6 +680,50 @@ def test_arbiter_rejects_shared_executed_source_hash_mismatch() -> None:
     )
 
     with pytest.raises(ArbitrationError, match="executed source mismatch"):
+        arbitrate(_routes(), observations)
+
+
+def _with_extension_digests(
+    digests: dict[str, str | None],
+) -> dict[str, LaneObservation]:
+    observations = _observations()
+    for lane, digest in digests.items():
+        lane_provenance = observations[lane].provenance
+        assert lane_provenance is not None
+        observations[lane] = dataclasses.replace(
+            observations[lane],
+            provenance=dataclasses.replace(
+                lane_provenance,
+                simsoptpp_path=None if digest is None else "/opt/simsoptpp.so",
+                simsoptpp_sha256=digest,
+                simsoptpp_version=None if digest is None else "test",
+            ),
+        )
+    return observations
+
+
+@pytest.mark.parametrize(
+    "digests",
+    (
+        {"native-cpu": "1" * 64, "jax-cpu": "1" * 64, "jax-gpu": "1" * 64},
+        {"native-cpu": "1" * 64, "jax-cpu": None, "jax-gpu": "1" * 64},
+    ),
+    ids=("all-lanes-loaded", "one-lane-loaded-none"),
+)
+def test_arbiter_accepts_one_loaded_extension_digest(
+    digests: dict[str, str | None],
+) -> None:
+    result = arbitrate(_routes(), _with_extension_digests(digests))
+
+    assert result.verdict == "pass"
+
+
+def test_arbiter_rejects_lanes_that_loaded_different_extension_bytes() -> None:
+    observations = _with_extension_digests(
+        {"native-cpu": "1" * 64, "jax-cpu": "2" * 64, "jax-gpu": "1" * 64}
+    )
+
+    with pytest.raises(ArbitrationError, match="simsoptpp extension mismatch"):
         arbitrate(_routes(), observations)
 
 
@@ -1368,6 +1413,7 @@ def _publish_quality_band_run(
     terminal_contract_override: str | None = None,
     receipt_mutation: str | None = None,
     used_legacy_manifest_adapter: bool = False,
+    simsoptpp_binary: Path | None = None,
 ) -> tuple[Path, dict[str, object]]:
     """Publish one synthetic native_default quality-band run for the auditor."""
     repo_root = Path(__file__).resolve().parents[2]
@@ -1427,6 +1473,15 @@ def _publish_quality_band_run(
                 tracked_diff_sha256=repository_state.tracked_diff_sha256,
                 untracked_files=repository_state.untracked_files,
                 executed_sources=explicit_sources,
+                simsoptpp_path=(
+                    None if simsoptpp_binary is None else str(simsoptpp_binary)
+                ),
+                simsoptpp_sha256=(
+                    None
+                    if simsoptpp_binary is None
+                    else hashlib.sha256(simsoptpp_binary.read_bytes()).hexdigest()
+                ),
+                simsoptpp_version=None if simsoptpp_binary is None else "test",
             ),
             values=_band_case_receipt_values(
                 relationship.comparison_routes, lane, fork=fork
@@ -1558,6 +1613,48 @@ def test_audit_accepts_a_published_quality_band_run(tmp_path: Path) -> None:
     assert result.case_count == 1
     assert result.lane_receipt_count == 3
     assert result.comparison_count > 0
+
+
+def _publish_run_with_extension(tmp_path: Path) -> tuple[Path, Path]:
+    binary = tmp_path / "extension" / "simsoptpp.cpython-311-x86_64-linux-gnu.so"
+    binary.parent.mkdir()
+    binary.write_bytes(b"loaded compiled extension")
+    published, _summary = _publish_quality_band_run(
+        tmp_path / "runs", simsoptpp_binary=binary
+    )
+    return published, binary
+
+
+def test_audit_accepts_an_unchanged_recorded_extension(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, _binary = _publish_run_with_extension(tmp_path)
+
+    result = audit_published_run(published, repo_root=repo_root)
+
+    assert result.verdict == "quality-band"
+    assert result.lane_receipt_count == 3
+
+
+def test_audit_rejects_a_recorded_extension_whose_bytes_changed(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, binary = _publish_run_with_extension(tmp_path)
+    binary.write_bytes(b"replaced compiled extension")
+
+    with pytest.raises(ValueError, match="simsoptpp extension changed"):
+        audit_published_run(published, repo_root=repo_root)
+
+
+def test_audit_rejects_a_recorded_extension_that_no_longer_exists(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    published, binary = _publish_run_with_extension(tmp_path)
+    binary.unlink()
+
+    with pytest.raises(ValueError, match="recorded simsoptpp extension is missing"):
+        audit_published_run(published, repo_root=repo_root)
 
 
 def test_audit_keeps_failed_equality_comparisons_noncertifying(

@@ -18,6 +18,7 @@ from examples.jax.parity.cases import get_case
 from examples.jax.parity.input_bundle import read_input_bundle
 from examples.jax.parity.provenance import (
     ExecutedSource,
+    validate_extension_current,
     validate_sources_current,
 )
 from examples.jax.parity.publication import require_published_run
@@ -219,6 +220,7 @@ def audit_published_run(
             if provenance.repository_commit != repository_commit:
                 raise ValueError(f"repository commit mismatch: {case_id}:{lane}")
             validate_sources_current(repo_root, provenance.executed_sources)
+            validate_extension_current(provenance)
             if (
                 provenance.steady_state_memory_measured
                 or provenance.memory_measurement_scope
