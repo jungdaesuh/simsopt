@@ -290,9 +290,7 @@ def _encoded_transition_value(
             )
         del open_paths[id(value)]
         return encoded
-    if isinstance(value, str) or value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, int):
+    if isinstance(value, (str, bool, int)) or value is None:
         return value
     if isinstance(value, float):
         if not np.isfinite(value):
@@ -389,30 +387,17 @@ def _snapshot_transition_evaluation(
         )
     )
 
-def _restore_transition_json_value(value: object) -> object:
-    # Current checkpoints encode the marker as a JSON list after tuple
-    # serialization; the dictionary form remains readable for pre-migration
-    # in-process snapshots.
-    if isinstance(value, Mapping) and set(value) == {_ALM_MAPPING_MARKER}:
-        entries = value[_ALM_MAPPING_MARKER]
-        return {str(key): _restore_transition_json_value(item) for key, item in entries}
-    if isinstance(value, (tuple, list)):
-        if (
-            len(value) == 2
-            and value[0] == _ALM_SEQUENCE_MARKER
-            and isinstance(value[1], (tuple, list))
-        ):
-            return tuple(_restore_transition_json_value(item) for item in value[1])
-        if (
-            len(value) == 2
-            and value[0] == _ALM_MAPPING_MARKER
-            and isinstance(value[1], (tuple, list))
-        ):
-            return {
-                str(key): _restore_transition_json_value(item) for key, item in value[1]
-            }
-        return [_restore_transition_json_value(item) for item in value]
-    return value
+def _restore_transition_json_value(value: ALMTransitionValue) -> object:
+    """The raw value of an encoded one, the inverse of
+    :func:`_transition_json_value` (a snapshot holds encoded values only,
+    :func:`_checked_encoded_value`): a sequence marker comes back as a tuple,
+    a mapping marker as a dict, a scalar as itself."""
+    if not isinstance(value, tuple):
+        return value
+    marker, payload = value
+    if marker == _ALM_SEQUENCE_MARKER:
+        return tuple(_restore_transition_json_value(item) for item in payload)
+    return {str(key): _restore_transition_json_value(item) for key, item in payload}
 
 def _restore_transition_evaluation(
     evaluation: ALMTransitionEvaluation,
