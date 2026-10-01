@@ -7059,7 +7059,6 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
 
 
 def test_boozer_solve_observer_inactive_skips_observability_payload(monkeypatch):
-    monkeypatch.delenv("SIMSOPT_BOOZER_OBSERVABILITY", raising=False)
     monkeypatch.setattr(
         surfaceobjectives_jax_module.logger,
         "isEnabledFor",

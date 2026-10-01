@@ -27,7 +27,6 @@ Architecture (implicit differentiation):
 
 import hashlib
 import logging
-import os
 from functools import partial
 import numpy as np
 import jax
@@ -289,16 +288,6 @@ _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "materialize_dense_linearization",
     "max_dense_linearization_bytes",
 )
-
-
-def _traceable_diag_progress(message):
-    """Emit optional progress logs for the target-lane baseline diagnosis."""
-    raw_value = os.environ.get("SIMSOPT_TRACEABLE_DIAG_PROGRESS")
-    if raw_value is None:
-        return
-    if raw_value.strip().lower() in {"", "0", "false", "no", "off"}:
-        return
-    print(f"[traceable-runtime-diagnose] {message}", flush=True)
 
 
 logger = logging.getLogger(__name__)
@@ -2403,11 +2392,7 @@ def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
 
 
 def _booz_solve_observer_active(result):
-    return (
-        not bool(result.get("success", False))
-        or logger.isEnabledFor(logging.DEBUG)
-        or os.environ.get("SIMSOPT_BOOZER_OBSERVABILITY") == "1"
-    )
+    return not bool(result.get("success", False)) or logger.isEnabledFor(logging.DEBUG)
 
 
 def _boozer_solve_observability_payload(result):

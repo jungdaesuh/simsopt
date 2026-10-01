@@ -5354,7 +5354,6 @@ def diagnose_traceable_objective_runtime(
     success_filter=None,
 ):
     """Return a compact baseline diagnostic report for the target-lane runtime."""
-    _traceable_diag_progress("resolve_runtime_entry")
     runtime_entry = _get_cached_traceable_runtime_entry(
         booz_jax,
         bs_jax,
@@ -5370,7 +5369,6 @@ def diagnose_traceable_objective_runtime(
             "Traceable runtime diagnosis requires the full single-stage outer objective."
         )
 
-    _traceable_diag_progress("deviceify_baseline_state")
     baseline_coil_dofs = _traceable_runtime_deviceify_tree(state["baseline_coil_dofs"])
     baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
     baseline_value = _traceable_runtime_deviceify_tree(state["baseline_value"])
@@ -5401,7 +5399,6 @@ def diagnose_traceable_objective_runtime(
         adjoint_linear_solve_available=baseline_success,
         newton_trace_capacity=state["newton_trace_capacity"],
     )
-    _traceable_diag_progress("baseline_total_gradient")
     total_value = baseline_value
     total_gradient, total_linear_solve_success = _traceable_total_gradient_with_status(
         booz_jax,
@@ -5415,7 +5412,6 @@ def diagnose_traceable_objective_runtime(
         objective_kwargs=objective_kwargs,
     )
     del total_linear_solve_success
-    _traceable_diag_progress("raw_term_values")
     raw_terms = _traceable_single_stage_outer_term_values(
         baseline_x,
         baseline_coil_dofs,
@@ -5436,7 +5432,6 @@ def diagnose_traceable_objective_runtime(
     }
     nonfinite_terms = []
     for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
-        _traceable_diag_progress(f"term_gradient:{term_name}")
         (
             direct_grad,
             implicit_grad,
@@ -5504,7 +5499,6 @@ def diagnose_traceable_objective_runtime(
         and report["total"]["grad"]["all_finite"]
         and not nonfinite_terms
     )
-    _traceable_diag_progress("report_complete")
     return report
 
 
@@ -6518,7 +6512,6 @@ from .surface_objectives import (
     _traceable_adjoint_fail_gradient_like,
     _traceable_cache_tree_signature,
     _traceable_contract_tree_signature,
-    _traceable_diag_progress,
     _traceable_full_single_stage_outer_objective,
     _traceable_rejected_objective_value,
     _traceable_runtime_deviceify_tree,
