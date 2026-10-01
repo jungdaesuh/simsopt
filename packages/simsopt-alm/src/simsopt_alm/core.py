@@ -14,8 +14,6 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 from scipy.optimize import nnls
 
-ALM_SCHEMA_VERSION = "alm_normalized_constraints_v2"
-
 def _finite_alm_value(name: str, value) -> float:
     value_f = float(value)
     if not np.isfinite(value_f):
@@ -166,30 +164,6 @@ _HYBRID_SIGNAL_FIELDS = (
     "hard_dual_update_values",
 )
 
-def require_positive_alm_threshold(name: str, value) -> float:
-    """Validate that an ALM threshold is finite and strictly positive.
-
-    Caller pre-handles the disabled-constraint case (``value is None``).
-    Zero, negative, NaN, and infinity are all rejected. Used at the shared
-    threshold-input boundary so the downstream ``max(raw, FLOOR)`` floor in
-    metadata constructors becomes defense-in-depth, not silent recovery.
-    """
-    value_f = float(value)
-    if not np.isfinite(value_f) or value_f <= 0.0:
-        raise ValueError(
-            f"ALM threshold {name!r} must be a finite positive value; got {value!r}"
-        )
-    return value_f
-
-def positive_part(value: float) -> float:
-    return float(max(value, 0.0))
-
-def upper_bound_residual(metric_value: float, upper_bound: float) -> float:
-    return positive_part(metric_value - upper_bound)
-
-def lower_bound_residual(metric_value: float, lower_bound: float) -> float:
-    return positive_part(lower_bound - metric_value)
-
 def augmented_inequality_objective(
     base_value: float,
     base_grad,
@@ -199,7 +173,7 @@ def augmented_inequality_objective(
     penalty,
 ):
     constraint_values = np.asarray(constraint_values, dtype=float)
-    constraint_grad_list = _constraint_grad_list(constraint_grads)
+    constraint_grad_list = [np.asarray(grad, dtype=float) for grad in constraint_grads]
     multipliers = np.asarray(multipliers, dtype=float)
     penalty_values = _penalty_values(penalty, constraint_values.size)
     positive_shift = np.maximum(0.0, multipliers + penalty_values * constraint_values)
@@ -219,18 +193,25 @@ def augmented_inequality_objective(
         )
 
     feasibility_values = np.maximum(constraint_values, 0.0)
-    return _build_augmented_evaluation(
-        base_value=float(base_value),
-        base_grad=np.asarray(base_grad, dtype=float),
-        total_value=total_value,
-        total_grad=total_grad,
-        constraint_values=constraint_values,
-        constraint_grads=constraint_grad_list,
-        dual_update_values=constraint_values,
-        feasibility_values=feasibility_values,
-        positive_shift_values=positive_shift,
-        augmented_term_by_constraint=augmented_terms,
-    )
+    max_feasibility_violation = _max_value(feasibility_values)
+    # Stored ndarrays are copied, except constraint_grads. A float ndarray
+    # there aliases the caller; the solver snapshots it on entry.
+    # `np.asarray` keeps the alias when the dtype already matches.
+    return {
+        "total": total_value,
+        "base_value": float(base_value),
+        "base_grad": base_grad_array.copy(),
+        "grad": total_grad.copy(),
+        "constraint_values": constraint_values.copy(),
+        "constraint_grads": constraint_grad_list,
+        "dual_update_values": constraint_values.copy(),
+        "feasibility_values": feasibility_values.copy(),
+        "max_violation": max_feasibility_violation,
+        "max_feasibility_violation": max_feasibility_violation,
+        "stationarity_norm": float(np.linalg.norm(total_grad)),
+        "positive_shift_values": positive_shift.copy(),
+        "augmented_term_by_constraint": augmented_terms.copy(),
+    }
 
 def normalize_alm_constraints(
     signed_values,
@@ -285,64 +266,6 @@ def normalize_alm_constraint_grads(constraint_grads, scales):
         np.asarray(grad, dtype=float) / float(scale)
         for grad, scale in zip(constraint_grads, scale_array)
     ]
-
-def _constraint_grad_list(constraint_grads) -> List[np.ndarray]:
-    return [
-        np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
-    ]
-
-def zero_gradient_like(reference_grad):
-    return np.zeros_like(np.asarray(reference_grad))
-
-def _build_augmented_evaluation(
-    *,
-    base_value: float,
-    base_grad,
-    total_value: float,
-    total_grad,
-    constraint_values: np.ndarray,
-    constraint_grads: Sequence[np.ndarray],
-    dual_update_values,
-    feasibility_values,
-    positive_shift_values=None,
-    augmented_term_by_constraint=None,
-):
-    dual_update_array = np.asarray(dual_update_values, dtype=float)
-    feasibility_array = np.asarray(feasibility_values, dtype=float)
-    stationarity_norm = float(np.linalg.norm(np.asarray(total_grad, dtype=float)))
-    max_feasibility_violation = _max_value(feasibility_array)
-    # Stored ndarrays are copied, except constraint_grads. A float ndarray
-    # there aliases the caller; the solver snapshots it on entry.
-    # `np.asarray` keeps the alias when the dtype already matches.
-    result = {
-        "total": float(total_value),
-        "base_value": float(base_value),
-        "base_grad": np.asarray(base_grad, dtype=float).copy(),
-        "grad": np.asarray(total_grad, dtype=float).copy(),
-        "constraint_values": np.asarray(constraint_values, dtype=float).copy(),
-        "constraint_grads": [
-            np.asarray(constraint_grad, dtype=float)
-            for constraint_grad in constraint_grads
-        ],
-        "dual_update_values": dual_update_array.copy(),
-        "feasibility_values": feasibility_array.copy(),
-        "max_violation": max_feasibility_violation,
-        "max_feasibility_violation": max_feasibility_violation,
-        "stationarity_norm": stationarity_norm,
-    }
-    if positive_shift_values is not None:
-        # Copy to avoid aliasing caller-owned mutable buffers, matching
-        # the ownership contract of the principal evaluation arrays above.
-        result["positive_shift_values"] = np.asarray(
-            positive_shift_values,
-            dtype=float,
-        ).copy()
-    if augmented_term_by_constraint is not None:
-        result["augmented_term_by_constraint"] = np.asarray(
-            augmented_term_by_constraint,
-            dtype=float,
-        ).copy()
-    return result
 
 def _augmented_terms(
     positive_shift: np.ndarray,
@@ -429,24 +352,14 @@ def _conditioning_metrics(evaluation: dict) -> Dict[str, Optional[float]]:
         penalty_grad_ratio = penalty_grad_norm / max(base_grad_norm, 1.0)
 
     return {
-        "conditioning_base_objective": float(base_objective),
-        "conditioning_penalty_objective": float(penalty_objective),
-        "conditioning_penalty_objective_ratio": (
-            None if penalty_objective_ratio is None else float(penalty_objective_ratio)
-        ),
-        "conditioning_total_grad_norm": float(total_grad_norm),
-        "conditioning_base_grad_norm": (
-            None if base_grad_norm is None else float(base_grad_norm)
-        ),
-        "conditioning_penalty_grad_norm": (
-            None if penalty_grad_norm is None else float(penalty_grad_norm)
-        ),
-        "conditioning_penalty_grad_ratio": (
-            None if penalty_grad_ratio is None else float(penalty_grad_ratio)
-        ),
-        "penalty_gradient_norm": (
-            None if penalty_grad_norm is None else float(penalty_grad_norm)
-        ),
+        "conditioning_base_objective": base_objective,
+        "conditioning_penalty_objective": penalty_objective,
+        "conditioning_penalty_objective_ratio": penalty_objective_ratio,
+        "conditioning_total_grad_norm": total_grad_norm,
+        "conditioning_base_grad_norm": base_grad_norm,
+        "conditioning_penalty_grad_norm": penalty_grad_norm,
+        "conditioning_penalty_grad_ratio": penalty_grad_ratio,
+        "penalty_gradient_norm": penalty_grad_norm,
     }
 
 def _kkt_base_grad(evaluation: dict) -> np.ndarray:
@@ -866,43 +779,25 @@ def _bound_reduced_stationarity_norm(
         return stationarity_norm
     return float(np.linalg.norm(np.where(blocked, 0.0, grad)))
 
-def _stationarity_metrics(
+def _routed_kkt_stationarity_norm(
     evaluation: dict,
     routing_state: ALMConstraintRoutingState,
     feasibility_gate: float,
-) -> Tuple[float, Optional[float], bool]:
-    """Return ``(stationarity_norm, kkt_stationarity_norm, signal_mismatch_active)``.
-
-    ``stationarity_norm`` is the raw augmented-Lagrangian gradient norm (the
-    loop bound-reduces it; that norm gates the multiplier update); callers that
-    need the same value under the ``raw_stationarity_norm`` history-schema key
-    alias it locally. ``kkt_stationarity_norm`` is the active-set KKT residual,
-    a diagnostic that gates nothing. Hybrid evaluations compute it on the
-    surrogate channel, the differentiable subproblem.
-    """
-    stationarity_norm = _augmented_stationarity_norm(evaluation)
+) -> Optional[float]:
+    """The active-set KKT residual, a diagnostic that gates nothing (None
+    without the gradients it needs). Hybrid evaluations compute it on the
+    surrogate channel, the differentiable subproblem, others on the
+    dual-update signal."""
     if routing_state.signal_state.explicit_hybrid_signals:
-        kkt_stationarity_norm = _surrogate_kkt_stationarity_norm(
-            evaluation,
-            routing_state,
-            feasibility_gate,
-        )
-    else:
-        preferred_dual_update_values = (
-            routing_state.signal_state.preferred_dual_update_values
-        )
-        kkt_stationarity_norm = _kkt_stationarity_norm(
-            _kkt_base_grad(evaluation),
-            evaluation.get("constraint_grads"),
-            preferred_dual_update_values,
-            routing_state.signal_state.hard_violation_values,
-            _constraint_activity_tolerances(evaluation, preferred_dual_update_values),
-            feasibility_gate,
-        )
-    return (
-        stationarity_norm,
-        kkt_stationarity_norm,
-        bool(routing_state.signal_mismatch_active),
+        return _surrogate_kkt_stationarity_norm(evaluation, routing_state, feasibility_gate)
+    preferred_dual_update_values = routing_state.signal_state.preferred_dual_update_values
+    return _kkt_stationarity_norm(
+        _kkt_base_grad(evaluation),
+        evaluation.get("constraint_grads"),
+        preferred_dual_update_values,
+        routing_state.signal_state.hard_violation_values,
+        _constraint_activity_tolerances(evaluation, preferred_dual_update_values),
+        feasibility_gate,
     )
 
 def validate_initial_multipliers(multipliers, n_constraints: int) -> np.ndarray:

@@ -83,28 +83,22 @@ class ALMPhysics:
         # The solver's read-only copy rule (events.py): arrays become read-only
         # copies, mappings read-only views, lists and tuples tuples. One memo
         # per field: its keys are ids of objects alive only during that call.
-        object.__setattr__(self, "base_value", float(self.base_value))
-        object.__setattr__(
-            self,
-            "base_grad",
-            _frozen_event_value(np.asarray(self.base_grad, dtype=float), {}),
-        )
-        object.__setattr__(
-            self,
-            "constraint_values",
-            _frozen_event_value(np.asarray(self.constraint_values, dtype=float), {}),
-        )
-        object.__setattr__(
-            self,
-            "constraint_grads",
-            _frozen_event_value(
-                tuple(np.asarray(grad, dtype=float) for grad in self.constraint_grads),
-                {},
+        for name, value in (
+            ("base_value", float(self.base_value)),
+            ("base_grad", _frozen_event_value(np.asarray(self.base_grad, dtype=float), {})),
+            (
+                "constraint_values",
+                _frozen_event_value(np.asarray(self.constraint_values, dtype=float), {}),
             ),
-        )
-        object.__setattr__(
-            self, "extras", _frozen_event_value(MappingProxyType(dict(self.extras)), {})
-        )
+            (
+                "constraint_grads",
+                _frozen_event_value(
+                    tuple(np.asarray(grad, dtype=float) for grad in self.constraint_grads), {}
+                ),
+            ),
+            ("extras", _frozen_event_value(MappingProxyType(dict(self.extras)), {})),
+        ):
+            object.__setattr__(self, name, value)
 
     def evaluation(self, multipliers, penalty) -> ALMEvaluation:
         """:func:`augmented_inequality_objective` at ``multipliers`` and ``penalty``,

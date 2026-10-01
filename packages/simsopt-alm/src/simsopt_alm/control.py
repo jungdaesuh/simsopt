@@ -27,7 +27,7 @@ from .core import (
     _extract_constraint_state,
     _next_penalty,
     _project_nonnegative_multipliers_with_diagnostics,
-    _stationarity_metrics,
+    _routed_kkt_stationarity_norm,
     alm_penalty_schedule_tolerances,
     validate_initial_multipliers,
 )
@@ -140,7 +140,6 @@ class ALMPenaltyIncreaseResult:
     update_feasibility_tol: float
     update_stationarity_tol: float
     penalty_update_state: ALMIterateMeasurement
-    requested_penalty: Optional[float]
 
 def _run_loop_state(
     run_state: ALMRunState,
@@ -340,7 +339,6 @@ def _apply_alm_penalty_increase(
         update_feasibility_tol=next_feasibility_tol,
         update_stationarity_tol=next_stationarity_tol,
         penalty_update_state=penalty_update_state,
-        requested_penalty=requested_penalty,
     )
 
 @dataclass(frozen=True)
@@ -491,7 +489,6 @@ class _ALMRestoredIterate:
     multipliers_state: np.ndarray
     penalty_state: float
     inner_result: Optional[object]
-    restored_best_feasible: bool
     restored_best_feasible_reason: Optional[str]
 
 def _restore_alm_best_feasible_on_failure(
@@ -513,7 +510,6 @@ def _restore_alm_best_feasible_on_failure(
     geometry; this helper only validates the snapshot carrier/identity pair
     before restore.
     """
-    restored_best_feasible = False
     restored_best_feasible_reason = None
     restored_evaluation = evaluation
     restored_x = current_x.copy()
@@ -537,7 +533,6 @@ def _restore_alm_best_feasible_on_failure(
             restore_reasons.append("final_iterate_worse_than_best_feasible")
 
     if restore_reasons:
-        restored_best_feasible = True
         restored_best_feasible_reason = ",".join(restore_reasons)
         restored_x = best_feasible.x.copy()
         restored_evaluation = best_feasible.evaluation
@@ -561,7 +556,6 @@ def _restore_alm_best_feasible_on_failure(
         multipliers_state=restored_multipliers_state,
         penalty_state=restored_penalty_state,
         inner_result=restored_inner_result,
-        restored_best_feasible=bool(restored_best_feasible),
         restored_best_feasible_reason=restored_best_feasible_reason,
     )
 
@@ -604,14 +598,8 @@ def _build_alm_failure_result_with_optional_restore(
         restored_state.penalty_state,
         settings.feasibility_tol,
     )
-    (
-        restored_stationarity_norm,
-        restored_kkt_stationarity_norm,
-        _restored_signal_mismatch_active,
-    ) = _stationarity_metrics(
-        restored_state.evaluation,
-        restored_routing_state,
-        settings.feasibility_tol,
+    restored_kkt_stationarity_norm = _routed_kkt_stationarity_norm(
+        restored_state.evaluation, restored_routing_state, settings.feasibility_tol
     )
     restored_stationarity_norm = _bound_reduced_stationarity_norm(
         restored_state.evaluation, run_state.x, run_state.base_bounds
@@ -621,7 +609,7 @@ def _build_alm_failure_result_with_optional_restore(
     )[3]
     effective_message_prefix = message_prefix
     effective_termination_reason = termination_reason
-    if restored_state.restored_best_feasible:
+    if restored_state.restored_best_feasible_reason is not None:
         if restored_message_prefix is not None:
             effective_message_prefix = restored_message_prefix
         if restored_termination_reason is not None:
@@ -703,7 +691,7 @@ def _handle_alm_penalty_cap_termination(
         termination_reason="penalty_cap_reached",
         message_prefix=(
             "ALM stopped after the requested penalty update "
-            f"{penalty_transition.requested_penalty:.3e} exceeded "
+            f"{penalty_transition.penalty_cap_requested:.3e} exceeded "
             f"the configured penalty cap {penalty:.3e}."
         ),
         restored_message_prefix=(
@@ -1841,14 +1829,12 @@ def minimize_alm(
             raise ValueError(
                 "resume_from constraint_names do not match current constraint_names"
             )
-        if (resume_from.constraint_blocks is None) != (
-            constraint_blocks_tuple is None
-        ) or resume_from.constraint_blocks != constraint_blocks_tuple:
+        if resume_from.constraint_blocks != constraint_blocks_tuple:
             raise ValueError(
                 "resume_from constraint_blocks do not match current constraint_blocks"
             )
         completed_outer = int(resume_from.completed_outer_iterations)
-        if completed_outer < 0 or completed_outer >= settings.max_outer_iterations:
+        if completed_outer >= settings.max_outer_iterations:
             raise ValueError(
                 "resume_from completed_outer_iterations must be less than "
                 "settings.max_outer_iterations"

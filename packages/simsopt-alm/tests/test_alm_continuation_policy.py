@@ -187,9 +187,6 @@ def _measure(
     routing = alm_core._constraint_routing_state(
         evaluation, multipliers, penalty, gate
     )
-    stationarity, kkt, mismatch = alm_core._stationarity_metrics(
-        evaluation, routing, gate
-    )
     return ALMIterateMeasurement(
         evaluation=evaluation,
         multipliers=multipliers,
@@ -198,9 +195,9 @@ def _measure(
         feasibility_values=feasibility,
         max_feasibility_violation=max_violation,
         routing_state=routing,
-        stationarity_norm=stationarity,
-        kkt_stationarity_norm=kkt,
-        signal_mismatch_active=mismatch,
+        stationarity_norm=alm_core._augmented_stationarity_norm(evaluation),
+        kkt_stationarity_norm=alm_core._routed_kkt_stationarity_norm(evaluation, routing, gate),
+        signal_mismatch_active=routing.signal_mismatch_active,
         update_feasibility_tol=update_feasibility_tol,
         update_stationarity_tol=update_stationarity_tol,
         effective_feasibility_tol=gate,

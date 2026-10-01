@@ -91,7 +91,8 @@ class ALMInnerAttemptRequest:
     inner_callback: Optional[Callable[[np.ndarray], None]]
     constraint_names_tuple: Tuple[str, ...]
     constraint_blocks_tuple: Optional[Tuple[str, ...]]
-    base_bounds: Optional[object] = None
+    # The caller's base bounds as normalized (lower, upper) pairs (None: none).
+    base_bounds: Optional[List[Tuple[float, float]]] = None
     continuation_policy: ALMContinuationPolicy = DEFAULT_CONTINUATION_POLICY
 
 @dataclass(frozen=True)
@@ -116,8 +117,6 @@ class _ALMInnerAttemptEvaluator:
     request: ALMInnerAttemptRequest
     cached_x: Optional[np.ndarray] = None
     cached_evaluation: Optional[dict] = None
-    # The request's base bounds as (lower, upper) pairs, for stationarity.
-    base_bounds: Optional[List[Tuple[float, float]]] = None
     # L-BFGS-B iterations completed in the current attempt: SciPy calls
     # ``callback`` once per completed iteration.
     attempt_iterations: int = 0
@@ -148,8 +147,8 @@ class _ALMInnerAttemptEvaluator:
         base box, and snapped onto the bounds it lies within rounding of
         (:func:`_snap_onto_bounds`) unless the snap raises the total
         (:func:`_snap_keeps_total`); a moved x is evaluated there."""
-        clipped = _project_onto_bounds(x, self.base_bounds)
-        snapped = _snap_onto_bounds(x, evaluation["grad"], self.base_bounds)
+        clipped = _project_onto_bounds(x, self.request.base_bounds)
+        snapped = _snap_onto_bounds(x, evaluation["grad"], self.request.base_bounds)
         if not np.array_equal(snapped, clipped):
             snapped_evaluation = self.evaluation_at(snapped)
             if _snap_keeps_total(evaluation, snapped_evaluation):
@@ -188,7 +187,7 @@ class _ALMInnerAttemptEvaluator:
             self.request.effective_feasibility_tol,
         )
         callback_stationarity_norm = _bound_reduced_stationarity_norm(
-            evaluation, inner_x_arr, self.base_bounds
+            evaluation, inner_x_arr, self.request.base_bounds
         )
         if callback_routing_state.signal_state.explicit_hybrid_signals:
             if _dual_update_gate_satisfied(
@@ -557,10 +556,7 @@ def _build_box_bounds(
     return _intersect_bounds(trust_bounds, normalized_base_bounds)
 
 def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptResult:
-    evaluator = _ALMInnerAttemptEvaluator(
-        request,
-        base_bounds=_normalize_base_bounds(request.base_bounds, request.x.size),
-    )
+    evaluator = _ALMInnerAttemptEvaluator(request)
     accepted_result = None
     accepted_eval = None
     accepted_x = None
@@ -723,23 +719,17 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
                 attempt_radius = retry_radius
                 trust_radius = float(attempt_radius)
                 continue
+        if infeasible_inner_stall or not smaller_box_left:
+            # Keep the start iterate: a stall the policy does not retry forces
+            # a penalty cycle; otherwise no step is usable (rejected, flagged,
+            # or a higher total) and the stall flags stay (False, None, False).
             accepted_result = result
             accepted_eval = request.current_eval
             accepted_x = request.x.copy()
             accepted_bounds = attempt_bounds
-            forced_infeasible_penalty_cycle = True
+            forced_infeasible_penalty_cycle = infeasible_inner_stall
             forced_infeasible_penalty_reason = inner_stall_reason
             forced_inner_false_success = bool(inner_false_success)
-            if attempt_radius is not None:
-                trust_radius = float(attempt_radius)
-            break
-        if not smaller_box_left:
-            # No usable step (rejected, flagged, or a higher total): keep the
-            # start iterate.
-            accepted_result = result
-            accepted_eval = request.current_eval
-            accepted_x = request.x.copy()
-            accepted_bounds = attempt_bounds
             if attempt_radius is not None:
                 trust_radius = float(attempt_radius)
             break

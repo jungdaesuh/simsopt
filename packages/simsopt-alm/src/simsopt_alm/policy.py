@@ -102,16 +102,7 @@ class DefaultContinuationPolicy:
             # outer loop continues (a later dual update may unclamp).
             and not view.last_cap_binding_active
         ):
-            return ALMConverge(
-                action="converged",
-                termination_reason="converged",
-                message=(
-                    "ALM converged: "
-                    f"max_violation={start.max_feasibility_violation:.3e}, "
-                    f"stationarity={start.stationarity_norm:.3e}"
-                ),
-                feasible_stall_count=view.feasible_stall_count,
-            )
+            return _converged(start, view.feasible_stall_count)
         return None
 
     def after_inner(self, view: ALMPostInnerView) -> ALMStepDecision:
@@ -125,25 +116,17 @@ class DefaultContinuationPolicy:
         constraints_inactive = _constraints_inactive_candidate(
             measured, settings.feasibility_tol
         )
+        kkt_point = _kkt_point(measured, settings)
         if (
-            _kkt_point(measured, settings)
+            kkt_point
             and not constraints_inactive
             # A clamped dual update holds the KKT residual small.
             and not view.last_cap_binding_active
         ):
-            return ALMConverge(
-                action="converged",
-                termination_reason="converged",
-                message=(
-                    "ALM converged: "
-                    f"max_violation={measured.max_feasibility_violation:.3e}, "
-                    f"stationarity={measured.stationarity_norm:.3e}"
-                ),
-                feasible_stall_count=view.feasible_stall_count,
-            )
+            return _converged(measured, view.feasible_stall_count)
         if constraints_inactive:
             # The same cap guard applies to the constraints-inactive arm.
-            if _kkt_point(measured, settings) and not view.last_cap_binding_active:
+            if kkt_point and not view.last_cap_binding_active:
                 return ALMConverge(
                     action="constraints_inactive_converged",
                     termination_reason="constraints_inactive_converged",
@@ -232,6 +215,20 @@ class DefaultContinuationPolicy:
 
 
 DEFAULT_CONTINUATION_POLICY = DefaultContinuationPolicy()
+
+
+def _converged(measured: ALMIterateMeasurement, feasible_stall_count: int) -> ALMConverge:
+    """The plain convergence decision at ``measured``."""
+    return ALMConverge(
+        action="converged",
+        termination_reason="converged",
+        message=(
+            "ALM converged: "
+            f"max_violation={measured.max_feasibility_violation:.3e}, "
+            f"stationarity={measured.stationarity_norm:.3e}"
+        ),
+        feasible_stall_count=feasible_stall_count,
+    )
 
 # After two consecutive feasible-but-no-progress outer updates, treat the run as
 # plateaued and stop burning boxed continuation cycles.
@@ -362,6 +359,16 @@ def _positive_alm_value(name: str, value) -> float:
     return value_f
 
 
+# The caller's L-BFGS-B options validated, in this order: (key, parser,
+# whether None passes unchecked).
+_INNER_OPTION_RULES = (
+    ("maxiter", _positive_alm_integer, False),
+    ("maxfun", _positive_alm_integer, True),
+    ("ftol", _positive_alm_value, False),
+    ("gtol", _positive_alm_value, False),
+)
+
+
 def _staged_inner_options(
     inner_options: Mapping[str, object],
     update_stationarity_tol: float,
@@ -372,20 +379,9 @@ def _staged_inner_options(
     ``min(1e-4, 0.1 * update_stationarity_tol)``, so an inner solve stops near
     the outer stationarity target; ``maxls`` defaults to ``default_maxls``."""
     options = dict(inner_options)
-    if "maxiter" in options:
-        options["maxiter"] = _positive_alm_integer(
-            "inner_options.maxiter",
-            options["maxiter"],
-        )
-    if "maxfun" in options and options["maxfun"] is not None:
-        options["maxfun"] = _positive_alm_integer(
-            "inner_options.maxfun",
-            options["maxfun"],
-        )
-    if "ftol" in options:
-        options["ftol"] = _positive_alm_value("inner_options.ftol", options["ftol"])
-    if "gtol" in options:
-        options["gtol"] = _positive_alm_value("inner_options.gtol", options["gtol"])
+    for key, parse, none_passes in _INNER_OPTION_RULES:
+        if key in options and not (none_passes and options[key] is None):
+            options[key] = parse(f"inner_options.{key}", options[key])
 
     base_gtol = float(options.get("gtol", 1e-12))
     staged_gtol = max(

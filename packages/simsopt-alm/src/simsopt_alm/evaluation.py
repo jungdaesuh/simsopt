@@ -27,7 +27,7 @@ from .core import (
     _bound_reduced_stationarity_norm,
     _constraint_routing_state,
     _extract_constraint_state,
-    _stationarity_metrics,
+    _routed_kkt_stationarity_norm,
 )
 from .events import _require_acyclic_containers
 
@@ -362,12 +362,9 @@ def _measure_iterate(
         penalty,
         effective_feasibility_tol,
     )
-    (
-        stationarity_norm,
-        kkt_stationarity_norm,
-        signal_mismatch_active,
-    ) = _stationarity_metrics(evaluation, routing_state, effective_feasibility_tol)
-    stationarity_norm = _bound_reduced_stationarity_norm(evaluation, x, base_bounds)
+    kkt_stationarity_norm = _routed_kkt_stationarity_norm(
+        evaluation, routing_state, effective_feasibility_tol
+    )
     return ALMIterateMeasurement(
         evaluation=evaluation,
         multipliers=multipliers,
@@ -376,9 +373,9 @@ def _measure_iterate(
         feasibility_values=feasibility_values,
         max_feasibility_violation=max_feasibility_violation,
         routing_state=routing_state,
-        stationarity_norm=stationarity_norm,
+        stationarity_norm=_bound_reduced_stationarity_norm(evaluation, x, base_bounds),
         kkt_stationarity_norm=kkt_stationarity_norm,
-        signal_mismatch_active=signal_mismatch_active,
+        signal_mismatch_active=routing_state.signal_mismatch_active,
         update_feasibility_tol=update_feasibility_tol,
         update_stationarity_tol=update_stationarity_tol,
         effective_feasibility_tol=effective_feasibility_tol,

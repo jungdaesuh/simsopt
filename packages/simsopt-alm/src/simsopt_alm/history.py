@@ -52,19 +52,6 @@ def _optional_float_array(evaluation: dict, key: str, fallback) -> Optional[np.n
     return np.asarray(values, dtype=float).reshape(-1).copy()
 
 
-def _explicit_raw_signed_constraint_values(evaluation: dict) -> Optional[np.ndarray]:
-    raw_constraint_values = _optional_float_array(
-        evaluation, "raw_constraint_values", None
-    )
-    if raw_constraint_values is not None:
-        return raw_constraint_values
-    return _optional_float_array(
-        evaluation,
-        "raw_surrogate_signed_constraint_values",
-        None,
-    )
-
-
 def _optional_string_list(evaluation: dict, key: str) -> Optional[List[str]]:
     values = evaluation.get(key)
     if values is None:
@@ -199,8 +186,7 @@ def _history_entry_from_event(event: ALMOuterStepEvent) -> dict:
     entry.update(_conditioning_metrics(measured.evaluation))
     if event.inner is not None:
         entry["sufficient_decrease_measure"] = event.inner.sufficient_decrease_measure
-    _attach_alm_history_diagnostics(
-        entry,
+    entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = _constraint_history_diagnostics_source(
         measured.evaluation,
         measured.multipliers,
         measured.penalty,
@@ -541,8 +527,7 @@ def _refresh_alm_history_for_penalty_update(
     )
     entry["stationarity_tolerance"] = float(updated_state.update_stationarity_tol)
     entry.update(_conditioning_metrics(updated_state.evaluation))
-    _attach_alm_history_diagnostics(
-        entry,
+    entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = _constraint_history_diagnostics_source(
         updated_state.evaluation,
         updated_state.multipliers,
         updated_state.penalty,
@@ -551,29 +536,6 @@ def _refresh_alm_history_for_penalty_update(
         updated_state.feasibility_values,
         routing_state,
         updated_state.effective_feasibility_tol,
-    )
-
-
-def _attach_alm_history_diagnostics(
-    entry: dict,
-    evaluation: dict,
-    multipliers_state: np.ndarray,
-    penalty_state,
-    constraint_names: Sequence[str],
-    solver_values: np.ndarray,
-    feasibility_state: np.ndarray,
-    routing_state: ALMConstraintRoutingState,
-    feasibility_gate: float,
-) -> None:
-    entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = _constraint_history_diagnostics_source(
-        evaluation,
-        multipliers_state,
-        penalty_state,
-        constraint_names,
-        solver_values,
-        feasibility_state,
-        routing_state,
-        feasibility_gate,
     )
 
 
@@ -607,8 +569,10 @@ def _constraint_history_diagnostics_source(
     return {
         "constraint_names": [str(name) for name in constraint_names],
         "feasibility_values": feasibility_array,
-        "raw_signed_constraint_values": _explicit_raw_signed_constraint_values(
-            evaluation
+        "raw_signed_constraint_values": _optional_float_array(
+            evaluation,
+            "raw_constraint_values",
+            evaluation.get("raw_surrogate_signed_constraint_values"),
         ),
         "normalized_signed_constraint_values": _optional_float_array(
             evaluation,
@@ -725,30 +689,6 @@ def _constraint_history_diagnostics_from_source(source: dict) -> dict:
         "max_raw_hard_violation": raw_hard_max_violation,
         **block_diagnostics,
     }
-
-
-def _constraint_history_diagnostics(
-    evaluation: dict,
-    multipliers: np.ndarray,
-    penalty,
-    constraint_names: Sequence[str],
-    solver_constraint_values: np.ndarray,
-    feasibility_values: np.ndarray,
-    routing_state: ALMConstraintRoutingState,
-    feasibility_gate: float,
-) -> dict:
-    return _constraint_history_diagnostics_from_source(
-        _constraint_history_diagnostics_source(
-            evaluation,
-            multipliers,
-            penalty,
-            constraint_names,
-            solver_constraint_values,
-            feasibility_values,
-            routing_state,
-            feasibility_gate,
-        )
-    )
 
 
 def _constraint_label_history_diagnostics(
