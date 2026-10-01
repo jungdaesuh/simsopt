@@ -416,11 +416,6 @@ _BOOZER_EXACT_REPORTING_RESULT_KEYS = frozenset(
         "message",
     }
 )
-_EXACT_NEWTON_OBSERVER_REPORTING_KEYS = (
-    "exact_newton_execution_observer_bearing",
-    "exact_newton_residual_evaluation_count",
-    "exact_newton_linear_operator_application_count",
-)
 _EXACT_NEWTON_VARIANT_TELEMETRY_KEYS = (
     "exact_newton_variant_dense_linearization_used",
     "exact_newton_variant_linear_solve_attempt_count",
@@ -3672,7 +3667,7 @@ def _traceable_lu_piv_or_dummy(matrix, *, finite):
 
 
 def _exact_newton_reporting_fields(result):
-    fields = {
+    return {
         "message": result.get("message"),
         "failure_category": result.get("failure_category"),
         "failure_stage": result.get("failure_stage"),
@@ -3681,16 +3676,6 @@ def _exact_newton_reporting_fields(result):
         "dense_jacobian_bytes": result.get("dense_jacobian_bytes"),
         "max_dense_jacobian_bytes": result.get("max_dense_jacobian_bytes"),
     }
-    observer_bearing = result.get("exact_newton_execution_observer_bearing")
-    if observer_bearing is not None:
-        fields.update(
-            {
-                key: result[key]
-                for key in _EXACT_NEWTON_OBSERVER_REPORTING_KEYS
-                if key in result
-            }
-        )
-    return fields
 
 
 def _ls_newton_objective_value_and_grad(obj_fn, x, objective_args):
@@ -7121,7 +7106,6 @@ class BoozerSurfaceJAX(Optimizable):
         for key in (
             "exact_newton_linear_residual_rel",
             "exact_refinement_correction_rel",
-            *_EXACT_NEWTON_OBSERVER_REPORTING_KEYS,
             *_EXACT_NEWTON_VARIANT_TELEMETRY_KEYS,
         ):
             if key in result and result[key] is not None:
@@ -7154,11 +7138,6 @@ class BoozerSurfaceJAX(Optimizable):
                 else None
             ),
             "max_dense_jacobian_bytes": None,
-            **{
-                key: array_result[key]
-                for key in _EXACT_NEWTON_OBSERVER_REPORTING_KEYS
-                if key in array_result
-            },
         }
         return {
             **_boozer_traceable_result_core(

@@ -79,9 +79,6 @@ def test_dense_variant_contract_is_strict_transfer_clean() -> None:
     assert int(result["exact_newton_variant_stop_reason_code"]) >= 0
     assert not bool(result["exact_newton_variant_numerical_failure"])
     assert int(result["exact_newton_variant_rollback_recompute_count"]) >= 0
-    assert "exact_newton_execution_observer_bearing" not in result
-    assert "exact_newton_residual_evaluation_count" not in result
-    assert "exact_newton_linear_operator_application_count" not in result
 
 
 @pytest.mark.parametrize("variant", [None, "", "C1", "c2", "C3", 1])

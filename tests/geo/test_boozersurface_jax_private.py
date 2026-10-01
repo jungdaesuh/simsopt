@@ -3519,7 +3519,6 @@ class TestBoozerSurfaceJAXClassPrivate:
             False,
             None,
             False,
-            False,
         )
         operator_runner = _opt._make_traceable_newton_polish_runner(
             *common_arguments,
@@ -3804,18 +3803,6 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert bool(result["success"]) is True
         assert int(result["nit"]) == 1
         np.testing.assert_allclose(np.asarray(result["x"]), np.zeros(2), atol=1e-15)
-
-    def test_traceable_matvec_counts_rearm_across_kernel_executions(self):
-        token = _opt._register_traceable_matvec_counter(3)
-        try:
-            _opt._invoke_traceable_matvec_counter(token, 0)
-            _opt._invoke_traceable_matvec_counter(token, 0)
-            _opt._invoke_traceable_matvec_counter(token, 1)
-            assert _opt.traceable_newton_matvec_counts_from_token(token) == (2, 1, 0)
-            _opt._invoke_traceable_matvec_counter(token, 0)
-            assert _opt.traceable_newton_matvec_counts_from_token(token) == (1, 0, 0)
-        finally:
-            _opt._unregister_traceable_matvec_counter(token)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME

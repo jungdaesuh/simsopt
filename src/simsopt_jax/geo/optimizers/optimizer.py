@@ -52,7 +52,6 @@ well; both paths use public JAX APIs.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import warnings
 from contextlib import contextmanager
@@ -251,9 +250,7 @@ from simsopt_jax.numerical_policy import (
     mixed_dense_ir_accuracy_policy,
 )
 from simsopt_jax.runtime.host_boundary import (
-    host_array as _host_array,
     host_bool as _host_bool,
-    host_int as _host_int,
     host_scalar as _host_scalar,
 )
 from simsopt_jax.solve.driver import (
@@ -444,8 +441,6 @@ _TRACEABLE_RUNNER_CACHE_TOKEN_ATTR = "_simsopt_traceable_runner_cache_token"
 _TRACEABLE_CALLBACK_LOCK = Lock()
 _TRACEABLE_CALLBACK_IDS = count(1)
 _TRACEABLE_CALLBACKS: dict[int, Callable[..., object]] = {}
-_TRACEABLE_MATVEC_COUNTER_IDS = count(1)
-_TRACEABLE_MATVEC_COUNTERS: dict[int, list[int]] = {}
 _TRACEABLE_RUNNER_CACHE_LOCK = Lock()
 # Explicit traceable cache tokens own semantic reuse; bare callables stay
 # isolated by object identity because their closure state is not comparable.
@@ -453,10 +448,6 @@ _TRACEABLE_LM_QR_RUNNER_CACHE = {}
 _TRACEABLE_NEWTON_POLISH_RUNNER_CACHE = {}
 _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE = {}
 _TRACEABLE_DENSE_EXACT_NEWTON_C2_RUNNER_CACHE = {}
-_TRACEABLE_NEWTON_MATVEC_COUNT_ENV = "SIMSOPT_TRACEABLE_NEWTON_MATVEC_COUNTS"
-_TRACEABLE_EXACT_NEWTON_EXECUTION_COUNT_ENV = (
-    "SIMSOPT_TRACEABLE_EXACT_NEWTON_EXECUTION_COUNTS"
-)
 _TRACEABLE_NEWTON_LINEAR_SOLVER_OPERATOR_GMRES: TraceableNewtonLinearSolver = (
     "operator_gmres"
 )
@@ -712,62 +703,6 @@ def _lookup_traceable_runner_callable(callable_ref, kind: str):
     return callable_fn
 
 
-def _env_flag_requested(name: str) -> bool:
-    value = os.environ.get(name, "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _traceable_newton_matvec_counts_requested() -> bool:
-    return _env_flag_requested(_TRACEABLE_NEWTON_MATVEC_COUNT_ENV)
-
-
-def _traceable_exact_newton_execution_counts_requested() -> bool:
-    return _env_flag_requested(_TRACEABLE_EXACT_NEWTON_EXECUTION_COUNT_ENV)
-
-
-def _register_traceable_matvec_counter(maxiter: int) -> int:
-    if maxiter <= 0:
-        return 0
-    with _TRACEABLE_CALLBACK_LOCK:
-        token = next(_TRACEABLE_MATVEC_COUNTER_IDS)
-        _TRACEABLE_MATVEC_COUNTERS[token] = [0] * int(maxiter)
-    return token
-
-
-def _unregister_traceable_matvec_counter(token: int) -> None:
-    if token == 0:
-        return
-    with _TRACEABLE_CALLBACK_LOCK:
-        _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
-
-
-def _drain_traceable_matvec_counter(
-    token: int, *, rearm: bool = False
-) -> tuple[int, ...] | None:
-    """Read a counter, optionally resetting its persistent compiled window."""
-    if token == 0:
-        return None
-    with _TRACEABLE_CALLBACK_LOCK:
-        if rearm:
-            values = _TRACEABLE_MATVEC_COUNTERS.get(token)
-            if values is not None:
-                _TRACEABLE_MATVEC_COUNTERS[token] = [0] * len(values)
-        else:
-            values = _TRACEABLE_MATVEC_COUNTERS.pop(token, None)
-    if values is None:
-        return None
-    return tuple(values)
-
-
-def _is_jax_tracer(value) -> bool:
-    return isinstance(value, jax.core.Tracer)
-
-
-def traceable_newton_matvec_counts_from_token(token: int) -> tuple[int, ...] | None:
-    """Read and rearm one opt-in compiled traceable Newton counter."""
-    return _drain_traceable_matvec_counter(token, rearm=True)
-
-
 class _StrongTraceableCallableRef:
     __slots__ = ("_callable_fn",)
 
@@ -922,15 +857,6 @@ def _invoke_traceable_lm_callback(token, x) -> None:
 def _invoke_traceable_progress_callback(token, nit, fun, grad_norm) -> None:
     callback = _lookup_traceable_callback(token, "progress")
     callback(nit, fun, grad_norm)
-
-
-def _invoke_traceable_matvec_counter(token, iteration) -> None:
-    token_value = int(np.asarray(token).reshape(()).item())
-    iteration_index = int(np.asarray(iteration).reshape(()).item())
-    with _TRACEABLE_CALLBACK_LOCK:
-        counter = _TRACEABLE_MATVEC_COUNTERS.get(token_value)
-        if counter is not None and 0 <= iteration_index < len(counter):
-            counter[iteration_index] += 1
 
 
 @dataclass(frozen=True)
@@ -3354,29 +3280,6 @@ def _gmres_solve_exact_newton_system(jvp_fn, x, rhs, *, tol):
     return dx, residual, matvec
 
 
-def _gmres_solve_exact_newton_system_counted(jvp_fn, x, rhs, *, tol):
-    """Exact-Newton GMRES with fixed-shape device execution telemetry."""
-
-    def matvec(vector):
-        return jvp_fn(x, vector)
-
-    restart, maxiter = _exact_newton_gmres_iteration_limits(rhs.shape[0])
-    dx, _, telemetry = _run_operator_gmres_counted_incremental(
-        matvec,
-        rhs,
-        tol=tol,
-        restart=restart,
-        maxiter=maxiter,
-    )
-    residual = rhs - matvec(dx)
-    telemetry = telemetry._replace(
-        linear_operator_application_count=(
-            telemetry.linear_operator_application_count + _device_int32(1, like=rhs)
-        ),
-    )
-    return dx, residual, matvec, telemetry
-
-
 def _linear_solve_status_with_relative_tolerance(
     solution,
     residual,
@@ -3766,7 +3669,6 @@ def _make_traceable_newton_polish_runner(
     materialize_hessian,
     max_dense_hessian_bytes,
     progress_callback_enabled,
-    matvec_count_enabled,
     linear_solver: TraceableNewtonLinearSolver,
 ):
     cache_key = (
@@ -3776,7 +3678,6 @@ def _make_traceable_newton_polish_runner(
         bool(materialize_hessian),
         max_dense_hessian_bytes,
         bool(progress_callback_enabled),
-        bool(matvec_count_enabled),
         linear_solver,
     )
     return _cached_traceable_runner(
@@ -3791,7 +3692,6 @@ def _make_traceable_newton_polish_runner(
             bool(materialize_hessian),
             max_dense_hessian_bytes,
             bool(progress_callback_enabled),
-            bool(matvec_count_enabled),
             linear_solver,
         ),
     )
@@ -3805,7 +3705,6 @@ def _build_traceable_newton_polish_runner(
     materialize_hessian,
     max_dense_hessian_bytes,
     progress_callback_enabled,
-    matvec_count_enabled,
     linear_solver,
 ):
     requested_materialize_hessian = materialize_hessian
@@ -3814,7 +3713,6 @@ def _build_traceable_newton_polish_runner(
         x_init,
         fn_args,
         progress_callback_token,
-        matvec_counter_token,
     ):
         objective_fn = _lookup_traceable_runner_callable(
             objective_fn_ref,
@@ -3979,15 +3877,7 @@ def _build_traceable_newton_polish_runner(
             )
 
             def matvec(v):
-                result = hvp_fn(state["x"], v) + stab_value * v
-                if matvec_count_enabled:
-                    jax.debug.callback(
-                        _invoke_traceable_matvec_counter,
-                        matvec_counter_token,
-                        state["attempted_iterations"],
-                        ordered=False,
-                    )
-                return result
+                return hvp_fn(state["x"], v) + stab_value * v
 
             def dense_lu_solve(_):
                 dx, linear_status = _solve_dense_square_operator_lu_system_with_status(
@@ -4476,35 +4366,13 @@ def _build_traceable_newton_polish_runner(
         }
 
     run_solver.__name__ = "traceable_newton_polish_run_solver"
-    if not progress_callback_enabled and not matvec_count_enabled:
+    if not progress_callback_enabled:
 
         def run_solver_without_callback(x_init, fn_args):
-            return run_solver(x_init, fn_args, 0, 0)
+            return run_solver(x_init, fn_args, 0)
 
         run_solver_without_callback.__name__ = run_solver.__name__
         return jax.jit(run_solver_without_callback)
-    if not progress_callback_enabled:
-
-        def run_solver_with_matvec_counter(
-            x_init,
-            fn_args,
-            matvec_counter_token,
-        ):
-            return run_solver(x_init, fn_args, 0, matvec_counter_token)
-
-        run_solver_with_matvec_counter.__name__ = run_solver.__name__
-        return jax.jit(run_solver_with_matvec_counter)
-    if not matvec_count_enabled:
-
-        def run_solver_with_progress_callback(
-            x_init,
-            fn_args,
-            progress_callback_token,
-        ):
-            return run_solver(x_init, fn_args, progress_callback_token, 0)
-
-        run_solver_with_progress_callback.__name__ = run_solver.__name__
-        return jax.jit(run_solver_with_progress_callback, static_argnums=(2,))
     return jax.jit(run_solver, static_argnums=(2,))
 
 
@@ -4536,7 +4404,6 @@ def newton_polish_traceable(
     The dense Hessian policy only controls final compatibility metadata.
     """
     linear_solver = _resolve_traceable_newton_linear_solver(linear_solver)
-    matvec_count_enabled = _traceable_newton_matvec_counts_requested()
     runner = _make_traceable_newton_polish_runner(
         objective_fn,
         int(maxiter),
@@ -4545,67 +4412,22 @@ def newton_polish_traceable(
         bool(materialize_hessian),
         max_dense_hessian_bytes,
         progress_callback is not None,
-        matvec_count_enabled,
         linear_solver,
     )
     progress_callback_token = _register_traceable_callback(progress_callback)
-    matvec_counter_token = (
-        _register_traceable_matvec_counter(int(maxiter)) if matvec_count_enabled else 0
-    )
     normalized_args = _normalize_solver_args(args)
     try:
-        if progress_callback_token == 0 and matvec_counter_token == 0:
-            result = runner(x0, normalized_args)
-        elif progress_callback_token == 0:
-            result = runner(x0, normalized_args, matvec_counter_token)
-        elif matvec_counter_token == 0:
-            result = runner(
-                x0,
-                normalized_args,
-                progress_callback_token,
-            )
-        else:
-            result = runner(
-                x0,
-                normalized_args,
-                progress_callback_token,
-                matvec_counter_token,
-            )
-        if progress_callback_token != 0 or matvec_counter_token != 0:
-            jax.effects_barrier()
-        if matvec_counter_token != 0 and _is_jax_tracer(result["newton_trace_active"]):
-            result = dict(result)
-            result["newton_matvec_counter_token"] = _device_int32(matvec_counter_token)
-            matvec_counter_token = 0
-        else:
-            matvec_counts = _drain_traceable_matvec_counter(matvec_counter_token)
-            matvec_counter_token = 0
-            if matvec_counts is not None:
-                result = dict(result)
-                active = _host_array(result["newton_trace_active"], dtype=bool)
-                actual = np.full(
-                    (int(maxiter),),
-                    _LINEAR_SOLVE_ITERATIONS_UNKNOWN,
-                    dtype=np.int32,
-                )
-                actual[active] = np.asarray(matvec_counts, dtype=np.int32)[active]
-                attempted = _host_int(result["newton_attempted_iterations"])
-                last_actual = (
-                    _LINEAR_SOLVE_ITERATIONS_UNKNOWN
-                    if attempted <= 0
-                    else int(actual[attempted - 1])
-                )
-                result["newton_trace_linear_solve_matvec_actual"] = jnp.asarray(
-                    actual,
-                    dtype=jnp.int32,
-                )
-                result["newton_last_linear_solve_matvec_actual"] = _device_int32(
-                    last_actual
-                )
+        if progress_callback_token == 0:
+            return runner(x0, normalized_args)
+        result = runner(
+            x0,
+            normalized_args,
+            progress_callback_token,
+        )
+        jax.effects_barrier()
         return result
     finally:
         _unregister_traceable_callback(progress_callback_token)
-        _unregister_traceable_matvec_counter(matvec_counter_token)
 
 
 def newton_exact(
@@ -4723,9 +4545,8 @@ def _make_traceable_exact_newton_runner(
     residual_fn,
     maxiter,
     tol,
-    execution_counts_enabled,
 ):
-    cache_key = (int(maxiter), float(tol), bool(execution_counts_enabled))
+    cache_key = (int(maxiter), float(tol))
     return _cached_traceable_runner(
         _TRACEABLE_EXACT_NEWTON_RUNNER_CACHE,
         residual_fn,
@@ -4734,7 +4555,6 @@ def _make_traceable_exact_newton_runner(
             residual_fn_ref,
             int(maxiter),
             float(tol),
-            bool(execution_counts_enabled),
         ),
     )
 
@@ -4926,7 +4746,6 @@ def _build_traceable_exact_newton_runner(
     residual_fn_ref,
     maxiter,
     tol,
-    execution_counts_enabled,
 ):
     def run_solver(x_init, fn_args):
         residual_fn = _lookup_traceable_runner_callable(
@@ -4976,28 +4795,12 @@ def _build_traceable_exact_newton_runner(
                 jnp.minimum(eisenstat_walker_tol, strict_cap_tol),
                 eisenstat_walker_tol,
             )
-            if execution_counts_enabled:
-                (
-                    dx,
-                    linear_residual,
-                    _,
-                    solve_telemetry,
-                ) = _gmres_solve_exact_newton_system_counted(
-                    jvp_fn,
-                    state["x"],
-                    state["residual"],
-                    tol=linear_tol_iteration,
-                )
-            else:
-                dx, linear_residual, _ = _gmres_solve_exact_newton_system(
-                    jvp_fn,
-                    state["x"],
-                    state["residual"],
-                    tol=linear_tol_iteration,
-                )
-                solve_telemetry = _CountedIncrementalGmresTelemetry(
-                    linear_operator_application_count=zero_count,
-                )
+            dx, linear_residual, _ = _gmres_solve_exact_newton_system(
+                jvp_fn,
+                state["x"],
+                state["residual"],
+                tol=linear_tol_iteration,
+            )
             linear_residual_norm = jnp.linalg.norm(linear_residual)
             linear_residual_rel = _relative_residual_norm(
                 linear_residual,
@@ -5005,28 +4808,12 @@ def _build_traceable_exact_newton_runner(
             )
 
             def add_correction(current_dx):
-                if execution_counts_enabled:
-                    (
-                        correction,
-                        _,
-                        _,
-                        correction_telemetry,
-                    ) = _gmres_solve_exact_newton_system_counted(
-                        jvp_fn,
-                        state["x"],
-                        linear_residual,
-                        tol=linear_tol_iteration,
-                    )
-                else:
-                    correction, _, _ = _gmres_solve_exact_newton_system(
-                        jvp_fn,
-                        state["x"],
-                        linear_residual,
-                        tol=linear_tol_iteration,
-                    )
-                    correction_telemetry = _CountedIncrementalGmresTelemetry(
-                        linear_operator_application_count=zero_count,
-                    )
+                correction, _, _ = _gmres_solve_exact_newton_system(
+                    jvp_fn,
+                    state["x"],
+                    linear_residual,
+                    tol=linear_tol_iteration,
+                )
                 correction_rel = jnp.linalg.norm(correction) / jnp.maximum(
                     jnp.linalg.norm(current_dx),
                     _device_scalar(
@@ -5047,17 +4834,15 @@ def _build_traceable_exact_newton_runner(
                         correction_rel,
                         _device_scalar(jnp.nan, dtype=current_dx.dtype),
                     ),
-                    correction_telemetry.linear_operator_application_count,
                 )
 
-            dx, correction_rel, correction_operator_applications = lax.cond(
+            dx, correction_rel = lax.cond(
                 jnp.all(jnp.isfinite(dx))
                 & (linear_residual_norm > linear_tol_iteration),
                 add_correction,
                 lambda current_dx: (
                     current_dx,
                     _device_scalar(0.0, dtype=current_dx.dtype),
-                    zero_count,
                 ),
                 dx,
             )
@@ -5101,24 +4886,6 @@ def _build_traceable_exact_newton_runner(
                     state["exact_refinement_correction_rel"],
                 ),
             }
-            if execution_counts_enabled:
-                iteration_operator_applications = (
-                    solve_telemetry.linear_operator_application_count
-                    + correction_operator_applications
-                )
-                next_state.update(
-                    {
-                        "exact_newton_linear_operator_application_count": (
-                            state["exact_newton_linear_operator_application_count"]
-                            + iteration_operator_applications
-                        ),
-                        "exact_newton_residual_evaluation_count": (
-                            state["exact_newton_residual_evaluation_count"]
-                            + iteration_operator_applications
-                            + candidate["iteration"]
-                        ),
-                    }
-                )
             return next_state
 
         state = lax.while_loop(
@@ -5140,17 +4907,6 @@ def _build_traceable_exact_newton_runner(
                     jnp.nan,
                     dtype=dtype,
                 ),
-                **(
-                    {
-                        "exact_newton_residual_evaluation_count": _device_int32(
-                            1,
-                            like=x_init,
-                        ),
-                        "exact_newton_linear_operator_application_count": zero_count,
-                    }
-                    if execution_counts_enabled
-                    else {}
-                ),
             },
         )
         result = {
@@ -5163,22 +4919,6 @@ def _build_traceable_exact_newton_runner(
             ],
             "exact_refinement_correction_rel": state["exact_refinement_correction_rel"],
         }
-        if execution_counts_enabled:
-            result.update(
-                {
-                    "exact_newton_residual_evaluation_count": state[
-                        "exact_newton_residual_evaluation_count"
-                    ],
-                    "exact_newton_linear_operator_application_count": state[
-                        "exact_newton_linear_operator_application_count"
-                    ],
-                    "exact_newton_execution_observer_bearing": _staged_like(
-                        x_init,
-                        True,
-                        dtype=jnp.bool_,
-                    ),
-                }
-            )
         return result
 
     run_solver.__name__ = "traceable_exact_newton_run_solver"
@@ -5495,13 +5235,11 @@ def newton_exact_traceable(
     materialize dense Jacobians. Public dense metadata belongs to
     ``newton_exact(...)`` / ``BoozerSurfaceJAX.run_code()``.
     """
-    execution_counts_enabled = _traceable_exact_newton_execution_counts_requested()
     normalized_args = _normalize_solver_args(args)
     runner = _make_traceable_exact_newton_runner(
         residual_fn,
         int(maxiter),
         float(tol),
-        execution_counts_enabled,
     )
     result = runner(x0, normalized_args)
     result["jacobian"] = None
