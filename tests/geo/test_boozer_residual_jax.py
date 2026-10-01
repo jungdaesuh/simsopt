@@ -17,21 +17,9 @@ C++ oracle tests use ``pytest.importorskip("simsoptpp")`` so this file
 remains runnable in pure-JAX environments without ``simsoptpp``.
 """
 
-import inspect
-import math
-import sys
-from pathlib import Path
-
-import pytest
-import numpy as np
-
-import jax
-import jax.numpy as jnp
-
-_TESTS_ROOT = Path(__file__).resolve().parents[1]
-if str(_TESTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TESTS_ROOT))
-from conftest import (
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
     assert_arrays_on_device,
     device_float64,
     host_array,
@@ -41,6 +29,16 @@ from conftest import (
     parity_default_device,
     parity_rng,
 )
+
+import inspect
+import math
+
+import pytest
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 import simsopt_jax.geo.boozer_residual as _brj
@@ -71,7 +69,7 @@ def test_boozer_residual_jacobian_composed_avoids_dense_basis_eye():
 
 
 @pytest.fixture(autouse=True)
-def _parity_device_scope(parity_lane):
+def _parity_device_scope(jax_runtime_guard, parity_lane):
     with parity_default_device(parity_lane):
         yield
 

@@ -8,6 +8,8 @@ of evidence are never conflated.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import pytest
 from examples.jax.parity.official_quality_bands import (
     OFFICIAL_BAND_CASE_IDS,

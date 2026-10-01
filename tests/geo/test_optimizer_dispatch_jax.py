@@ -3,6 +3,8 @@
 The Boozer M1 Hessian split regression lives in ``test_boozer_residual_jax.py``.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import inspect
 from pathlib import Path
 

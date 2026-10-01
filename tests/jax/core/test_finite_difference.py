@@ -3,6 +3,8 @@
 Lane key: derivative_heavy via explicit finite-difference/JAX AD parity.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import os
 from pathlib import Path
 import subprocess

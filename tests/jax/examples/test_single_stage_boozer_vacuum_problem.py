@@ -10,6 +10,12 @@ pre-evaluation warm start restored).
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_non_strict_jax_backend,
+    parity_device,
+)
+
 import logging
 import re
 from collections import Counter
@@ -17,7 +23,6 @@ from collections import Counter
 import jax
 import numpy as np
 import pytest
-from conftest import enable_non_strict_jax_backend, parity_device
 from simsopt_jax_adapters.geo.single_stage_boozer_vacuum_problem import (
     BOUNDED_SCALE,
     NCSX_INITIAL_IOTA,
@@ -41,7 +46,7 @@ _ALLOWED_CONSTRUCTION_COMPILES = frozenset(
 
 
 @pytest.fixture(params=("cpu", "gpu"), autouse=True)
-def problem_backend(monkeypatch, request):
+def problem_backend(jax_runtime_guard, monkeypatch, request):
     device = parity_device(request.param)
     enable_non_strict_jax_backend(monkeypatch, request, f"jax_{request.param}_parity")
     with jax.default_device(device):

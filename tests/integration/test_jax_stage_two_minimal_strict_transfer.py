@@ -10,6 +10,8 @@ guard is its teeth: under the default driver this test cannot pass.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from pathlib import Path
 
 import jax

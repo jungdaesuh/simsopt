@@ -1,3 +1,8 @@
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_strict_parity_backend,
+)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -8,8 +13,6 @@ from simsopt_jax.solve import (
     ScipyBFGSOptions,
     SimsoptBFGSOptions,
 )
-
-from conftest import enable_strict_parity_backend
 
 
 def test_scipy_driver_passes_host_numpy_array_to_value_grad():
@@ -37,7 +40,7 @@ def test_simsopt_bfgs_uses_explicit_value_grad_under_strict_transfer_guard(
 ):
     # Strict parity on this process's own JAX platform, with the guard carried
     # by the backend config: a CPU parity mode is refused in a GPU-default
-    # process, and the conftest helper pins the GPU determinism flag the
+    # process, and the jax_test_support helper pins the GPU determinism flag the
     # strict GPU mode requires.
     monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
     enable_strict_parity_backend(

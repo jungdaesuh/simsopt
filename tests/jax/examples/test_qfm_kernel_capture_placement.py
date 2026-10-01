@@ -23,6 +23,8 @@ and ``tests/geo/test_captured_coil_spec_placement.py``.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from typing import Callable
 
 import jax

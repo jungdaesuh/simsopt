@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import os
 
 import pytest
@@ -28,7 +30,7 @@ def _policy(mode: str, *, precision=None):
 
 
 @pytest.fixture(autouse=True)
-def _clear_precision_environment(monkeypatch: pytest.MonkeyPatch):
+def _clear_precision_environment(jax_runtime_guard, monkeypatch: pytest.MonkeyPatch):
     for name in (
         "SIMSOPT_BACKEND_MODE",
         "SIMSOPT_BACKEND",

@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_non_strict_jax_backend,
+    parity_device,
+)
+
 import math
 from dataclasses import replace
 from functools import reduce
@@ -12,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import enable_non_strict_jax_backend, parity_device
 from jax.scipy.linalg import lu_factor, lu_solve
 from simsopt.configs import get_data
 from simsopt.field import BiotSavart
@@ -62,7 +67,7 @@ UNIT_ROUNDOFF = 2.0**-53
 
 
 @pytest.fixture(params=("cpu", "gpu"), autouse=True)
-def analytic_backend(monkeypatch, request):
+def analytic_backend(jax_runtime_guard, monkeypatch, request):
     device = parity_device(request.param)
     enable_non_strict_jax_backend(monkeypatch, request, f"jax_{request.param}_parity")
     with jax.default_device(device):

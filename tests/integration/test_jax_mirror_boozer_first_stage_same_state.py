@@ -21,6 +21,14 @@ one constant: XLA compiles the lane's ``1/sqrt`` to ``rsqrt``, charged 3 u from 
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    enable_strict_parity_backend,
+    parity_default_device,
+    parity_device,
+)
+
 import hashlib
 import math
 import os
@@ -37,11 +45,6 @@ import mpmath
 import numpy as np
 import pytest
 import simsoptpp
-from conftest import (
-    enable_strict_parity_backend,
-    parity_default_device,
-    parity_device,
-)
 from examples.jax.parity.cases.native_boozer import _problem, _scale_configuration
 from examples.jax.parity.official_reference import load_upstream_scatter
 from simsopt.field import BiotSavart

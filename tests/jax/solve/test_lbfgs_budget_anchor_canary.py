@@ -19,6 +19,8 @@ defaulted, so a gate keyed on any field is keyed on a measurement.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import json
 import time
 from typing import NamedTuple

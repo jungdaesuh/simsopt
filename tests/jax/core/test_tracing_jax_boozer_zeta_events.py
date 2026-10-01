@@ -30,6 +30,8 @@ The parity-ladder lane is ``event_time_tracing``.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from pathlib import Path
 
 import jax.numpy as jnp

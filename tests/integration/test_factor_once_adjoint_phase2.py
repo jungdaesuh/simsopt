@@ -26,6 +26,8 @@ on-device LS path that requires the simsoptpp-backed editable install.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import os
 from pathlib import Path
 import subprocess

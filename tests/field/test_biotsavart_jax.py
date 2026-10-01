@@ -7,11 +7,15 @@ Validates against:
 3. C++ reference (when simsoptpp is available).
 """
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    parity_acceptance_modes,
+    parity_mode_case,
+)
+
 import inspect
 from contextlib import contextmanager
 import os
-from pathlib import Path
-import sys
 import types
 
 import pytest
@@ -23,10 +27,6 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-_TESTS_ROOT = Path(__file__).resolve().parents[1]
-if str(_TESTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TESTS_ROOT))
-from conftest import parity_acceptance_modes, parity_mode_case
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 from simsopt_jax import core

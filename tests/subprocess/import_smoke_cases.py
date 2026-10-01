@@ -13,6 +13,8 @@ from __future__ import annotations
 import ast
 import importlib.abc
 import json
+import os
+import runpy
 import sys
 from pathlib import Path
 
@@ -203,22 +205,44 @@ def case_import_package_root_with_generated_version_file() -> None:
         assert simsopt.__built_with_xsimd__ is False
 
 
-def case_root_conftest_imports_without_jax_installed() -> None:
-    import runpy
+_JAX_RUNTIME_PACKAGES = frozenset(
+    {"jax", "simsopt", "simsopt_jax", "simsopt_jax_adapters"}
+)
 
-    block_jax_imports(
-        message="blocked jax import for smoke test",
-        error_cls=ModuleNotFoundError,
+
+def _loaded_jax_runtime_packages() -> list[str]:
+    return sorted(
+        name for name in sys.modules if name.partition(".")[0] in _JAX_RUNTIME_PACKAGES
     )
 
-    conftest_path = Path.cwd() / "tests" / "conftest.py"
-    module_globals = runpy.run_path(
-        str(conftest_path), run_name="simsopt_tests_conftest"
+
+def case_root_conftest_import_leaves_jax_runtime_alone() -> None:
+    """The root conftest imports no JAX or simsopt module and keeps ``XLA_FLAGS``."""
+    assert _loaded_jax_runtime_packages() == []
+    xla_flags = os.environ.get("XLA_FLAGS")
+
+    runpy.run_path(
+        str(_REPO_ROOT / "tests" / "conftest.py"), run_name="simsopt_tests_conftest"
     )
 
-    assert module_globals["jax"] is None
-    parity_rng = module_globals["parity_rng"]
-    assert parity_rng(3).randint(0, 1000) == parity_rng(3).randint(0, 1000)
+    assert _loaded_jax_runtime_packages() == []
+    assert os.environ.get("XLA_FLAGS") == xla_flags
+
+
+def case_jax_test_support_import_applies_jax_test_runtime() -> None:
+    """Importing ``jax_test_support`` pins the CUDA autotuners and forces x64."""
+    assert "jax" not in sys.modules
+    os.environ.pop("XLA_FLAGS", None)
+
+    runpy.run_path(
+        str(_REPO_ROOT / "tests" / "jax_test_support.py"), run_name="jax_test_support"
+    )
+
+    runtime = sys.modules["simsopt_jax.backend.runtime"]
+    assert os.environ.get("XLA_FLAGS") == (
+        f"{runtime._GPU_FUSION_AUTOTUNER_DISABLED} {runtime._GPU_AUTOTUNE_LEVEL_PINNED}"
+    )
+    assert sys.modules["jax"].config.jax_enable_x64 is True
 
 
 def case_legacy_magneticfield_source_avoids_jax_import() -> None:

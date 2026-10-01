@@ -19,6 +19,8 @@ conversion rather than the maker.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import jax
 import numpy as np
 from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec

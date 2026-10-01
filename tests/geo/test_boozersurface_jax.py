@@ -11,6 +11,15 @@ Validates:
 7. Vector potential A correctness.
 """
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    assert_array_on_device,
+    assert_arrays_on_device,
+    enable_non_strict_jax_backend,
+    enable_strict_jax_backend,
+    parity_device,
+)
+
 import inspect
 import logging
 import sys
@@ -27,13 +36,6 @@ import scipy.linalg
 import simsopt_jax.core.biotsavart as _biotsavart_jax_core
 import simsopt_jax.geo.optimizers.reference as _opt_ref
 import simsopt_jax.solve.dispatch as _solve_jax_dispatch
-from conftest import (
-    assert_array_on_device,
-    assert_arrays_on_device,
-    enable_non_strict_jax_backend,
-    enable_strict_jax_backend,
-    parity_device,
-)
 from jax.flatten_util import ravel_pytree
 from scipy.optimize import OptimizeResult
 from simsopt.configs import get_data as get_zoo_data

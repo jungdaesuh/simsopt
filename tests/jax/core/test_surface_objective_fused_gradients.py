@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_strict_parity_backend,
+    parity_default_device,
+)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from conftest import enable_strict_parity_backend, parity_default_device
 from simsopt.field.coil import Current, coils_via_symmetries
 from simsopt.geo import SurfaceRZFourier, SurfaceXYZTensorFourier, Volume
 from simsopt.geo.curve import create_equally_spaced_curves

@@ -9,6 +9,8 @@ pin the clock and device observables an artifact driver reads off the run.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import inspect
 import json
 import os

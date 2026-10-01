@@ -1,5 +1,10 @@
 """Private optimizer runtime tests for BoozerSurfaceJAX."""
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_non_strict_jax_backend,
+)
+
 import inspect
 import types
 
@@ -24,7 +29,6 @@ from simsopt_jax.geo.optimizers.private import (
 )
 from simsopt_jax.geo.optimizers.private import _result_converters
 from simsopt_jax.geo.optimizers._shared import mark_cacheable_jit_value_and_grad
-from conftest import enable_non_strict_jax_backend
 from jax.flatten_util import ravel_pytree
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from scipy import optimize

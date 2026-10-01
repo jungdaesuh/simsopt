@@ -1,10 +1,15 @@
 """Native label, pin, and field-chain oracles for analytic Boozer operators."""
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_non_strict_jax_backend,
+    parity_device,
+)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import enable_non_strict_jax_backend, parity_device
 from simsopt.configs import get_data
 from simsopt.field import BiotSavart
 from simsopt.geo import (
@@ -20,7 +25,7 @@ from simsopt_jax_adapters.geo.boozer_surface import BoozerSurfaceJAX
 
 
 @pytest.fixture(params=("cpu", "gpu"), autouse=True)
-def analytic_backend(monkeypatch, request):
+def analytic_backend(jax_runtime_guard, monkeypatch, request):
     device = parity_device(request.param)
     enable_non_strict_jax_backend(monkeypatch, request, f"jax_{request.param}_parity")
     with jax.default_device(device):

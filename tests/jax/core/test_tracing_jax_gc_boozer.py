@@ -31,6 +31,11 @@ All tests run under ``JAX_PLATFORMS=cpu`` with ``JAX_ENABLE_X64=True``.
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_assert_two_rank_replay_matches,  # noqa: F401
+)
+
 from pathlib import Path
 
 import jax.numpy as jnp

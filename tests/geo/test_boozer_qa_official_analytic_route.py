@@ -18,12 +18,16 @@ the 1e-13 Newton tolerance the official run uses.
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_non_strict_jax_backend,
+)
+
 from pathlib import Path
 
 import jax
 import numpy as np
 import pytest
-from conftest import enable_non_strict_jax_backend
 from examples.jax.parity.cases.native_boozerqa import (
     BOOZER_QA_SPEC,
     _prepare_jax_variant_runtime,

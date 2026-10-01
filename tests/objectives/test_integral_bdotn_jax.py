@@ -7,9 +7,18 @@ Validates:
 3. C++ parity (when simsoptpp is available).
 """
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    device_float64,
+    host_array,
+    host_scalar,
+    parity_acceptance_tolerance,
+    parity_default_device,
+    parity_rng,
+)
+
 import math
-from pathlib import Path
-import sys
 
 import pytest
 import numpy as np
@@ -18,18 +27,6 @@ import jax
 import jax.numpy as jnp
 
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
-
-_TESTS_ROOT = Path(__file__).resolve().parents[1]
-if str(_TESTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TESTS_ROOT))
-from conftest import (
-    device_float64,
-    host_array,
-    host_scalar,
-    parity_acceptance_tolerance,
-    parity_default_device,
-    parity_rng,
-)
 
 from simsopt_jax.objectives.integral_bdotn import (
     integral_BdotN,
@@ -53,7 +50,7 @@ def _assert_documented_boundary(value, expected):
 
 
 @pytest.fixture(autouse=True)
-def _parity_device_scope(parity_lane):
+def _parity_device_scope(jax_runtime_guard, parity_lane):
     with parity_default_device(parity_lane):
         yield
 

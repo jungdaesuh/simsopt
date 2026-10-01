@@ -1,5 +1,7 @@
 """Optimizer-facade contracts for the linear-solve and Newton-merit owners."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import jax.numpy as jnp
 from simsopt_jax.geo.optimizers import linear_solve as _linear_solve
 from simsopt_jax.geo.optimizers import optimizer as _optimizer

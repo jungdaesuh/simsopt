@@ -1,5 +1,7 @@
 """Guard against weight_inv_modB default drift relative to upstream simsopt."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import inspect
 
 import pytest

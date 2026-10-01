@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass

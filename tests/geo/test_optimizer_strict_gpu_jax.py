@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_strict_parity_backend,
+    parity_default_device,
+)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import enable_strict_parity_backend, parity_default_device
 from simsopt_jax.geo.optimizers import optimizer as _optimizer
 from simsopt_jax.geo.optimizers.private import _bfgs as _private_bfgs
 from simsopt_jax.geo.optimizers.private import _lbfgs as _private_lbfgs

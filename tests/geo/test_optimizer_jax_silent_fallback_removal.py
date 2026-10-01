@@ -1,5 +1,7 @@
 """Regression coverage for optimizer-vector classification in the target lane."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import numpy as np
 import pytest
 

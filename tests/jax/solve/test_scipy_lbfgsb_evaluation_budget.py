@@ -9,6 +9,8 @@ restart route's callback. Every objective is a tiny analytic function driven thr
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import dataclasses
 
 import numpy as np

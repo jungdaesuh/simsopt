@@ -30,6 +30,8 @@ All tests run under ``JAX_PLATFORMS=cpu`` with ``JAX_ENABLE_X64=True``.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import numpy as np
 import pytest
 

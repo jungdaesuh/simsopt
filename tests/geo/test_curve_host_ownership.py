@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    parity_device,
+)
+
 from pathlib import Path
 from typing import Type, Union
 
@@ -9,7 +14,6 @@ import forward_roundoff_bound as fb
 import jax
 import numpy as np
 from boozer_first_stage_roundoff import INVERSE_SQRT_EXTRA_ROUNDINGS
-from conftest import parity_device
 from parity_native_cpu import run_parity_lane_child
 
 from simsopt.geo.curve import kappa_pure

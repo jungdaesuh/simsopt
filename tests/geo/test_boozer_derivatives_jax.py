@@ -9,6 +9,8 @@ Tests:
 5. Hessian symmetry and FD validation.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import pytest
 import numpy as np
 

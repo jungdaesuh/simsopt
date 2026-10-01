@@ -16,6 +16,8 @@ carries the particle straight out of the top of the interpolation box, and a
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import numpy as np
 from simsopt.field import InterpolatedField, MaxZStoppingCriterion, ToroidalField
 from simsopt.field.tracing import trace_particles as native_trace_particles

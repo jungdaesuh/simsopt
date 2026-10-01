@@ -1,3 +1,5 @@
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from simsopt_jax.core.state_tokens import make_state_token_factory
 
 

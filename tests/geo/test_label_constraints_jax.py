@@ -16,6 +16,8 @@ Tests:
 No simsoptpp dependency — all tests use pure JAX functions.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import sys
 from pathlib import Path
 

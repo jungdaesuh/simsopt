@@ -29,10 +29,16 @@ tolerance several orders of magnitude above the observed noise floor
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    host_array,
+    parity_default_device,
+    parity_rng,
+)
+
 import numpy as np
 import pytest
-
-from conftest import host_array, parity_default_device, parity_rng
 
 from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curveplanarfourier import CurvePlanarFourier
@@ -56,11 +62,11 @@ _DERIV_RTOL = 1e-9
 
 
 @pytest.fixture(autouse=True)
-def _parity_device_scope(parity_lane):
+def _parity_device_scope(jax_runtime_guard, parity_lane):
     """Run every test in this module under the parametrized cpu/gpu lane.
 
     GPU is skipped cleanly by ``parity_default_device`` when no CUDA device
-    is present (see ``tests/conftest.py:_parity_device_for_lane``); this wave
+    is present (see ``tests/jax_test_support.py:_parity_device_for_lane``); this wave
     runs CPU-only, so the gpu-lane instance of every test is expected to skip.
     """
     with parity_default_device(parity_lane):

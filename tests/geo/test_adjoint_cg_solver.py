@@ -8,6 +8,8 @@ The opt-in dense-LU exact-adjoint (``SIMSOPT_EXACT_ADJOINT_DENSE_LU=1``): direct
    (flag-and-transpose only), and the numerical-singularity fail-closed guard.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import dataclasses
 import os
 import subprocess

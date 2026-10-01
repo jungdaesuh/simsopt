@@ -17,6 +17,8 @@ return a NaN row on demand.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from types import SimpleNamespace
 
 import numpy as np

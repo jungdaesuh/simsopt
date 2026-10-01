@@ -7,6 +7,8 @@ lane changes, so both sides of every assertion are read from source.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 import inspect
 from dataclasses import asdict

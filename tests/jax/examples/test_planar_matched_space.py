@@ -17,6 +17,8 @@ if the ``s.fix_all()`` line is ever dropped again.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from contextlib import chdir
 from pathlib import Path
 

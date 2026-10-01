@@ -22,6 +22,8 @@ These tests pin the properties the lane ships with:
    while problems with different embedded constants keep their own.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import jax
 import numpy as np
 import pytest

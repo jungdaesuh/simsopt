@@ -6,6 +6,8 @@ JAX-only environment.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from types import SimpleNamespace
 
 import jax

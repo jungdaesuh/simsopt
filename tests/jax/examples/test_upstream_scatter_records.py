@@ -7,6 +7,8 @@ official script verbatim -- that the unperturbed draw reproduces the canonical o
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import copy
 import json
 

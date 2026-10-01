@@ -8,6 +8,8 @@ convergence nor failure, and a finite, decreasing objective promotes nothing.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from dataclasses import replace
 
 import numpy as np

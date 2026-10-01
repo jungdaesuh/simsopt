@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from conftest import enable_strict_parity_backend, parity_default_device
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_strict_parity_backend,
+    parity_default_device,
+)
 
 import jax
 import jax.numpy as jnp

@@ -49,6 +49,8 @@ This file is the KEEP-PATH regression: it holds if and only if the branch keeps
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import sys
 from dataclasses import dataclass
 from pathlib import Path

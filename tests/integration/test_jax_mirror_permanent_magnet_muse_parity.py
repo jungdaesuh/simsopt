@@ -15,6 +15,8 @@ pin cannot undo the pytest process team (``tests/conftest.py`` pins nothing).
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import os
 import subprocess
 import sys

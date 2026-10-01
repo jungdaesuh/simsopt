@@ -17,6 +17,8 @@ name, never by line, so edits inside an owner do not disturb the census.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 from pathlib import Path
 from typing import NamedTuple

@@ -10,6 +10,8 @@ runs ``simsopt.field.compute_fieldlines`` while the JAX lane runs the port.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 from pathlib import Path
 from types import SimpleNamespace

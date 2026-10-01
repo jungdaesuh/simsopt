@@ -1,5 +1,7 @@
 """Adapter continuation against uninterrupted Cartesian core traces."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import inspect
 import os
 import subprocess

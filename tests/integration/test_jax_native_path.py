@@ -13,6 +13,8 @@ Tests:
 5. Gradient accumulation works for shared-DOF (symmetry) coils.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import pytest
 import numpy as np
 

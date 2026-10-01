@@ -18,10 +18,16 @@ against the simsoptpp-backed CPU oracle. Tolerances come from the
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    host_array,
+    host_scalar,
+    parity_default_device,
+    parity_rng,
+)
+
 import numpy as np
 import pytest
-
-from conftest import host_array, host_scalar, parity_default_device, parity_rng
 
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
@@ -53,7 +59,7 @@ _NFP = 2
 
 
 @pytest.fixture(autouse=True)
-def _parity_device_scope():
+def _parity_device_scope(jax_runtime_guard):
     """Pin the JAX default device to the CPU parity lane.
 
     This fixture is validated on CPU only.

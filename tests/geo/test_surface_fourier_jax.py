@@ -8,6 +8,8 @@ Validates against:
 4. C++ reference (when simsoptpp is available).
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import copy
 
 import pytest

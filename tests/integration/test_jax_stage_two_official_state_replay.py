@@ -80,6 +80,8 @@ its constant that fails this file is 9.5e-10 (finite-build length weight),
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass

@@ -16,6 +16,8 @@ transfer guard, and the JIT cache contract.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import itertools
 
 import jax
@@ -31,7 +33,7 @@ CLAMPED_COMBINATIONS = list(itertools.product((False, True), repeat=3))
 
 
 @pytest.fixture(autouse=True)
-def _require_simsoptpp():
+def _require_simsoptpp(jax_runtime_guard):
     pytest.importorskip("simsoptpp")
     pytest.importorskip("simsopt")
 

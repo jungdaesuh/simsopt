@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-import sys
-from typing import NamedTuple
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    enable_strict_parity_backend,
+    parity_default_device,
+    parity_rng,
+)
 
-_TESTS_ROOT = Path(__file__).resolve().parents[1]
-if str(_TESTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TESTS_ROOT))
+from pathlib import Path
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import enable_strict_parity_backend, parity_default_device, parity_rng
 
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 from simsopt._core.optimizable import Optimizable
@@ -411,7 +413,7 @@ def _flux_kernel_value_and_grad(*, definition, normal, B, target):
 
 
 @pytest.fixture(autouse=True)
-def _strict_parity_lane(monkeypatch, request, parity_lane):
+def _strict_parity_lane(jax_runtime_guard, monkeypatch, request, parity_lane):
     enable_strict_parity_backend(monkeypatch, request, parity_lane)
     with parity_default_device(parity_lane):
         yield

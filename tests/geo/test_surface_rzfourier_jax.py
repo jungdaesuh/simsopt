@@ -1,10 +1,18 @@
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    host_array,
+    host_scalar,
+    parity_default_device,
+    parity_rng,
+)
+
 from pathlib import Path
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 import pytest
-from conftest import host_array, host_scalar, parity_default_device, parity_rng
 
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.surface import Surface
@@ -119,7 +127,7 @@ def _make_surface(*, stellsym: bool) -> SurfaceRZFourier:
 
 
 @pytest.fixture(autouse=True)
-def _parity_device_scope(parity_lane):
+def _parity_device_scope(jax_runtime_guard, parity_lane):
     with parity_default_device(parity_lane):
         yield
 

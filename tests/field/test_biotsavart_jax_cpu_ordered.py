@@ -19,6 +19,8 @@ routing path cannot silently drift while only beating production.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import numpy as np
 import pytest
 

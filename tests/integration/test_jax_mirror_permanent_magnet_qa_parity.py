@@ -24,6 +24,8 @@ file pins OpenMP; they do not need the pin, because ``native_permanent_magnet_qa
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import sys
 from collections.abc import Mapping
 from pathlib import Path

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import jax.numpy as jnp
 
 from simsopt_jax.core.boozer_fixed_state import PiecewisePolynomial1D

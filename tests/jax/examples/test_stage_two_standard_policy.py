@@ -9,6 +9,8 @@ whole point of these tests is to notice that it did.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 import inspect
 from pathlib import Path

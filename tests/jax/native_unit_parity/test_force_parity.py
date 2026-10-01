@@ -43,6 +43,12 @@ Every test runs under the ``parity_lane`` fixture, so the suite executes on GPU
 when CUDA is present and skips that lane cleanly otherwise.
 """
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    parity_default_device,
+)
+
 import numpy as np
 import pytest
 from jax import grad, jit
@@ -70,7 +76,6 @@ from simsopt.geo.curve import create_equally_spaced_curves
 import simsopt.field.force as native_force
 import simsopt_jax_adapters.field.force as jax_force
 
-from conftest import parity_default_device
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 _DERIVATIVE_HEAVY = parity_ladder_tolerances("derivative_heavy")
@@ -87,7 +92,7 @@ _FORCE_THRESHOLD_MN_PER_M = 1e-3
 
 
 @pytest.fixture(autouse=True)
-def _parity_device_scope(parity_lane):
+def _parity_device_scope(jax_runtime_guard, parity_lane):
     with parity_default_device(parity_lane):
         yield
 

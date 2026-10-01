@@ -17,6 +17,8 @@ checked below is the official CI run, which this branch does reproduce.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import os
 import subprocess
 import sys

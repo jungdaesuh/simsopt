@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_non_strict_jax_backend,
+)
+
 from pathlib import Path
 
 import pytest
-from conftest import enable_non_strict_jax_backend
 from examples.jax.parity.cases import get_case, native_boozerqa
 from examples.jax.parity.input_bundle import load_input_bundle
 from simsopt_jax.examples.single_stage_boozer_vacuum import JAX_PARITY_DRIVER_ID

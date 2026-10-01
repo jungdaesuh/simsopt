@@ -9,6 +9,8 @@ condition estimate bounds the new matrix, and the adjoint NaN-on-failure
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import jax
 import jax.scipy.linalg as jsp_linalg
 import numpy as np

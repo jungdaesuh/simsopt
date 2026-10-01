@@ -17,6 +17,8 @@ on a single wrapper.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from threading import Barrier

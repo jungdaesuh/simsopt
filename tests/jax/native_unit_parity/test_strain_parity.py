@@ -26,11 +26,17 @@ curve-shape-DOF gradients are known gaps of the JAX example, not covered here.
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    enable_strict_parity_backend,
+    parity_default_device,
+)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from conftest import enable_strict_parity_backend, parity_default_device
 
 from simsopt.configs.zoo import get_data
 from simsopt.geo import (
@@ -63,11 +69,11 @@ _WIDTH = 1.0e-3
 
 
 @pytest.fixture(autouse=True)
-def _strict_parity_lane(monkeypatch, request, parity_lane):
+def _strict_parity_lane(jax_runtime_guard, monkeypatch, request, parity_lane):
     """Make every test in this module GPU-capable via ``parity_lane``.
 
     ``parity_lane`` is parametrized ``("cpu", "gpu")`` by
-    ``tests/conftest.py``; the "gpu" case skips cleanly
+    ``tests/jax_test_support.py``; the "gpu" case skips cleanly
     (``pytest.skip("CUDA GPU not available")``) whenever no CUDA device is
     registered. The GPU lane activates automatically the moment a CUDA
     device is visible to JAX in the running environment -- it is not

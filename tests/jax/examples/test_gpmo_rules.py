@@ -10,6 +10,8 @@ own reduced configuration -- so this file runs on a clean checkout.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import numpy as np
 import pytest
 from examples.jax.parity.official_reference import load_official_reference

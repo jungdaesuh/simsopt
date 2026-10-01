@@ -15,6 +15,8 @@ workflow test applies at the initial state (``test_jax_mirror_boozer_parity.py``
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from pathlib import Path
 
 import numpy as np

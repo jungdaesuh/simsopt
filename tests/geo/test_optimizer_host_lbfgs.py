@@ -1,5 +1,7 @@
 """Focused tests for the pure host L-BFGS implementation."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from dataclasses import FrozenInstanceError
 
 import numpy as np

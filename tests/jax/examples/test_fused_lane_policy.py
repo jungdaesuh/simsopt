@@ -12,6 +12,8 @@ the policy is chosen before any physics is seen.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from typing import Any
 
 import jax

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    host_array,
+    host_scalar,
+)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import simsopt_jax.geo.optimizers.private._bfgs as _private_bfgs
-
-from conftest import host_array, host_scalar
 
 from simsopt.configs.zoo import get_data
 from simsopt.field.biotsavart import BiotSavart

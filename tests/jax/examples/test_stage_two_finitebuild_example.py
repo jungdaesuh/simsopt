@@ -15,6 +15,8 @@ test checks that the published ``solver_driver`` names it.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import importlib.util
 from pathlib import Path
 from types import ModuleType

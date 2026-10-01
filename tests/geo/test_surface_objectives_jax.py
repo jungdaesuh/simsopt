@@ -7,6 +7,16 @@ These tests exercise the pure JAX label/objective ingredients directly:
 3. Upstream-shaped ToroidalFlux CPU/JAX parity under tolerance-based checks.
 """
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    fixture_parity_lane,  # noqa: F401
+    enable_strict_parity_backend,
+    host_array,
+    host_scalar,
+    parity_default_device,
+    parity_rng,
+)
+
 import os
 from pathlib import Path
 import sys
@@ -17,13 +27,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import simsopt.geo as geo_module
-from conftest import (
-    enable_strict_parity_backend,
-    host_array,
-    host_scalar,
-    parity_default_device,
-    parity_rng,
-)
 from simsopt_jax.parity_tolerances import parity_ladder_tolerances
 
 # Add the src root so pure-JAX simsopt modules resolve from this repo

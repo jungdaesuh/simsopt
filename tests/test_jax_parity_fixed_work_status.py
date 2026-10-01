@@ -11,6 +11,8 @@ so no case can go back to ``"converged" if <scientific predicate> else
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 from pathlib import Path
 

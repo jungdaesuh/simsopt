@@ -15,6 +15,8 @@ strict-mode transfer-guard behaviour.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import numpy as np
 import pytest
 
@@ -36,7 +38,7 @@ _SHAPE_FIXTURES = [
 
 
 @pytest.fixture(autouse=True)
-def _require_simsoptpp():
+def _require_simsoptpp(jax_runtime_guard):
     pytest.importorskip("simsoptpp")
 
 

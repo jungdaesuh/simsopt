@@ -17,6 +17,8 @@ see the script start sending a finite budget where upstream has none.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 import json
 import os

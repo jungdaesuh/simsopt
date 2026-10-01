@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from jax_test_support import (
+    fixture_jax_runtime_guard,  # noqa: F401
+    enable_strict_parity_backend,
+    host_array,
+    parity_default_device,
+)
+
 import io
 from contextlib import redirect_stdout
 
@@ -9,7 +16,6 @@ import jax
 import numpy as np
 import pytest
 
-from conftest import enable_strict_parity_backend, host_array, parity_default_device
 from pm_qa_grid_fixture import GridSpec, _build_qa_grid
 from simsopt.solve.permanent_magnet_optimization import relax_and_split
 from simsopt_jax.geo.permanent_magnet_grid import PermanentMagnetGridJAX

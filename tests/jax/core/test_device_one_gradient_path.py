@@ -13,6 +13,8 @@ current gradient of a Stage-II flux lost five digits (relative error 1e-11 at
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import jax
 import jax.numpy as jnp
 import numpy as np

@@ -19,6 +19,8 @@ should live in real Python modules rather than inline ``python -c`` blobs.
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 import json
 import os
@@ -412,12 +414,21 @@ def test_import_package_root_with_generated_version_file():
     )
 
 
-def test_root_conftest_imports_without_jax_installed():
-    """Root test fixtures must not fail collection in non-JAX environments."""
+def test_root_conftest_import_leaves_jax_runtime_alone():
+    """Upstream's native tests see no JAX import or XLA_FLAGS edit from the conftest."""
     _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,
-        args=("case_root_conftest_imports_without_jax_installed",),
-        failure_message="root tests/conftest.py should import cleanly without JAX",
+        args=("case_root_conftest_import_leaves_jax_runtime_alone",),
+        failure_message="root tests/conftest.py should not touch the JAX runtime",
+    )
+
+
+def test_jax_test_support_import_applies_jax_test_runtime():
+    """JAX test modules get the XLA pins and x64 from their first import."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_jax_test_support_import_applies_jax_test_runtime",),
+        failure_message="tests/jax_test_support.py should pin XLA_FLAGS and force x64",
     )
 
 

@@ -22,6 +22,8 @@ Run one file per process (JAX x64 is process-global)::
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from pathlib import Path
 
 import numpy as np

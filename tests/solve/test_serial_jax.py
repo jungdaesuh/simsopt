@@ -3,6 +3,8 @@
 Lane key: derivative_heavy for explicit traceable Jacobian checks.
 """
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 import csv
 import inspect

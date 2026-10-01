@@ -57,6 +57,8 @@ and ``1 + 2^-36`` (1.5e-11) by the label value, while ``1 + 2^-34`` and
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import sys
 from dataclasses import dataclass
 from pathlib import Path

@@ -19,6 +19,8 @@ inherits those from ``sopp.Surface`` which composes the same
 
 from __future__ import annotations
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import dataclasses
 
 import jax
@@ -57,7 +59,7 @@ _ALPHA_FIXTURES = [-1, 0, 1]
 
 
 @pytest.fixture(autouse=True)
-def _require_simsoptpp():
+def _require_simsoptpp(jax_runtime_guard):
     pytest.importorskip("simsoptpp")
 
 
