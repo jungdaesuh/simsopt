@@ -31,7 +31,7 @@ jobs:
 
     env:
       BENCHMARK_ENV_NAME: jax
-      BENCHMARK_ENV_FILE: envs/jax.yml
+      BENCHMARK_ENV_PACKAGES: python=3.11 pip cmake ninja c-compiler cxx-compiler
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: log
@@ -44,12 +44,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Provision GPU parity environment from recipe
+      - name: Provision GPU parity environment
         run: |
           if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
-            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+            conda install -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           else
-            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+            conda create -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           fi
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pip install -e ".[JAX_GPU,dev]"
@@ -170,7 +170,7 @@ jobs:
     timeout-minutes: 720
     env:
       BENCHMARK_ENV_NAME: jax
-      BENCHMARK_ENV_FILE: envs/jax.yml
+      BENCHMARK_ENV_PACKAGES: python=3.11 pip cmake ninja c-compiler cxx-compiler
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
@@ -185,12 +185,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Provision strict parity environment from recipe
+      - name: Provision strict parity environment
         run: |
           if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
-            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+            conda install -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           else
-            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+            conda create -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           fi
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pip install -e ".[JAX_GPU,dev]"
@@ -241,7 +241,7 @@ jobs:
 
     env:
       BENCHMARK_ENV_NAME: jax
-      BENCHMARK_ENV_FILE: envs/jax.yml
+      BENCHMARK_ENV_PACKAGES: python=3.11 pip cmake ninja c-compiler cxx-compiler
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: log
@@ -256,12 +256,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Provision GPU full-suite environment from recipe
+      - name: Provision GPU full-suite environment
         run: |
           if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
-            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+            conda install -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           else
-            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+            conda create -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           fi
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pip install -e ".[JAX_GPU,dev]"
@@ -293,7 +293,7 @@ jobs:
     timeout-minutes: 60
     env:
       BENCHMARK_ENV_NAME: jax
-      BENCHMARK_ENV_FILE: envs/jax.yml
+      BENCHMARK_ENV_PACKAGES: python=3.11 pip cmake ninja c-compiler cxx-compiler
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
@@ -309,12 +309,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Provision GPU strict-purity environment from recipe
+      - name: Provision GPU strict-purity environment
         run: |
           if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
-            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+            conda install -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           else
-            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+            conda create -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
           fi
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pip install -e ".[JAX_GPU,dev]"

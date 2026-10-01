@@ -342,11 +342,10 @@ mpiexec -n 1 python examples/jax/3_Advanced/single_stage_optimization.py \
 
 Its manifest status is `planned` and its parity classification is
 `unsupported`, with no case ID, so `--case all-applicable` does not select it.
-It is not promoted and holds no parity claim. Promotion is blocked on the
-workflow-dispatch-only [VMEC hybrid authority
-workflow](../../.github/workflows/jax_vmec_hybrid_authority.yml) lane proving
-immutable VMEC/MPI build identity, the recorded MPI world size, and matched
-CPU and GPU slice provenance on an approved runner.
+It is not promoted and holds no parity claim. Promotion is blocked on a
+VMEC hybrid authority lane proving immutable VMEC/MPI build identity, the
+recorded MPI world size, and matched CPU and GPU slice provenance on an
+approved runner.
 
 ## Manifest schema
 

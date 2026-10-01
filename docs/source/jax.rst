@@ -16,13 +16,12 @@ target device long enough to amortize compilation and dispatch overhead.
 Install
 ~~~~~~~
 
-For CPU development, create the repository environment or install the JAX
-extra directly::
+For CPU development, install the JAX extra from the repository root, optionally
+inside a conda environment that provides the build tools::
 
-    conda env create -f envs/jax.yml
+    conda create -n jax -c conda-forge python=3.11 pip cmake ninja c-compiler cxx-compiler
     conda activate jax
 
-    # Alternative, from the repository root:
     python -m pip install -e ".[JAX,dev]"
 
 For NVIDIA GPUs, install the CUDA extra::

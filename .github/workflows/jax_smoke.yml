@@ -10,7 +10,6 @@ on:
       - 'docs/*jax*'
       - 'docs/jax*/**'
       - 'pyproject.toml'
-      - 'envs/jax.yml'
       - 'examples/jax/**'
       - 'src/simsopt/__init__.py'
       - 'src/simsopt/geo/__init__.py'
@@ -19,7 +18,6 @@ on:
       - 'src/simsoptpp/**'
       - 'tests/**'
       - 'scripts/jax_*.py'
-      - 'scripts/run_gpu_parity.sh'
   pull_request:
     branches: [master]
     paths:
@@ -29,7 +27,6 @@ on:
       - 'docs/*jax*'
       - 'docs/jax*/**'
       - 'pyproject.toml'
-      - 'envs/jax.yml'
       - 'examples/jax/**'
       - 'src/simsopt/__init__.py'
       - 'src/simsopt/geo/__init__.py'
@@ -38,7 +35,6 @@ on:
       - 'src/simsoptpp/**'
       - 'tests/**'
       - 'scripts/jax_*.py'
-      - 'scripts/run_gpu_parity.sh'
 
 jobs:
   jax-public-unit:
