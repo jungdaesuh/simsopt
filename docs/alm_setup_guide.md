@@ -298,7 +298,7 @@ and the help of each module named below.
 | `signed_upper_bound` | `simsopt_alm` | Row `objective.J() - bound` (with its gradient over the base objective's free dofs). |
 | `signed_lower_bound` | `simsopt_alm` | Row `bound - objective.J()`. |
 | `augmented_inequality_objective` | `simsopt_alm` | Builds the evaluator dict from f, grad f, g, grad g, multipliers, penalty (what `ALMPhysics.evaluation` calls). |
-| `run_directional_taylor_test` | `simsopt_alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). Its `status` is `passed`, `failed` (a ratio above the threshold) or `unavailable` (nonfinite values or no ratio checked); two or more decreasing positive steps. |
+| `run_directional_taylor_test` | `simsopt_alm` | Central differences of an evaluator's `total` along a direction, with the claimed directional derivative (`gradient_check.py` sweeps its steps per quantity). Its `status` is `passed`, `failed` (a ratio above the threshold) or `unavailable` (nonfinite values, no ratio checked, or a last error that rebounded above the floor after an exact cancellation); two or more decreasing positive steps. |
 | `ALMEvaluation` | `simsopt_alm` | TypedDict of the evaluator dict (required and optional keys). |
 | `ALMEvaluator` | `simsopt_alm` | Protocol `(x, multipliers, penalty) -> ALMEvaluation`. |
 | `ALMOuterStepEvent` | `simsopt_alm` | What `on_outer_step` receives once per continuation step. |

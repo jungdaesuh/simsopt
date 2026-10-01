@@ -44,6 +44,25 @@ def one_sided_bump(x, multipliers, penalty):
     return {"total": float(x @ x) + bump, "grad": 2.0 * x}
 
 
+def cancelling_wrong_gradient(x, multipliers, penalty):
+    """x^2 + 0.1 (x - 1) - 419430.4 (x - 1)^3 with the claimed gradient 2x: the
+    true derivative at x = 1 is 2.1, and the cubic term cancels the 0.1 error
+    exactly at the default step 2^-11 (error 0), then the error rebounds."""
+    delta = x[0] - 1.0
+    return {"total": float(x[0] ** 2 + 0.1 * delta - 419430.4 * delta ** 3), "grad": 2.0 * x}
+
+
+def crossing_right_gradient(x, multipliers, penalty):
+    """x^2 + (x - 1)^3 - 2^20 (x - 1)^5 with its exact gradient: the central
+    difference error at x = 1, h^2 - 2^20 h^4, is exactly 0 at h = 2^-10 and
+    then decreases by about 4 per halving."""
+    delta = x[0] - 1.0
+    return {
+        "total": float(x[0] ** 2 + delta ** 3 - 2.0 ** 20 * delta ** 5),
+        "grad": np.array([2.0 * x[0] + 3.0 * delta ** 2 - 5.0 * 2.0 ** 20 * delta ** 4]),
+    }
+
+
 def taylor(evaluate, **options):
     return run_directional_taylor_test(evaluate, X0, np.zeros(0), 1.0, direction=DIRECTION, **options)
 
@@ -77,6 +96,30 @@ class TaylorVerdictTests(unittest.TestCase):
         self.assertEqual(result["ratios"], [])
         self.assertGreater(result["errors"][-1], 0.05)
         self.assert_status(result, "unavailable")
+
+    def test_a_rebound_after_an_exact_cancellation_does_not_pass(self):
+        # GEO-01: the errors fall by ~4 per halving, cancel to exactly 0 at
+        # the fifth step, and rebound above the floor at the last one, whose
+        # ratio cannot be taken against 0. That rebound is unresolved
+        # evidence, never a pass.
+        result = taylor(cancelling_wrong_gradient)
+        self.assertEqual(result["errors"][-2], 0.0)
+        self.assertGreater(result["errors"][-1], 0.05)
+        self.assert_status(result, "unavailable")
+
+    def test_a_rebound_that_keeps_missing_the_claim_fails(self):
+        # More steps after the rebound: the error settles at the 0.1 the
+        # claim misses by, and the next ratio test fails.
+        steps = [0.5 ** power for power in range(7, 16)]
+        self.assert_status(taylor(cancelling_wrong_gradient, epsilons=steps), "failed")
+
+    def test_a_rebound_that_converges_again_passes(self):
+        # A right gradient whose error crosses 0 at one step: the step after
+        # the rebound checks a ratio (about 1/4) again, so it passes.
+        result = taylor(crossing_right_gradient)
+        self.assertEqual(result["errors"][3], 0.0)
+        self.assertGreater(result["errors"][4], 1.0e-10 * 2.0)
+        self.assert_status(result, "passed")
 
     def test_one_step_cannot_establish_the_ratio_test(self):
         with self.assertRaisesRegex(ValueError, "at least two"):

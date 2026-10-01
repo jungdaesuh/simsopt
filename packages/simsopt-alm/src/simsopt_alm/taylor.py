@@ -10,11 +10,13 @@ of one.
 (``ValueError`` otherwise). The result's ``status`` is ``"failed"`` when an
 error above the floor (1e-10 of max(1, |claimed derivative|)) does not fall
 by ``ratio_threshold`` from the step before; else ``"unavailable"`` when the
-evidence is not finite (base total or gradient, or a total at any step) or
-the steps checked no ratio while some error stayed above the floor; else
-``"passed"``. ``passed`` is ``status == "passed"``. The test copies each
-value it reads before the next call, so an evaluator may return a dict or
-gradient buffer it reuses.
+evidence is not finite (base total or gradient, or a total at any step), the
+steps checked no ratio while some error stayed above the floor, or the last
+step's error rebounded above the floor from one at or below it (a
+cancellation; no later ratio checked the rebound); else ``"passed"``.
+``passed`` is ``status == "passed"``. The test copies each value it reads
+before the next call, so an evaluator may return a dict or gradient buffer
+it reuses.
 """
 
 from __future__ import annotations
@@ -72,6 +74,10 @@ def _directional_taylor_result(
     central_estimates = []
     ratios = []
     ratio_failed = False
+    # An error above the floor right after one at or below it (an exact or
+    # near cancellation) has no ratio to take; it stays unresolved until the
+    # next step's ratio is checked.
+    rebound_unresolved = False
     previous_error = None
     for epsilon in taylor_epsilons:
         step = float(epsilon) * unit_direction
@@ -87,14 +93,19 @@ def _directional_taylor_result(
             ratio = float(error / previous_error)
             if error > error_floor and ratio > float(ratio_threshold):
                 ratio_failed = True
+            rebound_unresolved = False
+        elif previous_error is not None and error > error_floor:
+            rebound_unresolved = True
         ratios.append(ratio)
         previous_error = error
 
     finite_ratios = [ratio for ratio in ratios if ratio is not None]
     if ratio_failed:
         status = "failed"
-    elif not np.all(np.isfinite([directional_derivative, *central_estimates])) or (
-        not finite_ratios and max(errors) > error_floor
+    elif (
+        not np.all(np.isfinite([directional_derivative, *central_estimates]))
+        or (not finite_ratios and max(errors) > error_floor)
+        or rebound_unresolved
     ):
         status = "unavailable"
     else:

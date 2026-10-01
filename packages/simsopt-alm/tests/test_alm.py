@@ -343,7 +343,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
             "hybrid.py": 69,
             "inner.py": 794,
             "policy.py": 410,
-            "taylor.py": 190,
+            "taylor.py": 201,
         }
         for filename, budget in budgets.items():
             with self.subTest(module=filename):
@@ -381,7 +381,7 @@ class AlmLibrarySizeBudgetTests(unittest.TestCase):
             )
         )
         self.assertLessEqual(
-            line_count, 5863, f"the core package has {line_count} lines; budget is 5863"
+            line_count, 5874, f"the core package has {line_count} lines; budget is 5874"
         )
 
 
