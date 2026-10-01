@@ -1240,9 +1240,6 @@ def _pack_traceable_forward_result(
     newton_trace_certificate_gradient_dtype_bits: jax.Array | None = None,
     newton_trace_presence: Mapping[str, jax.Array | None] | None = None,
     newton_linear_solve_backend_code=None,
-    exact_newton_execution_observer_bearing=None,
-    exact_newton_residual_evaluation_count=None,
-    exact_newton_linear_operator_application_count=None,
     dense_hessian_bytes=None,
     max_dense_hessian_bytes=None,
     outer_raw_terms=None,
@@ -1362,21 +1359,6 @@ def _pack_traceable_forward_result(
             missing_bool
             if newton_last_linear_solve_success is None
             else newton_last_linear_solve_success
-        ),
-        "exact_newton_execution_observer_bearing": (
-            missing_bool
-            if exact_newton_execution_observer_bearing is None
-            else exact_newton_execution_observer_bearing
-        ),
-        "exact_newton_residual_evaluation_count": (
-            _runtime_int32_scalar(0)
-            if exact_newton_residual_evaluation_count is None
-            else exact_newton_residual_evaluation_count
-        ),
-        "exact_newton_linear_operator_application_count": (
-            _runtime_int32_scalar(0)
-            if exact_newton_linear_operator_application_count is None
-            else exact_newton_linear_operator_application_count
         ),
         "inner_penalty_residual_l2": (
             missing_float
@@ -1839,15 +1821,6 @@ def _traceable_general_forward_result(
             },
             newton_linear_solve_backend_code=solve_result.get(
                 "newton_linear_solve_backend_code"
-            ),
-            exact_newton_execution_observer_bearing=solve_result.get(
-                "exact_newton_execution_observer_bearing"
-            ),
-            exact_newton_residual_evaluation_count=solve_result.get(
-                "exact_newton_residual_evaluation_count"
-            ),
-            exact_newton_linear_operator_application_count=solve_result.get(
-                "exact_newton_linear_operator_application_count"
             ),
             dense_hessian_bytes=solve_result.get("dense_hessian_bytes"),
             max_dense_hessian_bytes=solve_result.get("max_dense_hessian_bytes"),
