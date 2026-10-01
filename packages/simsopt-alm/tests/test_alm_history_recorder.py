@@ -3,16 +3,21 @@
 The golden scenarios attach a recorder to the library ``minimize_alm``. Here
 every library call is intercepted: its events and its result are captured, and
 a fresh recorder that sees nothing but those events rebuilds the history the run
-recorded, bit for bit. The library loop owns no history code.
+recorded, bit for bit. Both sides come from the same recorder, so the rebuilt
+history is also held to the stored golden: bit for bit in the recording
+environment, entry by entry and field by field (names, in order) elsewhere for
+a scenario whose path is closed under last-bit noise. The library loop owns no
+history code.
 """
 
 import ast
+import inspect
 import subprocess
 import sys
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from unittest.mock import patch
 
 import numpy as np
@@ -27,6 +32,14 @@ if str(GOLDEN_DIR) not in sys.path:
 import alm_golden_scenarios as golden  # noqa: E402
 
 PACKAGE_ROOT = Path(alm.__file__).resolve().parent
+# Scenarios whose outcomes or path change under last-bit noise
+# (sensitivity.json): outside the recording environment their histories may
+# take other steps.
+LABEL_ONLY_SCENARIOS = frozenset(
+    name
+    for name, measured in golden.load_sensitivity()["scenarios"].items()
+    if measured["label_only"] is not None
+)
 
 
 @contextmanager
@@ -60,6 +73,21 @@ def _runs(trajectory: dict) -> List[dict]:
     return [trajectory]
 
 
+def frozen_history_difference(name: str, run_index: int, history: list) -> Optional[str]:
+    """How ``history`` (encoded) differs from run ``run_index`` of scenario
+    ``name``'s stored golden: bit for bit in the recording environment;
+    elsewhere the field names of every entry, in order, unless the scenario is
+    label-only (None: nothing to compare)."""
+    frozen = _runs(golden.load_golden(name)["trajectory"])[run_index]["history"]
+    if golden.bitwise_environment():
+        return golden.first_difference(frozen, history)
+    if name in LABEL_ONLY_SCENARIOS:
+        return None
+    return golden.first_difference(
+        [list(entry) for entry in frozen], [list(entry) for entry in history]
+    )
+
+
 class AlmHistoryRecorderTests(unittest.TestCase):
     def test_recorder_fed_only_events_rebuilds_every_recorded_history(self):
         for scenario in golden.SCENARIOS:
@@ -68,7 +96,7 @@ class AlmHistoryRecorderTests(unittest.TestCase):
                     trajectory = scenario.run()
                 recorded_runs = _runs(trajectory)
                 self.assertEqual(len(runs), len(recorded_runs))
-                for run, recorded in zip(runs, recorded_runs):
+                for run_index, (run, recorded) in enumerate(zip(runs, recorded_runs)):
                     if recorded["result"] is None:
                         # Interrupted at a checkpoint boundary: no result.
                         self.assertEqual(len(run), 2)
@@ -80,11 +108,15 @@ class AlmHistoryRecorderTests(unittest.TestCase):
                     history = ALMHistoryRecorder(settings.history_max_entries)
                     for event in events:
                         history.record(event)
+                    rebuilt = golden.encode(history.history())
+                    self.assertGreater(len(rebuilt), 0)
                     self.assertIsNone(
-                        golden.first_difference(
-                            recorded["history"], golden.encode(history.history())
-                        ),
+                        golden.first_difference(recorded["history"], rebuilt),
                         f"events alone do not rebuild '{scenario.name}' history",
+                    )
+                    self.assertIsNone(
+                        frozen_history_difference(scenario.name, run_index, rebuilt),
+                        f"'{scenario.name}' history differs from its stored golden",
                     )
 
     def test_history_callback_sees_each_entry_as_it_is_recorded(self):
@@ -109,6 +141,59 @@ class AlmHistoryRecorderTests(unittest.TestCase):
                 for index, (entry, event) in enumerate(zip(history, events))
             ],
         )
+
+
+def penalty_ramp_closed_form() -> dict:
+    """The penalty_ramp_to_cap path in closed form, per history entry
+    (outer steps 1-8). min (x0-10)^2 + (x1-1)^2 s.t. x0 - 1 <= 0 (x* = (1, 1),
+    lambda* = 18): with the row active, the subproblem at (lambda, rho) has
+    x0 = (20 + rho - lambda) / (2 + rho), x1 = 1, and a dual update gives
+    18 - lambda' = (18 - lambda) 2 / (2 + rho). The penalty goes 1 -> 10 ->
+    100 (scale 10) and stops at its cap 500. Step 1 is an early-stopped inner
+    solve (x0 ~ 7), so its values are not stated; steps 2-3 are at rho = 10,
+    lambda = 0 (x0 = 2.5); steps 4-7 dual-update at rho = 100; step 8 at
+    rho = 500 keeps its multiplier and ends feasible (x0 < 1), its inner
+    solve stopping short of the minimizer 1 - 5e-9 (x0 not stated)."""
+    multipliers = [0.0, 0.0, 0.0] + [18.0 - 18.0 / 51.0 ** k for k in range(1, 5)]
+    multipliers.append(multipliers[-1])
+    x0 = [None, 2.5, 2.5] + [1.0 + 18.0 / (51.0 ** j * 102.0) for j in range(4)] + [None]
+    return {
+        "outer_iteration": list(range(1, 9)),
+        "penalty": [10.0, 10.0, 100.0, 100.0, 100.0, 100.0, 100.0, 500.0],
+        "post_update_multipliers": multipliers,
+        "x0": x0,
+        "max_violation": [None] + [value - 1.0 for value in x0[1:-1]] + [0.0],
+    }
+
+
+# Inner solves at ftol = gtol = 1e-12 reach the closed-form subproblem
+# minimizers to about 3e-13 (measured under the Haswell, SkylakeX and
+# Sandybridge kernels); a wrong projection is off by O(1).
+CLOSED_FORM_TOLERANCE = 1e-10
+
+
+class AlmHistoryProjectionValueTests(unittest.TestCase):
+    def test_rebuilt_history_holds_the_closed_form_penalty_ramp(self):
+        settings, events = _penalty_ramp_events()
+        recorder = ALMHistoryRecorder(settings.history_max_entries)
+        for event in events:
+            recorder.record(event)
+        history = recorder.history()
+        expected = penalty_ramp_closed_form()
+        self.assertEqual([entry["outer_iteration"] for entry in history], expected["outer_iteration"])
+        self.assertEqual([entry["penalty"] for entry in history], expected["penalty"])
+        self.assertEqual([entry["constraint_names"] for entry in history], [["x0_cap"]] * 8)
+        for index, entry in enumerate(history):
+            with self.subTest(entry=index):
+                np.testing.assert_allclose(
+                    entry["post_update_multipliers"], [expected["post_update_multipliers"][index]],
+                    rtol=0.0, atol=CLOSED_FORM_TOLERANCE,
+                )
+                if expected["max_violation"][index] is not None:
+                    self.assertAlmostEqual(
+                        entry["max_violation"], expected["max_violation"][index],
+                        delta=CLOSED_FORM_TOLERANCE,
+                    )
 
 
 class AlmHistoryRecorderContractTests(unittest.TestCase):
@@ -309,7 +394,7 @@ class AlmLoopOwnsNoHistoryTests(unittest.TestCase):
         )
         self.assertNotIn(
             "history_callback",
-            alm_control.minimize_alm.__code__.co_varnames,
+            inspect.signature(alm_control.minimize_alm).parameters,
         )
 
 

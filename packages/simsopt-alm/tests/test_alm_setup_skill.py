@@ -1609,7 +1609,11 @@ class TemplateSmokeTests(unittest.TestCase):
                          [max(value, 0.0) for value in full["constraint_values"].values()])
         self.assertTrue((self.scratch / "checkpoints" / "final.pkl").exists())
         resumed = self.run_template("generic", "--smoke", "--resume", "checkpoints/outer_003.pkl")
-        for key in ("termination_reason", "outer_iterations", "inner_iterations", "multipliers", "finish"):
+        # Every field of the runner's summary (success, objective,
+        # feasibility, stationarity, restore, last iterate, finish, ...), not
+        # a chosen few.
+        self.assertEqual(list(resumed), list(full))
+        for key in full:
             with self.subTest(key=key):
                 self.assertEqual(resumed[key], full[key])
 

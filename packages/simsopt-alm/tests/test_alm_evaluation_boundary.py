@@ -103,16 +103,23 @@ def _event_record(event) -> tuple:
 
 
 def _run(reuse: bool):
+    """``(result, events kept, each event's record as it was published)``."""
     events: list = []
+    published: list = []
+
+    def on_outer_step(event):
+        events.append(event)
+        published.append(_event_record(event))
+
     result = minimize_alm(
         np.zeros(2),
         ["sum_cap", "x0_floor"],
         _Evaluator(reuse),
         ALMSettings(max_outer_iterations=8, max_subproblem_continuations=2),
         {"maxiter": 60},
-        on_outer_step=lambda event: events.append(_event_record(event)),
+        on_outer_step=on_outer_step,
     )
-    return result, events
+    return result, events, published
 
 
 class ReusedEvaluatorBuffersTests(unittest.TestCase):
@@ -142,10 +149,14 @@ class ReusedEvaluatorBuffersTests(unittest.TestCase):
         self.assertEqual(np.asarray(result.evaluation["grad"]).tolist(), [-2.0])
 
     def test_a_run_with_reused_buffers_is_the_run_with_new_arrays(self):
-        fresh_result, fresh_events = _run(reuse=False)
-        reused_result, reused_events = _run(reuse=True)
+        fresh_result, _fresh_events, fresh_published = _run(reuse=False)
+        reused_result, reused_events, reused_published = _run(reuse=True)
         self.assertTrue(fresh_result.success, fresh_result.termination_reason)
-        self.assertEqual(reused_events, fresh_events)
+        self.assertGreater(len(fresh_published), 1, "the run needs events before its last")
+        self.assertEqual(reused_published, fresh_published)
+        # Every later evaluation refilled the evaluator's buffers; an event a
+        # caller kept still holds what it held when it was published.
+        self.assertEqual([_event_record(event) for event in reused_events], reused_published)
         for name in ("x", "constraint_values", "multipliers"):
             with self.subTest(field=name):
                 self.assertEqual(
@@ -216,8 +227,14 @@ class FlaggedEvaluationTests(unittest.TestCase):
             flagged_trials.append(flagged)
             return dict(built, nonfinite_evaluation=flagged)
 
-        result = minimize_alm(np.zeros(1), ["g"], evaluate, ALMSettings(), {"maxiter": 50})
+        settings = ALMSettings()
+        result = minimize_alm(np.zeros(1), ["g"], evaluate, settings, {"maxiter": 50})
         self.assertTrue(any(flagged_trials), "no trial point was flagged")
         self.assertTrue(result.success, result.termination_reason)
         self.assertLessEqual(float(result.x[0]), 0.8)
         self.assertFalse(result.evaluation.get("nonfinite_evaluation", False))
+        # The known optimum x* = 0.5, f* = 0: converged means the augmented
+        # gradient 20 |x - 0.5| (the row's gradient is 0) is within
+        # stationarity_tol.
+        self.assertLessEqual(abs(float(result.x[0]) - 0.5), settings.stationarity_tol / 20.0)
+        self.assertLessEqual(result.objective, 10.0 * (settings.stationarity_tol / 20.0) ** 2)

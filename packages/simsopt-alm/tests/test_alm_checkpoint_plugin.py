@@ -7,11 +7,16 @@ accepts one back as ``resume_from``. The checkpoint plugin turns boundaries into
 and snapshots back into resume boundaries. Here every library call of the
 golden scenarios is intercepted: its boundaries alone rebuild every checkpoint
 the plugin wrote, bit for bit, and a snapshot round-trips through its boundary.
-The golden resume scenarios resume through the plugin.
+Both sides of that rebuild come from ``transition_snapshot``, so the rebuilt
+checkpoints are also held to the stored golden: bit for bit in the recording
+environment, field path by field path elsewhere for a scenario whose path is
+closed under last-bit noise. The golden resume scenarios resume through the
+plugin.
 """
 
 import ast
 import dataclasses
+import inspect
 import pickle
 import subprocess
 import sys
@@ -19,7 +24,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType
-from typing import List
+from typing import List, Optional
 from unittest.mock import patch
 
 import numpy as np
@@ -32,14 +37,53 @@ GOLDEN_DIR = Path(__file__).resolve().parent / "alm_golden"
 if str(GOLDEN_DIR) not in sys.path:
     sys.path.insert(0, str(GOLDEN_DIR))
 import alm_golden_scenarios as golden  # noqa: E402
+from test_alm_history_recorder import CLOSED_FORM_TOLERANCE, penalty_ramp_closed_form  # noqa: E402
 
 PACKAGE_ROOT = Path(alm.__file__).resolve().parent
+# Scenarios whose outcomes or path change under last-bit noise
+# (sensitivity.json): outside the recording environment their checkpoints may
+# hold other states.
+LABEL_ONLY_SCENARIOS = frozenset(
+    name
+    for name, measured in golden.load_sensitivity()["scenarios"].items()
+    if measured["label_only"] is not None
+)
 
 
 def _runs(trajectory: dict) -> List[dict]:
     if "resumed" in trajectory:
         return [trajectory["interrupted"], trajectory["resumed"]]
     return [trajectory]
+
+
+def _field_paths(encoded: object, path: str = "$") -> List[str]:
+    """Every dict key path of an encoded value, in order (list items as
+    ``[i]``), a None marked ``=None``: which fields are present and which are
+    None or a value."""
+    if isinstance(encoded, dict):
+        return [
+            found
+            for key, item in encoded.items()
+            for found in [f"{path}.{key}", *_field_paths(item, f"{path}.{key}")]
+        ]
+    if isinstance(encoded, list):
+        return [
+            found for index, item in enumerate(encoded) for found in _field_paths(item, f"{path}[{index}]")
+        ]
+    return [f"{path}=None"] if encoded is None else []
+
+
+def frozen_checkpoints_difference(name: str, run_index: int, checkpoints: list) -> Optional[str]:
+    """How ``checkpoints`` (encoded) differ from run ``run_index`` of scenario
+    ``name``'s stored golden: bit for bit in the recording environment;
+    elsewhere their field paths, unless the scenario is label-only (None:
+    nothing to compare)."""
+    frozen = _runs(golden.load_golden(name)["trajectory"])[run_index]["checkpoints"]
+    if golden.bitwise_environment():
+        return golden.first_difference(frozen, checkpoints)
+    if name in LABEL_ONLY_SCENARIOS:
+        return None
+    return golden.first_difference(_field_paths(frozen), _field_paths(checkpoints))
 
 
 @contextmanager
@@ -66,6 +110,40 @@ def captured_library_boundaries():
         yield runs
 
 
+class AlmCheckpointProjectionValueTests(unittest.TestCase):
+    def test_rebuilt_checkpoints_hold_the_closed_form_penalty_ramp(self):
+        with captured_library_boundaries() as runs:
+            golden.SCENARIOS_BY_NAME["penalty_ramp_to_cap"].run()
+        ((inner_options, boundaries),) = runs
+        snapshots = [alm_checkpoint.transition_snapshot(boundary, inner_options) for boundary in boundaries]
+        expected = penalty_ramp_closed_form()
+        self.assertEqual(
+            [snapshot.completed_outer_iterations for snapshot in snapshots], expected["outer_iteration"]
+        )
+        self.assertEqual([snapshot.penalty for snapshot in snapshots], expected["penalty"])
+        # Infeasible until the last boundary, which holds its iterate as the
+        # best-feasible incumbent.
+        self.assertEqual(
+            [snapshot.best_feasible is None for snapshot in snapshots], [True] * 7 + [False]
+        )
+        for index, snapshot in enumerate(snapshots):
+            with self.subTest(boundary=index):
+                self.assertEqual(snapshot.constraint_names, ("x0_cap",))
+                np.testing.assert_allclose(
+                    snapshot.multipliers, [expected["post_update_multipliers"][index]],
+                    rtol=0.0, atol=CLOSED_FORM_TOLERANCE,
+                )
+                x = np.asarray(snapshot.x, dtype=float)
+                self.assertEqual(x.shape, (2,))
+                # x1 = 1 is inside the inner solve's tolerance, not exact.
+                self.assertAlmostEqual(float(x[1]), 1.0, delta=1e-6)
+                if expected["x0"][index] is not None:
+                    self.assertAlmostEqual(float(x[0]), expected["x0"][index], delta=CLOSED_FORM_TOLERANCE)
+        self.assertLess(float(snapshots[-1].x[0]), 1.0)
+        incumbent = snapshots[-1].best_feasible
+        np.testing.assert_array_equal(incumbent.x, snapshots[-1].x)
+
+
 class AlmCheckpointFromBoundariesTests(unittest.TestCase):
     def test_boundaries_alone_rebuild_every_checkpoint(self):
         for scenario in golden.SCENARIOS:
@@ -74,7 +152,9 @@ class AlmCheckpointFromBoundariesTests(unittest.TestCase):
                     trajectory = scenario.run()
                 recorded_runs = _runs(trajectory)
                 self.assertEqual(len(runs), len(recorded_runs))
-                for (inner_options, boundaries), recorded in zip(runs, recorded_runs):
+                for run_index, ((inner_options, boundaries), recorded) in enumerate(
+                    zip(runs, recorded_runs)
+                ):
                     rebuilt = [
                         golden.encode(
                             alm_checkpoint.transition_snapshot(boundary, inner_options)
@@ -86,6 +166,11 @@ class AlmCheckpointFromBoundariesTests(unittest.TestCase):
                         difference,
                         f"boundaries do not rebuild '{scenario.name}' "
                         f"checkpoints:\n{difference}",
+                    )
+                    difference = frozen_checkpoints_difference(scenario.name, run_index, rebuilt)
+                    self.assertIsNone(
+                        difference,
+                        f"'{scenario.name}' checkpoints differ from the stored golden:\n{difference}",
                     )
 
     def test_published_and_resume_boundaries_are_read_only(self):
@@ -381,7 +466,7 @@ class AlmLoopOwnsNoCheckpointTests(unittest.TestCase):
         self.assertEqual(sorted(defined & self.CHECKPOINT_SYMBOLS), [])
 
     def test_loop_entry_point_takes_a_generic_resume_boundary(self):
-        parameters = alm_control.minimize_alm.__code__.co_varnames
+        parameters = inspect.signature(alm_control.minimize_alm).parameters
         self.assertIn("resume_from", parameters)
         self.assertIn("on_outer_boundary", parameters)
         self.assertNotIn("resume_state", parameters)

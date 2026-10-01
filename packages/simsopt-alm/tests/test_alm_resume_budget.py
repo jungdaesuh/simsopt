@@ -15,12 +15,15 @@ boundary (a remaining budget of 0). The only field allowed to differ is
 result (``None``).
 """
 
+import dataclasses
 import unittest
+from collections.abc import Mapping
 
 import numpy as np
 
 from simsopt_alm import (
     ALMPhysics,
+    ALMResult,
     ALMSettings,
     cached_alm_evaluator,
     minimize_alm,
@@ -75,22 +78,36 @@ def _boundary_record(boundary) -> tuple:
     )
 
 
+# Every public ALMResult field but the one the module docstring lets differ.
+RESUME_DIFFERING_RESULT_FIELDS = frozenset(("inner_result",))
+COMPARED_RESULT_FIELDS = tuple(
+    field.name
+    for field in dataclasses.fields(ALMResult)
+    if field.name not in RESUME_DIFFERING_RESULT_FIELDS
+)
+
+
+def _bits(value) -> object:
+    """A bit-exact, comparable record of a result value: arrays by dtype,
+    shape and bytes, floats by hex, mappings, sequences and dataclasses item
+    by item."""
+    if isinstance(value, np.ndarray):
+        return ("ndarray", value.dtype.str, value.shape, value.tobytes())
+    if isinstance(value, (float, np.floating)):
+        return ("float", float(value).hex())
+    if isinstance(value, Mapping):
+        return ("mapping", tuple((key, _bits(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_bits(item) for item in value))
+    if dataclasses.is_dataclass(value):
+        return (type(value).__name__, tuple(
+            (field.name, _bits(getattr(value, field.name))) for field in dataclasses.fields(value)
+        ))
+    return (type(value).__name__, value)
+
+
 def _result_record(result) -> dict:
-    return {
-        "x": result.x.tobytes(),
-        "success": result.success,
-        "termination_reason": result.termination_reason,
-        "message": result.message,
-        "objective": float(result.objective).hex(),
-        "constraint_values": result.constraint_values.tobytes(),
-        "max_violation": float(result.max_violation).hex(),
-        "multipliers": result.multipliers.tobytes(),
-        "penalty": float(result.penalty).hex(),
-        "stationarity_norm": float(result.stationarity_norm).hex(),
-        "nit": result.nit,
-        "outer_iterations": result.outer_iterations,
-        "restored_best_feasible": result.restored_best_feasible,
-    }
+    return {name: _bits(getattr(result, name)) for name in COMPARED_RESULT_FIELDS}
 
 
 # An infeasible start (f's unconstrained minimizer, x0 + x1 <= 2 violated): a
@@ -155,6 +172,13 @@ class ResumeContinuesTheUninterruptedRunTests(unittest.TestCase):
                     _result_record(full_result),
                     "the resumed run returned a different result",
                 )
+                if resumed_result.inner_result is not None:
+                    # A resumed process that ran an inner solve returns its
+                    # L-BFGS-B result, the uninterrupted run's last one.
+                    self.assertEqual(
+                        (resumed_result.inner_result.nit, _bits(resumed_result.inner_result.x)),
+                        (full_result.inner_result.nit, _bits(full_result.inner_result.x)),
+                    )
         return exhausted_boundaries
 
     def test_budget_spent_at_a_boundary_or_inside_an_outer(self):
