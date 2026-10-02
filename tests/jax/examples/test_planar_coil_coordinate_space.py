@@ -328,24 +328,13 @@ class _InlineNumericLiterals(ast.NodeTransformer):
         return node
 
 
-def _writes_output_only(statement: ast.stmt) -> bool:
-    """The VTK output the script writes before its first ``JF``."""
-    if _assigns("pointData")(statement):
-        return True
-    if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
-        return False
-    func = statement.value.func
-    return (isinstance(func, ast.Name) and func.id == "curves_to_vtk") or (
-        isinstance(func, ast.Attribute) and func.attr == "to_vtk"
-    )
-
 
 def _assert_native_coordinate_construction(source: str) -> None:
     """Pin geometry, fixed DOFs and object creation order before the first JF.
 
     Optimizable orders parents by creation, so term order alone cannot prove
     that the script and twin index the same physical coordinates. Every
-    statement from the surface to ``JF`` except the VTK output must match, so
+    statement from the surface to ``JF``, VTK output included, must match, so
     an added call such as ``s.unfix_all()`` is drift too.
     """
     statements = ast.parse(source).body
@@ -363,6 +352,9 @@ coils = coils_via_symmetries(base_curves, base_currents, s.nfp, True)
 bs = BiotSavart(coils)
 bs.set_points(s.gamma().reshape((-1, 3)))
 curves = [c.curve for c in coils]
+curves_to_vtk(curves, OUT_DIR + "curves_init")
+pointData = {{"B_N": np.sum(bs.B().reshape(({SURFACE_RESOLUTION}, {SURFACE_RESOLUTION}, 3)) * s.unitnormal(), axis=2)[:, :, None]}}
+s.to_vtk(OUT_DIR + "surf_init", extra_data=pointData)
 Jf = SquaredFlux(s, bs)
 Jls = [CurveLength(c) for c in base_curves]
 Jccdist = CurveCurveDistance(curves, {CC_THRESHOLD}, num_basecurves={NCOILS})
@@ -373,11 +365,7 @@ linkNum = LinkingNumber(curves)
 """
     )
     surface_at = _statement_index(statements, _assigns("s"))
-    construction = [
-        statement
-        for statement in statements[surface_at:objective_at]
-        if not _writes_output_only(statement)
-    ]
+    construction = statements[surface_at:objective_at]
     bindings = _assignments(statements[:surface_at])
     actual = _InlineNumericLiterals(bindings).visit(ast.Module(construction, []))
     assert ast.dump(actual) == ast.dump(expected), (
@@ -397,6 +385,11 @@ def test_native_script_preserves_geometry_fixed_dofs_and_construction_order() ->
         ("base_currents[0].fix_all()", ""),
         ("ncoils = 4", "ncoils = 5"),
         ("ncoils = 4", "ncoils = 4.0"),
+        (
+            'curves_to_vtk(curves, OUT_DIR + "curves_init")\npointData = {"B_N": '
+            "np.sum(bs.B().reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}",
+            'curves_to_vtk(curves, OUT_DIR + "curves_init")\npointData = s.unfix_all()',
+        ),
         ("R1 = 0.5", "R1 = 0.6"),
         ("order = 5", "order = 6"),
         (
