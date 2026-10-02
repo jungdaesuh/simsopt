@@ -2,8 +2,8 @@
 
 The bounded problems of ``examples/jax/3_Advanced/stage_two_optimization_finitebuild.py``
 and ``coil_forces.py`` are rebuilt here from the same public constructors and
-constants (the scripts are entry points, not importable modules; their scalar
-constants are read from their source and pinned below), and the shipped coil
+constants (the scripts are entry points, not importable modules; their complete
+bounded construction is compared by AST below), and the shipped coil
 forces run is executed as the runner executes it, as a fresh child process.
 """
 
@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import sysconfig
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -80,21 +81,6 @@ FIRST_LENGTH_WEIGHT = COIL_FORCES_CONSTANTS["FIRST_LENGTH_WEIGHT"]
 SECOND_LENGTH_WEIGHT = COIL_FORCES_CONSTANTS["SECOND_LENGTH_WEIGHT"]
 
 
-def _script_constants(name: str) -> dict[str, object]:
-    path = EXAMPLES / f"{name}.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    constants: dict[str, object] = {}
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and isinstance(node.value, ast.Constant)
-        ):
-            constants[node.targets[0].id] = node.value.value
-    return constants
-
-
 def _qa_surface() -> SurfaceRZFourier:
     return SurfaceRZFourier.from_vmec_input(
         TEST_DATA / "input.LandremanPaul2021_QA",
@@ -148,16 +134,15 @@ def _finite_build_problem():
             [current] * filament_count for current in base_currents
         )
     )
+    filament_curves = apply_symmetries_to_curves(base_filaments, surface.nfp, True)
+    currents = apply_symmetries_to_currents(filament_currents, surface.nfp, True)
     coils = [
         Coil(curve, current)
-        for curve, current in zip(
-            apply_symmetries_to_curves(base_filaments, surface.nfp, True),
-            apply_symmetries_to_currents(filament_currents, surface.nfp, True),
-            strict=True,
-        )
+        for curve, current in zip(filament_curves, currents, strict=True)
     ]
     field = BiotSavartJAX(coils)
     flux = SquaredFluxJAX(surface, field)
+    initial_lengths = tuple(float(CurveLength(curve).J()) for curve in base_curves)
     config = FiniteBuildStageTwoConfig(
         num_base_curves=count,
         filament_offsets=compute_filament_offsets(
@@ -167,7 +152,7 @@ def _finite_build_problem():
             gapsize_b=gap_b,
         ),
         symmetry_copies=surface.nfp * 2,
-        length_targets=tuple(float(CurveLength(curve).J()) for curve in base_curves),
+        length_targets=initial_lengths,
         length_weight=1.0e-2,
         curve_curve_minimum_distance=0.1,
         curve_curve_weight=10.0,
@@ -272,14 +257,281 @@ def _child_environment() -> dict[str, str]:
     return environment
 
 
-def test_rebuilt_problems_use_the_scripts_own_constants() -> None:
-    finite_build = _script_constants("stage_two_optimization_finitebuild")
-    coil_forces = _script_constants("coil_forces")
+def _function(module: ast.Module, name: str) -> ast.FunctionDef:
+    return next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
 
-    for name, value in FINITE_BUILD_CONSTANTS.items():
-        assert finite_build[name] == value, name
-    for name, value in COIL_FORCES_CONSTANTS.items():
-        assert coil_forces[name] == value, name
+
+def _literal_bindings(module: ast.Module) -> dict[str, ast.expr]:
+    return {
+        node.targets[0].id: node.value
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant | ast.Dict)
+    }
+
+
+def _call(scope: ast.AST, callee: str) -> ast.Call:
+    return next(
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == callee
+    )
+
+
+def _keyword(call: ast.Call, name: str) -> ast.expr:
+    return next(keyword.value for keyword in call.keywords if keyword.arg == name)
+
+
+class _BoundedConstruction(ast.NodeTransformer):
+    """Resolve literal aliases and bounded settings; preserve every other AST node.
+
+    Comparing entire bodies retains constructor arguments, wiring, loops,
+    current fixing and call order rather than a selected list of constants.
+    """
+
+    def __init__(self, module: ast.Module, surface: ast.expr) -> None:
+        self.bindings = _literal_bindings(module)
+        self.helpers = {"_qa_surface": surface}
+        for node in module.body:
+            if isinstance(node, ast.FunctionDef) and node.name in {
+                "_stage_config",
+                "_force_config",
+                "_force_stage_config",
+                "_force_terms_config",
+            }:
+                returned = node.body[-1]
+                assert isinstance(returned, ast.Return) and returned.value is not None
+                self.helpers[node.name] = returned.value
+
+    def describe(self, node: ast.AST) -> str:
+        return ast.dump(self.visit(deepcopy(node)))
+
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if isinstance(node.ctx, ast.Load):
+            bound = self.bindings.get(node.id)
+            if bound is not None:
+                return self.visit(deepcopy(bound))
+        return node
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.expr:
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Dict):
+            return next(
+                value
+                for key, value in zip(node.value.keys, node.value.values, strict=True)
+                if ast.dump(key) == ast.dump(node.slice)
+            )
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.expr:
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Name):
+            if node.func.id in self.helpers:
+                assert not node.args and not node.keywords
+                return self.visit(deepcopy(self.helpers[node.func.id]))
+            if node.func.id in {"int", "float"} and isinstance(
+                node.args[0], ast.Constant
+            ):
+                value = node.args[0].value
+                assert isinstance(value, int | float)
+                return ast.Constant(
+                    int(value) if node.func.id == "int" else float(value)
+                )
+        return node
+
+    def visit_Assign(self, node: ast.Assign) -> ast.Assign | None:
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name == "native_scale":
+                assert ast.dump(node.value) == ast.dump(
+                    ast.parse('scale == "native_default"', mode="eval").body
+                ), "bounded scale selection drift"
+                self.bindings[name] = ast.Constant(False)
+                return None
+            self.generic_visit(node)
+            if isinstance(node.value, ast.Constant | ast.Dict):
+                self.bindings[name] = node.value
+                return None
+            return node
+        self.generic_visit(node)
+        return node
+
+    def visit_IfExp(self, node: ast.IfExp) -> ast.expr:
+        node.test = self.visit(node.test)
+        if isinstance(node.test, ast.Constant) and isinstance(node.test.value, bool):
+            return self.visit(node.body if node.test.value else node.orelse)
+        self.generic_visit(node)
+        return node
+
+    def visit_Expr(self, node: ast.Expr) -> ast.Expr | None:
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return None
+        self.generic_visit(node)
+        return node
+
+
+def _assert_complete_construction(name: str, source: str) -> None:
+    script = ast.parse(source)
+    builders = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    surface_return = _function(builders, "_qa_surface").body[0]
+    assert isinstance(surface_return, ast.Return) and surface_return.value is not None
+    finite_build = name == "stage_two_optimization_finitebuild"
+    constants_name = (
+        "FINITE_BUILD_CONSTANTS" if finite_build else "COIL_FORCES_CONSTANTS"
+    )
+    constants = _literal_bindings(builders)[constants_name]
+    assert isinstance(constants, ast.Dict)
+    constant_values: dict[str, ast.expr] = {}
+    script_constants = _literal_bindings(script)
+    for key, value in zip(constants.keys, constants.values, strict=True):
+        assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+        constant_values[key.value] = value
+        assert ast.dump(script_constants[key.value]) == ast.dump(value), (
+            f"{name}.{key.value} construction drift"
+        )
+    pairs = (
+        [("_build_problem", "_finite_build_problem")]
+        if finite_build
+        else [
+            ("_build_problem", "_force_problem"),
+            ("_stage_config", "_force_stage_config"),
+            ("_force_config", "_force_terms_config"),
+        ]
+    )
+    for script_function, builder_function in pairs:
+        actual = _BoundedConstruction(script, surface_return.value).describe(
+            ast.Module(_function(script, script_function).body, [])
+        )
+        expected = _BoundedConstruction(builders, surface_return.value).describe(
+            ast.Module(_function(builders, builder_function).body, [])
+        )
+        assert actual == expected, f"{name}.{script_function} construction drift"
+
+    factories = (
+        ["make_finite_build_stage_two_objective"]
+        if finite_build
+        else ["make_force_stage_two_objective", "make_force_stage_two_length_penalty"]
+    )
+    script_solve = _function(script, "solve")
+    builder_state = _function(
+        builders, "_finite_build_state" if finite_build else "_force_state"
+    )
+    for factory in factories:
+        script_call = _call(script_solve, factory)
+        builder_call = _call(builder_state, factory)
+        actual = _BoundedConstruction(script, surface_return.value)
+        expected = _BoundedConstruction(builders, surface_return.value)
+        for scope, normalizer in ((script_solve, actual), (builder_state, expected)):
+            for statement in scope.body:
+                if (
+                    isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)
+                    and statement.targets[0].id
+                    in {"flux_objective", "stage_config", "force_config"}
+                ):
+                    normalizer.bindings[statement.targets[0].id] = statement.value
+        if not finite_build:
+            parameter = _function(builders, "build").args.args[0].arg
+            expected.bindings[parameter] = expected.bindings["stage_config"]
+        assert actual.describe(script_call) == expected.describe(builder_call), (
+            f"{name}.{factory} construction drift"
+        )
+
+    weight_inputs = (
+        [
+            (
+                _keyword(
+                    _call(script_solve, "prepare_finite_build_stage_two"),
+                    "objective_scale",
+                ),
+                _call(builder_state, "_device_scalar").args[0],
+            )
+        ]
+        if finite_build
+        else [
+            (
+                _keyword(
+                    _call(script_solve, "TraceableParametricScalarProblem"),
+                    "objective_parameter",
+                ),
+                constant_values["FIRST_LENGTH_WEIGHT"],
+            ),
+            (
+                _call(script_solve, "problem.set_objective_parameter").args[0],
+                constant_values["SECOND_LENGTH_WEIGHT"],
+            ),
+        ]
+    )
+    for script_input, builder_input in weight_inputs:
+        actual = _BoundedConstruction(script, surface_return.value)
+        expected = _BoundedConstruction(builders, surface_return.value)
+        expected.bindings["value"] = builder_input
+        scalar = _call(_function(builders, "_device_scalar"), "np.asarray")
+        assert actual.describe(_call(script_input, "np.asarray")) == expected.describe(
+            scalar
+        ), f"{name} device weight construction drift"
+
+
+@pytest.mark.parametrize("name", ["stage_two_optimization_finitebuild", "coil_forces"])
+def test_rebuilt_problems_match_complete_script_construction(name: str) -> None:
+    _assert_complete_construction(
+        name, (EXAMPLES / f"{name}.py").read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "before", "after"),
+    [
+        ("stage_two_optimization_finitebuild", "R1=0.7", "R1=0.8"),
+        (
+            "stage_two_optimization_finitebuild",
+            "length_weight=1.0e-2",
+            "length_weight=2.0e-2",
+        ),
+        (
+            "stage_two_optimization_finitebuild",
+            "rotation_order=ROTATION_ORDER",
+            "rotation_order=2",
+        ),
+        (
+            "stage_two_optimization_finitebuild",
+            "SOLVE_OBJECTIVE_SCALE = 1.0e-4",
+            "SOLVE_OBJECTIVE_SCALE = 2.0e-4",
+        ),
+        (
+            "stage_two_optimization_finitebuild",
+            "np.asarray(SOLVE_OBJECTIVE_SCALE, dtype=np.float64)",
+            "np.asarray(PUBLISHED_OBJECTIVE_SCALE, dtype=np.float64)",
+        ),
+        ("coil_forces", "R1=0.5", "R1=0.6"),
+        ("coil_forces", "length_target=17.4", "length_target=18.4"),
+        ("coil_forces", "force_weight=1.0e-2", "force_weight=2.0e-2"),
+        ("coil_forces", "base_currents[0].fix_all()", ""),
+        ("coil_forces", "FIRST_LENGTH_WEIGHT = 1.0e-3", "FIRST_LENGTH_WEIGHT = 2.0e-3"),
+        (
+            "coil_forces",
+            "np.asarray(FIRST_LENGTH_WEIGHT, dtype=np.float64)",
+            "np.asarray(SECOND_LENGTH_WEIGHT, dtype=np.float64)",
+        ),
+        (
+            "coil_forces",
+            "flux_objective = flux.traceable_objective()",
+            "flux_objective = flux.fixed_surface_flux_spec()",
+        ),
+    ],
+)
+def test_complete_construction_check_rejects_script_drift(name, before, after) -> None:
+    source = (EXAMPLES / f"{name}.py").read_text(encoding="utf-8")
+    assert source.count(before) == 1
+    with pytest.raises(AssertionError, match="construction drift"):
+        _assert_complete_construction(name, source.replace(before, after))
 
 
 def _bitwise_equal(first: jax.Array, second: jax.Array) -> bool:

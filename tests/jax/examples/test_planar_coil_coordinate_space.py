@@ -11,8 +11,8 @@ Those 121 were never an optimizable space: ``SquaredFlux`` depends on the field
 alone and never re-sets the Biot-Savart evaluation points, so a Taylor test in
 surface-only directions plateaued at 2.9911e-2 instead of vanishing while
 coil-only directions converged quadratically.  The conversion is completed now,
-and ``test_native_script_fixes_its_surface_before_building_the_objective`` fails
-if the ``s.fix_all()`` line is ever dropped or moved after the objective again.
+and the static construction check fails if either the surface or first current
+is left free, or if construction changes the coordinate order.
 The native script is read, never executed: its construction is checked against
 the twin's term by term, and the twin carries the numeric claims.
 """
@@ -308,34 +308,101 @@ def _twin_objective_terms() -> list[tuple[float, tuple[object, ...]]]:
     return _terms(returned.value, bindings, _constants(_assignments(module.body)))
 
 
-def test_native_script_fixes_its_surface_before_building_the_objective() -> None:
-    """``s.fix_all()`` precedes ``CurveSurfaceDistance(curves, s, ...)`` and ``JF``.
+class _GeometryConstants(ast.NodeTransformer):
+    def __init__(self, constants: Mapping[str, float]) -> None:
+        self.constants = constants
 
-    Without it ``CurveSurfaceDistance`` pulls the surface's coordinates into
-    ``JF.x``, where ``SquaredFlux`` owns no partial for them.
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if isinstance(node.ctx, ast.Load) and node.id in self.constants:
+            return ast.Constant(self.constants[node.id])
+        return node
+
+    def visit_Constant(self, node: ast.Constant) -> ast.Constant:
+        if type(node.value) in (int, float):
+            return ast.Constant(float(node.value))
+        return node
+
+
+def _assert_native_coordinate_construction(source: str) -> None:
+    """Pin geometry, fixed DOFs and object creation order before the first JF.
+
+    Optimizable orders parents by creation, so term order alone cannot prove
+    that the script and twin index the same physical coordinates.
     """
-    statements = _native_script_statements()
-
-    def fixes_surface(statement: ast.stmt) -> bool:
-        call = statement.value if isinstance(statement, ast.Expr) else None
-        return (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and call.func.attr == "fix_all"
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id == "s"
-        )
-
-    fixed_at = _statement_index(statements, fixes_surface)
-    distance_at = _statement_index(statements, _assigns("Jcsdist"))
+    statements = ast.parse(source).body
     objective_at = _statement_index(statements, _assigns("JF"))
-    distance = _assignments(statements[: distance_at + 1])["Jcsdist"]
+    expected = ast.parse(
+        f"""
+s = SurfaceRZFourier.from_vmec_input(filename, range="half period",
+                                    nphi={SURFACE_RESOLUTION}, ntheta={SURFACE_RESOLUTION})
+s.fix_all()
+base_curves = create_equally_spaced_planar_curves({NCOILS}, s.nfp, stellsym=True,
+                                                R0=1.0, R1=0.5, order={CURVE_ORDER})
+base_currents = [Current(1e5) for i in range({NCOILS})]
+base_currents[0].fix_all()
+coils = coils_via_symmetries(base_curves, base_currents, s.nfp, True)
+bs = BiotSavart(coils)
+bs.set_points(s.gamma().reshape((-1, 3)))
+curves = [c.curve for c in coils]
+Jf = SquaredFlux(s, bs)
+Jls = [CurveLength(c) for c in base_curves]
+Jccdist = CurveCurveDistance(curves, {CC_THRESHOLD}, num_basecurves={NCOILS})
+Jcsdist = CurveSurfaceDistance(curves, s, {CS_THRESHOLD})
+Jcs = [LpCurveCurvature(c, 2, {CURVATURE_THRESHOLD}) for c in base_curves]
+Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
+linkNum = LinkingNumber(curves)
+"""
+    )
+    names = _assignments(expected.body).keys()
+    construction = [
+        statement
+        for statement in statements[:objective_at]
+        if (
+            isinstance(statement, ast.Assign)
+            and any(_assigns(name)(statement) for name in names)
+        )
+        or (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr in {"fix_all", "set_points"}
+        )
+    ]
+    constants = _constants(_assignments(statements[:objective_at]))
+    actual = _GeometryConstants(constants).visit(ast.Module(construction, []))
+    expected = _GeometryConstants({}).visit(expected)
+    assert ast.dump(actual) == ast.dump(expected), (
+        "native coordinate construction drift"
+    )
 
-    assert fixed_at < distance_at < objective_at
-    assert isinstance(distance, ast.Call)
-    assert isinstance(distance.func, ast.Name)
-    assert distance.func.id == "CurveSurfaceDistance"
-    assert isinstance(distance.args[1], ast.Name) and distance.args[1].id == "s"
+
+def test_native_script_preserves_geometry_fixed_dofs_and_construction_order() -> None:
+    _assert_native_coordinate_construction(NATIVE_SCRIPT.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("s.fix_all()", ""),
+        ("base_currents[0].fix_all()", ""),
+        ("ncoils = 4", "ncoils = 5"),
+        ("R1 = 0.5", "R1 = 0.6"),
+        ("order = 5", "order = 6"),
+        (
+            "Jf = SquaredFlux(s, bs)\nJls = [CurveLength(c) for c in base_curves]",
+            "Jls = [CurveLength(c) for c in base_curves]\nJf = SquaredFlux(s, bs)",
+        ),
+        (
+            "Jls = [CurveLength(c) for c in base_curves]",
+            "Jls = [CurveLength(c) for c in reversed(base_curves)]",
+        ),
+    ],
+)
+def test_coordinate_construction_check_rejects_script_drift(before, after) -> None:
+    source = NATIVE_SCRIPT.read_text(encoding="utf-8")
+    assert source.count(before) == 1
+    with pytest.raises(AssertionError, match="native coordinate construction drift"):
+        _assert_native_coordinate_construction(source.replace(before, after))
 
 
 def test_native_script_objective_is_the_twins_term_by_term() -> None:
