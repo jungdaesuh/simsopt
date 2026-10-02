@@ -11,15 +11,18 @@ Those 121 were never an optimizable space: ``SquaredFlux`` depends on the field
 alone and never re-sets the Biot-Savart evaluation points, so a Taylor test in
 surface-only directions plateaued at 2.9911e-2 instead of vanishing while
 coil-only directions converged quadratically.  The conversion is completed now,
-and ``test_native_script_optimizes_only_the_coil_coordinates`` fails with 196
-if the ``s.fix_all()`` line is ever dropped again.
+and ``test_native_script_fixes_its_surface_before_building_the_objective`` fails
+if the ``s.fix_all()`` line is ever dropped or moved after the objective again.
+The native script is read, never executed: its construction is checked against
+the twin's term by term, and the twin carries the numeric claims.
 """
 
 from __future__ import annotations
 
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
-from contextlib import chdir
+import ast
+from collections.abc import Mapping
 from pathlib import Path
 
 import jax
@@ -59,9 +62,6 @@ NATIVE_SCRIPT = (
     ROOT / "examples" / "2_Intermediate" / "stage_two_optimization_planar_coils.py"
 )
 NATIVE_SURFACE = ROOT / "tests" / "test_files" / "input.LandremanPaul2021_QA"
-# Everything the native script does before this marker builds the problem; what
-# follows is the Taylor test and the two optimizer calls.
-NATIVE_OPTIMIZER_SECTION = 'print("""'
 
 NCOILS = 4
 CURVE_ORDER = 5
@@ -69,6 +69,15 @@ CURVE_QUADPOINTS = 75
 SURFACE_RESOLUTION = 32
 LENGTH_TARGET = 10.4
 FIRST_LENGTH_WEIGHT = 10.0
+CC_THRESHOLD = 0.08
+CC_WEIGHT = 1000.0
+CS_THRESHOLD = 0.12
+CS_WEIGHT = 10.0
+CURVATURE_THRESHOLD = 10.0
+CURVATURE_WEIGHT = 1.0e-6
+MSC_THRESHOLD = 10.0
+MSC_WEIGHT = 1.0e-6
+LINKING_NUMBER_WEIGHT = 1.0
 COIL_COORDINATES = 75
 
 
@@ -103,55 +112,235 @@ def _native_twin_objective(surface, base_curves, coils, field):
         SquaredFlux(surface, field)
         + FIRST_LENGTH_WEIGHT
         * QuadraticPenalty(sum(CurveLength(c) for c in base_curves), LENGTH_TARGET)
-        + 1000.0 * CurveCurveDistance(curves, 0.08, num_basecurves=NCOILS)
-        + 10.0 * CurveSurfaceDistance(curves, surface, 0.12)
-        + 1.0e-6 * sum(LpCurveCurvature(c, 2, 10.0) for c in base_curves)
-        + 1.0e-6
-        * sum(QuadraticPenalty(MeanSquaredCurvature(c), 10.0) for c in base_curves)
-        + 1.0 * LinkingNumber(curves)
+        + CC_WEIGHT * CurveCurveDistance(curves, CC_THRESHOLD, num_basecurves=NCOILS)
+        + CS_WEIGHT * CurveSurfaceDistance(curves, surface, CS_THRESHOLD)
+        + CURVATURE_WEIGHT
+        * sum(LpCurveCurvature(c, 2, CURVATURE_THRESHOLD) for c in base_curves)
+        + MSC_WEIGHT
+        * sum(
+            QuadraticPenalty(MeanSquaredCurvature(c), MSC_THRESHOLD)
+            for c in base_curves
+        )
+        + LINKING_NUMBER_WEIGHT * LinkingNumber(curves)
     )
 
 
-def _native_script_problem(working_directory: Path) -> dict[str, object]:
-    """Run the shipped script's construction section and hand back its namespace.
+# --- Reading the native script without executing it ---------------------------
+# A term is described structurally: calls by callee name and described arguments,
+# numbers by their value (module constants resolved), comprehension loop
+# variables by what they range over, and every other name as an opaque variable,
+# so the script's ``s``/``bs`` and the twin's ``surface``/``field`` compare equal.
 
-    The script is a module-level program, not an importable builder, so the only
-    way to read the space it actually optimizes is to execute the source it
-    ships, truncated just before its first optimizer call.  ``__file__`` carries
-    the real path so the script still resolves ``tests/test_files``; the working
-    directory is redirected so its VTK output lands in a temporary tree.
-    """
-    source = NATIVE_SCRIPT.read_text(encoding="utf-8")
-    construction = source[: source.index(NATIVE_OPTIMIZER_SECTION)]
-    namespace: dict[str, object] = {
-        "__file__": str(NATIVE_SCRIPT),
-        "__name__": "native_planar_construction",
+_VARIABLE = ("variable",)
+
+
+def _number(node: ast.expr, constants: Mapping[str, float]) -> float | None:
+    """The value of a numeric literal expression, or ``None`` if it is not one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
+        return float(node.value)
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        operand = _number(node.operand, constants)
+        return None if operand is None else -operand
+    if isinstance(node, ast.BinOp):
+        left = _number(node.left, constants)
+        right = _number(node.right, constants)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Div):
+            return left / right
+        return None
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Weight"
+        and len(node.args) == 1
+    ):
+        return _number(node.args[0], constants)
+    return None
+
+
+def _assignments(statements: list[ast.stmt]) -> dict[str, ast.expr]:
+    """Single-name assignments, the last one before the end of ``statements``."""
+    return {
+        statement.targets[0].id: statement.value
+        for statement in statements
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
     }
-    with chdir(working_directory):
-        exec(compile(construction, str(NATIVE_SCRIPT), "exec"), namespace)
-    return namespace
 
 
-@pytest.mark.native_cpu_reference
-def test_native_script_optimizes_only_the_coil_coordinates(tmp_path: Path) -> None:
-    namespace = _native_script_problem(tmp_path)
-    objective = namespace["JF"]
-    field = namespace["bs"]
-    surface = namespace["s"]
+def _constants(bindings: Mapping[str, ast.expr]) -> dict[str, float]:
+    constants: dict[str, float] = {}
+    for name, value in bindings.items():
+        number = _number(value, constants)
+        if number is not None:
+            constants[name] = number
+    return constants
 
-    assert surface.x.size == 0, (
-        f"the shipped native script left {surface.x.size} surface coordinates "
-        "free; CurveSurfaceDistance pulls them into JF.x, where SquaredFlux "
-        "owns no partial for them"
+
+def _describe(
+    node: ast.expr,
+    bindings: Mapping[str, ast.expr],
+    constants: Mapping[str, float],
+    loop: Mapping[str, tuple[object, ...]],
+    *,
+    term: bool = False,
+) -> tuple[object, ...]:
+    """Describe ``node``; ``term`` resolves a name bound to an objective call."""
+    number = _number(node, constants)
+    if number is not None:
+        return ("number", number)
+    if isinstance(node, ast.Name):
+        if node.id in loop:
+            return loop[node.id]
+        bound = bindings.get(node.id)
+        if isinstance(bound, ast.ListComp | ast.GeneratorExp) or (
+            term and isinstance(bound, ast.Call)
+        ):
+            return _describe(bound, bindings, constants, loop)
+        return _VARIABLE
+    if isinstance(node, ast.Attribute):
+        return (
+            "attribute",
+            node.attr,
+            _describe(node.value, bindings, constants, loop),
+        )
+    if isinstance(node, ast.ListComp | ast.GeneratorExp):
+        (generator,) = node.generators
+        assert isinstance(generator.target, ast.Name)
+        element = _describe(generator.iter, bindings, constants, loop)
+        if element[0] == "each":
+            element = element[1]
+        else:
+            element = _VARIABLE
+        inner = {**loop, generator.target.id: element}
+        return ("each", _describe(node.elt, bindings, constants, inner))
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return (
+            "call",
+            node.func.id,
+            tuple(_describe(arg, bindings, constants, loop) for arg in node.args),
+            tuple(
+                sorted(
+                    (
+                        str(keyword.arg),
+                        _describe(keyword.value, bindings, constants, loop),
+                    )
+                    for keyword in node.keywords
+                )
+            ),
+        )
+    raise AssertionError(f"undescribed objective term: {ast.dump(node)}")
+
+
+def _terms(
+    expression: ast.expr,
+    bindings: Mapping[str, ast.expr],
+    constants: Mapping[str, float],
+) -> list[tuple[float, tuple[object, ...]]]:
+    """``(weight, description)`` of each ``+``-separated term of an objective."""
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+        return _terms(expression.left, bindings, constants) + _terms(
+            expression.right, bindings, constants
+        )
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Mult):
+        weight = _number(expression.left, constants)
+        if weight is not None:
+            return [
+                (
+                    weight,
+                    _describe(expression.right, bindings, constants, {}, term=True),
+                )
+            ]
+    return [(1.0, _describe(expression, bindings, constants, {}, term=True))]
+
+
+def _native_script_statements() -> list[ast.stmt]:
+    source = NATIVE_SCRIPT.read_text(encoding="utf-8")
+    return ast.parse(source, filename=str(NATIVE_SCRIPT)).body
+
+
+def _statement_index(statements: list[ast.stmt], matches) -> int:
+    return next(
+        index for index, statement in enumerate(statements) if matches(statement)
     )
-    assert objective.x.size == COIL_COORDINATES, (
-        f"the shipped native script optimizes {objective.x.size} coordinates, "
-        f"not {COIL_COORDINATES}"
+
+
+def _assigns(name: str):
+    return lambda statement: (
+        isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == name
     )
-    assert list(objective.dof_names) == list(field.dof_names), (
-        "the shipped native script's objective orders the coil coordinates "
-        "differently from BiotSavart(coils).x, which the mirror indexes"
+
+
+def _native_objective_terms() -> list[tuple[float, tuple[object, ...]]]:
+    statements = _native_script_statements()
+    objective_at = _statement_index(statements, _assigns("JF"))
+    bindings = _assignments(statements[:objective_at])
+    return _terms(
+        _assignments(statements[: objective_at + 1])["JF"],
+        bindings,
+        _constants(bindings),
     )
+
+
+def _twin_objective_terms() -> list[tuple[float, tuple[object, ...]]]:
+    module = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    twin = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_native_twin_objective"
+    )
+    returned = next(node for node in twin.body if isinstance(node, ast.Return))
+    assert returned.value is not None
+    bindings = _assignments(twin.body)
+    return _terms(returned.value, bindings, _constants(_assignments(module.body)))
+
+
+def test_native_script_fixes_its_surface_before_building_the_objective() -> None:
+    """``s.fix_all()`` precedes ``CurveSurfaceDistance(curves, s, ...)`` and ``JF``.
+
+    Without it ``CurveSurfaceDistance`` pulls the surface's coordinates into
+    ``JF.x``, where ``SquaredFlux`` owns no partial for them.
+    """
+    statements = _native_script_statements()
+
+    def fixes_surface(statement: ast.stmt) -> bool:
+        call = statement.value if isinstance(statement, ast.Expr) else None
+        return (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "fix_all"
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "s"
+        )
+
+    fixed_at = _statement_index(statements, fixes_surface)
+    distance_at = _statement_index(statements, _assigns("Jcsdist"))
+    objective_at = _statement_index(statements, _assigns("JF"))
+    distance = _assignments(statements[: distance_at + 1])["Jcsdist"]
+
+    assert fixed_at < distance_at < objective_at
+    assert isinstance(distance, ast.Call)
+    assert isinstance(distance.func, ast.Name)
+    assert distance.func.id == "CurveSurfaceDistance"
+    assert isinstance(distance.args[1], ast.Name) and distance.args[1].id == "s"
+
+
+def test_native_script_objective_is_the_twins_term_by_term() -> None:
+    """The script's ``JF`` has the twin's terms, arguments and weights, in order."""
+    assert _native_objective_terms() == _twin_objective_terms()
 
 
 @pytest.mark.native_cpu_reference
