@@ -1,40 +1,285 @@
-"""Stage-II example objectives: device-operand weights publish unchanged values."""
+"""Stage-II example objectives: device-operand weights publish unchanged values.
+
+The bounded problems of ``examples/jax/3_Advanced/stage_two_optimization_finitebuild.py``
+and ``coil_forces.py`` are rebuilt here from the same public constructors and
+constants (the scripts are entry points, not importable modules; their scalar
+constants are read from their source and pinned below), and the shipped coil
+forces run is executed as the runner executes it, as a fresh child process.
+"""
 
 from __future__ import annotations
 
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
-import importlib.util
+import ast
+import itertools
+import json
+import os
+import subprocess
+import sys
+import sysconfig
 from dataclasses import replace
 from pathlib import Path
-from types import ModuleType
 
 import jax
 import numpy as np
 import pytest
+import simsoptpp
+from examples.jax._lane_environment import build_execution_environment
+from simsopt.field import (
+    Coil,
+    Current,
+    apply_symmetries_to_currents,
+    apply_symmetries_to_curves,
+    coils_via_symmetries,
+)
+from simsopt.geo import (
+    CurveLength,
+    SurfaceRZFourier,
+    create_equally_spaced_curves,
+    create_multifilament_grid,
+)
+from simsopt_jax.backend.runtime import get_runtime_jax_device
+from simsopt_jax.core import compute_filament_offsets
+from simsopt_jax.objectives import StageTwoObjectiveConfig
 from simsopt_jax.solve.serial import (
     TraceableParametricScalarProblem,
     TraceableScalarProblem,
 )
+from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives import (
+    FiniteBuildStageTwoConfig,
+    ForceStageTwoConfig,
     make_finite_build_stage_two_objective,
     make_force_stage_two_length_penalty,
     make_force_stage_two_objective,
 )
+from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 
-EXAMPLES = Path(__file__).resolve().parents[3] / "examples" / "jax" / "3_Advanced"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EXAMPLES = REPO_ROOT / "examples" / "jax" / "3_Advanced"
+TEST_DATA = REPO_ROOT / "tests" / "test_files"
 # ``main()`` runs both examples with this budget in bounded mode.
 _BOUNDED_STEPS = 3
 
+#: The scripts' own constants, pinned against their source by the first test.
+FINITE_BUILD_CONSTANTS = {
+    "SOLVE_OBJECTIVE_SCALE": 1.0e-4,
+    "NUM_BASE_CURVES": 4,
+    "NUM_FILAMENTS_N": 2,
+    "NUM_FILAMENTS_B": 3,
+    "GAP_SIZE_N": 0.02,
+    "GAP_SIZE_B": 0.04,
+    "ROTATION_ORDER": 1,
+}
+COIL_FORCES_CONSTANTS = {
+    "FIRST_LENGTH_WEIGHT": 1.0e-3,
+    "SECOND_LENGTH_WEIGHT": 1.0e-4,
+}
+FIRST_LENGTH_WEIGHT = COIL_FORCES_CONSTANTS["FIRST_LENGTH_WEIGHT"]
+SECOND_LENGTH_WEIGHT = COIL_FORCES_CONSTANTS["SECOND_LENGTH_WEIGHT"]
 
-def _example(name: str) -> ModuleType:
-    specification = importlib.util.spec_from_file_location(
-        f"jax_example_{name}",
-        EXAMPLES / f"{name}.py",
+
+def _script_constants(name: str) -> dict[str, object]:
+    path = EXAMPLES / f"{name}.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    constants: dict[str, object] = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+        ):
+            constants[node.targets[0].id] = node.value.value
+    return constants
+
+
+def _qa_surface() -> SurfaceRZFourier:
+    return SurfaceRZFourier.from_vmec_input(
+        TEST_DATA / "input.LandremanPaul2021_QA",
+        range="half period",
+        nphi=4,
+        ntheta=4,
     )
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
+
+
+def _finite_build_problem():
+    """``stage_two_optimization_finitebuild._build_problem("bounded")``."""
+    constants = FINITE_BUILD_CONSTANTS
+    count = int(constants["NUM_BASE_CURVES"])
+    filaments_n = int(constants["NUM_FILAMENTS_N"])
+    filaments_b = int(constants["NUM_FILAMENTS_B"])
+    gap_n = float(constants["GAP_SIZE_N"])
+    gap_b = float(constants["GAP_SIZE_B"])
+    surface = _qa_surface()
+    base_curves = create_equally_spaced_curves(
+        count,
+        surface.nfp,
+        stellsym=True,
+        R0=1.0,
+        R1=0.7,
+        order=2,
+        numquadpoints=8,
+        use_jax_curve=False,
+    )
+    filament_count = filaments_n * filaments_b
+    base_currents = []
+    for index in range(count):
+        current = Current(1.0)
+        if index == 0:
+            current.fix_all()
+        base_currents.append(current * (1.0e5 / filament_count))
+    base_filaments = list(
+        itertools.chain.from_iterable(
+            create_multifilament_grid(
+                curve,
+                filaments_n,
+                filaments_b,
+                gap_n,
+                gap_b,
+                rotation_order=int(constants["ROTATION_ORDER"]),
+            )
+            for curve in base_curves
+        )
+    )
+    filament_currents = list(
+        itertools.chain.from_iterable(
+            [current] * filament_count for current in base_currents
+        )
+    )
+    coils = [
+        Coil(curve, current)
+        for curve, current in zip(
+            apply_symmetries_to_curves(base_filaments, surface.nfp, True),
+            apply_symmetries_to_currents(filament_currents, surface.nfp, True),
+            strict=True,
+        )
+    ]
+    field = BiotSavartJAX(coils)
+    flux = SquaredFluxJAX(surface, field)
+    config = FiniteBuildStageTwoConfig(
+        num_base_curves=count,
+        filament_offsets=compute_filament_offsets(
+            numfilaments_n=filaments_n,
+            numfilaments_b=filaments_b,
+            gapsize_n=gap_n,
+            gapsize_b=gap_b,
+        ),
+        symmetry_copies=surface.nfp * 2,
+        length_targets=tuple(float(CurveLength(curve).J()) for curve in base_curves),
+        length_weight=1.0e-2,
+        curve_curve_minimum_distance=0.1,
+        curve_curve_weight=10.0,
+    )
+    return field, flux, config
+
+
+def _force_stage_config() -> StageTwoObjectiveConfig:
+    """``coil_forces._stage_config()``."""
+    return StageTwoObjectiveConfig(
+        num_base_curves=3,
+        length_target=17.4,
+        length_target_mode="max",
+        curve_curve_minimum_distance=0.1,
+        curve_curve_weight=1000.0,
+        curve_surface_minimum_distance=0.3,
+        curve_surface_weight=10.0,
+        curvature_threshold=5.0,
+        curvature_weight=1.0e-6,
+        mean_squared_curvature_threshold=5.0,
+        mean_squared_curvature_weight=1.0e-6,
+    )
+
+
+def _force_terms_config() -> ForceStageTwoConfig:
+    """``coil_forces._force_config()``."""
+    return ForceStageTwoConfig(
+        num_force_coils=3,
+        force_weight=1.0e-2,
+        vacuum_energy_weight=1.0e-4,
+        force_power=4.0,
+        force_threshold=0.0,
+        downsample=1,
+    )
+
+
+def _force_problem():
+    """``coil_forces._build_problem("bounded")``, on the runtime policy's device."""
+    surface = _qa_surface()
+    base_curves = create_equally_spaced_curves(
+        3,
+        surface.nfp,
+        stellsym=True,
+        R0=1.0,
+        R1=0.5,
+        order=2,
+        numquadpoints=8,
+        use_jax_curve=False,
+    )
+    base_currents = [Current(1.0e5) for _ in base_curves]
+    base_currents[0].fix_all()
+    regularization = 0.05**2 / np.sqrt(np.e)
+    coils = coils_via_symmetries(
+        base_curves,
+        base_currents,
+        surface.nfp,
+        surface.stellsym,
+        [regularization for _ in base_curves],
+    )
+    field = BiotSavartJAX(coils)
+    flux = SquaredFluxJAX(surface, field)
+    device = get_runtime_jax_device()
+    surface_gamma = jax.device_put(
+        np.asarray(surface.gamma(), dtype=np.float64).reshape((-1, 3)), device
+    )
+    surface_normal = jax.device_put(
+        np.asarray(surface.normal(), dtype=np.float64).reshape((-1, 3)), device
+    )
+    target_quadpoints = jax.device_put(
+        np.stack(
+            tuple(
+                np.asarray(curve.quadpoints, dtype=np.float64) for curve in base_curves
+            )
+        ),
+        device,
+    )
+    regularizations = jax.device_put(
+        np.full(len(coils), regularization, dtype=np.float64), device
+    )
+    return (
+        field,
+        flux,
+        surface_gamma,
+        surface_normal,
+        target_quadpoints,
+        regularizations,
+    )
+
+
+def _child_environment() -> dict[str, str]:
+    _, environment = build_execution_environment(
+        "cpu", "fast", os.environ, repo_root=REPO_ROOT
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (
+            str(Path(simsoptpp.__file__).resolve().parent),
+            str(REPO_ROOT / "src"),
+            str(sysconfig.get_paths()["purelib"]),
+            str(Path(jax.__file__).resolve().parents[1]),
+        )
+    )
+    return environment
+
+
+def test_rebuilt_problems_use_the_scripts_own_constants() -> None:
+    finite_build = _script_constants("stage_two_optimization_finitebuild")
+    coil_forces = _script_constants("coil_forces")
+
+    for name, value in FINITE_BUILD_CONSTANTS.items():
+        assert finite_build[name] == value, name
+    for name, value in COIL_FORCES_CONSTANTS.items():
+        assert coil_forces[name] == value, name
 
 
 def _bitwise_equal(first: jax.Array, second: jax.Array) -> bool:
@@ -51,8 +296,7 @@ def _device_scalar(value: float) -> jax.Array:
 
 
 def _finite_build_state() -> tuple[jax.Array, TraceableParametricScalarProblem, object]:
-    example = _example("stage_two_optimization_finitebuild")
-    field, flux, config = example._build_problem("bounded")
+    field, flux, config = _finite_build_problem()
     objective = make_finite_build_stage_two_objective(
         field,
         flux.fixed_surface_flux_spec(),
@@ -63,14 +307,15 @@ def _finite_build_state() -> tuple[jax.Array, TraceableParametricScalarProblem, 
         objective_fn=lambda current, objective_scale: (
             objective_scale * objective(current)
         ),
-        objective_parameter=_device_scalar(example.SOLVE_OBJECTIVE_SCALE),
+        objective_parameter=_device_scalar(
+            float(FINITE_BUILD_CONSTANTS["SOLVE_OBJECTIVE_SCALE"])
+        ),
         x=parameters,
     )
     return parameters, problem, objective
 
 
 def _force_state():
-    example = _example("coil_forces")
     (
         field,
         flux,
@@ -78,9 +323,9 @@ def _force_state():
         surface_normal,
         target_quadpoints,
         regularizations,
-    ) = example._build_problem("bounded")
-    stage_config = example._stage_config()
-    force_config = example._force_config()
+    ) = _force_problem()
+    stage_config = _force_stage_config()
+    force_config = _force_terms_config()
 
     def build(config) -> object:
         return make_force_stage_two_objective(
@@ -101,7 +346,7 @@ def _force_state():
         return zero_weight_objective(current) + length_penalty(current, length_weight)
 
     parameters = jax.device_put(np.asarray(field.x, dtype=np.float64))
-    return example, field, stage_config, build, weighted_objective, parameters
+    return field, stage_config, build, weighted_objective, parameters
 
 
 def test_finitebuild_publishes_the_fresh_unscaled_gradient_bit_for_bit() -> None:
@@ -128,11 +373,11 @@ def test_coil_forces_weighted_objective_is_bitwise_static_below_the_length_targe
     equality with the pre-change one, so the equality is asserted here and only
     here; the active regime is the sibling test below.
     """
-    example, field, stage_config, build, weighted_objective, parameters = _force_state()
+    field, stage_config, build, weighted_objective, parameters = _force_state()
     length_penalty = make_force_stage_two_length_penalty(field, stage_config)
     weighted_program = jax.jit(jax.value_and_grad(weighted_objective, argnums=0))
 
-    for weight in (example.FIRST_LENGTH_WEIGHT, example.SECOND_LENGTH_WEIGHT):
+    for weight in (FIRST_LENGTH_WEIGHT, SECOND_LENGTH_WEIGHT):
         static_program = jax.jit(
             jax.value_and_grad(build(replace(stage_config, length_weight=weight)))
         )
@@ -156,12 +401,12 @@ def test_coil_forces_weighted_objective_matches_each_static_length_weight() -> N
     reassociates the penalty sum, so the agreement is at the ~1 ULP level rather
     than bitwise.
     """
-    example, field, stage_config, build, weighted_objective, parameters = _force_state()
+    field, stage_config, build, weighted_objective, parameters = _force_state()
     extended = parameters * 2.0
     length_penalty = make_force_stage_two_length_penalty(field, stage_config)
     weighted_program = jax.jit(jax.value_and_grad(weighted_objective, argnums=0))
 
-    for weight in (example.FIRST_LENGTH_WEIGHT, example.SECOND_LENGTH_WEIGHT):
+    for weight in (FIRST_LENGTH_WEIGHT, SECOND_LENGTH_WEIGHT):
         static_program = jax.jit(
             jax.value_and_grad(build(replace(stage_config, length_weight=weight)))
         )
@@ -190,12 +435,10 @@ def test_coil_forces_active_length_penalty_separates_the_two_stage_weights() -> 
     weight, so the assertion is on the whole weighted objective: switching the
     device weight may only shift it by the length penalty it buys.
     """
-    example, field, stage_config, _build, weighted_objective, parameters = (
-        _force_state()
-    )
+    field, stage_config, _build, weighted_objective, parameters = _force_state()
     extended = parameters * 2.0
-    first_weight = example.FIRST_LENGTH_WEIGHT
-    second_weight = example.SECOND_LENGTH_WEIGHT
+    first_weight = FIRST_LENGTH_WEIGHT
+    second_weight = SECOND_LENGTH_WEIGHT
     length_penalty = make_force_stage_two_length_penalty(field, stage_config)
     weighted_program = jax.jit(weighted_objective)
     first_value = float(weighted_program(extended, _device_scalar(first_weight)))
@@ -237,27 +480,44 @@ def test_coil_forces_active_length_penalty_separates_the_two_stage_weights() -> 
 #
 def test_coil_forces_example_bounded_solve_lands_on_its_endpoint(tmp_path) -> None:
     """Both shipped stages run, the second after swapping the device length weight."""
-    example = _example("coil_forces")
-    result = example.solve(tmp_path, _BOUNDED_STEPS, "bounded")
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-S",
+            str(EXAMPLES / "coil_forces.py"),
+            "--smoke",
+            "--json",
+            "--output-dir",
+            str(tmp_path),
+        ),
+        cwd=REPO_ROOT,
+        env=_child_environment(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.splitlines()[-1])
+    observables = result["observables"]
 
-    assert result.status == "ok"
-    assert result.observables["solver_iterations"] == (_BOUNDED_STEPS, _BOUNDED_STEPS)
+    assert result["status"] == "ok"
+    assert observables["solver_iterations"] == [_BOUNDED_STEPS, _BOUNDED_STEPS]
     # Regression pin retaken 2026-09-13 after the mirror adopted native's
     # post-Taylor start state and SciPy L-BFGS-B at native policy (ftol=gtol=1e-15).
     np.testing.assert_allclose(
-        result.observables["final_objective"],
+        observables["final_objective"],
         0.003424195336484035,
         rtol=1.0e-12,
         atol=0.0,
     )
     np.testing.assert_allclose(
-        result.observables["squared_flux"],
+        observables["squared_flux"],
         0.0033617810994737273,
         rtol=1.0e-12,
         atol=0.0,
     )
     np.testing.assert_allclose(
-        result.observables["vacuum_energy"],
+        observables["vacuum_energy"],
         0.6148225859961913,
         rtol=1.0e-12,
         atol=0.0,
@@ -265,9 +525,7 @@ def test_coil_forces_example_bounded_solve_lands_on_its_endpoint(tmp_path) -> No
 
 
 def test_force_stage_two_length_penalty_rejects_a_static_length_weight() -> None:
-    _example_module, field, stage_config, _build, _objective, _parameters = (
-        _force_state()
-    )
+    field, stage_config, _build, _objective, _parameters = _force_state()
 
     with pytest.raises(ValueError, match="length_weight must be zero"):
         make_force_stage_two_length_penalty(

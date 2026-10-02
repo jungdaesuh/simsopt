@@ -27,7 +27,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import types
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -45,7 +44,9 @@ _OPTIMIZER_PRIVATE_DIR = (
     Path(_SRC_DIR) / "simsopt_jax" / "geo" / "optimizers" / "private"
 )
 _RUNTIME_BACKEND_PATH = Path(_SRC_DIR) / "simsopt_jax" / "backend" / "runtime.py"
-_LEGACY_GEO_JIT_PATH = Path(_SRC_DIR) / "simsopt" / "geo" / "jit.py"
+_LEGACY_GEO_JIT_PROBE_PATH = (
+    Path(_REPO_ROOT) / "tests" / "subprocess" / "legacy_geo_jit_probe.py"
+)
 _JAX_SUBPROCESS_CASES_PATH = (
     Path(_REPO_ROOT) / "tests" / "subprocess" / "jax_runtime_cases.py"
 )
@@ -490,59 +491,39 @@ def test_package_root_propagates_backend_import_error():
 
 
 def _execute_legacy_geo_jit_with_fake_jax(
-    monkeypatch, *, jax_platforms: str | None, jax_platform_name: str | None = None
+    *, jax_platforms: str | None, jax_platform_name: str | None = None
 ) -> list[tuple[str, object]]:
-    updates: list[tuple[str, object]] = []
-
-    class _FakeJaxConfig:
-        def update(self, name: str, value: object) -> None:
-            updates.append((name, value))
-
-    fake_jax = types.ModuleType("jax")
-    fake_jax.config = _FakeJaxConfig()
-    fake_jax.jit = lambda fun, **args: fun
-    fake_simsopt = types.ModuleType("simsopt")
-    fake_geo = types.ModuleType("simsopt.geo")
-    fake_geo.__path__ = []
-    fake_config = types.ModuleType("simsopt.geo.config")
-    fake_config.parameters = {"jit": False}
-
-    monkeypatch.setitem(sys.modules, "jax", fake_jax)
-    monkeypatch.setitem(sys.modules, "simsopt", fake_simsopt)
-    monkeypatch.setitem(sys.modules, "simsopt.geo", fake_geo)
-    monkeypatch.setitem(sys.modules, "simsopt.geo.config", fake_config)
-    if jax_platforms is None:
-        monkeypatch.delenv("JAX_PLATFORMS", raising=False)
-    else:
-        monkeypatch.setenv("JAX_PLATFORMS", jax_platforms)
-    if jax_platform_name is None:
-        monkeypatch.delenv("JAX_PLATFORM_NAME", raising=False)
-    else:
-        monkeypatch.setenv("JAX_PLATFORM_NAME", jax_platform_name)
-
-    module_globals = {
-        "__file__": str(_LEGACY_GEO_JIT_PATH),
-        "__name__": "simsopt.geo.jit",
-        "__package__": "simsopt.geo",
+    """Import ``simsopt.geo.jit`` in a fresh child against a recording fake JAX."""
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in {"JAX_PLATFORMS", "JAX_PLATFORM_NAME"}
     }
-    source = _LEGACY_GEO_JIT_PATH.read_text(encoding="utf-8")
-    exec(compile(source, str(_LEGACY_GEO_JIT_PATH), "exec"), module_globals)
-    assert callable(module_globals["jit"])
-    return updates
+    if jax_platforms is not None:
+        environment["JAX_PLATFORMS"] = jax_platforms
+    if jax_platform_name is not None:
+        environment["JAX_PLATFORM_NAME"] = jax_platform_name
+    completed = subprocess.run(
+        (sys.executable, str(_LEGACY_GEO_JIT_PROBE_PATH)),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return [(name, value) for name, value in json.loads(completed.stdout)]
 
 
-def test_legacy_geo_jit_respects_explicit_jax_platforms(monkeypatch):
+def test_legacy_geo_jit_respects_explicit_jax_platforms() -> None:
     updates = _execute_legacy_geo_jit_with_fake_jax(
-        monkeypatch,
         jax_platforms="cuda",
     )
 
     assert ("jax_platform_name", "cpu") not in updates
 
 
-def test_legacy_geo_jit_preserves_cpu_default_without_platform_env(monkeypatch):
+def test_legacy_geo_jit_preserves_cpu_default_without_platform_env() -> None:
     updates = _execute_legacy_geo_jit_with_fake_jax(
-        monkeypatch,
         jax_platforms=None,
     )
 

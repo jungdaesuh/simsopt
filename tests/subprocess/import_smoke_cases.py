@@ -1465,10 +1465,14 @@ def case_jax_core_public_contract() -> None:
         assert export_name in _EXPECTED_JAX_CORE_PUBLIC_EXPORTS
         assert getattr(jax_core, export_name) is not None
 
-    namespace: dict[str, object] = {}
-    exec("from simsopt_jax.core import *", namespace)
-    exported_names = tuple(name for name in namespace if not name.startswith("__"))
+    # ``from simsopt_jax.core import *`` binds exactly ``__all__``, in order, by
+    # ``getattr`` on the package; spelled out statically, it must resolve every
+    # name and expose nothing outside the package's own ``dir()``.
+    star_exports = {name: getattr(jax_core, name) for name in jax_core.__all__}
+    exported_names = tuple(name for name in star_exports if not name.startswith("__"))
     assert exported_names == _EXPECTED_JAX_CORE_PUBLIC_EXPORTS
+    assert all(isinstance(name, str) for name in jax_core.__all__)
+    assert set(jax_core.__all__) <= set(dir(jax_core))
     assert "simsopt._core" not in sys.modules
     assert "simsoptpp" not in sys.modules
 

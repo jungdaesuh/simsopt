@@ -281,7 +281,6 @@ def test_public_muse_script_routes_post_diagnostics_through_shared_helper() -> N
         / "examples/jax/2_Intermediate/permanent_magnet_MUSE.py"
     )
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    compile(tree, str(path), "exec")
     solve = next(
         node
         for node in tree.body

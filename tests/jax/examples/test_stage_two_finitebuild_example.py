@@ -1,8 +1,8 @@
 """Behavioral contract for the shipped finite-build Stage-II JAX example.
 
 The example is judged on what it computes, not on how its source is spelled.
-One bounded run of the public ``solve()`` entry point is shared by every test
-below, and each test states one thing that run must be true of: the published
+One bounded run of the shipped script, executed as the runner executes it (a
+fresh ``--smoke --json`` child), is shared by every test below, and each test states one thing that run must be true of: the published
 observable set is exactly the agreed schema, every published number is finite,
 the solve lowered the objective it decomposes, and the filament packs still
 clear one another.  A source-shape test cannot see any of that -- an example
@@ -17,24 +17,30 @@ from __future__ import annotations
 
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
-import importlib.util
+import ast
+import json
+import os
+import subprocess
+import sys
+import sysconfig
 from pathlib import Path
-from types import ModuleType
 
+import jax
 import numpy as np
 import pytest
-from simsopt_jax.examples import ExampleResult
+import simsoptpp
+from examples.jax._lane_environment import build_execution_environment
 from simsopt_jax.solve.driver import Driver
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE = (
-    Path(__file__).resolve().parents[3]
+    REPO_ROOT
     / "examples"
     / "jax"
     / "3_Advanced"
     / "stage_two_optimization_finitebuild.py"
 )
-# ``main()`` runs the shipped bounded lane on this budget; ``solve()`` is
-# driven with the same one so the tested run is the shipped one.
+# ``main()`` runs the shipped bounded lane (``--smoke``) on this budget.
 BOUNDED_STEPS = 3
 # Every key the example publishes.  Compared as a set, so a dropped observable
 # and a silently added one both fail: downstream parity and receipt consumers
@@ -69,41 +75,69 @@ NUMERIC_OBSERVABLES = (
 )
 
 
-def _example() -> ModuleType:
-    """Load the shipped script the way a reader would run it.
-
-    Example scripts live outside any importable package, so this mirrors the
-    loader the neighbouring example tests already use.
-    """
-    specification = importlib.util.spec_from_file_location(
-        "jax_example_stage_two_optimization_finitebuild",
-        EXAMPLE,
+def _module_constant(name: str) -> object:
+    """A module-level literal of the shipped script, read without running it."""
+    tree = ast.parse(EXAMPLE.read_text(encoding="utf-8"), filename=str(EXAMPLE))
+    value = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == name
     )
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
+    return ast.literal_eval(value)
+
+
+def _child_environment() -> dict[str, str]:
+    _, environment = build_execution_environment(
+        "cpu", "fast", os.environ, repo_root=REPO_ROOT
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (
+            str(Path(simsoptpp.__file__).resolve().parent),
+            str(REPO_ROOT / "src"),
+            str(sysconfig.get_paths()["purelib"]),
+            str(Path(jax.__file__).resolve().parents[1]),
+        )
+    )
+    return environment
 
 
 @pytest.fixture(scope="module")
-def example() -> ModuleType:
-    return _example()
-
-
-@pytest.fixture(scope="module")
-def bounded_result(example: ModuleType, tmp_path_factory) -> ExampleResult:
-    """One bounded solve in the shipped default mode, shared below."""
+def bounded_result(tmp_path_factory) -> dict[str, object]:
+    """One bounded run of the shipped script's default mode, shared below."""
     output_directory = tmp_path_factory.mktemp("finitebuild-bounded")
-    return example.solve(output_directory, BOUNDED_STEPS, "bounded")
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-S",
+            str(EXAMPLE),
+            "--smoke",
+            "--json",
+            "--output-dir",
+            str(output_directory),
+        ),
+        cwd=REPO_ROOT,
+        env=_child_environment(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout.splitlines()[-1])
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_bounded_solve_publishes_exactly_the_agreed_observable_schema(
-    bounded_result: ExampleResult,
+    bounded_result: dict[str, object],
 ) -> None:
-    assert set(bounded_result.observables) == PUBLISHED_OBSERVABLES
+    assert set(bounded_result["observables"]) == PUBLISHED_OBSERVABLES
 
 
 def test_bounded_solve_reports_a_sound_result_that_spent_its_whole_budget(
-    bounded_result: ExampleResult,
+    bounded_result: dict[str, object],
 ) -> None:
     """``ok`` is earned, and it is earned without the budget converging.
 
@@ -111,26 +145,26 @@ def test_bounded_solve_reports_a_sound_result_that_spent_its_whole_budget(
     it did, this problem would be trivial and the improvement contract below
     would be measuring nothing.
     """
-    observables = bounded_result.observables
+    observables = bounded_result["observables"]
 
-    assert bounded_result.status == "ok"
+    assert bounded_result["status"] == "ok"
     assert observables["solver_iterations"] == BOUNDED_STEPS
     assert observables["solver_success"] is False
     assert observables["solver_driver"] == Driver.SCIPY_LBFGSB.value
 
 
 def test_bounded_solve_publishes_finite_numbers_everywhere(
-    bounded_result: ExampleResult,
+    bounded_result: dict[str, object],
 ) -> None:
     for name in NUMERIC_OBSERVABLES:
-        values = np.asarray(bounded_result.observables[name], dtype=np.float64)
+        values = np.asarray(bounded_result["observables"][name], dtype=np.float64)
         assert np.all(np.isfinite(values)), (
-            f"{name} published a nonfinite value: {bounded_result.observables[name]!r}"
+            f"{name} published a nonfinite value: {bounded_result['observables'][name]!r}"
         )
 
 
 def test_bounded_solve_lowers_the_objective_it_decomposes(
-    bounded_result: ExampleResult,
+    bounded_result: dict[str, object],
 ) -> None:
     """The run improved, and the three published terms are that objective.
 
@@ -139,7 +173,7 @@ def test_bounded_solve_lowers_the_objective_it_decomposes(
     the flux, length and distance terms must sum to what was published as the
     final objective.
     """
-    observables = bounded_result.observables
+    observables = bounded_result["observables"]
     squared_flux = observables["squared_flux"]
     length_penalty = observables["length_penalty"]
     distance_penalty = observables["distance_penalty"]
@@ -157,29 +191,28 @@ def test_bounded_solve_lowers_the_objective_it_decomposes(
 
 
 def test_bounded_solve_keeps_the_filament_packs_clear_of_one_another(
-    example: ModuleType,
-    bounded_result: ExampleResult,
+    bounded_result: dict[str, object],
 ) -> None:
     """A crossed or coincident pack publishes a nonpositive clearance."""
-    observables = bounded_result.observables
+    observables = bounded_result["observables"]
     coil_lengths = observables["coil_lengths"]
 
     assert observables["minimum_clearance"] > 0.0
-    assert len(coil_lengths) == example.NUM_BASE_CURVES
+    assert len(coil_lengths) == _module_constant("NUM_BASE_CURVES")
     assert all(length > 0.0 for length in coil_lengths)
 
 
 def test_bounded_solve_publishes_one_gradient_entry_per_solved_coordinate(
-    bounded_result: ExampleResult,
+    bounded_result: dict[str, object],
 ) -> None:
-    observables = bounded_result.observables
+    observables = bounded_result["observables"]
 
     assert len(observables["solution"]) > 0
     assert len(observables["gradient"]) == len(observables["solution"])
 
 
 def test_bounded_solve_names_the_upstream_provider(
-    bounded_result: ExampleResult,
+    bounded_result: dict[str, object],
 ) -> None:
     """The run says which optimizer produced it: the provider upstream calls."""
-    assert bounded_result.observables["solver_driver"] == Driver.SCIPY_LBFGSB.value
+    assert bounded_result["observables"]["solver_driver"] == Driver.SCIPY_LBFGSB.value
