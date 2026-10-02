@@ -158,3 +158,11 @@ def test_native_default_authority_is_manual_and_explicit() -> None:
     )
     assert "--scale bounded" in source
     assert "--scale native_default" in source
+
+
+def test_same_state_mirror_parity_runs_on_cpu_and_gpu() -> None:
+    same_state = "tests/jax/test_mirror_same_state_parity.py"
+    assert same_state in _jobs(SMOKE)["jax-public-integration"]
+    gpu_parity = _jobs(AUTHORITY)["gpu-parity"]
+    assert same_state in gpu_parity
+    assert "steps.mirror_same_state.outcome" in gpu_parity

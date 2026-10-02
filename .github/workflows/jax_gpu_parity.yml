@@ -128,6 +128,16 @@ jobs:
             python -m pytest tests/geo/test_optimizer_strict_gpu_jax.py \
             -v --tb=short
 
+      - name: Native/JAX same-state mirror parity
+        id: mirror_same_state
+        continue-on-error: true
+        env:
+          JAX_PLATFORMS: cuda,cpu
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/jax/test_mirror_same_state_parity.py \
+            -v --tb=short
+
       # ------------------------------------------------------------------
       # Summary gate — fail the job if any test step failed
       # ------------------------------------------------------------------
@@ -144,6 +154,7 @@ jobs:
           echo "| Surface Fourier | ${{ steps.surface.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Precision and derivative authority | ${{ steps.precision_authority.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Dense optimizer placement | ${{ steps.optimizer_placement.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Mirror same-state parity | ${{ steps.mirror_same_state.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           # Fail the workflow if any test step did not succeed
@@ -152,7 +163,8 @@ jobs:
              [ "${{ steps.boozer.outcome }}" != "success" ] || \
              [ "${{ steps.surface.outcome }}" != "success" ] || \
              [ "${{ steps.precision_authority.outcome }}" != "success" ] || \
-             [ "${{ steps.optimizer_placement.outcome }}" != "success" ]; then
+             [ "${{ steps.optimizer_placement.outcome }}" != "success" ] || \
+             [ "${{ steps.mirror_same_state.outcome }}" != "success" ]; then
             echo "One or more GPU parity tests failed."
             exit 1
           fi

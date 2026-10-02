@@ -243,6 +243,11 @@ jobs:
           path: .artifacts/jax-example-parity/
           retention-days: 14
 
+      - name: Run native/JAX same-state mirror parity
+        run: |
+          python -m pytest tests/jax/test_mirror_same_state_parity.py \
+            -v --tb=short
+
   jax-private-optimizer:
     name: JAX private optimizer lane (with simsoptpp)
     runs-on: ubuntu-latest
