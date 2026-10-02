@@ -13,21 +13,17 @@ native source it names.
 
 The generated
 [`NATIVE_TO_JAX_INDEX.md`](NATIVE_TO_JAX_INDEX.md) lists the native sources,
-their exact JAX mirrors or blockers, device scope, and execution scale.
-Regenerate it from the validated manifests with
+their exact JAX mirrors or blockers, and device scope. Regenerate it from the
+validated manifest with
 `python -m examples.jax.native_to_jax_index --write`; use `--check` in
 validation.
 
 ## Known limitations
 
-- A quality-band result does not establish convergence. At `native_default`
-  scale, coil forces keeps its raw GPU solver failure under its quality band,
-  and the QFM GPU endpoint quality and the NCSX GPU long-trajectory comparison
-  do not meet their case contracts.
-- Endpoint acceptance uses the individual native/JAX case contracts; it does
-  not establish equivalence of every official trajectory or setting.
-- PM4Stell's backtracking deviation and the planar-coil upstream-gradient
-  limitation are disclosed in their case contracts.
+- In-tree tests compare each mirror with native SIMSOPT at small scale. Endpoint
+  contracts at `native_default` scale, including the PM4Stell backtracking
+  deviation and the planar-coil upstream-gradient limitation, belong to the
+  native/JAX parity harness, which is maintained outside this repository.
 
 Install the CPU runtime from the repository root with:
 
