@@ -13,10 +13,14 @@ import os
 import sys
 import sysconfig
 from pathlib import Path
+from typing import Literal
 
 import simsoptpp
 
 _ISOLATED_CHILD_WRAPPER = Path(__file__).with_name("isolated_kernel_child.py")
+
+#: The payloads ``isolated_kernel_child.PAYLOADS`` can run, by name.
+IsolatedChildPayload = Literal["simsoptpp-curve-name"]
 
 
 def loaded_kernel_directory() -> Path:
@@ -51,17 +55,18 @@ def repo_child_pythonpath(repo_root: Path, inherited_pythonpath: str | None) -> 
 
 
 def isolated_child_command(
-    payload: tuple[str, ...],
-    *,
+    payload: IsolatedChildPayload,
+    *arguments: str,
     repo_root: Path | None = None,
     extra_path_entries: tuple[str, ...] = (),
     executable: str | None = None,
 ) -> tuple[str, ...]:
     """Build ``python -I`` argv that still sees the compiled kernel.
 
-    Isolated mode ignores PYTHONPATH. The stdlib wrapper inserts the
-    parent-loaded kernel directory, then optional repo ``src`` and root, then
-    ``payload``.
+    Isolated mode ignores PYTHONPATH. The wrapper inserts the parent-loaded
+    kernel directory, then optional repo ``src`` and root, then runs the named
+    ``payload`` from its fixed table with ``arguments``. No source text is
+    passed to or executed by the child.
     """
     python = sys.executable if executable is None else executable
     repo_entries = () if repo_root is None else (str(repo_root / "src"), str(repo_root))
@@ -73,5 +78,6 @@ def isolated_child_command(
         *repo_entries,
         *extra_path_entries,
         "--",
-        *payload,
+        payload,
+        *arguments,
     )
