@@ -53,9 +53,8 @@ python examples/jax/run_examples.py --device gpu --intent parity --scale bounded
 ```
 
 `--scale` is a typed selector, not an inference from the command name. It
-defaults to `bounded`, but state it explicitly in CI and parity commands so
-the emitted child argv, canonical input, receipt, and artifact scale are all
-attributable. Only `bounded` maps to the child `--smoke` flag; `native_default`
+defaults to `bounded`, but state it explicitly in CI commands so the emitted
+child argv and the scale each child reports are attributable. Only `bounded` maps to the child `--smoke` flag; `native_default`
 emits no scale flag and runs the example's native-default step budget.
 Callbacks passed to the public `run_example` helper receive
 `(output_directory, max_steps, execution_scale)`. The scale is independent of
@@ -69,9 +68,8 @@ never selected implicitly.
 Both ordinary-runner intents pin FP64 (`SIMSOPT_PRECISION=fp64`,
 `JAX_ENABLE_X64=1`), strict backend selection, the same public objective and
 custom SIMSOPT JAX solver family, and the same scientific-success checks.
-Parity additionally selects the stable numerical policy. Only
-[`run_parity.py`](run_parity.py) can publish certification evidence; ordinary
-fast and parity example runs are diagnostic.
+Parity additionally selects the stable numerical policy. Fast and parity
+example runs are both diagnostic; neither is certification evidence.
 
 The strict device-to-host transfer guard applies to the GPU parity profile
 only: it sets `JAX_TRANSFER_GUARD=disallow` and
@@ -106,8 +104,8 @@ outer optimizer over JAX physics and derivatives** where explicitly declared:
 These are the providers the upstream scripts call, with upstream's own options.
 
 The `outer_optimizer_policy` manifest field declares the policy owned by that
-example. The declaration is bound to the registered example and, for parity,
-the exact case and driver. A driver name alone grants no exception, and another
+example. The declaration is bound to the registered example and its exact
+driver. A driver name alone grants no exception, and another
 example cannot borrow this policy. Missing declarations retain the default ban.
 This permission does not relax transfer guards, source provenance, scientific
 acceptance, or parity comparisons. CPU control is not a GPU-resident optimizer;
@@ -132,82 +130,23 @@ Passing a canonical mode such as `jax_cpu_float32_smoke` remains supported and
 cannot be combined with `device` or `intent`. An unavailable requested GPU
 fails; it never falls back to CPU.
 
-## Native/JAX parity evidence
+## Native/JAX same-state parity
 
-The paired parity runner reconstructs matched native SIMSOPT CPU and JAX
-workflows from one serialized input bundle. Run the applicable official
-upstream cases at their native-default scale on CPU with:
-
-```console
-python examples/jax/run_parity.py \
-  --case all-applicable \
-  --lanes native-cpu,jax-cpu \
-  --scale native_default \
-  --artifact-root .artifacts/jax-example-parity
-```
-
-In a CUDA environment, use the full matched lane set:
+[`tests/jax/test_mirror_same_state_parity.py`](../../tests/jax/test_mirror_same_state_parity.py)
+builds each covered native SIMSOPT problem and its JAX mirror at one shared
+starting state, at a small size, and compares the objective and, where it is
+defined, the gradient there: native against JAX CPU, and against JAX GPU when
+CUDA is present. It stores no reference data; the tolerances are the
+same-state values of `simsopt_jax.parity_tolerances`.
 
 ```console
-python examples/jax/run_parity.py \
-  --case all-applicable \
-  --lanes native-cpu,jax-cpu,jax-gpu \
-  --scale native_default \
-  --artifact-root .artifacts/jax-example-parity
+python -m pytest tests/jax/test_mirror_same_state_parity.py
 ```
-
-Then audit the published run independently:
-
-```console
-python -m examples.jax.parity.audit \
-  --run .artifacts/jax-example-parity/<run-id> \
-  --repo-root "$PWD"
-```
-
-`--case` also accepts individual case IDs, repeated. The legacy `--smoke` flag
-is still accepted but no longer selects scale, and is rejected together with
-`--scale native_default`; use `--scale`.
-
-The runner fixes FP64 and platform selection before importing JAX and pins both
-transfer guards to `disallow` in the `jax-gpu` lane; a missing GPU, CPU
-fallback, wrong precision, implicit transfer, or forbidden host solver fails the
-run. Each lane executes in a fresh process.
-The published directory contains canonical input JSON/NPY files, one hash-bound
-lane receipt per case, and an aggregate `summary.json` that records the loaded
-manifest version pair and the selected scale. Failed or interrupted runs retain
-a diagnostic `.partial` directory and are never published as passing evidence.
-
-Every lane receipt records the repository commit, the tracked diff hash, the
-untracked-file inventory, and the SHA-256 of each executed source and of the
-loaded native extension. The auditor re-hashes those sources against the
-checkout it is given and rejects any that changed.
-
-Bounded and native-default scale are independent of workflow coverage: a
-bounded `full` case is not native-default evidence. Every tracked parity
-relationship records `scale_tier: bounded`, and native-default parity runs
-only from the manual `run_native_default` dispatch input of the GPU parity
-workflow. Treat native-default evidence as not run rather than inferring it
-from a bounded pass. Published runs are local-only: `.artifacts/` is
-ignored, is not a durable shared archive, and cannot by itself support a
-remotely reproducible retention claim.
-
-Memory receipts use `XLA_PYTHON_CLIENT_PREALLOCATE=false`, synchronize the JAX
-publication boundary, and report one combined import/compile/warmup/bounded-run
-peak. They do not claim a separate steady-state peak and support no speed
-claim. The receipts pin that setting explicitly rather than relying on the
-runtime: the `jax_gpu_parity` and `jax_gpu_fast` modes already default
-`xla_gpu_preallocate` to `False`
-(`src/simsopt_jax/backend/_runtime_policy.py`, `_GPU_MEMORY_MODE_DEFAULTS`),
-so preallocation is off under any supported GPU mode unless the user sets
-`SIMSOPT_JAX_GPU_PREALLOCATE` or passes `xla_gpu_preallocate=True`. A script
-that selects a device through `JAX_PLATFORMS` alone, without going through
-`set_backend`, gets JAX's own preallocating default instead.
 
 ## The one-to-one identity contract
 
-The authoritative inventory is [`manifest.json`](manifest.json) and
-[`parity_manifest.json`](parity_manifest.json). Nothing else in this directory
-defines coverage.
+The authoritative inventory is [`manifest.json`](manifest.json). Nothing else
+in this directory defines coverage.
 
 `manifest.json` holds the official coverage:
 
@@ -219,12 +158,8 @@ defines coverage.
 
 An owned record must sit at the identical tier and filename as its source, must
 be typed `one_to_one`, and cannot be a tutorial. Each mirror is owned by at
-most one source. `parity_manifest.json` holds 26 official relationships
-(25 `full`, 1 `unsupported`). Execution scale and verified evidence are
-separate from source coverage.
-
-`run_parity.py --case all-applicable` selects the 25 executable official
-relationships.
+most one source. Execution scale and verified evidence are separate from source
+coverage.
 
 List the pairs from the manifest rather than from a hand-maintained table:
 
@@ -300,8 +235,7 @@ mpiexec -n 1 python examples/jax/3_Advanced/single_stage_optimization.py \
   --smoke --json --output-dir <output-dir>
 ```
 
-Its manifest status is `planned` and its parity classification is
-`unsupported`, with no case ID, so `--case all-applicable` does not select it.
+Its manifest status is `planned`, so the example runner does not select it.
 It is not promoted and holds no parity claim. Promotion is blocked on a
 VMEC hybrid authority lane proving immutable VMEC/MPI build identity, the
 recorded MPI world size, and matched CPU and GPU slice provenance on an
@@ -309,17 +243,14 @@ approved runner.
 
 ## Manifest schema
 
-The only accepted contract pair is example-schema-v3 plus parity-schema-v2,
-read atomically; any other version of either document is rejected. Every parity
-`summary.json` records `manifest_schema_version`,
-`parity_manifest_schema_version`, and `used_legacy_manifest_adapter`, so an
-audited bundle states which contract produced it. No legacy manifest reader
-exists, so `used_legacy_manifest_adapter` is always `false`; the key stays so
-summary schema 2 keeps its shape, and the auditor rejects any other value.
+The only accepted example manifest is schema v3; any other version is
+rejected. Every runner invocation first prints one JSON line to stderr with
+`examples_manifest_schema_version` and `used_legacy_manifest_adapter`. No
+legacy manifest reader exists, so `used_legacy_manifest_adapter` is always
+`false`.
 
-The active v3/v2 documents hold official coverage only; a document with any
-other root field is rejected. Historical receipts retain their original files
-and must be audited at their recorded source revision.
+The active v3 document holds official coverage only; a document with any other
+root field is rejected.
 
 ## Author contract
 

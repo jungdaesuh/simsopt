@@ -227,22 +227,6 @@ jobs:
       - name: Run JAX examples on CPU in explicit parity mode
         run: python examples/jax/run_examples.py --device cpu --intent parity --scale bounded
 
-      - name: Run native/JAX CPU example parity
-        run: |
-            python examples/jax/run_parity.py \
-              --case all-applicable \
-              --lanes native-cpu,jax-cpu \
-              --scale bounded \
-              --artifact-root .artifacts/jax-example-parity
-
-      - name: Upload native/JAX CPU parity receipts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jax-native-example-parity-cpu
-          path: .artifacts/jax-example-parity/
-          retention-days: 14
-
       - name: Run native/JAX same-state mirror parity
         run: |
           python -m pytest tests/jax/test_mirror_same_state_parity.py \

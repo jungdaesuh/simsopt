@@ -14,7 +14,7 @@ import forward_roundoff_bound as fb
 import jax
 import numpy as np
 from boozer_first_stage_roundoff import INVERSE_SQRT_EXTRA_ROUNDINGS
-from parity_native_cpu import run_parity_lane_child
+from parity_native_cpu import run_lane_child
 
 from simsopt.geo.curve import kappa_pure
 from simsopt.geo.curveobjectives import CurveLength, curve_length_pure
@@ -153,7 +153,7 @@ def test_native_curve_length_kernels_stay_host_owned_in_a_cuda_only_process(
         expected_value = objective.J()
         expected_derivative = objective.dJ()
 
-    completed = run_parity_lane_child(
+    completed = run_lane_child(
         "jax-gpu",
         _CUDA_ONLY_CURVE_LENGTH_CHILD,
         str(curve.quadpoints.size),

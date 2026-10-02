@@ -1,4 +1,4 @@
-"""Case-bound host SciPy outer optimizers over JAX physics."""
+"""Example-bound host SciPy outer optimizers over JAX physics."""
 
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ class OuterOptimizerPolicy:
     policy_id: OuterOptimizerPolicyId
     example_id: str
     example_path: str
-    case_id: str | None
     expected_driver: str
 
 
@@ -45,28 +44,24 @@ _APPROVED_POLICIES = (
         "scipy-trf-over-jax-quadratic",
         "native-just-a-quadratic",
         "1_Simple/just_a_quadratic.py",
-        "native-just-a-quadratic",
         "scipy_least_squares_trf_jax_quadratic",
     ),
     OuterOptimizerPolicy(
         "scipy-trf-over-jax-curve-length",
         "native-minimize-curve-length",
         "1_Simple/minimize_curve_length.py",
-        "native-minimize-curve-length",
         "scipy_least_squares_trf_jax_curve_length",
     ),
     OuterOptimizerPolicy(
         "scipy-trf-over-jax-surf-vol-area",
         "native-surf-vol-area",
         "1_Simple/surf_vol_area.py",
-        "native-surf-vol-area",
         "scipy_least_squares_trf_jax_surf_vol_area",
     ),
     OuterOptimizerPolicy(
         "scipy-lbfgsb-slsqp-over-jax-qfm",
         "native-qfm",
         "1_Simple/qfm.py",
-        "native-qfm",
         "scipy_lbfgsb_slsqp_qfm_sequence",
     ),
     # The official native scripts of standard, planar and stochastic stage two,
@@ -78,42 +73,36 @@ _APPROVED_POLICIES = (
         "scipy-lbfgsb-over-jax-standard-stage-two",
         "native-stage-two-optimization",
         "2_Intermediate/stage_two_optimization.py",
-        "native-stage-two-optimization",
         "scipy_lbfgsb",
     ),
     OuterOptimizerPolicy(
         "scipy-lbfgsb-over-jax-planar-stage-two",
         "native-stage-two-optimization-planar-coils",
         "2_Intermediate/stage_two_optimization_planar_coils.py",
-        "native-stage-two-optimization-planar-coils",
         "scipy_lbfgsb",
     ),
     OuterOptimizerPolicy(
         "scipy-lbfgsb-over-jax-stochastic-stage-two",
         "native-stage-two-optimization-stochastic",
         "2_Intermediate/stage_two_optimization_stochastic.py",
-        "native-stage-two-optimization-stochastic",
         "scipy_lbfgsb",
     ),
     OuterOptimizerPolicy(
         "scipy-lbfgsb-over-jax-minimal-stage-two",
         "native-stage-two-optimization-minimal",
         "1_Simple/stage_two_optimization_minimal.py",
-        "native-stage-two-optimization-minimal",
         "scipy_lbfgsb",
     ),
     OuterOptimizerPolicy(
         "scipy-lbfgsb-over-jax-finite-build-stage-two",
         "native-stage-two-optimization-finitebuild",
         "3_Advanced/stage_two_optimization_finitebuild.py",
-        "native-stage-two-optimization-finitebuild",
         "scipy_lbfgsb",
     ),
     OuterOptimizerPolicy(
         "scipy-lbfgsb-over-jax-coil-forces",
         "native-coil-forces",
         "3_Advanced/coil_forces.py",
-        "native-coil-forces",
         "scipy_lbfgsb",
     ),
 )
@@ -140,17 +129,6 @@ def parse_outer_optimizer_policy(
                 )
             return policy
     raise OuterOptimizerPolicyError("unknown outer optimizer policy")
-
-
-def policy_owns_parity_case(
-    policy: OuterOptimizerPolicy, *, case_id: str | None, example_id: str | None
-) -> bool:
-    """Reject forged policy records and tutorial policies without a parity case."""
-    return (
-        policy in _APPROVED_POLICIES
-        and policy.case_id is not None
-        and (case_id, example_id) == (policy.case_id, policy.example_id)
-    )
 
 
 def validate_ready_example_policy(

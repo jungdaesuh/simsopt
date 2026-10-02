@@ -144,14 +144,15 @@ omitted-precision JAX route remain unchanged.
 Quick smoke run
 ~~~~~~~~~~~~~~~
 
-The parity runner executes the official upstream mirrors at their bounded scale
-next to native SIMSOPT and compares the two lanes::
+The example runner executes every ready JAX mirror of an official upstream
+example at its bounded scale, each in its own subprocess::
 
-    python examples/jax/run_parity.py \
-      --case all-applicable \
-      --lanes native-cpu,jax-cpu \
-      --scale bounded \
-      --artifact-root .artifacts/jax-example-parity
+    python examples/jax/run_examples.py --device cpu --scale bounded
+
+The same-state parity test builds native SIMSOPT problems and their JAX mirrors
+at one shared starting state and compares the objectives and gradients there::
+
+    python -m pytest tests/jax/test_mirror_same_state_parity.py
 
 Synchronize device work before timing custom benchmarks.  JAX dispatch is
 asynchronous, so a timer must call ``jax.block_until_ready`` on the result.
@@ -374,9 +375,7 @@ one compatibility release and emit a deprecation warning.
 
 Fast and parity retain the same FP64 scientific contract, public objectives,
 custom SIMSOPT JAX solver family, accepted-state publication, and terminal
-scientific gates.  Fast output is never certification evidence.  Use the
-dedicated ``examples/jax/run_parity.py`` workflow for hash-bound native/JAX
-certification artifacts.
+scientific gates.  Fast output is never certification evidence.
 
 Precision selection
 ~~~~~~~~~~~~~~~~~~~

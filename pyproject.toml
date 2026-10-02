@@ -148,7 +148,6 @@ include = [
     "src/simsopt_jax/solve/simsopt",
     "src/simsopt_jax_adapters/mhd/vmec_host.py",
     "tests/integration/test_jax_execution_scale_contract.py",
-    "tests/integration/test_jax_stochastic_configuration_ssot.py",
     "tests/jax/adapters/test_vmec_host_evaluation.py",
     "tests/jax/solve/test_import_boundaries.py",
     "tests/jax/solve/test_optimizer_result_schema.py",

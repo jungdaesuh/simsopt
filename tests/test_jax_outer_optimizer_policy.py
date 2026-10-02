@@ -7,12 +7,10 @@ from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 import dataclasses
 import json
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
-from examples.jax import run_parity
-from examples.jax.manifest_contracts_v3 import load_manifest_contract_pair_documents
-from examples.jax.manifest_runtime import load_runtime_contract_pair
+from examples.jax.manifest_contracts_v3 import parse_examples_v3_document
+from examples.jax.manifest_runtime import load_runtime_manifest
 from examples.jax.outer_optimizer_policy import (
     OuterOptimizerPolicyError,
     parse_outer_optimizer_policy,
@@ -24,15 +22,13 @@ HOST_POLICY_ID = "native-qfm"
 
 
 def test_approved_policies_are_available_through_the_real_runtime_registry() -> None:
-    pair = load_runtime_contract_pair(
-        REPO_ROOT / "examples/jax/manifest.json",
-        REPO_ROOT / "examples/jax/parity_manifest.json",
-        repo_root=REPO_ROOT,
+    pair = load_runtime_manifest(
+        REPO_ROOT / "examples/jax/manifest.json", repo_root=REPO_ROOT
     )
     host = next(example for example in pair.examples if example.id == HOST_POLICY_ID)
     assert host.status == "ready"
     assert host.outer_optimizer_policy is not None
-    assert host.outer_optimizer_policy.case_id == HOST_POLICY_ID
+    assert host.outer_optimizer_policy.example_id == HOST_POLICY_ID
     assert (
         next(
             example
@@ -45,13 +41,12 @@ def test_approved_policies_are_available_through_the_real_runtime_registry() -> 
 
 @pytest.mark.parametrize(
     "mutation",
-    ("missing", "copied", "unknown", "wrong_case"),
+    ("missing", "copied", "unknown"),
 )
 def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
     mutation: str,
 ) -> None:
     manifest = json.loads((REPO_ROOT / "examples/jax/manifest.json").read_text())
-    parity = json.loads((REPO_ROOT / "examples/jax/parity_manifest.json").read_text())
     examples = {example["id"]: example for example in manifest["jax_examples"]}
     if mutation == "missing":
         del examples[HOST_POLICY_ID]["outer_optimizer_policy"]
@@ -59,17 +54,10 @@ def test_manifest_rejects_missing_or_borrowed_host_outer_declarations(
         examples["native-just-a-quadratic"]["outer_optimizer_policy"] = examples[
             HOST_POLICY_ID
         ]["outer_optimizer_policy"]
-    elif mutation == "unknown":
-        examples[HOST_POLICY_ID]["outer_optimizer_policy"] = "allow-all-scipy"
     else:
-        relationship = next(
-            relationship
-            for relationship in parity["relationships"]
-            if relationship["jax_example_id"] == HOST_POLICY_ID
-        )
-        relationship["case_id"] = "unregistered-borrower"
+        examples[HOST_POLICY_ID]["outer_optimizer_policy"] = "allow-all-scipy"
     with pytest.raises(ValueError, match="outer optimizer policy"):
-        load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
+        parse_examples_v3_document(manifest, repo_root=REPO_ROOT)
 
 
 def test_planned_record_without_declaration_keeps_legacy_default() -> None:
@@ -100,10 +88,8 @@ def test_planned_record_without_declaration_keeps_legacy_default() -> None:
 def test_example_child_command_rejects_a_missing_ready_host_declaration(
     example_id: str,
 ) -> None:
-    pair = load_runtime_contract_pair(
-        REPO_ROOT / "examples/jax/manifest.json",
-        REPO_ROOT / "examples/jax/parity_manifest.json",
-        repo_root=REPO_ROOT,
+    pair = load_runtime_manifest(
+        REPO_ROOT / "examples/jax/manifest.json", repo_root=REPO_ROOT
     )
     example = next(example for example in pair.examples if example.id == example_id)
     assert build_child_command(example, repo_root=REPO_ROOT)
@@ -114,18 +100,15 @@ def test_example_child_command_rejects_a_missing_ready_host_declaration(
         build_child_command(without_declaration, repo_root=REPO_ROOT)
 
 
-def test_qfm_host_policy_is_bound_to_its_official_example_and_case() -> None:
+def test_qfm_host_policy_is_bound_to_its_official_example() -> None:
     manifest = json.loads((REPO_ROOT / "examples/jax/manifest.json").read_text())
-    parity = json.loads((REPO_ROOT / "examples/jax/parity_manifest.json").read_text())
-    pair = load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
-    qfm = next(
-        example for example in pair.examples.jax_examples if example.id == "native-qfm"
-    )
+    parsed = parse_examples_v3_document(manifest, repo_root=REPO_ROOT)
+    qfm = next(example for example in parsed.jax_examples if example.id == "native-qfm")
     assert qfm.outer_optimizer_policy is not None
     assert (
         qfm.outer_optimizer_policy.expected_driver == "scipy_lbfgsb_slsqp_qfm_sequence"
     )
-    assert qfm.outer_optimizer_policy.case_id == "native-qfm"
+    assert qfm.outer_optimizer_policy.example_path == "1_Simple/qfm.py"
 
     borrower = next(
         example
@@ -134,54 +117,4 @@ def test_qfm_host_policy_is_bound_to_its_official_example_and_case() -> None:
     )
     borrower["outer_optimizer_policy"] = qfm.outer_optimizer_policy.policy_id
     with pytest.raises(ValueError, match="different example"):
-        load_manifest_contract_pair_documents(manifest, parity, repo_root=REPO_ROOT)
-
-
-def test_parity_runner_rejects_missing_policy_before_inputs_or_children(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pair = load_runtime_contract_pair(
-        REPO_ROOT / "examples/jax/manifest.json",
-        REPO_ROOT / "examples/jax/parity_manifest.json",
-        repo_root=REPO_ROOT,
-    )
-    policyless_pair = dataclasses.replace(
-        pair,
-        examples=tuple(
-            dataclasses.replace(example, outer_optimizer_policy=None)
-            for example in pair.examples
-        ),
-    )
-    monkeypatch.setattr(
-        run_parity,
-        "load_runtime_contract_pair",
-        lambda *args, **kwargs: policyless_pair,
-    )
-    case = Mock()
-    case.create_input.side_effect = AssertionError("input creation must not begin")
-    launch = Mock(side_effect=AssertionError("child execution must not begin"))
-    monkeypatch.setattr(run_parity, "get_case", lambda case_id: case)
-    monkeypatch.setattr(run_parity, "execute_case_lanes", launch)
-    assert (
-        run_parity.main(
-            [
-                "--case",
-                HOST_POLICY_ID,
-                "--lanes",
-                "jax-cpu",
-                "--scale",
-                "native_default",
-                "--artifact-root",
-                str(tmp_path),
-            ]
-        )
-        == 1
-    )
-    case.create_input.assert_not_called()
-    launch.assert_not_called()
-    failed_receipts = tuple(tmp_path.rglob("FAILURE.json"))
-    assert failed_receipts, "Rejected runs must preserve a failure receipt"
-    assert (
-        "requires its outer optimizer policy declaration"
-        in failed_receipts[0].read_text()
-    )
+        parse_examples_v3_document(manifest, repo_root=REPO_ROOT)

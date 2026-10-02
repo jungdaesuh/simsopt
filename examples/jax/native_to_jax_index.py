@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from examples.jax.manifest_contracts_v3 import load_manifest_contract_pair_documents
+from examples.jax.manifest_contracts_v3 import parse_examples_v3_document
 from examples.jax.official_source_catalog import (
     OFFICIAL_UPSTREAM_COMMIT,
     OFFICIAL_UPSTREAM_DEFAULT_BRANCH,
@@ -17,7 +17,6 @@ JAX_EXAMPLES_DIRECTORY = Path(__file__).resolve().parent
 REPO_ROOT = JAX_EXAMPLES_DIRECTORY.parents[1]
 INDEX_PATH = JAX_EXAMPLES_DIRECTORY / "NATIVE_TO_JAX_INDEX.md"
 MANIFEST_PATH = JAX_EXAMPLES_DIRECTORY / "manifest.json"
-PARITY_MANIFEST_PATH = JAX_EXAMPLES_DIRECTORY / "parity_manifest.json"
 
 
 def _load_json(path: Path) -> object:
@@ -30,48 +29,38 @@ def _markdown_cell(value: str) -> str:
 
 
 def render_native_to_jax_index(*, repo_root: Path = REPO_ROOT) -> str:
-    """Render the complete index from validated manifest contracts."""
-    jax_examples_directory = repo_root / "examples" / "jax"
-    pair = load_manifest_contract_pair_documents(
-        _load_json(jax_examples_directory / MANIFEST_PATH.name),
-        _load_json(jax_examples_directory / PARITY_MANIFEST_PATH.name),
+    """Render the complete index from the validated example manifest."""
+    manifest = parse_examples_v3_document(
+        _load_json(repo_root / "examples" / "jax" / MANIFEST_PATH.name),
         repo_root=repo_root,
     )
-    examples_by_id = {example.id: example for example in pair.examples.jax_examples}
-    parity_by_source = {
-        relationship.native_source: relationship
-        for relationship in pair.parity.relationships
-    }
+    examples_by_id = {example.id: example for example in manifest.jax_examples}
     table_header = (
         "| Native example | JAX mirror | Classification | "
-        "Runtime dependencies | Device scope | Scale |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "Runtime dependencies | Device scope |",
+        "| --- | --- | --- | --- | --- |",
     )
     lines = [
         "# Native-to-JAX example index",
         "",
-        (
-            "Generated from `manifest.json` and `parity_manifest.json`. "
-            "Do not edit this table by hand."
-        ),
+        "Generated from `manifest.json`. Do not edit this table by hand.",
         (
             f"Official upstream scope: `{OFFICIAL_UPSTREAM_REPOSITORY}` "
             f"`{OFFICIAL_UPSTREAM_DEFAULT_BRANCH}` at "
             f"`{OFFICIAL_UPSTREAM_COMMIT}` "
-            f"({len(pair.examples.source_catalog)} source files)."
+            f"({len(manifest.source_catalog)} source files)."
         ),
         "",
         "## Official upstream catalog",
         "",
         *table_header,
     ]
-    for source in pair.examples.source_catalog:
+    for source in manifest.source_catalog:
         example = (
             examples_by_id[source.mirror_example_id]
             if source.mirror_example_id is not None
             else None
         )
-        relationship = parity_by_source.get(source.source)
         mirror_path = "—" if example is None else f"`examples/jax/{example.path}`"
         classification = source.disposition
         if example is not None:
@@ -89,16 +78,12 @@ def render_native_to_jax_index(*, repo_root: Path = REPO_ROOT) -> str:
             )
             if example.outer_optimizer_policy is not None:
                 device_scope = "outer: CPU SciPy; " + device_scope
-        scale = (
-            "—" if relationship is None else ", ".join(relationship.supported_scales)
-        )
         cells = (
             f"`examples/{source.source}`",
             mirror_path,
             classification,
             dependencies,
             device_scope,
-            scale,
         )
         lines.append("| " + " | ".join(_markdown_cell(cell) for cell in cells) + " |")
     lines.extend(

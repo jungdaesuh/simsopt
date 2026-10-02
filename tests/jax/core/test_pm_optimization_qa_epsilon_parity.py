@@ -28,8 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Child source is a string so OpenMP is in the environment before the
 # extension is imported. ``run_native_cpu_child`` is the SSOT that
-# applies ``build_parity_lane_environment`` (``OMP_NUM_THREADS=1``)
-# for native-cpu. The child runs in tests/ so it imports the grid fixture
+# applies the native-cpu lane environment (``OMP_NUM_THREADS=1``). The child runs in tests/ so it imports the grid fixture
 # (and unpickles its ``GridSpec``) as the same top-level module.
 _NATIVE_CHILD = """\
 import io
@@ -101,8 +100,7 @@ def test_qa_nphi4_epsilon_1e_3_matches_native(tmp_path: Path) -> None:
     (relative scatter ~2e-2 on this geometry). ``OMP_NUM_THREADS`` is read
     when libgomp starts, so an in-process env pin cannot undo the pytest
     process team. The native lane therefore runs in a subprocess whose
-    environment comes from ``run_native_cpu_child`` /
-    ``build_parity_lane_environment`` (the SSOT that sets
+    environment comes from ``run_native_cpu_child`` (the SSOT that sets
     ``OMP_NUM_THREADS=1`` before the child imports the extension).
     """
     spec = _qa_spec(4)

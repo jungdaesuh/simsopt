@@ -27,8 +27,8 @@ LEGACY_JAX_LANES: tuple[JaxLane, ...] = ("cpu-smoke", "gpu-strict")
 # how the run was launched, which is what a lane comparison needs.  Lanes that
 # are compared against each other therefore agree on it, and a receipt that omits
 # it cannot say what was actually compared.  This tuple is the one place those
-# variable names are written down; ``examples/jax/parity/runtime.py`` pins them
-# and ``examples/jax/parity/provenance.py`` retains them.
+# variable names are written down; the lane-child test helper
+# ``tests/parity_native_cpu.py`` pins them.
 HOST_THREAD_VARIABLES: tuple[str, ...] = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",

@@ -1,4 +1,4 @@
-"""Runtime-only adapter over the atomic example and parity manifest pair."""
+"""Runtime-only adapter over the JAX example manifest."""
 
 from __future__ import annotations
 
@@ -11,18 +11,16 @@ from examples.jax.manifest_contracts_v3 import (
     ExampleClassification,
     ExampleStatus,
     JaxExamplesManifestV3,
-    ManifestContractPair,
     TeachingKind,
-    load_manifest_contract_pair_documents,
+    parse_examples_v3_document,
 )
 from examples.jax.outer_optimizer_policy import OuterOptimizerPolicy
-from examples.jax.parity._manifest import ParityManifest
 
 _LANE_BY_DEVICE: Final = {"cpu": "cpu-smoke", "gpu": "gpu-strict"}
 
 
 class RuntimeManifestError(ValueError):
-    """A validated manifest pair cannot be adapted to executable runtime state."""
+    """A manifest document cannot be adapted to executable runtime state."""
 
 
 @dataclass(frozen=True)
@@ -41,12 +39,11 @@ class RuntimeExample:
 
 
 @dataclass(frozen=True)
-class RuntimeContractPair:
-    """Executable records and parity policy from one validated version pair."""
+class RuntimeManifest:
+    """Executable records from one validated example manifest."""
 
-    version_pair: tuple[int, int]
+    schema_version: int
     examples: tuple[RuntimeExample, ...]
-    parity: ParityManifest
 
 
 def _document(path: Path, context: str) -> dict[str, object]:
@@ -84,24 +81,12 @@ def _canonical_examples(
     )
 
 
-def _runtime_pair(pair: ManifestContractPair) -> RuntimeContractPair:
-    return RuntimeContractPair(
-        version_pair=pair.version_pair,
-        examples=_canonical_examples(pair.examples),
-        parity=pair.parity,
+def load_runtime_manifest(examples_path: Path, *, repo_root: Path) -> RuntimeManifest:
+    """Read, validate, and adapt one example manifest."""
+    manifest = parse_examples_v3_document(
+        _document(examples_path, "examples manifest"), repo_root=repo_root
     )
-
-
-def load_runtime_contract_pair(
-    examples_path: Path,
-    parity_path: Path,
-    *,
-    repo_root: Path,
-) -> RuntimeContractPair:
-    """Read, validate, and adapt one complete example/parity manifest pair."""
-    pair = load_manifest_contract_pair_documents(
-        _document(examples_path, "examples manifest"),
-        _document(parity_path, "parity manifest"),
-        repo_root=repo_root,
+    return RuntimeManifest(
+        schema_version=manifest.schema_version,
+        examples=_canonical_examples(manifest),
     )
-    return _runtime_pair(pair)

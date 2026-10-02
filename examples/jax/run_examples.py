@@ -34,9 +34,9 @@ from examples.jax.outer_optimizer_policy import (
     validate_ready_example_policy,
 )
 from examples.jax.manifest_runtime import (
-    RuntimeContractPair,
     RuntimeExample,
-    load_runtime_contract_pair,
+    RuntimeManifest,
+    load_runtime_manifest,
 )
 from simsopt_jax.config import ExecutionIntent, JaxDevice, JaxExecutionProfile
 from simsopt_jax.examples import EXECUTION_SCALES, ExecutionScale
@@ -47,7 +47,7 @@ class ChildResultValidationError(ValueError):
 
 
 def manifest_observability_payload(
-    manifest: RuntimeContractPair,
+    manifest: RuntimeManifest,
 ) -> dict[str, int | bool]:
     """Return the schema/adapter fields emitted by every runner invocation.
 
@@ -55,8 +55,7 @@ def manifest_observability_payload(
     reader exists, and the key stays so the emitted line keeps its shape.
     """
     return {
-        "examples_manifest_schema_version": manifest.version_pair[0],
-        "parity_manifest_schema_version": manifest.version_pair[1],
+        "examples_manifest_schema_version": manifest.schema_version,
         "used_legacy_manifest_adapter": False,
     }
 
@@ -201,7 +200,7 @@ def _write_child_failure(
 
 
 def run_lane(
-    manifest: RuntimeContractPair,
+    manifest: RuntimeManifest,
     lane: Lane,
     *,
     repo_root: Path,
@@ -228,7 +227,7 @@ def run_lane(
 
 
 def run_profile(
-    manifest: RuntimeContractPair,
+    manifest: RuntimeManifest,
     device: JaxDevice,
     intent: ExecutionIntent,
     scale: ExecutionScale = "bounded",
@@ -320,11 +319,6 @@ def _argument_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(__file__).with_name("manifest.json"),
     )
-    parser.add_argument(
-        "--parity-manifest",
-        type=Path,
-        default=Path(__file__).with_name("parity_manifest.json"),
-    )
     return parser
 
 
@@ -344,13 +338,9 @@ def main(arguments: list[str] | None = None) -> int:
     parsed = _parse_arguments(arguments)
     repo_root = _REPO_ROOT
     try:
-        manifest = load_runtime_contract_pair(
-            parsed.manifest,
-            parsed.parity_manifest,
-            repo_root=repo_root,
-        )
+        manifest = load_runtime_manifest(parsed.manifest, repo_root=repo_root)
     except ValueError as error:
-        print(f"manifest pair validation failed: {error}", file=sys.stderr)
+        print(f"manifest validation failed: {error}", file=sys.stderr)
         return 2
     print(
         json.dumps(

@@ -2,9 +2,8 @@
 
 ``jax.device_put`` of a non-scalar HOST array inside a traced region is staged
 into the computation and becomes an implicit host-to-device copy when the
-computation runs. The parity lanes execute with
-``jax_transfer_guard_host_to_device = disallow`` (``examples/jax/parity/arbiter.py``
-requires that guard for the ``parity`` intent), so such a buffer aborts the run:
+computation runs. The strict GPU lanes execute with
+``jax_transfer_guard_host_to_device = disallow``, so such a buffer aborts the run:
 the multistep GSCO workflow died that way on the jax-gpu lane, inside
 ``jax.lax.while_loop`` in ``wireframe_gsco_multistep_loop_jax``, with
 ``aval=ShapedArray(int32[2501])`` -- the ``max_iter_per_step + 1`` history buffer

@@ -31,9 +31,8 @@ at 135 and 69 iterations of its own 400-iteration cap.  Upstream's END POINT is
 therefore not reachable by a gradient that describes the objective, and this
 mirror does not claim it: it runs the script's own ``MAXITER`` per stage
 (``NATIVE_ITERATIONS`` below) and a budget exit is the expected honest terminal
-status.  What is mirrored, and proven against upstream's own capture in
-``tests/integration/test_jax_mirror_planar_coils_official_states.py``, is the
-objective VALUE at upstream's three recorded states and the GRADIENT at the
+status.  What is mirrored, and was proven against upstream's own capture, is
+the objective VALUE at upstream's three recorded states and the GRADIENT at the
 start state -- the one state at which upstream's gradient is right.  The JAX
 curve differentiates through the quaternion normalization
 (``simsopt_jax/core/curve_planar_fourier.py``) and so has no analogue of the

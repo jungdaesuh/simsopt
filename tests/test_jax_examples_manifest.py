@@ -13,16 +13,13 @@ from examples.jax._manifest import (
     resolve_example_implementation,
 )
 from examples.jax.manifest_contracts_v3 import (
-    ContractVersionError,
     ManifestV3ValidationError,
-    load_manifest_contract_pair_documents,
     parse_examples_v3_document,
 )
-from examples.jax.manifest_runtime import load_runtime_contract_pair
+from examples.jax.manifest_runtime import load_runtime_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "manifest.json"
-PARITY_MANIFEST_PATH = REPO_ROOT / "examples" / "jax" / "parity_manifest.json"
 
 
 def _document(path: Path) -> dict[str, object]:
@@ -104,34 +101,23 @@ def test_schema_v3_rejects_unregistered_executable_fields() -> None:
         parse_examples_v3_document(examples, repo_root=REPO_ROOT)
 
 
-def test_contract_pair_accepts_only_example_v3_with_parity_v2() -> None:
+def test_manifest_accepts_only_example_schema_v3() -> None:
     examples = _document(MANIFEST_PATH)
-    parity = _document(PARITY_MANIFEST_PATH)
 
-    pair = load_manifest_contract_pair_documents(examples, parity, repo_root=REPO_ROOT)
-    assert pair.version_pair == (3, 2)
+    assert parse_examples_v3_document(examples, repo_root=REPO_ROOT).schema_version == 3
 
-    # The retired example-v2/parity-v1 schemas are refused like any unknown one.
+    # The retired example-v2 schema is refused like any unknown one.
     for version in (2, 4):
         unknown_examples = copy.deepcopy(examples)
         unknown_examples["schema_version"] = version
-        with pytest.raises(ContractVersionError, match="unsupported example schema"):
-            load_manifest_contract_pair_documents(
-                unknown_examples, parity, repo_root=REPO_ROOT
-            )
-    for version in (1, 3):
-        unknown_parity = copy.deepcopy(parity)
-        unknown_parity["schema_version"] = version
-        with pytest.raises(ContractVersionError, match="unsupported parity schema"):
-            load_manifest_contract_pair_documents(
-                examples, unknown_parity, repo_root=REPO_ROOT
-            )
+        with pytest.raises(
+            ManifestV3ValidationError, match="unsupported example schema"
+        ):
+            parse_examples_v3_document(unknown_examples, repo_root=REPO_ROOT)
 
 
 def test_ready_examples_are_public_jax_workflows_not_forwarders() -> None:
-    examples = load_runtime_contract_pair(
-        MANIFEST_PATH, PARITY_MANIFEST_PATH, repo_root=REPO_ROOT
-    ).examples
+    examples = load_runtime_manifest(MANIFEST_PATH, repo_root=REPO_ROOT).examples
 
     for example in examples:
         if example.status != "ready":

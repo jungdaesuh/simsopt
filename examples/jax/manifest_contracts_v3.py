@@ -1,4 +1,4 @@
-"""Typed ownership boundary for the JAX example and parity manifest pair."""
+"""Typed ownership boundary for the JAX example manifest."""
 
 from __future__ import annotations
 
@@ -13,11 +13,6 @@ from examples.jax.official_source_catalog import (
 from examples.jax.outer_optimizer_policy import (
     OuterOptimizerPolicy,
     parse_outer_optimizer_policy,
-    policy_owns_parity_case,
-)
-from examples.jax.parity._manifest import (
-    ParityManifest,
-    parse_v2_parity_relationships_document,
 )
 
 SourceDispositionV3 = Literal["eligible", "hybrid", "blocked", "not_applicable"]
@@ -74,10 +69,6 @@ class ManifestV3ValidationError(ValueError):
     """A schema-v3 example contract violates its ownership boundary."""
 
 
-class ContractVersionError(ValueError):
-    """Example and parity manifest versions cannot be read atomically."""
-
-
 @dataclass(frozen=True)
 class RuntimeDependencies:
     python_import_roots: tuple[str, ...]
@@ -125,13 +116,6 @@ class JaxExamplesManifestV3:
     source_catalog: tuple[SourceRecordV3, ...]
     jax_examples: tuple[JaxExampleRecordV3, ...]
     schema_version: Literal[3] = 3
-
-
-@dataclass(frozen=True)
-class ManifestContractPair:
-    version_pair: tuple[int, int]
-    examples: JaxExamplesManifestV3
-    parity: ParityManifest
 
 
 def _mapping(value: object, context: str) -> dict[str, object]:
@@ -498,80 +482,3 @@ def parse_examples_v3_document(
     )
     _validate_v3_ownership(manifest, repo_root)
     return manifest
-
-
-def _parse_parity_v2_document(
-    document: object,
-    *,
-    examples_manifest: JaxExamplesManifestV3,
-    repo_root: Path,
-) -> ParityManifest:
-    relationships = parse_v2_parity_relationships_document(
-        document, repo_root=repo_root
-    )
-    examples_by_id = {record.id: record for record in examples_manifest.jax_examples}
-    expected_order = tuple(
-        (source.mirror_example_id, source.source)
-        for source in examples_manifest.source_catalog
-        if source.mirror_example_id is not None
-    )
-    actual_order = tuple(
-        (relationship.jax_example_id, relationship.native_source)
-        for relationship in relationships
-    )
-    if actual_order != expected_order:
-        raise ManifestV3ValidationError(
-            "official parity relationships must exactly follow one-to-one "
-            "source ownership"
-        )
-    for relationship in relationships:
-        example = examples_by_id[relationship.jax_example_id]
-        if example.classification == "tutorial":
-            raise ManifestV3ValidationError("tutorial cannot be parity coverage")
-        if (
-            example.outer_optimizer_policy is not None
-            and relationship.case_id is not None
-            and not policy_owns_parity_case(
-                example.outer_optimizer_policy,
-                case_id=relationship.case_id,
-                example_id=example.id,
-            )
-        ):
-            raise ManifestV3ValidationError(
-                "outer optimizer policy does not own this parity case"
-            )
-        if relationship.classification != "unsupported" and example.status != "ready":
-            raise ManifestV3ValidationError(
-                f"planned executable cannot claim parity: {example.id}"
-            )
-    return ParityManifest(schema_version=2, relationships=relationships)
-
-
-def _schema_version(document: object, contract: str) -> int:
-    root = _mapping(document, contract)
-    version = root.get("schema_version")
-    if isinstance(version, bool) or not isinstance(version, int):
-        raise ContractVersionError(f"unsupported {contract} schema: {version!r}")
-    return version
-
-
-def load_manifest_contract_pair_documents(
-    examples_document: object,
-    parity_document: object,
-    *,
-    repo_root: Path,
-) -> ManifestContractPair:
-    """Atomically accept the example-schema-v3 and parity-schema-v2 pair."""
-    examples_version = _schema_version(examples_document, "example")
-    parity_version = _schema_version(parity_document, "parity")
-    if examples_version != 3:
-        raise ContractVersionError(f"unsupported example schema: {examples_version!r}")
-    if parity_version != 2:
-        raise ContractVersionError(f"unsupported parity schema: {parity_version!r}")
-    examples = parse_examples_v3_document(examples_document, repo_root=repo_root)
-    parity = _parse_parity_v2_document(
-        parity_document,
-        examples_manifest=examples,
-        repo_root=repo_root,
-    )
-    return ManifestContractPair((3, 2), examples, parity)

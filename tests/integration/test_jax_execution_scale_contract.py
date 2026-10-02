@@ -5,55 +5,24 @@ from __future__ import annotations
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import ast
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import jax  # noqa: F401
-import numpy as np
 import pytest
 from examples.jax._manifest import resolve_example_implementation
-from examples.jax.manifest_runtime import RuntimeExample, load_runtime_contract_pair
+from examples.jax.manifest_runtime import RuntimeExample, load_runtime_manifest
 from examples.jax.outer_optimizer_policy import parse_outer_optimizer_policy
-from examples.jax.parity.cases import get_case
-from examples.jax.parity.child import main as run_parity_child
-from examples.jax.parity.input_bundle import (
-    create_input_bundle,
-    read_input_bundle,
-)
-from examples.jax.parity.receipts import load_lane_observation
-from examples.jax.parity.runner import build_child_command as build_parity_command
 from examples.jax.run_examples import (
     _parse_arguments as parse_example_arguments,
 )
 from examples.jax.run_examples import (
     build_child_command as build_example_command,
 )
-from examples.jax.run_parity import _parse_arguments as parse_parity_arguments
 from simsopt_contracts import examples_runtime as shared_example_runtime
 from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
-
-
-def test_input_bundle_import_does_not_load_eager_example_package() -> None:
-    completed = subprocess.run(
-        (
-            sys.executable,
-            "-c",
-            (
-                "import sys; import examples.jax.parity.input_bundle; assert "
-                "'simsopt_jax.examples' not in sys.modules; assert "
-                "'jax' not in sys.modules; assert 'jaxlib' not in sys.modules"
-            ),
-        ),
-        cwd=Path(__file__).resolve().parents[2],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
 
 
 def _example() -> RuntimeExample:
@@ -178,10 +147,8 @@ def test_shared_examples_never_infer_scale_from_step_thresholds() -> None:
         for path in (examples_root / tier).iterdir()
         if path.is_file() and path.suffix == ".py"
     }
-    examples = load_runtime_contract_pair(
-        examples_root / "manifest.json",
-        examples_root / "parity_manifest.json",
-        repo_root=repo_root,
+    examples = load_runtime_manifest(
+        examples_root / "manifest.json", repo_root=repo_root
     ).examples
     declared_paths = {example.path for example in examples}
     ready_paths = {example.path for example in examples if example.status == "ready"}
@@ -220,141 +187,6 @@ def test_shared_examples_never_infer_scale_from_step_thresholds() -> None:
         f"ready manifest examples left the scale-inference sweep: {uncovered}"
     )
     assert offenders == []
-
-
-def test_parity_child_argv_carries_scale_without_boolean_inference(
-    tmp_path: Path,
-) -> None:
-    command = build_parity_command(
-        python_executable="/venv/bin/python",
-        case_id="quadratic",
-        lane="jax-gpu",
-        input_bundle_path=tmp_path / "input_bundle.json",
-        result_directory=tmp_path / "result",
-        scale="native_default",
-    )
-
-    assert command[-2:] == ("--scale", "native_default")
-    assert "--smoke" not in command
-
-
-def test_parity_scale_defaults_to_bounded_and_rejects_smoke_conflict(
-    tmp_path: Path,
-) -> None:
-    required = (
-        "--case",
-        "quadratic",
-        "--lanes",
-        "native-cpu",
-        "--artifact-root",
-        str(tmp_path),
-    )
-
-    assert parse_parity_arguments(list(required)).scale == "bounded"
-    assert (
-        parse_parity_arguments([*required, "--scale", "native_default"]).scale
-        == "native_default"
-    )
-    with pytest.raises(SystemExit):
-        parse_parity_arguments([*required, "--scale", "native_default", "--smoke"])
-
-
-def test_input_bundle_persists_scale_inside_its_fingerprint(
-    tmp_path: Path,
-) -> None:
-    bundle = create_input_bundle(
-        tmp_path,
-        case_id="quadratic",
-        random_seed=0,
-        arrays={"parameters": np.asarray([1.0], dtype=np.float64)},
-        configuration={"max_steps": 2},
-        scale="native_default",
-    )
-    loaded, _arrays = read_input_bundle(tmp_path)
-
-    assert bundle.scale == "native_default"
-    assert loaded == bundle
-
-
-def test_input_bundle_rejects_scale_changed_without_fingerprint(
-    tmp_path: Path,
-) -> None:
-    create_input_bundle(
-        tmp_path,
-        case_id="quadratic",
-        random_seed=0,
-        arrays={"parameters": np.asarray([1.0], dtype=np.float64)},
-        configuration={"max_steps": 2},
-        scale="bounded",
-    )
-    path = tmp_path / "input_bundle.json"
-    document = json.loads(path.read_text(encoding="utf-8"))
-    document["scale"] = "native_default"
-    path.write_text(json.dumps(document), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="fingerprint mismatch"):
-        read_input_bundle(tmp_path)
-
-
-def test_parity_child_rejects_requested_scale_different_from_input(
-    tmp_path: Path,
-) -> None:
-    create_input_bundle(
-        tmp_path / "inputs",
-        case_id="native-just-a-quadratic",
-        random_seed=0,
-        arrays={"parameters": np.asarray([1.0], dtype=np.float64)},
-        configuration={"max_steps": 2},
-        scale="bounded",
-    )
-
-    with pytest.raises(ValueError, match="does not match requested"):
-        run_parity_child(
-            [
-                "--case",
-                "native-just-a-quadratic",
-                "--lane",
-                "native-cpu",
-                "--input-bundle",
-                str(tmp_path / "inputs" / "input_bundle.json"),
-                "--result-directory",
-                str(tmp_path / "result"),
-                "--scale",
-                "native_default",
-            ]
-        )
-
-
-def test_native_child_records_native_synchronization_when_jax_is_loaded(
-    tmp_path: Path,
-) -> None:
-    input_bundle = get_case("native-just-a-quadratic").create_input(
-        tmp_path / "inputs", "bounded"
-    )
-
-    assert (
-        run_parity_child(
-            [
-                "--case",
-                "native-just-a-quadratic",
-                "--lane",
-                "native-cpu",
-                "--input-bundle",
-                str(tmp_path / "inputs" / "input_bundle.json"),
-                "--result-directory",
-                str(tmp_path / "result"),
-                "--scale",
-                input_bundle.scale,
-            ]
-        )
-        == 0
-    )
-
-    receipt = load_lane_observation(tmp_path / "result")
-    assert receipt.provenance is not None
-    assert (
-        receipt.provenance.measurement_synchronization == "native synchronous execution"
-    )
 
 
 def test_jax_example_result_extends_the_shared_runtime() -> None:

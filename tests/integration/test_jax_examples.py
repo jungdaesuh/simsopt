@@ -17,12 +17,11 @@ from examples.jax._lane_environment import (
     build_lane_environment,
 )
 from examples.jax.manifest_runtime import (
-    RuntimeContractPair,
     RuntimeExample,
-    load_runtime_contract_pair,
+    RuntimeManifest,
+    load_runtime_manifest,
 )
 from examples.jax.outer_optimizer_policy import OuterOptimizerPolicyError
-from examples.jax.parity._manifest import ParityManifest
 from examples.jax.run_examples import (
     _parse_arguments,
     build_child_command,
@@ -50,19 +49,13 @@ def _record(
     )
 
 
-def _manifest(record: RuntimeExample) -> RuntimeContractPair:
-    return RuntimeContractPair(
-        version_pair=(3, 2),
-        examples=(record,),
-        parity=ParityManifest(schema_version=2, relationships=()),
-    )
+def _manifest(record: RuntimeExample) -> RuntimeManifest:
+    return RuntimeManifest(schema_version=3, examples=(record,))
 
 
 def _repository_examples(repo_root: Path) -> tuple[RuntimeExample, ...]:
-    return load_runtime_contract_pair(
-        repo_root / "examples" / "jax" / "manifest.json",
-        repo_root / "examples" / "jax" / "parity_manifest.json",
-        repo_root=repo_root,
+    return load_runtime_manifest(
+        repo_root / "examples" / "jax" / "manifest.json", repo_root=repo_root
     ).examples
 
 
@@ -435,14 +428,10 @@ def test_runner_emits_manifest_observability_before_execution(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    manifest = RuntimeContractPair(
-        version_pair=(3, 2),
-        examples=(),
-        parity=ParityManifest(schema_version=2, relationships=()),
-    )
+    manifest = RuntimeManifest(schema_version=3, examples=())
     monkeypatch.setattr(
         example_runner,
-        "load_runtime_contract_pair",
+        "load_runtime_manifest",
         lambda *_args, **_kwargs: manifest,
     )
     monkeypatch.setattr(example_runner, "run_profile", lambda *_args, **_kwargs: 0)
@@ -453,9 +442,7 @@ def test_runner_emits_manifest_observability_before_execution(
 
     assert exit_code == 0
     assert capsys.readouterr().err == (
-        '{"examples_manifest_schema_version":3,'
-        '"parity_manifest_schema_version":2,'
-        '"used_legacy_manifest_adapter":false}\n'
+        '{"examples_manifest_schema_version":3,"used_legacy_manifest_adapter":false}\n'
     )
 
 
