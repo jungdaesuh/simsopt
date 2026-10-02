@@ -308,26 +308,45 @@ def _twin_objective_terms() -> list[tuple[float, tuple[object, ...]]]:
     return _terms(returned.value, bindings, _constants(_assignments(module.body)))
 
 
-class _GeometryConstants(ast.NodeTransformer):
-    def __init__(self, constants: Mapping[str, float]) -> None:
-        self.constants = constants
+class _InlineNumericLiterals(ast.NodeTransformer):
+    """Replace names bound to ``int`` or ``float`` literals by those literals.
+
+    The literal keeps its type: ``ncoils = 4.0`` must not match ``4``.
+    """
+
+    def __init__(self, bindings: Mapping[str, ast.expr]) -> None:
+        self.bindings = bindings
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
-        if isinstance(node.ctx, ast.Load) and node.id in self.constants:
-            return ast.Constant(self.constants[node.id])
+        bound = self.bindings.get(node.id)
+        if (
+            isinstance(node.ctx, ast.Load)
+            and isinstance(bound, ast.Constant)
+            and type(bound.value) in (int, float)
+        ):
+            return ast.Constant(value=bound.value)
         return node
 
-    def visit_Constant(self, node: ast.Constant) -> ast.Constant:
-        if type(node.value) in (int, float):
-            return ast.Constant(float(node.value))
-        return node
+
+def _writes_output_only(statement: ast.stmt) -> bool:
+    """The VTK output the script writes before its first ``JF``."""
+    if _assigns("pointData")(statement):
+        return True
+    if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+        return False
+    func = statement.value.func
+    return (isinstance(func, ast.Name) and func.id == "curves_to_vtk") or (
+        isinstance(func, ast.Attribute) and func.attr == "to_vtk"
+    )
 
 
 def _assert_native_coordinate_construction(source: str) -> None:
     """Pin geometry, fixed DOFs and object creation order before the first JF.
 
     Optimizable orders parents by creation, so term order alone cannot prove
-    that the script and twin index the same physical coordinates.
+    that the script and twin index the same physical coordinates. Every
+    statement from the surface to ``JF`` except the VTK output must match, so
+    an added call such as ``s.unfix_all()`` is drift too.
     """
     statements = ast.parse(source).body
     objective_at = _statement_index(statements, _assigns("JF"))
@@ -353,24 +372,14 @@ Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
 linkNum = LinkingNumber(curves)
 """
     )
-    names = _assignments(expected.body).keys()
+    surface_at = _statement_index(statements, _assigns("s"))
     construction = [
         statement
-        for statement in statements[:objective_at]
-        if (
-            isinstance(statement, ast.Assign)
-            and any(_assigns(name)(statement) for name in names)
-        )
-        or (
-            isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Call)
-            and isinstance(statement.value.func, ast.Attribute)
-            and statement.value.func.attr in {"fix_all", "set_points"}
-        )
+        for statement in statements[surface_at:objective_at]
+        if not _writes_output_only(statement)
     ]
-    constants = _constants(_assignments(statements[:objective_at]))
-    actual = _GeometryConstants(constants).visit(ast.Module(construction, []))
-    expected = _GeometryConstants({}).visit(expected)
+    bindings = _assignments(statements[:surface_at])
+    actual = _InlineNumericLiterals(bindings).visit(ast.Module(construction, []))
     assert ast.dump(actual) == ast.dump(expected), (
         "native coordinate construction drift"
     )
@@ -384,8 +393,10 @@ def test_native_script_preserves_geometry_fixed_dofs_and_construction_order() ->
     ("before", "after"),
     [
         ("s.fix_all()", ""),
+        ("s.fix_all()", "s.fix_all()\ns.unfix_all()"),
         ("base_currents[0].fix_all()", ""),
         ("ncoils = 4", "ncoils = 5"),
+        ("ncoils = 4", "ncoils = 4.0"),
         ("R1 = 0.5", "R1 = 0.6"),
         ("order = 5", "order = 6"),
         (
