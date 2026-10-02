@@ -11,15 +11,16 @@ the ``native_workflow`` same-state values of ``simsopt_jax.parity_tolerances``
 (``direct_kernel`` for QFM), value or derivative by the observable's name,
 applied as ``allclose(native, jax)``.
 
-Not covered: ``surf_vol_area`` (no initial-state comparison was declared); the
-three tracing examples (their initial state is the shared seed input);
-``permanent_magnet_MUSE`` (PM4Stell's ArbVec kernel, behind an 8 s order-500
-coil build); ``permanent_magnet_QA`` (its start residual is one host formula of
-shared arrays, and its magnet stage starts from a path-dependent coil optimum);
-``stage_two_optimization_stochastic`` (its objective needs the mirror's sample
-materialization as a shared input and a perturbed-curve native rebuild);
-``wireframe_rcls_with_ports`` (the basic case's RCLS kernel; ports only
-constrain segments on the host); the planned single-stage example.
+Not covered here, because no initial-state comparison applies (``surf_vol_area``
+declared none; the three tracing examples start from the shared seed input) or
+because their own tests compare them with native SIMSOPT: ``surf_vol_area``
+and the tracing examples (``tests/integration/test_jax_official_tiny_least_squares.py``,
+``tests/integration/test_jax_tracing_*``), ``permanent_magnet_MUSE`` and ``_QA``
+(``tests/integration/test_jax_permanent_magnet_{arbvec,qa}_native_parity.py``),
+``stage_two_optimization_stochastic``
+(``tests/jax/examples/test_stochastic_matched_state_parity.py``) and
+``wireframe_rcls_with_ports`` (``tests/integration/test_jax_wireframe_rcls_matches_native.py``).
+The planned single-stage example has no mirror to compare.
 """
 
 from __future__ import annotations
