@@ -1,4 +1,4 @@
-"""Outer-optimization constants shared by the BoozerQA JAX mirror and its parity case."""
+"""Outer-optimization constants of the BoozerQA JAX mirror."""
 
 from __future__ import annotations
 

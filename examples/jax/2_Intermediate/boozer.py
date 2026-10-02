@@ -7,9 +7,8 @@ toroidal flux and expands it to three times the converged flux.  The numerical
 solves execute on the selected JAX device.
 
 Every official setting and every stage comes from
-``simsopt_jax.examples.boozer_official``, which the parity case
-``examples/jax/parity/cases/native_boozer.py`` also drives, so this script and
-the matched workflow cannot drift apart.
+``simsopt_jax.examples.boozer_official``, so this script cannot drift off
+upstream's settings.
 
 GPU memory: ``jit(solve)`` at mpol=ntor=16 on a 48² quadrature requested
 243.07 GiB and OOM'd on a 32 GB card.  The largest resolution known to fit

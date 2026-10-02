@@ -40,12 +40,7 @@ NATIVE_ITERATIONS = 10_000
 #: Bounded scale is upstream's own ``in_github_actions`` configuration of
 #: ``examples/2_Intermediate/permanent_magnet_MUSE.py`` (K=100,
 #: nBacktracking=50, max_nMagnets=20, downsample=100, nphi=ntheta=2,
-#: nHistory=20) -- the configuration the parity case freezes and the official
-#: CI run measured. Every constant below is bound to
-#: ``examples/jax/parity/cases/native_permanent_magnet_muse._scale_configuration``
-#: by ``tests/integration/test_jax_mirror_permanent_magnet_muse_parity.py``, so
-#: the mirror and its parity case cannot drift apart at the scale that runs
-#: routinely.
+#: nHistory=20) -- the configuration the official CI run measured.
 BOUNDED_ITERATIONS = 100
 #: Official ``nHistory`` (``permanent_magnet_MUSE.py:153``), the same at both
 #: scales; ``int(K / nHistory)`` is upstream's record period.

@@ -1,8 +1,8 @@
 """Production finite-build Stage-II coil optimization workflow.
 
-The internal workflow both finite-build JAX callers route through: the
-Advanced example and the parity case build their physics (objective and
-diagnostics closures) from the adapter layer and hand them here; the fused
+The internal workflow the finite-build JAX callers route through: the
+Advanced example builds its physics (objective and
+diagnostics closures) from the adapter layer and hands them here; the fused
 lane in :mod:`simsopt_jax.examples.fused_lane` owns the traceable program
 construction and the device solve, and
 :func:`simsopt_jax.examples.scalar_stage.solve_scalar_stage` owns the host
@@ -57,8 +57,8 @@ FINITE_BUILD_OFFICIAL_DRIVER: Final[Driver] = Driver.SCIPY_LBFGSB
 FINITE_BUILD_DEVICE_DRIVER: Final[Driver] = Driver.SIMSOPT_LBFGSB
 
 # The finite-build lane prepares exactly the shared fused lane; the name is
-# kept because the Advanced example, the parity case, and the strict-transfer
-# test spell the workflow this way.
+# kept because the Advanced example and the strict-transfer test spell the
+# workflow this way.
 PreparedFiniteBuildStageTwo = PreparedFusedLaneSolve
 prepare_finite_build_stage_two = prepare_fused_lane_solve
 

@@ -269,9 +269,8 @@ def _core_statuses_from_hits(
     """Core terminal status per line, for an integrator that returns none.
 
     ``simsopt.field.compute_fieldlines`` returns only trajectories and hits, so
-    the status is read the way the branch's other native tracing lane reads it
-    (``examples/jax/parity/cases/native_tracing_fieldlines_ncsx.py``): a line
-    that reached ``tmax`` is ``0``, a line whose last recorded hit carries a
+    the status is read from the returned data: a line that reached ``tmax`` is
+    ``0``, a line whose last recorded hit carries a
     negative index stopped on that criterion, anything else is ``1``.
     """
 

@@ -40,13 +40,10 @@ EXAMPLE_ID = "native-qfm"
 #: The penalty stage runs SciPy L-BFGS-B (``QFM_PENALTY_DRIVER =
 #: Driver.SCIPY_LBFGSB``, dispatched at
 #: ``src/simsopt_jax/solve/dispatch.py:362``); the exact stage's method is the
-#: solver module's own ``QFM_EXACT_METHOD``. Both are bound to the parity
-#: case's by ``tests/integration/test_jax_mirror_qfm_parity.py``, so the script
-#: and its case cannot classify the same run under different vocabularies.
+#: solver module's own ``QFM_EXACT_METHOD``.
 PENALTY_METHOD = "L-BFGS-B"
 #: Upstream's own budget (``maxiter=1000`` in ``examples/1_Simple/qfm.py``) and
-#: the branch's bounded budget; both are bound to the parity case's
-#: ``max_steps`` by the same test.
+#: the branch's bounded budget.
 NATIVE_DEFAULT_STEPS = 1000
 BOUNDED_STEPS = 80
 
@@ -95,9 +92,7 @@ def _build_surface(scale: ExecutionScale) -> tuple[SurfaceRZFourier, BiotSavartJ
 def _endpoint_finite(state: QfmHostState) -> bool:
     """Whether the endpoint one provider call left is finite.
 
-    The same two quantities the parity case checks per call
-    (``native_qfm._provider_call``): the parameters it returned and the
-    objective value at them.
+    The parameters the call returned and the objective value at them.
     """
     return bool(np.all(np.isfinite(state.parameters)) and np.isfinite(state.qfm_value))
 
@@ -127,8 +122,7 @@ def _stage_result(
         constraint_objective=0.5 * label_residual * label_residual,
         # One owner for "what did this provider call stop for": the contract
         # routes each ``scipy.optimize.minimize`` method to its own status
-        # vocabulary, and the parity case classifies the same fields through
-        # the same function.
+        # vocabulary.
         penalty_stopping_reason=scipy_minimize_stopping_reason(
             method=PENALTY_METHOD,
             provider_success=bool(stage.penalty_optimizer.success),
@@ -228,13 +222,11 @@ def solve(
     # reported status fails closed there; every quantity every stage publishes
     # must be finite (checked on the full arrays, before anything selects from
     # them); and the QFM value must have decreased, which is what the official
-    # run does, four orders of magnitude (tracked fixture
-    # ``examples/jax/parity/official_reference/9e027eac3/native-qfm.json``,
-    # ``initial:qfm_value`` down to ``area:exact:qfm_value``).
+    # run does, by four orders of magnitude from the initial QFM value to the
+    # exact area stage's.
     # The branch-added constraint gate (``final_constraint <= 1e-10``) stays
     # demoted to the published ``constraint_residual``: the official run itself
-    # ends with exact-stage label residuals (``<label>:exact:label_residual_abs``
-    # in the same fixture) that would fail it.
+    # ends with exact-stage label residuals that would fail it.
     solver_success = bool(
         all(
             stage.penalty_stopping_reason == "converged"

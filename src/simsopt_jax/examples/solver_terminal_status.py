@@ -7,9 +7,8 @@ way. This module is that single derivation for the GSCO family
 (``simsoptpp::GSCO``), shared by the executable examples
 (``examples/jax/2_Intermediate/wireframe_gsco_modular.py``,
 ``wireframe_gsco_sector_saddle.py``,
-``examples/jax/3_Advanced/wireframe_gsco_multistep.py``) and by the parity cases
-(``examples/jax/parity/cases/_wireframe_gsco.py`` and the multistep case). It
-lives in the installed package because the examples are executed as standalone
+``examples/jax/3_Advanced/wireframe_gsco_multistep.py``). It lives in the
+installed package because the examples are executed as standalone
 scripts, with no repository root on ``sys.path``
 (``tests/integration/test_jax_external_solver_free_examples.py``).
 
@@ -21,10 +20,6 @@ declared budget -- ``budget_exhausted``. A run that adopted no loop at all moved
 nothing and is ``failed``, whichever of the first two conditions ended it. No
 scientific predicate ("final objective below initial") takes part: upstream's
 own run is not required to satisfy one.
-
-The GPMO family of the same kind still lives in
-``examples/jax/parity/cases/_fixed_work_status.py``; only the GSCO family is
-needed outside the parity harness.
 
 Pure in its own computation: every function here is a total function of its
 arguments, with no I/O, no globals and no JAX call. Importing the module is not
@@ -72,11 +67,9 @@ GSCO_MULTISTEP_NO_ACCEPTED_UPDATE: Final = (
 #: (``wireframe_optimization.cpp:281`` ``stop_last_iter``) and the official
 #: ``9e027eac3`` runs stop earlier on their own rule -- 1848 of 2000 accepted
 #: updates for the modular example, 1698 of 2000 for the sector-saddle one
-#: (``examples/jax/parity/official_reference/9e027eac3/*.json``,
-#: ``final:iterations`` against ``final:allocated_iteration_budget``) -- so only
-#: the reduced cap is ever reached, and only there is a budget stop an expected
-#: outcome rather than a failure to mirror the source. This is the same fact the
-#: parity side declares as ``WorkBudgetContract(scales=("bounded",))``.
+#: (accepted iterations against the allocated iteration budget) -- so only the
+#: reduced cap is ever reached, and only there is a budget stop an expected
+#: outcome rather than a failure to mirror the source.
 GSCO_REDUCED_BUDGET_SCALES: Final[tuple[ExecutionScale, ...]] = ("bounded",)
 
 
@@ -234,10 +227,8 @@ def gsco_example_status(
     stopped itself is ``ok``; a solver that hit ITS SOURCE's cap did not mirror
     the source and is ``failed``; a solver that hit a cap the campaign reduced
     ran exactly the work that reduced scale asked of it, and the caller admits
-    that by naming the scale in ``budget_admitted_scales`` -- the same opt-in,
-    per workflow, that the parity cases make with
-    ``WorkBudgetContract(scales=...)``, and empty by default for the same
-    reason. The distinction stays visible in the published ``terminal_status``
+    that by naming the scale in ``budget_admitted_scales`` -- an opt-in per
+    workflow, empty by default. The distinction stays visible in the published ``terminal_status``
     and ``terminal_reason``, and ``solver_success`` keeps the strict meaning
     (converged only).
     """

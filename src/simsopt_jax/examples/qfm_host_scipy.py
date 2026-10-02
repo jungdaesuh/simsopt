@@ -63,8 +63,8 @@ class QfmSurfaceResolution:
 #: Surface resolution per execution scale, the single source of this contract.
 #: ``native_default`` is upstream's own: ``1_Simple/qfm.py`` sets
 #: ``mpol = ntor = 5`` and ``np.linspace(..., 25, endpoint=False)`` for both
-#: angles. ``bounded`` is the branch's smoke resolution. The shipped mirror,
-#: the parity case and the strict-transfer test all read this table.
+#: angles. ``bounded`` is the branch's smoke resolution. The shipped mirror
+#: and the strict-transfer test both read this table.
 QFM_SURFACE_RESOLUTION: Final[Mapping[ExecutionScale, QfmSurfaceResolution]] = (
     MappingProxyType(
         {

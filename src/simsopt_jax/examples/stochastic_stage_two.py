@@ -91,7 +91,7 @@ def stochastic_stage_two_configuration(
 
 
 #: This family's spelling of the shared single-stage route.  The stochastic
-#: mirror and its parity twin call the solve under this name; the route, and
+#: mirror calls the solve under this name; the route, and
 #: the drivers it accepts, are :func:`.scalar_stage.solve_scalar_stage`'s.
 solve_stochastic_stage_two = solve_scalar_stage
 

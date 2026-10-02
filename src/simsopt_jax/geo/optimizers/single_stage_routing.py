@@ -1,7 +1,6 @@
 """Single-stage JAX optimizer routing policy.
 
-This module is dependency-light so examples, parity cases, and subprocess
-probes can share the same backend resolution rules without importing the
+This module is dependency-light so examples and subprocess probes can share the same backend resolution rules without importing the
 optimizer runtime.
 """
 

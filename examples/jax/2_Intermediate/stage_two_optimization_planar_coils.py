@@ -10,10 +10,8 @@ state trees return through one batched host publication.
 
 The optimized space is the coil set alone: 72 planar-Fourier curve coordinates
 plus the three free currents, ordered exactly as ``BiotSavart(coils).x``.  The
-admissible native reference is therefore the fixed-surface twin built by
-``examples/jax/parity/cases/native_stage_two_optimization_planar_coils.py``,
-the same construction ``examples/2_Intermediate/stage_two_optimization.py``
-uses.  Upstream ``9e027eac3`` leaves the 121 ``SurfaceRZFourier`` coordinates
+admissible native reference is therefore the fixed-surface twin, the same
+construction ``examples/2_Intermediate/stage_two_optimization.py`` uses.  Upstream ``9e027eac3`` leaves the 121 ``SurfaceRZFourier`` coordinates
 free, which ``CurveSurfaceDistance`` pulls into ``JF.x``; that is a defect of
 the upstream script, not a narrowing here -- ``SquaredFlux`` owns no surface
 partial and never re-sets the Biot-Savart evaluation points, so the extra

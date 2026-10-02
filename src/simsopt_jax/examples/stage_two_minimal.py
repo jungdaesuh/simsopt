@@ -7,8 +7,7 @@ available and every caller names one:
     ``scipy.optimize.minimize(..., method="L-BFGS-B")`` over the JAX
     objective, which is the provider upstream's
     ``examples/1_Simple/stage_two_optimization_minimal.py`` calls. This is the
-    **mirror default**: it is what the shipped example and the parity case
-    run, through the same host SciPy route four sibling mirrors use.
+    **mirror default**: it is what the shipped example runs, through the same host SciPy route four sibling mirrors use.
 ``MINIMAL_STAGE_TWO_DEVICE_DRIVER``
     the in-tree device-resident L-BFGS-B, an explicit opt-in **performance
     mode** for library callers. It keeps the whole solve

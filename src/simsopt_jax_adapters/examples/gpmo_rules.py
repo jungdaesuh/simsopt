@@ -1,12 +1,12 @@
-"""Upstream GPMO rules shared by the examples and their parity cases.
+"""Upstream GPMO rules shared by the permanent-magnet examples.
 
 Official source: ``simsopt/solve/permanent_magnet_optimization.py`` and
 ``src/simsoptpp/permanent_magnet_optimization.cpp`` at upstream
 ``9e027eac38028d57aa23777be52a781aa860e347``. Only the MUSE script consumes the
 recorded history (``examples/2_Intermediate/permanent_magnet_MUSE.py:184-185``);
 the period, the filled-prefix rule and the two "did this solver do its work"
-predicates apply to every GPMO caller, example and parity lane alike, so they
-live here once instead of once per case.
+predicates apply to every GPMO caller alike, so they live here once instead
+of once per caller.
 
 Pure: numpy only, no I/O, no JAX, no globals.
 """

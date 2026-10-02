@@ -127,14 +127,13 @@ def solve(
     initial_error, final_error, maximum_current = (
         float(value) for value in diagnostics
     )
-    # The completion policy is the one the parity case applies to the same
-    # returned arrays: the solver's own stop condition decides, never the
-    # scientific predicate "final normal error below initial" -- upstream's own
-    # run is not required to satisfy it, so it is published as a diagnostic and
-    # gates nothing. A run that reached its iteration cap is upstream's
-    # ``stop_last_iter`` and is not a converged solve; at the campaign's reduced
-    # scales that cap is the campaign's own, which is the one case where the
-    # example still executed its workflow.
+    # The completion policy reads the returned arrays: the solver's own stop
+    # condition decides, never the scientific predicate "final normal error
+    # below initial" -- upstream's own run is not required to satisfy it, so it
+    # is published as a diagnostic and gates nothing. A run that reached its
+    # iteration cap is upstream's ``stop_last_iter`` and is not a converged
+    # solve; at the campaign's reduced scales that cap is the campaign's own,
+    # which is the one case where the example still executed its workflow.
     label = gsco_terminal_label(
         accepted_updates=iterations,
         max_iterations=max_steps,

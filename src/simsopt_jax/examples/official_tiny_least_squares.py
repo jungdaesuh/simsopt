@@ -6,7 +6,7 @@ sampling and stopping, as in ``least_squares_serial_solve(grad=None)``.
 It lives in the installed package because the three examples
 (``examples/jax/1_Simple/just_a_quadratic.py``, ``minimize_curve_length.py``,
 ``surf_vol_area.py``) are executed as standalone scripts, with no repository
-root on ``sys.path``; their parity cases import it from here too.
+root on ``sys.path``.
 """
 
 from __future__ import annotations

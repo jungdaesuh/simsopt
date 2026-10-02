@@ -15,7 +15,7 @@ stages before it.
 
 ``2_Intermediate/boozerQA.py`` has no stage entry -- it is a single outer solve
 -- but its official settings and its outer objective's weights live here for the
-same reason: the shipped example and the parity case read one copy.
+same reason: every caller reads one copy.
 
 This module is importable from a plain source checkout (only ``src`` is on the
 path when an example script runs), which the ``examples`` package is not.
@@ -64,7 +64,7 @@ OFFICIAL_QA_RESIDUAL_WEIGHT = 0.0
 #: Upstream drives the outer solve with SciPy's dense BFGS, so the mirror's
 #: outer method is fixed by the official workflow and never follows the
 #: execution mode's default driver.  ``minimize_bfgs_host_core`` is this
-#: driver's host core; the parity case dispatches on the enumeration.
+#: driver's host core.
 OFFICIAL_QA_OUTER_DRIVER = Driver.SIMSOPT_BFGS
 #: Upstream's own BoozerQA outer solve ends on its iteration budget
 #: (``MAXITER = 1e3`` with ``tol=1e-15``, boozerQA.py:143-145; the official
@@ -136,9 +136,8 @@ def boozer_first_stage_budget(*, least_squares_steps: int, native_default: bool)
     ``OFFICIAL_LS_MAXITER`` there: the runner's step count does not move an
     official budget.  At a reduced scale the stage keeps the official ratio
     between the two budgets applied to the reduced least-squares step count.
-    Both the shipped script and ``examples/jax/parity/cases/native_boozer.py``
-    take the first-stage budget from here, so neither can drift off upstream's
-    300 while the other keeps it.
+    Every caller takes the first-stage budget from here, so none can drift off
+    upstream's 300 while another keeps it.
     """
     if native_default:
         return OFFICIAL_LBFGS_MAXITER

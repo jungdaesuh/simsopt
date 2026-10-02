@@ -18,9 +18,8 @@ cap of 20, the last *successful* state as the warm start, the ``1e3`` sentinel o
 failure, and the implicit-function gradient through a transpose solve of the same
 Jacobian.  The outer optimizer belongs to the caller.
 
-The shipped script and the matched parity case
-(``examples/jax/parity/cases/native_boozerqa.py``) both run this module, so the
-script a user executes is the one the case verifies.
+The shipped script ``examples/jax/2_Intermediate/boozerQA.py`` runs this
+module, so the workflow its tests verify is the one a user executes.
 """
 
 from __future__ import annotations
@@ -94,8 +93,8 @@ class BoozerQAProblem:
     The caller supplies the already-constructed NCSX pieces -- the base curves
     whose lengths set the length target, the native ``BiotSavart`` whose coils
     define the field, the seed surface, ``nfp`` and the seed ``G`` -- so the
-    shipped script keeps upstream's inline construction and the parity case keeps
-    its frozen input bundle as the construction source of truth.
+    shipped script keeps upstream's inline construction as the construction
+    source of truth.
 
     Construction solves the seed Boozer surface and freezes the iota, major-radius
     and coil-length targets at that solution, exactly as upstream does: upstream

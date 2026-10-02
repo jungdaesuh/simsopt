@@ -12,9 +12,8 @@ as bounded kernels instead of one memory-heavy optimization graph.
 
 Every official setting comes from ``simsopt_jax.examples.boozer_official``, and
 the workflow itself is owned by
-``simsopt_jax_adapters.geo.boozer_qa_problem``, which the parity case
-``examples/jax/parity/cases/native_boozerqa.py`` runs too, so the shipped script
-and the matched workflow cannot drift apart.
+``simsopt_jax_adapters.geo.boozer_qa_problem``, so the shipped script and the
+tested workflow cannot drift apart.
 
 The outer solve is budget-bound at the official settings, on upstream as well as
 here, so ``solver_success`` is false while the run is healthy: the published

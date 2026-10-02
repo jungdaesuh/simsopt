@@ -364,7 +364,7 @@ def _curve_pair_penalty_total(
         second_gammas = class_gammas[batch.second_class]
         # The gather's gradient is a scatter-add: GPU dJ is bitwise reproducible
         # only under --xla_gpu_exclude_nondeterministic_ops=true, which the
-        # parity lane and tests/jax_test_support.py set.
+        # strict GPU example lane and tests/jax_test_support.py set.
         pair_inputs = (
             first_gammas[first_rows],
             class_gammadashes[batch.first_class][first_rows],

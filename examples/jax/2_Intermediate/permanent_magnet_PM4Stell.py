@@ -37,10 +37,7 @@ NATIVE_ITERATIONS = 2_000
 #: Bounded scale is upstream's own ``in_github_actions`` configuration of
 #: ``examples/2_Intermediate/permanent_magnet_PM4Stell.py`` (K=100,
 #: max_nMagnets=20, nBacktracking=200, nAdjacent=10, nHistory=10,
-#: downsample=100, N=2) -- the configuration the parity case freezes and the
-#: official CI run measured. Every constant below is bound to
-#: ``examples/jax/parity/cases/native_permanent_magnet_pm4stell._scale_configuration``
-#: by ``tests/integration/test_jax_mirror_permanent_magnet_pm4stell_parity.py``.
+#: downsample=100, N=2) -- the configuration the official CI run measured.
 BOUNDED_ITERATIONS = 100
 #: Upstream's ``nBacktracking``, ``nHistory`` and ``nAdjacent`` do not depend on
 #: the scale; ``int(K / nHistory)`` is the record period.
@@ -155,7 +152,7 @@ def solve(
         max_nMagnets=NATIVE_MAGNET_CAP if native_scale else BOUNDED_MAGNET_CAP,
         # Official kwargs record the history every ``int(K / nHistory)``
         # iterations (``initialize_default_kwargs`` sets ``verbose=True``), the
-        # same period the parity case gives the native provider. Upstream
+        # period upstream gives the native provider. Upstream
         # refuses ``nhistory > K``, so a budget below ``nHistory`` records one
         # row per iteration instead of aborting the run; the clamp is inert at
         # both official budgets (100 and 2000).

@@ -1,8 +1,7 @@
 """Owned production contract for parity-validation tolerance lanes.
 
 This module is the canonical owner of the parity tolerance ladder shared by
-user-facing examples, the example parity harness and the tests; they import
-these names from here.
+user-facing examples and the tests; they import these names from here.
 """
 
 from __future__ import annotations

@@ -179,14 +179,14 @@ def solve(
     wireframe.currents[:] = solution
     constraints_satisfied = bool(wireframe.check_constraints())
     stage_budget = np.full(stage_count, max_steps, dtype=np.int64)
-    # The completion policy is the one the parity case applies to the same
-    # per-stage arrays: each stage is one GSCO solve, so a stage that reached
-    # its allocated ``max_iter`` is upstream's ``stop_last_iter`` -- a budget
-    # stop, never a converged workflow -- and a staged run that never reached
-    # its final adjustment stopped on the limit named below (the stage history
-    # capacity when the workflow terminates naturally, the smoke guard
-    # otherwise). "final normal error below initial" is a published diagnostic:
-    # upstream's own run is not required to satisfy it, so it gates nothing.
+    # The completion policy reads the per-stage arrays: each stage is one GSCO
+    # solve, so a stage that reached its allocated ``max_iter`` is upstream's
+    # ``stop_last_iter`` -- a budget stop, never a converged workflow -- and a
+    # staged run that never reached its final adjustment stopped on the limit
+    # named below (the stage history capacity when the workflow terminates
+    # naturally, the smoke guard otherwise). "final normal error below initial"
+    # is a published diagnostic: upstream's own run is not required to satisfy
+    # it, so it gates nothing.
     limit_raw_status = (
         "stage_history_capacity_exhausted_without_final_adjustment"
         if scale == "native_default"
