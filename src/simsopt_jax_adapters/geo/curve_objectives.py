@@ -1,0 +1,939 @@
+"""Public JAX-backed curve objective wrappers.
+
+The legacy :mod:`simsopt.geo.curveobjectives` classes remain the CPU/C++
+compatibility surface. These wrappers expose the same scalar objective
+contracts while keeping the value/gradient kernels in JAX and avoiding the
+C++ point-cloud candidate cullers for distance penalties.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax import grad, lax
+from scipy.spatial.distance import cdist
+from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt._core.optimizable import Optimizable
+from simsopt.geo._curve_surface_distance_owners import (
+    curve_surface_distance_owners,
+)
+from simsopt.geo.curveobjectives import curve_arclengthvariation_pure
+from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
+from simsopt_jax.core._math_utils import (
+    as_jax_float64 as _as_jax_float64,
+)
+from simsopt_jax.core.curve_geometry import pair_linking_number_pure
+from simsopt_jax.core.curve_kernels import (
+    curvature_p_norm_from_kappa_pure,
+    curve_curve_distance_penalty_pure,
+    curve_length_from_incremental_arclength_pure,
+    curve_surface_distance_penalty_pure,
+)
+from simsopt_jax.geo._pairwise_reductions import (
+    _chunk_rows,
+    _masked_pairwise_distances,
+    _pairwise_distances,
+    _resolve_pairwise_penalty_chunk_size,
+    _use_dense_pairwise_path,
+)
+from simsopt_jax.runtime.host_boundary import (
+    host_float as _host_float,
+    host_float64 as _as_numpy_float64,
+    host_tree as _host_tree,
+)
+
+jit = jax.jit
+
+__all__ = [
+    "ArclengthVariationJAX",
+    "CurveCurveDistanceBarrierJAX",
+    "CurveCurveDistanceJAX",
+    "CurveLengthJAX",
+    "CurveSurfaceDistanceJAX",
+    "LinkingNumberJAX",
+    "LpCurveCurvatureBarrierJAX",
+    "LpCurveCurvatureJAX",
+    "MeanSquaredCurvatureJAX",
+]
+
+
+@jit
+def curve_length_pure(l):
+    return curve_length_from_incremental_arclength_pure(l)
+
+
+@jit
+def _curve_length_grad(l):
+    return grad(curve_length_pure)(l)
+
+
+@jit
+def _arclength_variation_grad(incremental_arclength, interval_matrix):
+    return grad(curve_arclengthvariation_pure)(incremental_arclength, interval_matrix)
+
+
+def _curve_jax_position_and_tangent(curve):
+    return _as_jax_float64(curve.gamma()), _as_jax_float64(curve.gammadash())
+
+
+def _curve_position_samples(curve, downsample=1):
+    gamma = curve.gamma()
+    return gamma if downsample == 1 else gamma[::downsample]
+
+
+def _curve_pair_minimum_distance(curves, i, j, downsample=1):
+    return np.min(
+        cdist(
+            _curve_position_samples(curves[i], downsample),
+            _curve_position_samples(curves[j], downsample),
+        )
+    )
+
+
+def _curve_numpy_position_and_tangent(curve):
+    return _as_numpy_float64(curve.gamma()).copy(), _as_numpy_float64(
+        curve.gammadash()
+    ).copy()
+
+
+def _curve_surface_geometry_snapshot(curves, surface):
+    curve_positions = []
+    curve_tangents = []
+    for curve in curves:
+        gamma, gammadash = _curve_numpy_position_and_tangent(curve)
+        curve_positions.append(gamma)
+        curve_tangents.append(gammadash)
+    surface_gamma = _as_numpy_float64(surface.gamma().reshape((-1, 3))).copy()
+    surface_normals = _as_numpy_float64(surface.normal().reshape((-1, 3))).copy()
+    return curve_positions, curve_tangents, surface_gamma, surface_normals
+
+
+def _add_curve_vjp(buffer, values, downsample):
+    if downsample == 1:
+        buffer += values
+    else:
+        buffer[::downsample] += values
+
+
+def _curve_vjp_buffers(curves):
+    return [np.zeros_like(c.gamma()) for c in curves], [
+        np.zeros_like(c.gammadash()) for c in curves
+    ]
+
+
+def _sum_curve_vjp_contributions(curves, dgamma_vjps, dgammadash_vjps):
+    return sum(
+        curve.dgamma_by_dcoeff_vjp(dgamma_vjp)
+        + curve.dgammadash_by_dcoeff_vjp(dgammadash_vjp)
+        for curve, dgamma_vjp, dgammadash_vjp in zip(
+            curves, dgamma_vjps, dgammadash_vjps
+        )
+    )
+
+
+@jit
+def Lp_curvature_pure(kappa, gammadash, p, desired_kappa):
+    return curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa)
+
+
+@jit
+def _lp_curve_curvature_grad(kappa, gammadash, p, threshold):
+    return grad(Lp_curvature_pure, argnums=(0, 1))(kappa, gammadash, p, threshold)
+
+
+@jit
+def curvature_barrier_pure(kappa, gammadash, threshold):
+    threshold_jax = _as_jax_float64(threshold)
+    two = _as_jax_float64(2.0)
+    arc_length = jnp.linalg.norm(gammadash, axis=1)
+    feasible = kappa < threshold_jax
+    safe_ratio = jnp.where(feasible, kappa / threshold_jax, two)
+    barrier = -jnp.log1p(-safe_ratio)
+    barrier = jnp.where(feasible, barrier, jnp.inf)
+    return jnp.mean(barrier * arc_length)
+
+
+@jit
+def _curvature_barrier_grad(kappa, gammadash, threshold):
+    return grad(curvature_barrier_pure, argnums=(0, 1))(kappa, gammadash, threshold)
+
+
+def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
+    return curve_curve_distance_penalty_pure(gamma1, l1, gamma2, l2, minimum_distance)
+
+
+def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
+    gamma1 = _as_jax_float64(gamma1)
+    l1 = _as_jax_float64(l1)
+    gamma2 = _as_jax_float64(gamma2)
+    l2 = _as_jax_float64(l2)
+    minimum_distance_jax = _as_jax_float64(minimum_distance)
+    half = _as_jax_float64(0.5)
+    zero = _as_jax_float64(0.0)
+    row_count = int(gamma1.shape[0])
+    col_count = int(gamma2.shape[0])
+    if row_count == 0 or col_count == 0:
+        return zero
+    normalization = _as_jax_float64(row_count * col_count)
+
+    arc_length_1 = jnp.linalg.norm(l1, axis=1)
+    arc_length_2 = jnp.linalg.norm(l2, axis=1)
+    chunk_size = _resolve_pairwise_penalty_chunk_size()
+    if _use_dense_pairwise_path(row_count, col_count, chunk_size):
+        dists = _pairwise_distances(gamma1, gamma2)
+        alen = arc_length_1[:, None] * arc_length_2[None, :]
+        feasible = dists > minimum_distance_jax
+        safe_ratio = jnp.where(feasible, minimum_distance_jax / dists, half)
+        barrier = -jnp.log1p(-safe_ratio)
+        barrier = jnp.where(feasible, barrier, jnp.inf)
+        return jnp.sum(alen * barrier) / normalization
+
+    gamma1_chunks, gamma1_masks = _chunk_rows(gamma1, chunk_size)
+    gamma2_chunks, gamma2_masks = _chunk_rows(gamma2, chunk_size)
+    arc_length_1_chunks, _ = _chunk_rows(arc_length_1, chunk_size)
+    arc_length_2_chunks, _ = _chunk_rows(arc_length_2, chunk_size)
+
+    def _scan_gamma1_chunks(carry, gamma1_inputs):
+        total, feasible_all = carry
+        gamma1_chunk, arc_length_1_chunk, gamma1_mask = gamma1_inputs
+
+        def _scan_gamma2_chunks(inner_carry, gamma2_inputs):
+            inner_total, inner_feasible = inner_carry
+            gamma2_chunk, arc_length_2_chunk, gamma2_mask = gamma2_inputs
+            valid = gamma1_mask[:, None] & gamma2_mask[None, :]
+            dists = _masked_pairwise_distances(
+                gamma1_chunk,
+                gamma2_chunk,
+                valid,
+                minimum_distance_jax,
+            )
+            feasible = jnp.logical_or(~valid, dists > minimum_distance_jax)
+            safe_dists = jnp.where(valid, dists, minimum_distance_jax)
+            safe_ratio = jnp.where(
+                valid,
+                jnp.where(feasible, minimum_distance_jax / safe_dists, half),
+                zero,
+            )
+            barrier = -jnp.log1p(-safe_ratio)
+            alen = arc_length_1_chunk[:, None] * arc_length_2_chunk[None, :]
+            block_total = jnp.sum(jnp.where(valid, alen * barrier, zero))
+            return (inner_total + block_total, inner_feasible & jnp.all(feasible)), None
+
+        (total, feasible_all), _ = lax.scan(
+            jax.checkpoint(_scan_gamma2_chunks),
+            (total, feasible_all),
+            (gamma2_chunks, arc_length_2_chunks, gamma2_masks),
+        )
+        return (total, feasible_all), None
+
+    (total, feasible_all), _ = lax.scan(
+        _scan_gamma1_chunks,
+        (zero, jnp.asarray(True)),
+        (gamma1_chunks, arc_length_1_chunks, gamma1_masks),
+    )
+    return jnp.where(feasible_all, total / normalization, jnp.inf)
+
+
+@dataclass(frozen=True)
+class _CurvePairBatch:
+    """Curve pairs whose first and second members share one quadrature class each.
+
+    ``first_rows[k]`` and ``second_rows[k]`` index pair ``k``'s curves in the
+    ``first_class`` and ``second_class`` stacks of :class:`_CurvePairPlan`.
+    """
+
+    first_class: int
+    second_class: int
+    first_rows: tuple[int, ...]
+    second_rows: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _CurvePairPlan:
+    """Static vectorization of a curve-pair sum over equal-shape curve stacks.
+
+    Curves with one sample count form a class, numbered in curve order; every
+    curve gets a class, including curves that appear in no pair.
+    ``class_members[c]`` lists the curve indices stacked, in curve order, into
+    class ``c``.  Each batch holds the pairs of one (first class, second class)
+    combination, in first-appearance order of the pair sequence; pair order is
+    kept only within a batch.  Summing batch totals therefore reassociates the
+    per-pair loop's running sum (about 1e-16 relative).  The plan is hashable
+    so jit specializes on it as a static argument.
+    """
+
+    class_members: tuple[tuple[int, ...], ...]
+    batches: tuple[_CurvePairBatch, ...]
+
+
+def _curve_pair_plan(sample_counts, pairs) -> _CurvePairPlan:
+    class_by_count: dict[int, int] = {}
+    curve_class = tuple(
+        class_by_count.setdefault(count, len(class_by_count)) for count in sample_counts
+    )
+    class_members = tuple(
+        tuple(index for index, cls in enumerate(curve_class) if cls == target)
+        for target in range(len(class_by_count))
+    )
+    row_in_class = {
+        index: row for members in class_members for row, index in enumerate(members)
+    }
+    batch_rows: dict[tuple[int, int], tuple[list[int], list[int]]] = {}
+    for first, second in pairs:
+        first_rows, second_rows = batch_rows.setdefault(
+            (curve_class[first], curve_class[second]), ([], [])
+        )
+        first_rows.append(row_in_class[first])
+        second_rows.append(row_in_class[second])
+    return _CurvePairPlan(
+        class_members=class_members,
+        batches=tuple(
+            _CurvePairBatch(
+                first_class=first_class,
+                second_class=second_class,
+                first_rows=tuple(first_rows),
+                second_rows=tuple(second_rows),
+            )
+            for (first_class, second_class), (first_rows, second_rows) in (
+                batch_rows.items()
+            )
+        ),
+    )
+
+
+# Device scratch allowed for the pairs evaluated together in one vmap; larger
+# batches are swept in slices of this size.  An NCSX-size coil set (250
+# samples per curve, 48 pairs: about 183 MiB of scratch) fits in one slice.
+# The budget is per batch: a gradient program's peak can reach about
+# (number of batches) x budget.
+_CURVE_PAIR_BATCH_BYTES = 256 * 2**20
+# Point-pair-sized arrays one pair's value and gradient keep live at once
+# (differences, distances, weights, excess and their cotangents).
+_CURVE_PAIR_SCRATCH_ARRAYS = 8
+
+
+def _curve_pair_batch_size(
+    first_count,
+    second_count,
+    pair_count,
+    pairwise_chunk_size,
+    itemsize,
+    batch_bytes,
+):
+    """Pairs per vmap slice so one slice's scratch stays within ``batch_bytes``.
+
+    A pair on the kernels' dense path holds ``first_count * second_count``
+    point pairs; on the chunked path it holds one ``chunk**2`` block.
+    """
+    if _use_dense_pairwise_path(first_count, second_count, pairwise_chunk_size):
+        point_pairs = first_count * second_count
+    else:
+        point_pairs = pairwise_chunk_size * pairwise_chunk_size
+    pair_bytes = point_pairs * itemsize * _CURVE_PAIR_SCRATCH_ARRAYS
+    return max(1, min(pair_count, batch_bytes // pair_bytes))
+
+
+def _curve_pair_penalty_total(
+    class_gammas,
+    class_gammadashes,
+    minimum_distance,
+    pair_kernel,
+    plan,
+    pairwise_chunk_size,
+    batch_bytes,
+):
+    """Sum ``pair_kernel`` over every pair of ``plan``.
+
+    Each batch is one vmap when its scratch fits ``batch_bytes``; otherwise it
+    is swept in rematerialized slices so the gradient keeps only slice inputs.
+    """
+    batched_kernel = jax.vmap(pair_kernel, in_axes=(0, 0, 0, 0, None))
+
+    def _pair_value(pair_inputs):
+        return pair_kernel(*pair_inputs, minimum_distance)
+
+    total = jnp.zeros((), dtype=minimum_distance.dtype)
+    for batch in plan.batches:
+        first_rows = np.asarray(batch.first_rows)
+        second_rows = np.asarray(batch.second_rows)
+        first_gammas = class_gammas[batch.first_class]
+        second_gammas = class_gammas[batch.second_class]
+        # The gather's gradient is a scatter-add: GPU dJ is bitwise reproducible
+        # only under --xla_gpu_exclude_nondeterministic_ops=true, which the
+        # strict GPU example lane and tests/jax_test_support.py set.
+        pair_inputs = (
+            first_gammas[first_rows],
+            class_gammadashes[batch.first_class][first_rows],
+            second_gammas[second_rows],
+            class_gammadashes[batch.second_class][second_rows],
+        )
+        batch_size = _curve_pair_batch_size(
+            int(first_gammas.shape[1]),
+            int(second_gammas.shape[1]),
+            len(batch.first_rows),
+            pairwise_chunk_size,
+            first_gammas.dtype.itemsize,
+            batch_bytes,
+        )
+        if batch_size == len(batch.first_rows):
+            pair_values = batched_kernel(*pair_inputs, minimum_distance)
+        else:
+            pair_values = lax.map(
+                jax.checkpoint(_pair_value), pair_inputs, batch_size=batch_size
+            )
+        total = total + jnp.sum(pair_values)
+    return total
+
+
+# ``pairwise_chunk_size`` is the size the pair kernels resolve at trace time;
+# as a static argument it also keys each executable on that size.
+_CURVE_PAIR_STATIC_ARGNAMES = (
+    "pair_kernel",
+    "plan",
+    "pairwise_chunk_size",
+    "batch_bytes",
+)
+
+
+@partial(jit, static_argnames=_CURVE_PAIR_STATIC_ARGNAMES)
+def _curve_pair_penalty(
+    class_gammas,
+    class_gammadashes,
+    minimum_distance,
+    *,
+    pair_kernel,
+    plan,
+    pairwise_chunk_size,
+    batch_bytes,
+):
+    return _curve_pair_penalty_total(
+        class_gammas,
+        class_gammadashes,
+        minimum_distance,
+        pair_kernel,
+        plan,
+        pairwise_chunk_size,
+        batch_bytes,
+    )
+
+
+@partial(jit, static_argnames=_CURVE_PAIR_STATIC_ARGNAMES)
+def _curve_pair_penalty_value_and_grad(
+    class_gammas,
+    class_gammadashes,
+    minimum_distance,
+    *,
+    pair_kernel,
+    plan,
+    pairwise_chunk_size,
+    batch_bytes,
+):
+    return jax.value_and_grad(
+        lambda gammas, gammadashes: _curve_pair_penalty_total(
+            gammas,
+            gammadashes,
+            minimum_distance,
+            pair_kernel,
+            plan,
+            pairwise_chunk_size,
+            batch_bytes,
+        ),
+        argnums=(0, 1),
+    )(class_gammas, class_gammadashes)
+
+
+def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
+    return curve_surface_distance_penalty_pure(
+        gammac,
+        lc,
+        gammas,
+        ns,
+        minimum_distance,
+    )
+
+
+@jit
+def _cs_distance_grad(gammac, lc, gammas, ns, minimum_distance):
+    return grad(cs_distance_pure, argnums=(0, 1, 2, 3))(
+        gammac,
+        lc,
+        gammas,
+        ns,
+        minimum_distance,
+    )
+
+
+@jit
+def curve_msc_pure(kappa, gammadash):
+    arc_length = jnp.linalg.norm(gammadash, axis=1)
+    return jnp.mean(kappa**2 * arc_length) / jnp.mean(arc_length)
+
+
+@jit
+def _curve_msc_grad(kappa, gammadash):
+    return grad(curve_msc_pure, argnums=(0, 1))(kappa, gammadash)
+
+
+class CurveLengthJAX(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.geo.CurveLength`."""
+
+    def __init__(self, curve):
+        self.curve = curve
+        super().__init__(depends_on=[curve])
+
+    def J(self):
+        return _host_float(
+            curve_length_pure(_as_jax_float64(self.curve.incremental_arclength()))
+        )
+
+    @derivative_dec
+    def dJ(self):
+        arc = _as_jax_float64(self.curve.incremental_arclength())
+        return self.curve.dincremental_arclength_by_dcoeff_vjp(
+            _as_numpy_float64(_curve_length_grad(arc))
+        )
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class LpCurveCurvatureJAX(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.geo.LpCurveCurvature`."""
+
+    def __init__(self, curve, p, threshold=0.0):
+        self.curve = curve
+        self.p = p
+        self.threshold = threshold
+        super().__init__(depends_on=[curve])
+
+    def J(self):
+        return _host_float(
+            Lp_curvature_pure(
+                _as_jax_float64(self.curve.kappa()),
+                _as_jax_float64(self.curve.gammadash()),
+                _as_jax_float64(self.p),
+                _as_jax_float64(self.threshold),
+            )
+        )
+
+    @derivative_dec
+    def dJ(self):
+        kappa = _as_jax_float64(self.curve.kappa())
+        gammadash = _as_jax_float64(self.curve.gammadash())
+        grad_kappa, grad_gammadash = _lp_curve_curvature_grad(
+            kappa,
+            gammadash,
+            _as_jax_float64(self.p),
+            _as_jax_float64(self.threshold),
+        )
+        return self.curve.dkappa_by_dcoeff_vjp(
+            _as_numpy_float64(grad_kappa)
+        ) + self.curve.dgammadash_by_dcoeff_vjp(_as_numpy_float64(grad_gammadash))
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class LpCurveCurvatureBarrierJAX(Optimizable):
+    """JAX-backed curve curvature strict barrier."""
+
+    def __init__(self, curve, threshold):
+        self.curve = curve
+        self.threshold = threshold
+        super().__init__(depends_on=[curve])
+
+    def J(self):
+        return curvature_barrier_pure(
+            _as_jax_float64(self.curve.kappa()),
+            _as_jax_float64(self.curve.gammadash()),
+            _as_jax_float64(self.threshold),
+        )
+
+    @derivative_dec
+    def dJ(self):
+        kappa = _as_jax_float64(self.curve.kappa())
+        gammadash = _as_jax_float64(self.curve.gammadash())
+        grad_kappa, grad_gammadash = _curvature_barrier_grad(
+            kappa,
+            gammadash,
+            _as_jax_float64(self.threshold),
+        )
+        return self.curve.dkappa_by_dcoeff_vjp(
+            _as_numpy_float64(grad_kappa)
+        ) + self.curve.dgammadash_by_dcoeff_vjp(_as_numpy_float64(grad_gammadash))
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class MeanSquaredCurvatureJAX(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.geo.MeanSquaredCurvature`."""
+
+    def __init__(self, curve):
+        self.curve = curve
+        super().__init__(depends_on=[curve])
+
+    def J(self):
+        return _host_float(
+            curve_msc_pure(
+                _as_jax_float64(self.curve.kappa()),
+                _as_jax_float64(self.curve.gammadash()),
+            )
+        )
+
+    @derivative_dec
+    def dJ(self):
+        kappa = _as_jax_float64(self.curve.kappa())
+        gammadash = _as_jax_float64(self.curve.gammadash())
+        grad_kappa, grad_gammadash = _curve_msc_grad(kappa, gammadash)
+        return self.curve.dkappa_by_dcoeff_vjp(
+            _as_numpy_float64(grad_kappa)
+        ) + self.curve.dgammadash_by_dcoeff_vjp(_as_numpy_float64(grad_gammadash))
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class ArclengthVariationJAX(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.geo.ArclengthVariation`."""
+
+    def __init__(self, curve, nintervals="full"):
+        super().__init__(depends_on=[curve])
+        if nintervals not in ("full", "partial") and not (
+            isinstance(nintervals, int) and 0 < nintervals <= curve.gamma().shape[0]
+        ):
+            raise ValueError(
+                "nintervals must be 'full', 'partial', or an integer in "
+                f"(0, nquadpoints]; got {nintervals!r}."
+            )
+        self.curve = curve
+        nquadpoints = len(curve.quadpoints)
+        if nintervals == "full":
+            resolved_intervals = int(curve.gamma().shape[0])
+        elif nintervals == "partial":
+            if not isinstance(curve, (CurveXYZFourier, JaxCurveXYZFourier)):
+                raise RuntimeError(
+                    "Please provide a value other than `partial` for `nintervals`. "
+                    "We only have a default for `CurveXYZFourier` and "
+                    "`JaxCurveXYZFourier`."
+                )
+            resolved_intervals = 2 * curve.order
+        else:
+            resolved_intervals = int(nintervals)
+        self.nintervals = resolved_intervals
+        indices = np.floor(
+            np.linspace(0, nquadpoints, resolved_intervals + 1, endpoint=True)
+        ).astype(int)
+        mat = np.zeros((resolved_intervals, nquadpoints))
+        for i in range(resolved_intervals):
+            mat[i, indices[i] : indices[i + 1]] = 1 / (indices[i + 1] - indices[i])
+        self.mat = mat
+
+    def J(self):
+        return _host_float(
+            curve_arclengthvariation_pure(
+                _as_jax_float64(self.curve.incremental_arclength()),
+                _as_jax_float64(self.mat),
+            )
+        )
+
+    @derivative_dec
+    def dJ(self):
+        return self.curve.dincremental_arclength_by_dcoeff_vjp(
+            _as_numpy_float64(
+                _arclength_variation_grad(
+                    _as_jax_float64(self.curve.incremental_arclength()),
+                    _as_jax_float64(self.mat),
+                )
+            )
+        )
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class _CurveCurveDistanceJAXBase(Optimizable):
+    """Pair-summed curve-curve penalty evaluated as one batched JAX program.
+
+    The pairs are ``(i, j)`` with ``j < min(i, num_basecurves)``, as in
+    :class:`~simsopt.geo.CurveCurveDistance`; each pair contributes
+    ``pair_kernel`` on the ``downsample``-strided samples of both curves.
+    Subclasses name the kernel; J and dJ are each one jitted dispatch.
+    """
+
+    pair_kernel = None
+
+    def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):
+        self.curves = curves
+        self.minimum_distance = minimum_distance
+        self.num_basecurves = num_basecurves or len(curves)
+        self.downsample = downsample
+        self._pair_plan = _curve_pair_plan(
+            tuple(
+                int(_curve_position_samples(curve, downsample).shape[0])
+                for curve in curves
+            ),
+            tuple(self._iter_curve_pair_indices()),
+        )
+        super().__init__(depends_on=curves)
+
+    def _iter_curve_pair_indices(self):
+        for i in range(len(self.curves)):
+            for j in range(min(i, self.num_basecurves)):
+                yield i, j
+
+    def _class_stacked_geometry(self):
+        """Return device stacks of sampled ``gamma``/``gammadash`` per class."""
+
+        def _stack(samples):
+            return tuple(
+                _as_jax_float64(
+                    np.stack(
+                        [
+                            _as_numpy_float64(samples(self.curves[index]))[
+                                :: self.downsample
+                            ]
+                            for index in members
+                        ]
+                    )
+                )
+                for members in self._pair_plan.class_members
+            )
+
+        return (
+            _stack(lambda curve: curve.gamma()),
+            _stack(lambda curve: curve.gammadash()),
+        )
+
+    def _penalty_value(self):
+        class_gammas, class_gammadashes = self._class_stacked_geometry()
+        return _curve_pair_penalty(
+            class_gammas,
+            class_gammadashes,
+            _as_jax_float64(self.minimum_distance),
+            pair_kernel=type(self).pair_kernel,
+            plan=self._pair_plan,
+            pairwise_chunk_size=_resolve_pairwise_penalty_chunk_size(),
+            batch_bytes=_CURVE_PAIR_BATCH_BYTES,
+        )
+
+    def _penalty_gradient(self):
+        class_gammas, class_gammadashes = self._class_stacked_geometry()
+        _, (class_dgammas, class_dgammadashes) = _curve_pair_penalty_value_and_grad(
+            class_gammas,
+            class_gammadashes,
+            _as_jax_float64(self.minimum_distance),
+            pair_kernel=type(self).pair_kernel,
+            plan=self._pair_plan,
+            pairwise_chunk_size=_resolve_pairwise_penalty_chunk_size(),
+            batch_bytes=_CURVE_PAIR_BATCH_BYTES,
+        )
+        class_dgammas, class_dgammadashes = _host_tree(
+            (class_dgammas, class_dgammadashes), dtype=np.float64
+        )
+        dgamma_buffers, dgammadash_buffers = _curve_vjp_buffers(self.curves)
+        for members, dgammas, dgammadashes in zip(
+            self._pair_plan.class_members, class_dgammas, class_dgammadashes
+        ):
+            for row, index in enumerate(members):
+                _add_curve_vjp(dgamma_buffers[index], dgammas[row], self.downsample)
+                _add_curve_vjp(
+                    dgammadash_buffers[index], dgammadashes[row], self.downsample
+                )
+        return _sum_curve_vjp_contributions(
+            self.curves,
+            dgamma_buffers,
+            dgammadash_buffers,
+        )
+
+    def shortest_distance(self):
+        return min(
+            _curve_pair_minimum_distance(self.curves, i, j, self.downsample)
+            for i, j in self._iter_curve_pair_indices()
+        )
+
+
+class CurveCurveDistanceJAX(_CurveCurveDistanceJAXBase):
+    """JAX-backed curve-curve distance penalty without C++ candidate culling."""
+
+    pair_kernel = staticmethod(cc_distance_pure)
+
+    def J(self):
+        return _host_float(self._penalty_value())
+
+    @derivative_dec
+    def dJ(self):
+        return self._penalty_gradient()
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class CurveCurveDistanceBarrierJAX(_CurveCurveDistanceJAXBase):
+    """JAX-backed curve-curve strict distance barrier."""
+
+    pair_kernel = staticmethod(cc_distance_barrier_pure)
+
+    def __init__(self, curves, minimum_distance, num_basecurves=None):
+        super().__init__(curves, minimum_distance, num_basecurves=num_basecurves)
+
+    def J(self):
+        return self._penalty_value()
+
+    @derivative_dec
+    def dJ(self):
+        return self._penalty_gradient()
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class CurveSurfaceDistanceJAX(Optimizable):
+    """JAX-backed curve-surface distance penalty without C++ candidate culling."""
+
+    def __init__(self, curves, surface, minimum_distance, downsample=1):
+        self.curves = curves
+        self.surface = surface
+        self.minimum_distance = minimum_distance
+        self.downsample = downsample
+        super().__init__(depends_on=curve_surface_distance_owners(curves, surface))
+
+    def _evaluation_geometry(self):
+        curve_positions, curve_tangents, surface_gamma, surface_normals = (
+            _curve_surface_geometry_snapshot(self.curves, self.surface)
+        )
+        return (
+            curve_positions,
+            curve_tangents,
+            _as_jax_float64(surface_gamma),
+            _as_jax_float64(surface_normals),
+        )
+
+    def shortest_distance(self):
+        surface_points = np.asarray(
+            self.surface.gamma()[:: self.downsample, :: self.downsample, :],
+            dtype=np.float64,
+        ).reshape((-1, 3))
+        return min(
+            float(
+                np.min(
+                    np.linalg.norm(
+                        np.asarray(
+                            curve.gamma()[:: self.downsample, :],
+                            dtype=np.float64,
+                        )[:, None, :]
+                        - surface_points[None, :, :],
+                        axis=-1,
+                    )
+                )
+            )
+            for curve in self.curves
+        )
+
+    def J(self):
+        curve_positions, curve_tangents, surface_gamma, surface_normals = (
+            self._evaluation_geometry()
+        )
+        res = _as_jax_float64(0.0)
+        minimum_distance = _as_jax_float64(self.minimum_distance)
+        for gamma, gammadash in zip(curve_positions, curve_tangents):
+            res += cs_distance_pure(
+                _as_jax_float64(gamma),
+                _as_jax_float64(gammadash),
+                surface_gamma,
+                surface_normals,
+                minimum_distance,
+            )
+        return _host_float(res)
+
+    @derivative_dec
+    def dJ(self):
+        """Return the derivative with respect to curve and surface DOFs."""
+        curve_positions, curve_tangents, surface_gamma, surface_normals = (
+            self._evaluation_geometry()
+        )
+        dgamma_buffers, dgammadash_buffers = _curve_vjp_buffers(self.curves)
+        surface_gamma_vjp = np.zeros_like(self.surface.gamma())
+        surface_normal_vjp = np.zeros_like(self.surface.normal())
+        minimum_distance = _as_jax_float64(self.minimum_distance)
+        for index, (gamma, gammadash) in enumerate(
+            zip(curve_positions, curve_tangents)
+        ):
+            grad_gamma, grad_gammadash, grad_surface_gamma, grad_surface_normal = (
+                _cs_distance_grad(
+                    _as_jax_float64(gamma),
+                    _as_jax_float64(gammadash),
+                    surface_gamma,
+                    surface_normals,
+                    minimum_distance,
+                )
+            )
+            dgamma_buffers[index] += _as_numpy_float64(grad_gamma)
+            dgammadash_buffers[index] += _as_numpy_float64(grad_gammadash)
+            surface_gamma_vjp += _as_numpy_float64(grad_surface_gamma).reshape(
+                surface_gamma_vjp.shape
+            )
+            surface_normal_vjp += _as_numpy_float64(grad_surface_normal).reshape(
+                surface_normal_vjp.shape
+            )
+        curve_derivative = _sum_curve_vjp_contributions(
+            self.curves,
+            dgamma_buffers,
+            dgammadash_buffers,
+        )
+        surface_derivative = Derivative(
+            {
+                self.surface: (
+                    self.surface.dgamma_by_dcoeff_vjp(surface_gamma_vjp)
+                    + self.surface.dnormal_by_dcoeff_vjp(surface_normal_vjp)
+                )
+            }
+        )
+        return curve_derivative + surface_derivative
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
+
+class LinkingNumberJAX(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.geo.LinkingNumber`."""
+
+    def __init__(self, curves, downsample=1):
+        self.curves = curves
+        for curve in curves:
+            assert np.mod(len(curve.quadpoints), downsample) == 0, (
+                f"Downsample {downsample} does not divide the number of quadpoints "
+                f"{len(curve.quadpoints)}."
+            )
+        self.downsample = downsample
+        self.dphis = np.array(
+            [(c.quadpoints[1] - c.quadpoints[0]) * downsample for c in self.curves]
+        )
+        super().__init__(depends_on=curves)
+
+    def J(self):
+        total = _as_jax_float64(0.0)
+        for p in range(1, len(self.curves)):
+            gamma_p, gammadash_p = _curve_jax_position_and_tangent(self.curves[p])
+            if self.downsample != 1:
+                gamma_p = gamma_p[:: self.downsample]
+                gammadash_p = gammadash_p[:: self.downsample]
+            dphi_p = _as_jax_float64(self.dphis[p])
+            for q in range(p):
+                gamma_q, gammadash_q = _curve_jax_position_and_tangent(self.curves[q])
+                if self.downsample != 1:
+                    gamma_q = gamma_q[:: self.downsample]
+                    gammadash_q = gammadash_q[:: self.downsample]
+                total += _as_jax_float64(
+                    pair_linking_number_pure(
+                        gamma_p,
+                        gammadash_p,
+                        gamma_q,
+                        gammadash_q,
+                        dphi_p,
+                        _as_jax_float64(self.dphis[q]),
+                    )
+                )
+        return total
+
+    @derivative_dec
+    def dJ(self):
+        return Derivative({})
+
+    return_fn_map = {"J": J, "dJ": dJ}

@@ -26,9 +26,13 @@ from monty.io import zopen
 
 from .dev import SimsoptRequires
 from .types import RealArray, StrArray, BoolArray, Key
-from .util import ImmutableId, OptimizableMeta, WeakKeyDefaultDict, \
-    DofLengthMismatchError
-from .derivative import derivative_dec
+from .util import (
+    ImmutableId,
+    OptimizableMeta,
+    WeakKeyDefaultDict,
+    DofLengthMismatchError,
+)
+from ._derivative_decorator import derivative_dec
 from .json import GSONable, SIMSON, GSONDecoder, GSONEncoder
 
 try:
@@ -841,7 +845,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Remove the specific Optimizable object from the children list.
 
         Args:
-            child: Direct dependent (child) of the Optimizable object
+            other: Direct dependent (child) of the Optimizable object
         """
         weakref_other = weakref.ref(other)
         self._children.remove(weakref_other)
@@ -853,7 +857,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Adds another Optimizable object as parent at specified index.
 
         Args:
-            int: Index of the parent's list
+            index: Index of the parent's list
             other: Another Optimizable object to be added as parent
         """
         if other not in self.parents:
@@ -1461,7 +1465,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
     def full_fix(self, arr: Key) -> None:
         """
         Set the fixed/free attribute for all dofs on which this Optimizable object
-        depends. 
+        depends.
 
         Args:
             arr: List or array of the same length as ``full_x``, containing
@@ -1475,7 +1479,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
     def full_unfix(self, arr: Key) -> None:
         """
         Set the fixed/free attribute for all dofs on which this Optimizable object
-        depends. 
+        depends.
 
         Args:
             arr: List or array of the same length as ``full_x``, containing
@@ -1519,15 +1523,15 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
             opt.local_unfix_all()
 
     def __add__(self, other):
-        """ Add two Optimizable objects """
+        """Add two Optimizable objects"""
         return OptimizableSum([self, other])
 
     def __mul__(self, other):
-        """ Multiply an Optimizable object by a scalar """
+        """Multiply an Optimizable object by a scalar"""
         return ScaledOptimizable(other, self)
 
     def __rmul__(self, other):
-        """ Multiply an Optimizable object by a scalar """
+        """Multiply an Optimizable object by a scalar"""
         return ScaledOptimizable(other, self)
 
     # https://stackoverflow.com/questions/11624955/avoiding-python-sum-default-start-arg-behavior
@@ -1542,14 +1546,14 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
     @SimsoptRequires(plt is not None, "print method for DAG requires matplotlib")
     def plot_graph(self, show=True):
         """
-        Plot the directed acyclical graph that represents the dependencies of an 
+        Plot the directed acyclical graph that represents the dependencies of an
         ``Optimizable`` on its parents. The workflow is as follows: generate a ``networkx``
         ``DiGraph`` using the ``traversal`` function defined below.  Next, call ``graphviz_layout``
         which determines sensible positions for the nodes of the graph using the ``dot``
         program of ``graphviz``. Finally, ``networkx`` plots the graph using ``matplotlib``.
 
         Note that the tool ``network2tikz`` at `https://github.com/hackl/network2tikz <https://github.com/hackl/network2tikz>`_
-        can be used to convert the networkx ``DiGraph`` and positions to a 
+        can be used to convert the networkx ``DiGraph`` and positions to a
         latex file for publication.
 
         Args:

@@ -1,0 +1,184 @@
+"""JAX port of ``examples/2_Intermediate/wireframe_gsco_sector_saddle.py``.
+
+The host constructs the native QA plasma and NESCOIL wireframe, seeds its
+planar TF coils, and applies the sector-break and poloidal-current constraints.
+The immutable response/topology payload then enters the sampled-history JAX
+GSCO kernel on the selected device.  Only final currents and scalar diagnostics
+return to the host for constraint validation and reporting.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from simsopt.geo import SurfaceRZFourier, ToroidalWireframe
+from simsopt_jax.examples import ExampleResult, ExecutionScale, run_example
+from simsopt_jax.examples.solver_terminal_status import (
+    GSCO_REDUCED_BUDGET_SCALES,
+    gsco_example_status,
+    gsco_terminal_label,
+)
+from simsopt_jax_adapters.solve.wireframe import (
+    bnorm_obj_matrices_jax,
+    gsco_wireframe_jax,
+)
+
+EXAMPLE_ID = "native-wireframe-gsco-sector-saddle"
+NATIVE_ITERATIONS = 2_000
+TEST_DATA = Path(__file__).resolve().parents[3] / "tests" / "test_files"
+
+
+def _build_problem(
+    scale: ExecutionScale,
+) -> tuple[ToroidalWireframe, SurfaceRZFourier, float]:
+    native_scale = scale == "native_default"
+    plasma_resolution = 32 if native_scale else 4
+    wireframe_nphi = 48 if native_scale else 18
+    wireframe_ntheta = 50 if native_scale else 8
+    plasma = SurfaceRZFourier.from_vmec_input(
+        TEST_DATA / "input.LandremanPaul2021_QA",
+        nphi=plasma_resolution,
+        ntheta=plasma_resolution,
+        range="half period",
+    )
+    wireframe_surface = SurfaceRZFourier.from_nescoil_input(
+        TEST_DATA / "nescin.LandremanPaul2021_QA",
+        "current",
+    )
+    wireframe = ToroidalWireframe(
+        wireframe_surface,
+        wireframe_nphi,
+        wireframe_ntheta,
+    )
+    mu0 = 4.0 * np.pi * 1.0e-7
+    poloidal_current = -2.0 * np.pi * plasma.get_rc(0, 0) / mu0
+    number_of_tf_coils = 3
+    tf_current = poloidal_current / (2 * wireframe.nfp * number_of_tf_coils)
+    wireframe.add_tfcoil_currents(number_of_tf_coils, tf_current)
+    wireframe.set_toroidal_breaks(
+        number_of_tf_coils,
+        2,
+        allow_pol_current=True,
+    )
+    wireframe.set_poloidal_current(poloidal_current)
+    return wireframe, plasma, poloidal_current
+
+
+def solve(
+    _output_directory: Path, max_steps: int, scale: ExecutionScale
+) -> ExampleResult:
+    wireframe, plasma, poloidal_current = _build_problem(scale)
+    response, target = bnorm_obj_matrices_jax(
+        wireframe,
+        plasma,
+        area_weighted=True,
+        verbose=False,
+    )
+    initial_currents = np.asarray(wireframe.currents, dtype=np.float64).reshape((-1, 1))
+    gsco_current = 0.05 * abs(poloidal_current)
+    result = gsco_wireframe_jax(
+        wireframe,
+        response,
+        target,
+        lambda_S=10.0**-6.5,
+        no_crossing=True,
+        match_current=False,
+        default_current=gsco_current,
+        max_current=1.1 * gsco_current,
+        max_iter=max_steps,
+        print_interval=max_steps,
+        # Upstream's C++ records every iteration (``record_iter`` in
+        # ``wireframe_optimization.cpp``). The dense history is what the stop
+        # rule reads to tell an accepted undo from an exhausted budget.
+        record_every=1,
+        verbose=False,
+    )
+    response_device = jnp.asarray(response, dtype=jnp.float64)
+    target_device = jnp.asarray(target, dtype=jnp.float64)
+    initial_device = jnp.asarray(initial_currents, dtype=jnp.float64)
+    initial_error_device = jnp.linalg.norm(
+        response_device @ initial_device - target_device
+    )
+    final_error_device = jnp.linalg.norm(response_device @ result.x - target_device)
+    diagnostics = np.asarray(
+        jax.device_get(
+            jnp.stack(
+                (
+                    initial_error_device,
+                    final_error_device,
+                    jnp.max(jnp.abs(result.x)),
+                )
+            )
+        ),
+        dtype=np.float64,
+    )
+    solution = np.asarray(jax.device_get(result.x), dtype=np.float64).ravel()
+    wireframe.currents[:] = solution
+    constraints_satisfied = bool(wireframe.check_constraints())
+    history_length = int(jax.device_get(result.history_length))
+    recorded = slice(0, history_length)
+    iteration_history = np.asarray(jax.device_get(result.iter_history), dtype=np.int64)[
+        recorded
+    ]
+    loop_history = np.asarray(jax.device_get(result.loop_history), dtype=np.int64)[
+        recorded
+    ]
+    current_history = np.asarray(jax.device_get(result.curr_history), dtype=np.float64)[
+        recorded
+    ]
+    iterations = int(iteration_history[-1])
+    initial_error, final_error, maximum_current = (
+        float(value) for value in diagnostics
+    )
+    # The completion policy reads the returned arrays: the solver's own stop
+    # condition decides, never the scientific predicate "final normal error
+    # below initial" -- upstream's own run is not required to satisfy it, so it
+    # is published as a diagnostic and gates nothing. A run that reached its
+    # iteration cap is upstream's ``stop_last_iter`` and is not a converged
+    # solve; at the campaign's reduced scales that cap is the campaign's own,
+    # which is the one case where the example still executed its workflow.
+    label = gsco_terminal_label(
+        accepted_updates=iterations,
+        max_iterations=max_steps,
+        loop_history=loop_history,
+        current_history=current_history,
+        endpoint_usable=bool(np.all(np.isfinite(solution)) and constraints_satisfied),
+    )
+    return ExampleResult(
+        example_id=EXAMPLE_ID,
+        observables={
+            "initial_normal_error": initial_error,
+            "final_normal_error": final_error,
+            "maximum_current": maximum_current,
+            "iterations": iterations,
+            "allocated_iteration_budget": max_steps,
+            "constraints_satisfied": constraints_satisfied,
+            "terminal_status": label.normalized_status,
+            "terminal_reason": label.raw_status,
+            "normal_error_decreased": bool(final_error < initial_error),
+            "solver_success": label.success,
+        },
+        status=gsco_example_status(
+            label,
+            scale,
+            budget_admitted_scales=GSCO_REDUCED_BUDGET_SCALES,
+        ),
+    )
+
+
+def main(arguments: list[str] | None = None) -> int:
+    return run_example(
+        arguments,
+        description=__doc__,
+        temporary_prefix="simsopt-jax-wireframe-gsco-sector-saddle-",
+        bounded_steps=40,
+        native_default_steps=NATIVE_ITERATIONS,
+        solve=solve,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -71,6 +71,12 @@ input_name = 'input.LandremanPaul2021_QA_lowres'
 TEST_DIR = (Path(__file__).parent / ".." / ".." / "tests" / "test_files").resolve()
 surface_filename = TEST_DIR / input_name
 s = SurfaceRZFourier.from_vmec_input(surface_filename, range="half period", nphi=nphi, ntheta=ntheta)
+# The plasma boundary is the prescribed target of this permanent-magnet
+# problem, not an optimization variable. This explicit ownership is required
+# now that CurveSurfaceDistance differentiates with respect to both curves and
+# surfaces: without it the boundary's 121 free dofs enter the coil
+# optimization below, which upstream runs over the 7 coil parameters alone.
+s.fix_all()
 s_inner = SurfaceRZFourier.from_vmec_input(surface_filename, range="half period", nphi=nphi, ntheta=ntheta)
 s_outer = SurfaceRZFourier.from_vmec_input(surface_filename, range="half period", nphi=nphi, ntheta=ntheta)
 

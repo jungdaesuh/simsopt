@@ -1,0 +1,291 @@
+name: JAX GPU Parity
+
+# Weekly GPU parity check + manual dispatch.
+# Validates that core JAX modules produce correct results on a real GPU,
+# catching silent numerical divergence between CPU and CUDA backends.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Sunday midnight UTC
+    - cron: "0 0 * * 0"
+
+jobs:
+  gpu-parity:
+    name: GPU parity (CUDA, JAX)
+    # Self-hosted CUDA runner: upstream has none, so the job runs only where the
+    # repository opts in with the variable SIMSOPT_GPU_RUNNER=true (an unset
+    # variable reads as an empty string, so the job is skipped rather than left
+    # queued). The opt-in is not a security boundary; restrict which repositories
+    # and workflows may use the runner with the runner group's settings. This
+    # workflow has no pull_request trigger, so no fork's code is scheduled here.
+    if: vars.SIMSOPT_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 45
+
+    env:
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_PACKAGES: python=3.11 pip cmake ninja c-compiler cxx-compiler
+      SIMSOPT_BACKEND_MODE: jax_gpu_parity
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: log
+      XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
+      JAX_PLATFORMS: cuda
+      JAX_ENABLE_X64: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Provision GPU parity environment
+        run: |
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda install -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
+          else
+            conda create -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
+
+      # ------------------------------------------------------------------
+      # GPU device verification
+      # ------------------------------------------------------------------
+      - name: Verify JAX sees a GPU device
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -c "
+          import jax
+          devices = jax.devices()
+          print('JAX devices:', devices)
+          print('Default backend:', jax.default_backend())
+          gpu_devices = [d for d in devices if d.platform in {'cuda', 'gpu'}]
+          assert len(gpu_devices) > 0, (
+              f'No GPU devices found. Available: {devices}'
+          )
+          assert jax.config.jax_enable_x64
+          print(f'GPU count: {len(gpu_devices)}')
+          "
+
+      # ------------------------------------------------------------------
+      # Core parity test suite
+      # Each file runs independently so a failure in one does not skip
+      # the rest.  Results are collected at the end.
+      # ------------------------------------------------------------------
+      - name: Import smoke tests
+        id: smoke
+        continue-on-error: true
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/test_jax_import_smoke.py -v --tb=short
+
+      - name: Biot-Savart JAX unit
+        id: bs_unit
+        continue-on-error: true
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/field/test_biotsavart_jax.py -v --tb=short
+
+      - name: Boozer residual JAX
+        id: boozer
+        continue-on-error: true
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/geo/test_boozer_residual_jax.py \
+            -k gpu_parity -v --tb=short
+
+      - name: Surface Fourier JAX
+        id: surface
+        continue-on-error: true
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
+
+      - name: Precision and public derivative authority
+        id: precision_authority
+        continue-on-error: true
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest \
+              tests/jax/core/test_surface_objective_fused_gradients.py \
+              tests/geo/test_curve_objectives_strict_gpu_jax.py \
+              tests/geo/test_surface_objectives_strict_gpu_jax.py \
+              tests/geo/test_core_geometry_strict_gpu_jax.py \
+              -v --tb=short
+
+      - name: Dense optimizer cross-device placement
+        id: optimizer_placement
+        continue-on-error: true
+        env:
+          JAX_PLATFORMS: cuda,cpu
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/geo/test_optimizer_strict_gpu_jax.py \
+            -v --tb=short
+
+      - name: Native/JAX same-state mirror parity
+        id: mirror_same_state
+        continue-on-error: true
+        env:
+          JAX_PLATFORMS: cuda,cpu
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/jax/test_mirror_same_state_parity.py \
+            -v --tb=short
+
+      # ------------------------------------------------------------------
+      # Summary gate — fail the job if any test step failed
+      # ------------------------------------------------------------------
+      - name: Check for failures
+        if: always()
+        run: |
+          echo "## GPU Parity Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Import smoke | ${{ steps.smoke.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Biot-Savart unit | ${{ steps.bs_unit.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Boozer residual | ${{ steps.boozer.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Surface Fourier | ${{ steps.surface.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Precision and derivative authority | ${{ steps.precision_authority.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dense optimizer placement | ${{ steps.optimizer_placement.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Mirror same-state parity | ${{ steps.mirror_same_state.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Fail the workflow if any test step did not succeed
+          if [ "${{ steps.smoke.outcome }}" != "success" ] || \
+             [ "${{ steps.bs_unit.outcome }}" != "success" ] || \
+             [ "${{ steps.boozer.outcome }}" != "success" ] || \
+             [ "${{ steps.surface.outcome }}" != "success" ] || \
+             [ "${{ steps.precision_authority.outcome }}" != "success" ] || \
+             [ "${{ steps.optimizer_placement.outcome }}" != "success" ] || \
+             [ "${{ steps.mirror_same_state.outcome }}" != "success" ]; then
+            echo "One or more GPU parity tests failed."
+            exit 1
+          fi
+
+  gpu-full-suite-log:
+    name: GPU full suite (CUDA, transfer_guard=log)
+    # Self-hosted CUDA runner: upstream has none, so the job runs only where the
+    # repository opts in with the variable SIMSOPT_GPU_RUNNER=true (an unset
+    # variable reads as an empty string, so the job is skipped rather than left
+    # queued). The opt-in is not a security boundary; restrict which repositories
+    # and workflows may use the runner with the runner group's settings. This
+    # workflow has no pull_request trigger, so no fork's code is scheduled here.
+    if: vars.SIMSOPT_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 240
+
+    env:
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_PACKAGES: python=3.11 pip cmake ninja c-compiler cxx-compiler
+      SIMSOPT_BACKEND_MODE: jax_gpu_parity
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: log
+      XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
+      JAX_PLATFORMS: cuda
+      JAX_ENABLE_X64: "1"
+      PYTHONUNBUFFERED: "1"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Provision GPU full-suite environment
+        run: |
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda install -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
+          else
+            conda create -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
+
+      - name: Verify CUDA runtime and x64 contract
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -c "import jax; print(jax.devices()); print(jax.default_backend()); assert any(device.platform in {'cuda', 'gpu'} for device in jax.devices()); assert jax.config.jax_enable_x64"
+
+      - name: Run full pytest suite under CUDA log transfer guard
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests \
+            -v --tb=short -rA \
+            --capture=tee-sys \
+            -o log_cli=true \
+            -o log_cli_level=INFO
+
+  jax-gpu-strict-purity:
+    name: JAX GPU strict purity (CUDA, transfer_guard=disallow)
+    # Self-hosted CUDA runner: upstream has none, so the job runs only where the
+    # repository opts in with the variable SIMSOPT_GPU_RUNNER=true (an unset
+    # variable reads as an empty string, so the job is skipped rather than left
+    # queued). The opt-in is not a security boundary; restrict which repositories
+    # and workflows may use the runner with the runner group's settings. This
+    # workflow has no pull_request trigger, so no fork's code is scheduled here.
+    if: vars.SIMSOPT_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    env:
+      BENCHMARK_ENV_NAME: jax
+      BENCHMARK_ENV_PACKAGES: python=3.11 pip cmake ninja c-compiler cxx-compiler
+      SIMSOPT_BACKEND_MODE: jax_gpu_parity
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      JAX_TRANSFER_GUARD: disallow
+      XLA_FLAGS: --xla_gpu_exclude_nondeterministic_ops=true
+      JAX_PLATFORMS: cuda
+      JAX_ENABLE_X64: "1"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Provision GPU strict-purity environment
+        run: |
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda install -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
+          else
+            conda create -y -n "$BENCHMARK_ENV_NAME" -c conda-forge $BENCHMARK_ENV_PACKAGES
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
+
+      - name: Verify CUDA runtime and x64 contract
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -c "import jax; print(jax.devices()); print(jax.default_backend()); assert any(device.platform in {'cuda', 'gpu'} for device in jax.devices()); assert jax.config.jax_enable_x64"
+
+      - name: Run CUDA strict transfer-guard smoke slice
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/test_jax_import_smoke.py \
+            -k "gpu_ondevice_loops_with_host_constants or grouped_biot_savart_gpu_spec_eval or grouped_biot_savart_gpu_current_arrays" \
+            -v --tb=short
+
+      - name: Run JAX examples on GPU in fast-default mode
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python examples/jax/run_examples.py --device gpu --scale bounded
+
+      - name: Run JAX examples on GPU in explicit parity mode
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python examples/jax/run_examples.py --device gpu --intent parity --scale bounded
+
+      - name: Run remaining JAX surface CUDA import mode matrix
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/integration/test_remaining_jax_surfaces_mode_matrix.py \
+            -k "simsoptpp_free_import_mode_matrix" \
+            -v --tb=short
+
+      - name: Run BoozerSurfaceJAX CUDA inner-solve tests
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/geo/test_boozersurface_jax.py \
+            -k "run_code_traceable_exact_executes_inner_solve_on_gpu or run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu" \
+            -v --tb=short

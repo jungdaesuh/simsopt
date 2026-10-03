@@ -1,8 +1,10 @@
 #include <array>
 #include "regular_grid_interpolant_3d.h"
+#include <limits>
 #include <xtensor/containers/xarray.hpp>
 #include "xtensor/core/xlayout.hpp"
 #define _USE_MATH_DEFINES
+#include <cmath>
 #include <math.h>
 
 
@@ -82,6 +84,12 @@ int RegularGridInterpolant3D<Array>::locate_unsafe(double x, double y, double z)
 template<class Array>
 void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, double z, double* res){
 
+    if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)){
+        if(out_of_bounds_ok)
+            return;
+        throw std::runtime_error("coordinates must be finite");
+    }
+
     // to avoid funny business when the data is just a tiny bit out of bounds
     // due to machine precision, we perform this check and shift
     if(x >= xmax) x -= _EPS_;
@@ -91,15 +99,46 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
     if(z >= zmax) z -= _EPS_;
     else if (z <= zmin) z += _EPS_;
 
-    int xidx = int(nx*(x-xmin)/(xmax-xmin)); // find idx so that xmesh[xidx] <= x <= xs[xidx+1]
-    int yidx = int(ny*(y-ymin)/(ymax-ymin));
-    int zidx = int(nz*(z-zmin)/(zmax-zmin));
-    if(!out_of_bounds_ok){
-        if(xidx < 0 || xidx >= nx)
+    double xidx_scaled = nx*(x-xmin)/(xmax-xmin); // find idx so that xmesh[xidx] <= x <= xs[xidx+1]
+    double yidx_scaled = ny*(y-ymin)/(ymax-ymin);
+    double zidx_scaled = nz*(z-zmin)/(zmax-zmin);
+    if(!std::isfinite(xidx_scaled) || xidx_scaled < std::numeric_limits<int>::min() || xidx_scaled > std::numeric_limits<int>::max()){
+        if(out_of_bounds_ok)
+            return;
+        else
+            throw std::runtime_error(fmt::format("xidxs={} is not representable as int", xidx_scaled));
+    }
+    if(!std::isfinite(yidx_scaled) || yidx_scaled < std::numeric_limits<int>::min() || yidx_scaled > std::numeric_limits<int>::max()){
+        if(out_of_bounds_ok)
+            return;
+        else
+            throw std::runtime_error(fmt::format("yidxs={} is not representable as int", yidx_scaled));
+    }
+    if(!std::isfinite(zidx_scaled) || zidx_scaled < std::numeric_limits<int>::min() || zidx_scaled > std::numeric_limits<int>::max()){
+        if(out_of_bounds_ok)
+            return;
+        else
+            throw std::runtime_error(fmt::format("zidxs={} is not representable as int", zidx_scaled));
+    }
+    int xidx = int(xidx_scaled);
+    int yidx = int(yidx_scaled);
+    int zidx = int(zidx_scaled);
+    if(xidx < 0 || xidx >= nx){
+        if(out_of_bounds_ok)
+            return;
+        else
             throw std::runtime_error(fmt::format("xidxs={} not within [0, {}]", xidx, nx-1));
-        if(yidx < 0 || yidx >= ny)
+    }
+    if(yidx < 0 || yidx >= ny){
+        if(out_of_bounds_ok)
+            return;
+        else
             throw std::runtime_error(fmt::format("yidxs={} not within [0, {}]", yidx, ny-1));
-        if(zidx < 0 || zidx >= nz)
+    }
+    if(zidx < 0 || zidx >= nz){
+        if(out_of_bounds_ok)
+            return;
+        else
             throw std::runtime_error(fmt::format("zidxs={} not within [0, {}]", zidx, nz-1));
     }
     double xlocal = (x-xmesh[xidx])/hx;
@@ -125,12 +164,16 @@ void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double 
     if constexpr (xsimd::simd_type<double>::size >= 3){
         // batches have no per-lane operator[] anymore; build the 3-lane input via a
         // small contiguous buffer + load, and read results back via store + index.
-        
-        alignas(xs::default_arch::alignment()) double xyz_arr[4] {x, y, z, 0.0};
+        // Both buffers span the full batch width (simdcount lanes, e.g. 8 doubles
+        // under AVX-512); the lanes after x, y, z are zero-initialized.
+        alignas(xs::default_arch::alignment()) double xyz_arr[simdcount] = {};
+        xyz_arr[0] = x;
+        xyz_arr[1] = y;
+        xyz_arr[2] = z;
         simd_t xyz = xs::load_aligned(xyz_arr);
         for (int k = 0; k < degree+1; ++k) {
             simd_t temp = this->rule.basis_fun(k, xyz);
-            alignas(xs::default_arch::alignment()) double temp_arr[4];
+            alignas(xs::default_arch::alignment()) double temp_arr[simdcount];
             temp.store_aligned(temp_arr);
             pkxs[k] = temp_arr[0];
             pkys[k] = temp_arr[1];

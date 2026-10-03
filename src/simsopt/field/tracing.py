@@ -5,6 +5,10 @@ import numpy as np
 
 import simsoptpp as sopp
 from .._core.util import parallel_loop_bounds
+from .._core.tracing_metadata import (
+    levelset_classifier_from_interpolant,
+    register_levelset_classifier,
+)
 from ..field.magneticfield import MagneticField
 from ..field.boozermagneticfield import BoozerMagneticField
 from ..field.sampling import draw_uniform_on_curve, draw_uniform_on_surface
@@ -357,10 +361,10 @@ def trace_particles_starting_on_curve(curve, field, nparticles, tmax=1e-4,
     """
     m = mass
     speed_total = sqrt(2*Ekin/m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
-    np.random.seed(seed)
-    us = np.random.uniform(low=umin, high=umax, size=(nparticles, ))
+    rng = np.random.RandomState(seed)
+    us = rng.uniform(low=umin, high=umax, size=(nparticles, ))
     speed_par = us*speed_total
-    xyz, _ = draw_uniform_on_curve(curve, nparticles, safetyfactor=10)
+    xyz, _ = draw_uniform_on_curve(curve, nparticles, safetyfactor=10, randomgen=rng)
     return trace_particles(
         field, xyz, speed_par, tmax=tmax, mass=mass, charge=charge,
         Ekin=Ekin, tol=tol, comm=comm, phis=phis,
@@ -413,10 +417,10 @@ def trace_particles_starting_on_surface(surface, field, nparticles, tmax=1e-4,
     """
     m = mass
     speed_total = sqrt(2*Ekin/m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
-    np.random.seed(seed)
-    us = np.random.uniform(low=umin, high=umax, size=(nparticles, ))
+    rng = np.random.RandomState(seed)
+    us = rng.uniform(low=umin, high=umax, size=(nparticles, ))
     speed_par = us*speed_total
-    xyz, _ = draw_uniform_on_surface(surface, nparticles, safetyfactor=10)
+    xyz, _ = draw_uniform_on_surface(surface, nparticles, safetyfactor=10, randomgen=rng)
     return trace_particles(
         field, xyz, speed_par, tmax=tmax, mass=mass, charge=charge,
         Ekin=Ekin, tol=tol, comm=comm, phis=phis,
@@ -741,12 +745,15 @@ class LevelsetStoppingCriterion(sopp.LevelsetStoppingCriterion):
             sopp.LevelsetStoppingCriterion.__init__(self, classifier.dist)
         else:
             sopp.LevelsetStoppingCriterion.__init__(self, classifier)
+            classifier = levelset_classifier_from_interpolant(classifier) or classifier
+        self.classifier = classifier
+        register_levelset_classifier(self, classifier)
 
 
 class MinToroidalFluxStoppingCriterion(sopp.MinToroidalFluxStoppingCriterion):
     """
     Stop the iteration once a particle falls below a critical value of
-    ``s``, the normalized toroidal flux. This :class:`StoppingCriterion` is
+    ``s``, the normalized toroidal flux. This stopping criterion is
     important to use when tracing particles in flux coordinates, as the poloidal
     angle becomes ill-defined at the magnetic axis. This should only be used
     when tracing trajectories in a flux coordinate system (i.e., :class:`trace_particles_boozer`).
@@ -755,11 +762,13 @@ class MinToroidalFluxStoppingCriterion(sopp.MinToroidalFluxStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MinToroidalFluxStopingCriterion(s)]
+        stopping_criteria=[MinToroidalFluxStoppingCriterion(s)]
 
     where ``s`` is the value of the minimum normalized toroidal flux.
     """
-    pass
+    def __init__(self, min_s):
+        sopp.MinToroidalFluxStoppingCriterion.__init__(self, min_s)
+        self.min_s = min_s
 
 
 class MaxToroidalFluxStoppingCriterion(sopp.MaxToroidalFluxStoppingCriterion):
@@ -772,11 +781,13 @@ class MaxToroidalFluxStoppingCriterion(sopp.MaxToroidalFluxStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MaxToroidalFluxStopingCriterion(s)]
+        stopping_criteria=[MaxToroidalFluxStoppingCriterion(s)]
 
     where ``s`` is the value of the maximum normalized toroidal flux.
     """
-    pass
+    def __init__(self, max_s):
+        sopp.MaxToroidalFluxStoppingCriterion.__init__(self, max_s)
+        self.max_s = max_s
 
 
 class ToroidalTransitStoppingCriterion(sopp.ToroidalTransitStoppingCriterion):
@@ -792,14 +803,19 @@ class ToroidalTransitStoppingCriterion(sopp.ToroidalTransitStoppingCriterion):
     where ``ntransits`` is the maximum number of toroidal transits and ``flux``
     is a boolean indicating whether tracing is being performed in a flux coordinate system.
     """
-    pass
+    def __init__(self, max_transits, flux):
+        sopp.ToroidalTransitStoppingCriterion.__init__(self, max_transits, flux)
+        self.max_transits = max_transits
+        self.flux = flux
 
 
 class IterationStoppingCriterion(sopp.IterationStoppingCriterion):
     """
     Stop the iteration once the maximum number of iterations is reached.
     """
-    pass
+    def __init__(self, max_iter):
+        sopp.IterationStoppingCriterion.__init__(self, max_iter)
+        self.max_iter = max_iter
 
 
 class MinRStoppingCriterion(sopp.MinRStoppingCriterion):
@@ -811,11 +827,13 @@ class MinRStoppingCriterion(sopp.MinRStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MinRStopingCriterion(crit_r)]
+        stopping_criteria=[MinRStoppingCriterion(crit_r)]
 
     where ``crit_r`` is the value of the critical coordinate.
     """
-    pass
+    def __init__(self, crit_r):
+        sopp.MinRStoppingCriterion.__init__(self, crit_r)
+        self.crit_r = crit_r
 
 
 class MinZStoppingCriterion(sopp.MinZStoppingCriterion):
@@ -827,11 +845,13 @@ class MinZStoppingCriterion(sopp.MinZStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MinZStopingCriterion(crit_z)]
+        stopping_criteria=[MinZStoppingCriterion(crit_z)]
 
     where ``crit_z`` is the value of the critical coordinate.
     """
-    pass
+    def __init__(self, crit_z):
+        sopp.MinZStoppingCriterion.__init__(self, crit_z)
+        self.crit_z = crit_z
 
 
 class MaxRStoppingCriterion(sopp.MaxRStoppingCriterion):
@@ -843,11 +863,13 @@ class MaxRStoppingCriterion(sopp.MaxRStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MaxRStopingCriterion(crit_r)]
+        stopping_criteria=[MaxRStoppingCriterion(crit_r)]
 
     where ``crit_r`` is the value of the critical coordinate.
     """
-    pass
+    def __init__(self, crit_r):
+        sopp.MaxRStoppingCriterion.__init__(self, crit_r)
+        self.crit_r = crit_r
 
 
 class MaxZStoppingCriterion(sopp.MaxZStoppingCriterion):
@@ -859,11 +881,13 @@ class MaxZStoppingCriterion(sopp.MaxZStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MaxZStopingCriterion(crit_z)]
+        stopping_criteria=[MaxZStoppingCriterion(crit_z)]
 
     where ``crit_z`` is the value of the critical coordinate.
     """
-    pass
+    def __init__(self, crit_z):
+        sopp.MaxZStoppingCriterion.__init__(self, crit_z)
+        self.crit_z = crit_z
 
 
 def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, aspect='equal', dpi=300, xlims=None,
