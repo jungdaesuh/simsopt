@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
-from typing import NamedTuple, Protocol, cast
+from dataclasses import dataclass, replace
+from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -93,7 +93,8 @@ class _BFGSObserverObservation:
     g_k: jax.Array
 
 
-class _BFGSHostObservation(NamedTuple):
+@dataclass(frozen=True)
+class _BFGSHostObservation:
     terminal: bool
     accepted: bool
     iteration: int
@@ -101,7 +102,8 @@ class _BFGSHostObservation(NamedTuple):
     ngev: int
 
 
-class _BFGSObserverHostObservation(NamedTuple):
+@dataclass(frozen=True)
+class _BFGSObserverHostObservation:
     terminal: bool
     accepted: bool
     iteration: int

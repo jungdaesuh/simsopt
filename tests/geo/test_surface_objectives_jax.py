@@ -7,7 +7,7 @@ These tests exercise the pure JAX label/objective ingredients directly:
 3. Upstream-shaped ToroidalFlux CPU/JAX parity under tolerance-based checks.
 """
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from jax_test_support import (
     fixture_jax_runtime_guard,  # noqa: F401
     fixture_parity_lane,  # noqa: F401
@@ -5620,7 +5620,10 @@ def test_traceable_seeded_public_contract_remains_two_fields():
         )
     )
 
-    assert len(seeded) == 2
+    assert tuple(field.name for field in fields(seeded)) == (
+        "value_and_grad",
+        "optimizer_initial_value_and_grad",
+    )
 
 
 def test_traceable_general_only_bundle_defers_gradient_jits(monkeypatch):

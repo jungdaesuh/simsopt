@@ -57,7 +57,6 @@ from typing import (
     Callable,
     Generic,
     Literal,
-    NamedTuple,
     Protocol,
     TypeVar,
     cast,
@@ -249,7 +248,8 @@ from simsopt_jax.solve.driver import (
 # visible and make the intentional reexports F401-safe for Ruff.
 
 
-class _PrivateOptimizerRuntime(NamedTuple):
+@dataclass(frozen=True)
+class _PrivateOptimizerRuntime:
     minimize_bfgs: Callable
     minimize_lbfgs: Callable
     minimize_lbfgs_value_and_grad: Callable

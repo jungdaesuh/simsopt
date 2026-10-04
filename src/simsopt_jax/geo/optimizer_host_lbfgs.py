@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, NamedTuple
+from dataclasses import dataclass, replace
+from typing import Callable
 
 import numpy as np
 
@@ -38,7 +38,8 @@ def line_search_failure_reason_from_code(code):
     return _LINE_SEARCH_FAILURE_REASONS_BY_CODE[int(code)]
 
 
-class HostLineSearchResults(NamedTuple):
+@dataclass(frozen=True)
+class HostLineSearchResults:
     failed: bool
     nit: int
     nfev: int
@@ -73,7 +74,8 @@ class HostLineSearchTrial:
     curvature_margin: float
 
 
-class _HostZoomState(NamedTuple):
+@dataclass(frozen=True)
+class _HostZoomState:
     done: bool
     failed: bool
     j: int
@@ -102,7 +104,8 @@ class _HostZoomState(NamedTuple):
     ngev: int
 
 
-class _HostLineSearchState(NamedTuple):
+@dataclass(frozen=True)
+class _HostLineSearchState:
     done: bool
     failed: bool
     i: int
@@ -131,7 +134,8 @@ class _HostLineSearchState(NamedTuple):
     g_star: np.ndarray
 
 
-class HostInvalidStepEvent(NamedTuple):
+@dataclass(frozen=True)
+class HostInvalidStepEvent:
     iteration: int
     step_scale: float
     line_search_failed: bool
@@ -149,7 +153,8 @@ class HostInvalidStepEvent(NamedTuple):
     curvature_margin: float
 
 
-class HostLBFGSResult(NamedTuple):
+@dataclass(frozen=True)
+class HostLBFGSResult:
     converged: bool
     failed: bool
     k: int
@@ -168,7 +173,8 @@ class HostLBFGSResult(NamedTuple):
     optimizer_state_trace: tuple[dict[str, object], ...] = ()
 
 
-class HostBFGSResult(NamedTuple):
+@dataclass(frozen=True)
+class HostBFGSResult:
     converged: bool
     failed: bool
     k: int
@@ -182,7 +188,8 @@ class HostBFGSResult(NamedTuple):
     ls_status: int
 
 
-class _HostLBFGSState(NamedTuple):
+@dataclass(frozen=True)
+class _HostLBFGSState:
     converged: bool
     failed: bool
     k: int
@@ -324,7 +331,8 @@ def _line_search_margins(*, phi_0, dphi_0, c1, c2, alpha, phi, dphi):
 
 
 def _cache_zoom_sample(state, *, alpha, phi, dphi, grad):
-    return state._replace(
+    return replace(
+        state,
         has_rec=True,
         a_rec=float(alpha),
         phi_rec=float(phi),
@@ -393,13 +401,13 @@ def _zoom(
 
     while (not state.done) and (not state.failed):
         if state.j >= max_zoom_iter:
-            state = state._replace(failed=True)
+            state = replace(state, failed=True)
             break
 
         dalpha = abs(state.a_hi - state.a_lo)
         threshold = dtype.type(1e-5 if np.finfo(dtype).bits < 64 else 1e-10)
         if dalpha <= threshold:
-            state = state._replace(failed=True)
+            state = replace(state, failed=True)
             break
 
         a = min(state.a_hi, state.a_lo)
@@ -461,13 +469,15 @@ def _zoom(
             g_j = np.asarray(g_j, dtype=dtype)
             sample_eval_count = 1
 
-        state = state._replace(
+        state = replace(
+            state,
             nfev=state.nfev + sample_eval_count,
             ngev=state.ngev + sample_eval_count,
         )
         sample_valid = _line_search_sample_valid(phi_j, dphi_j, g_j)
         if sample_valid and phi_j < state.best_phi:
-            state = state._replace(
+            state = replace(
+                state,
                 best_a=float(a_j),
                 best_phi=float(phi_j),
                 best_dphi=float(dphi_j),
@@ -493,7 +503,8 @@ def _zoom(
         previous_g_hi = state.g_hi
 
         if hi_to_j:
-            state = state._replace(
+            state = replace(
+                state,
                 a_hi=float(a_j),
                 phi_hi=float(phi_j),
                 dphi_hi=float(dphi_j),
@@ -507,7 +518,8 @@ def _zoom(
                 grad=previous_g_hi,
             )
         if star_to_j:
-            state = state._replace(
+            state = replace(
+                state,
                 done=True,
                 a_star=float(a_j),
                 phi_star=float(phi_j),
@@ -515,7 +527,8 @@ def _zoom(
                 g_star=g_j,
             )
         if hi_to_lo:
-            state = state._replace(
+            state = replace(
+                state,
                 a_hi=float(state.a_lo),
                 phi_hi=float(state.phi_lo),
                 dphi_hi=float(state.dphi_lo),
@@ -529,7 +542,8 @@ def _zoom(
                 grad=previous_g_hi,
             )
         if lo_to_j:
-            state = state._replace(
+            state = replace(
+                state,
                 a_lo=float(a_j),
                 phi_lo=float(phi_j),
                 dphi_lo=float(dphi_j),
@@ -544,15 +558,16 @@ def _zoom(
                     grad=previous_g_lo,
                 )
 
-        state = state._replace(j=state.j + 1)
+        state = replace(state, j=state.j + 1)
         if state.j >= max_zoom_iter and not state.done:
-            state = state._replace(failed=True)
+            state = replace(state, failed=True)
 
     best_is_acceptable = _line_search_sample_valid(
         state.best_phi, state.best_dphi, state.best_g
     ) and (state.best_phi < phi_0)
     if state.failed and best_is_acceptable:
-        state = state._replace(
+        state = replace(
+            state,
             failed=False,
             done=True,
             a_star=state.best_a,
@@ -564,7 +579,8 @@ def _zoom(
 
 
 def _apply_zoom_branch_result(state, zoom, *, wolfe_one):
-    state = state._replace(
+    state = replace(
+        state,
         nfev=state.nfev + zoom.nfev,
         ngev=state.ngev + zoom.ngev,
     )
@@ -572,7 +588,8 @@ def _apply_zoom_branch_result(state, zoom, *, wolfe_one):
         zoom.best_phi, zoom.best_dphi, zoom.best_g
     ) and (zoom.best_phi < state.best_phi)
     if improves_best:
-        state = state._replace(
+        state = replace(
+            state,
             best_a=zoom.best_a,
             best_phi=zoom.best_phi,
             best_dphi=zoom.best_dphi,
@@ -582,13 +599,15 @@ def _apply_zoom_branch_result(state, zoom, *, wolfe_one):
         zoom.best_phi, zoom.best_dphi, zoom.best_g
     ) and (zoom.best_phi < state.best_finite_phi)
     if improves_best_finite:
-        state = state._replace(
+        state = replace(
+            state,
             best_finite_a=zoom.best_a,
             best_finite_phi=zoom.best_phi,
             best_finite_dphi=zoom.best_dphi,
             best_finite_g=zoom.best_g,
         )
-    return state._replace(
+    return replace(
+        state,
         done=True,
         failed=zoom.failed or state.failed,
         a_star=zoom.a_star,
@@ -706,7 +725,8 @@ def _line_search_from_restricted_func_and_grad(
         dphi_i = float(dphi_i)
         g_i = np.asarray(g_i, dtype=dtype)
         first_tested_alpha = float(a_i) if state.nfev == 0 else state.first_tested_alpha
-        state = state._replace(
+        state = replace(
+            state,
             first_tested_alpha=first_tested_alpha,
             nfev=state.nfev + 1,
             ngev=state.ngev + 1,
@@ -715,7 +735,8 @@ def _line_search_from_restricted_func_and_grad(
         sample_valid = _line_search_sample_valid(phi_i, dphi_i, g_i)
         improves_best_finite_i = sample_valid and phi_i < state.best_finite_phi
         if improves_best_finite_i:
-            state = state._replace(
+            state = replace(
+                state,
                 best_finite_a=float(a_i),
                 best_finite_phi=float(phi_i),
                 best_finite_dphi=float(dphi_i),
@@ -725,7 +746,8 @@ def _line_search_from_restricted_func_and_grad(
             sample_valid and (not wolfe_one(a_i, phi_i)) and (phi_i < state.best_phi)
         )
         if improves_best_i:
-            state = state._replace(
+            state = replace(
+                state,
                 best_a=float(a_i),
                 best_phi=float(phi_i),
                 best_dphi=float(dphi_i),
@@ -768,7 +790,8 @@ def _line_search_from_restricted_func_and_grad(
             )
             state = _apply_zoom_branch_result(state, zoom, wolfe_one=wolfe_one)
         elif star_to_i:
-            state = state._replace(
+            state = replace(
+                state,
                 done=True,
                 a_star=float(a_i),
                 phi_star=float(phi_i),
@@ -799,7 +822,8 @@ def _line_search_from_restricted_func_and_grad(
             )
             state = _apply_zoom_branch_result(state, zoom, wolfe_one=wolfe_one)
 
-        state = state._replace(
+        state = replace(
+            state,
             i=state.i + 1,
             a_i2=state.a_i1,
             phi_i2=state.phi_i1,
@@ -817,7 +841,8 @@ def _line_search_from_restricted_func_and_grad(
         state.best_finite_g,
     ) and (state.best_finite_phi < phi_0)
     if (state.failed or (not state.done)) and best_is_acceptable:
-        state = state._replace(
+        state = replace(
+            state,
             failed=False,
             done=True,
             a_star=state.best_finite_a,
@@ -1029,22 +1054,22 @@ def line_search_value_and_grad_more_thuente_host(
     dphi0 = float(np.dot(gfk, pk))
     if not np.isfinite(dphi0) or dphi0 >= 0.0:
         return HostLineSearchResults(
-            True,
-            0,
-            0,
-            0,
-            1,
-            0.0,
-            phi0,
-            gfk,
-            1,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            LINE_SEARCH_FAILURE_REASON_NOT_DESCENT,
-            float("nan"),
-            float("nan"),
+            failed=True,
+            nit=0,
+            nfev=0,
+            ngev=0,
+            k=1,
+            a_k=0.0,
+            f_k=phi0,
+            g_k=gfk,
+            status=1,
+            requested_initial_step=0.0,
+            first_tested_alpha=0.0,
+            best_finite_alpha=0.0,
+            returned_alpha=0.0,
+            failure_reason=LINE_SEARCH_FAILURE_REASON_NOT_DESCENT,
+            armijo_margin=float("nan"),
+            curvature_margin=float("nan"),
         )
 
     if initial_step_size is not None:
@@ -1887,7 +1912,8 @@ def minimize_lbfgs_host_core(
                     bool(converged),
                     int(ls_status),
                 )
-            state = state._replace(
+            state = replace(
+                state,
                 converged=False,
                 failed=True,
                 nfev=next_nfev,
@@ -1970,7 +1996,8 @@ def minimize_lbfgs_host_core(
             g_kp1=g_kp1,
         )
 
-        state = state._replace(
+        state = replace(
+            state,
             converged=converged,
             failed=(status > 0) and (status != 4) and (not converged),
             k=next_k,
@@ -2004,7 +2031,8 @@ def minimize_lbfgs_host_core(
     converged_final = (not state_nonfinite) and (
         host_norm(g_final, ord=norm) < gtol_value
     )
-    state = state._replace(
+    state = replace(
+        state,
         converged=bool(converged_final),
         failed=bool(state.failed or state_nonfinite),
         nfev=state.nfev + final_eval_increment,
@@ -2033,7 +2061,7 @@ def minimize_lbfgs_host_core(
         status = 5
     else:
         status = state.status
-    state = state._replace(status=int(status))
+    state = replace(state, status=int(status))
     return HostLBFGSResult(
         converged=state.converged,
         failed=state.failed,

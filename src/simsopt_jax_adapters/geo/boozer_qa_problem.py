@@ -39,6 +39,7 @@ from simsopt_jax.examples.boozer_official import (
 from simsopt_jax.runtime.host_boundary import host_array, host_bool, host_float
 
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
+from simsopt_jax_adapters.geo.boozer_endpoint import BoozerEndpoint
 from simsopt_jax_adapters.geo.single_stage_boozer_vacuum_problem import (
     _reporting_metrics_with_explicit_staging,
 )
@@ -57,7 +58,7 @@ __all__ = [
 
 
 @dataclass(frozen=True, slots=True)
-class BoozerQAEndpoint:
+class BoozerQAEndpoint(BoozerEndpoint):
     """One evaluated coil state: reported objective, gradient and physics.
 
     ``value`` and ``gradient`` carry upstream's failed-inner-solve policy, so a
@@ -66,25 +67,6 @@ class BoozerQAEndpoint:
     with ``inner_success`` false is the sentinel, not a physical objective.  The
     physics fields describe the Boozer state the evaluation left in place.
     """
-
-    value: float
-    gradient: NDArray[np.float64]
-    inner_success: bool
-    iota: float
-    volume: float
-    non_qs_ratio: float
-    boozer_residual: float
-    major_radius_penalty: float
-    length_penalty: float
-
-    @property
-    def boozer_residual_rms(self) -> float:
-        """Root mean square of the Boozer residual vector.
-
-        ``boozer_residual`` is half the mean square of that vector, which is what
-        native's ``BoozerResidual.J()`` returns.
-        """
-        return float(np.sqrt(2.0 * self.boozer_residual))
 
 
 class BoozerQAProblem:

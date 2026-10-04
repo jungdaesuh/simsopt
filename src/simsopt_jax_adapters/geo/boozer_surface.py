@@ -35,7 +35,6 @@ import inspect
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
-from typing import NamedTuple
 import functools
 from functools import partial
 
@@ -4694,7 +4693,8 @@ def _require_analytic_newton_honours(options, *, decision_size=None) -> None:
         )
 
 
-class _AnalyticPenaltyBundle(NamedTuple):
+@dataclass(frozen=True)
+class _AnalyticPenaltyBundle:
     """Jitted analytic LS evaluators for one penalty configuration.
 
     ``value_grad(x, coil_set_spec) -> (value, gradient)`` and

@@ -14,7 +14,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from threading import Lock
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -370,7 +369,8 @@ class _TraceableExactPayloadFusedConsumerResult:
     producer_residual_inf_norm: jax.Array
 
 
-class TraceableObjectiveIncumbentEvaluation(NamedTuple):
+@dataclass(frozen=True)
+class TraceableObjectiveIncumbentEvaluation:
     """Device-resident numerical result and its scientific eligibility evidence."""
 
     value: jax.Array
@@ -427,7 +427,16 @@ class AcceptedIncumbentHostValueAndGrad:
                 incumbent = self._incumbent
                 generation = self._generation
             evaluation = self._compiled_evaluate(candidate, incumbent)
-            _block_until_ready(evaluation)
+            _block_until_ready(
+                (
+                    evaluation.value,
+                    evaluation.gradient,
+                    evaluation.forward_success,
+                    evaluation.primal_success,
+                    evaluation.actual_adjoint_success,
+                    evaluation.candidate_inner_state,
+                )
+            )
             with self._lock:
                 if generation == self._generation:
                     self._pending[parameter_sha256] = evaluation
@@ -454,7 +463,8 @@ class AcceptedIncumbentHostValueAndGrad:
             self._pending.clear()
 
 
-class TraceableObjectiveTrialResult(NamedTuple):
+@dataclass(frozen=True)
+class TraceableObjectiveTrialResult:
     """Immutable host diagnostic for one forward solve and its actual adjoint."""
 
     raw_objective_value: float
@@ -4005,7 +4015,8 @@ def _build_traceable_optimizer_solved_pair(optimizer_compiled_bundle):
     )
 
 
-class TraceableObjectiveCandidateEvaluation(NamedTuple):
+@dataclass(frozen=True)
+class TraceableObjectiveCandidateEvaluation:
     """Device-resident forward, gradient, and state for one candidate."""
 
     forward_result: dict[str, object]
@@ -5574,7 +5585,8 @@ def make_traceable_objective(
     )["objective"]
 
 
-class TraceableObjectiveSeededValueAndGrad(NamedTuple):
+@dataclass(frozen=True)
+class TraceableObjectiveSeededValueAndGrad:
     """Explicit cached baseline seed plus the target-lane value/grad callable."""
 
     value_and_grad: callable
@@ -5666,7 +5678,8 @@ def make_traceable_solved_state_value_and_grad(
     return runtime_entry["value_and_grad"]
 
 
-class TraceableObjectiveSolvedPair(NamedTuple):
+@dataclass(frozen=True)
+class TraceableObjectiveSolvedPair:
     """Decomposed outer objective: a forward solve plus a solved-state value/grad.
 
     ``solve_fn(coil_dofs) -> forward_result`` runs the device-traceable forward
@@ -5968,7 +5981,14 @@ class TraceableObjectiveSession:
             fallback_gradient_on_primal_failure=False,
         )
         evaluation = evaluate_candidate(candidate, incumbent_state)
-        _block_until_ready(evaluation)
+        _block_until_ready(
+            (
+                evaluation.forward_result,
+                evaluation.gradient,
+                evaluation.actual_adjoint_success,
+                evaluation.candidate_inner_state,
+            )
+        )
         return evaluation
 
     def evaluate_candidate_from_anchor(

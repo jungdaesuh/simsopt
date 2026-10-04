@@ -23,7 +23,8 @@ path when an example script runs), which the ``examples`` package is not.
 
 from __future__ import annotations
 
-from typing import Final, NamedTuple
+from dataclasses import dataclass
+from typing import Final
 
 import numpy as np
 
@@ -78,7 +79,8 @@ OFFICIAL_QA_ADMISSIBLE_OUTER_STOPPING_REASONS: Final[frozenset[StoppingReason]] 
 )
 
 
-class BoozerStageState(NamedTuple):
+@dataclass(frozen=True)
+class BoozerStageState:
     """Surface degrees of freedom, rotational transform and poloidal current."""
 
     surface_dofs: np.ndarray
@@ -86,7 +88,8 @@ class BoozerStageState(NamedTuple):
     G: float
 
 
-class BoozerStageOutcome(NamedTuple):
+@dataclass(frozen=True)
+class BoozerStageOutcome:
     """One stage's end state and the provider's own report of that stage.
 
     ``state`` is what the provider actually left behind -- the surface's own

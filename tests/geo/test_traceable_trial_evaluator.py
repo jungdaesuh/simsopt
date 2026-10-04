@@ -375,7 +375,9 @@ def _incumbent_evaluation(
     )
 
 
-def test_accepted_incumbent_controller_rejected_evaluation_keeps_incumbent() -> None:
+def test_accepted_incumbent_controller_rejected_evaluation_keeps_incumbent(
+    monkeypatch,
+) -> None:
     initial_state = _inner_state(
         (-1.0, -2.0),
         (-3.0, -4.0),
@@ -389,6 +391,15 @@ def test_accepted_incumbent_controller_rejected_evaluation_keeps_incumbent() -> 
         eligible=False,
     )
     observed_incumbents = []
+    ready_leaves = []
+
+    def wait_for_numeric_payload(payload):
+        ready_leaves.append(jax.tree.leaves(payload))
+        return jax.block_until_ready(payload)
+
+    monkeypatch.setattr(
+        surface_objectives_traceable, "_block_until_ready", wait_for_numeric_payload
+    )
 
     def compiled_evaluate(_parameters, incumbent):
         observed_incumbents.append(incumbent)
@@ -409,6 +420,10 @@ def test_accepted_incumbent_controller_rejected_evaluation_keeps_incumbent() -> 
     assert value == 17.5
     np.testing.assert_array_equal(gradient, np.asarray([1.25, -2.5]))
     assert len(observed_incumbents) == 2
+    assert len(ready_leaves) == 2
+    assert all(isinstance(leaf, jax.Array) for leaves in ready_leaves for leaf in leaves)
+    assert all(len(leaves) == 9 for leaves in ready_leaves)
+    assert rejected_state.solved_x is ready_leaves[0][-3]
     assert all(incumbent is initial_state for incumbent in observed_incumbents)
     assert controller.current_inner_state is initial_state
 
@@ -637,14 +652,23 @@ def test_accepted_incumbent_session_factory_is_transfer_guard_safe() -> None:
     assert bool(np.asarray(jax.device_get(controller.current_inner_state.eligible)))
 
 
-def test_session_candidate_evaluation_uses_explicit_anchor_under_transfer_guard() -> (
-    None
-):
+def test_session_candidate_evaluation_uses_explicit_anchor_under_transfer_guard(
+    monkeypatch,
+) -> None:
     forward_result = _forward_result(success=True, primal_success=True)
     anchored_calls: list[tuple[object, object]] = []
     gradient_calls: list[tuple[object, object, object]] = []
     gradient = jnp.asarray([1.25, -2.5], dtype=jnp.float64)
     adjoint_success = jnp.asarray(True, dtype=jnp.bool_)
+    ready_leaves = []
+
+    def wait_for_numeric_payload(payload):
+        ready_leaves.extend(jax.tree.leaves(payload))
+        return jax.block_until_ready(payload)
+
+    monkeypatch.setattr(
+        surface_objectives_traceable, "_block_until_ready", wait_for_numeric_payload
+    )
 
     def baseline_forward(_parameters):
         pytest.fail("anchored candidate evaluation must not call baseline forward")
@@ -694,6 +718,9 @@ def test_session_candidate_evaluation_uses_explicit_anchor_under_transfer_guard(
     assert len(gradient_calls) == 1
     np.testing.assert_array_equal(evaluation.gradient, gradient)
     assert evaluation.forward_result["x"] is forward_result["x"]
+    assert all(isinstance(leaf, jax.Array) for leaf in ready_leaves)
+    assert any(leaf is evaluation.gradient for leaf in ready_leaves)
+    assert any(leaf is evaluation.candidate_inner_state.solved_x for leaf in ready_leaves)
 
 
 def test_session_candidate_evaluation_skips_fallback_gradient() -> None:

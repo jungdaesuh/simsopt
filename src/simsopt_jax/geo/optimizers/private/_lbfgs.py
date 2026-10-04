@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import NamedTuple, Protocol, cast
+from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -65,7 +65,8 @@ _LBFGS_STEP_ENTRY_KIND_BY_CODE = {
 }
 
 
-class _LbfgsbStepwiseHostStatus(NamedTuple):
+@dataclass(frozen=True)
+class _LbfgsbStepwiseHostStatus:
     terminal: bool
     entry_kind: str
     accepted_new_x: bool

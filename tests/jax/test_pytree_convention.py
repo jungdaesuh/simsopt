@@ -32,35 +32,8 @@ NAMEDTUPLE_NAMES = frozenset(("NamedTuple", "namedtuple"))
 ALIAS_NAMES = REGISTRATION_NAMES | NAMEDTUPLE_NAMES | {"pytree_dataclass", "pytree_node"}
 Violation = tuple[str, str, str, str]
 
-# Each later migration removes its occurrences; stale exemptions fail below.
-PENDING: tuple[Violation, ...] = (
-    ("src/simsopt_jax/examples/boozer_official.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax/examples/boozer_official.py", "BoozerStageOutcome", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/examples/boozer_official.py", "BoozerStageState", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "HostBFGSResult", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "HostInvalidStepEvent", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "HostLBFGSResult", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "HostLineSearchResults", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "_HostLBFGSState", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "_HostLineSearchState", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "_HostZoomState", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/optimizer.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/optimizer.py", "_PrivateOptimizerRuntime", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSHostObservation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSObserverHostObservation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgs.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgs.py", "_LbfgsbStepwiseHostStatus", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/boozer_surface.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/boozer_surface.py", "_AnalyticPenaltyBundle", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveCandidateEvaluation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveIncumbentEvaluation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveSeededValueAndGrad", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveSolvedPair", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveTrialResult", "namedtuple", "NamedTuple"),  # step5
-)
+# Any exemption must match the exact occurrence multiset below.
+PENDING: tuple[Violation, ...] = ()
 
 
 class ConventionVisitor(ast.NodeVisitor):
@@ -457,8 +430,12 @@ def test_guard_permits_module_and_unrelated_import_aliases(source):
 
 def test_pending_cannot_hide_replaced_namedtuple_import_alias():
     path = "src/simsopt_jax/geo/optimizers/private/_lbfgs.py"
-    source = (ROOT / path).read_text()
-    expected = Counter(entry for entry in PENDING if entry[0] == path)
+    source = (
+        "from typing import NamedTuple\n"
+        "class _LbfgsbStepwiseHostStatus(NamedTuple):\n"
+        "    terminal: bool\n"
+    )
+    expected = Counter(violations_in_source(path, source))
     replacement = source.replace("from typing import NamedTuple", "import typing\nfrom typing import NamedTuple as Record")
     replacement = replacement.replace("class _LbfgsbStepwiseHostStatus(NamedTuple):", "class _LbfgsbStepwiseHostStatus(typing.NamedTuple):")
     replacement += "\nclass Surprise(Record):\n    value: int\n"
