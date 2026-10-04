@@ -690,6 +690,51 @@ def test_custom_node_preserves_sealed_constructor_and_ordered_reconstruction():
     assert [float(value) for value in jax.tree_util.tree_leaves(gradient)] == [2.0, 1.0]
 
 
+def test_custom_node_rejects_mutable_dataclass_without_registering():
+    @dataclass
+    class Mutable:
+        value: int
+
+        def tree_flatten(self):
+            return (self.value,), None
+
+        @classmethod
+        def tree_unflatten(cls, _meta, children):
+            return cls(*children)
+
+    before = registered_pytree_classes()
+    with pytest.raises(TypeError, match="Mutable must be a frozen dataclass"):
+        pytree_node(Mutable)
+    assert registered_pytree_classes() == before
+    payload = Mutable(1)
+    assert jax.tree_util.tree_leaves(payload) == [payload]
+
+
+def test_custom_node_freezes_undecorated_subclass_and_keeps_custom_leaf_order():
+    @dataclass(frozen=True)
+    class Base:
+        first: int
+
+    @pytree_node
+    class Payload(Base):
+        second: int
+
+        def tree_flatten(self):
+            return (self.second, self.first), None
+
+        @classmethod
+        def tree_unflatten(cls, _meta, children):
+            second, first = children
+            return cls(first=first, second=second)
+
+    payload = Payload(first=1, second=2)
+    with pytest.raises(FrozenInstanceError):
+        payload.second = 3
+    leaves, treedef = jax.tree_util.tree_flatten(payload)
+    assert leaves == [2, 1]
+    assert jax.tree_util.tree_unflatten(treedef, [4, 3]) == Payload(first=3, second=4)
+
+
 def test_dataclass_reconstruction_calls_post_init():
     constructed = []
 

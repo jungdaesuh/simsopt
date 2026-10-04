@@ -10,6 +10,8 @@ from typing import Literal, Protocol, cast
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax._validation import is_integral
+from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.core._device_scalars import placement_zero
 from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core.curve_geometry import (
@@ -30,6 +32,7 @@ from simsopt_jax.core.specs import (
     apply_coil_symmetry,
 )
 from simsopt_jax.pytree import pytree_dataclass
+from simsopt_jax.runtime.host_boundary import host_value
 
 from .stochastic_stage_two import (
     StochasticCoilPerturbations,
@@ -111,22 +114,32 @@ def prepare_stage_two_config(
     surface_gamma: jax.Array | None = None,
     surface_normal: jax.Array | None = None,
 ) -> _PreparedStageTwoConfig:
-    """Validate host settings once and partition numeric operands from modes."""
-    if not isinstance(config, _PreparedStageTwoConfig):
-        if not isinstance(config.num_base_curves, int) or config.num_base_curves <= 0:
-            raise ValueError("num_base_curves must be a positive integer.")
-        for name in ("length_target_mode", "mean_squared_curvature_target_mode"):
-            if getattr(config, name) not in ("max", "identity"):
-                raise ValueError(f"{name} must be 'max' or 'identity'.")
-        for name in _STAGE_TWO_NUMERIC_FIELDS:
-            value = getattr(config, name)
-            if value is not None and not isfinite(value):
-                raise ValueError(f"{name} must be finite.")
-        if config.individual_length_weight != 0.0 and config.individual_length_target is None:
-            raise ValueError(
-                "individual_length_target is required when "
-                "individual_length_weight is nonzero."
-            )
+    """Validate current settings and rebuild activation before tracing."""
+    if not is_integral(config.num_base_curves) or config.num_base_curves <= 0:
+        raise ValueError("num_base_curves must be a positive integer.")
+    for name in ("length_target_mode", "mean_squared_curvature_target_mode"):
+        if getattr(config, name) not in ("max", "identity"):
+            raise ValueError(f"{name} must be 'max' or 'identity'.")
+    numeric_values = dict(
+        zip(
+            _STAGE_TWO_NUMERIC_FIELDS,
+            host_value(tuple(getattr(config, name) for name in _STAGE_TWO_NUMERIC_FIELDS)),
+            strict=True,
+        )
+    )
+    for name, value in numeric_values.items():
+        if value is None and name in ("length_target", "individual_length_target"):
+            continue
+        if value is None or not isfinite(value):
+            raise ValueError(f"{name} must be finite.")
+    if (
+        numeric_values["individual_length_weight"] != 0.0
+        and numeric_values["individual_length_target"] is None
+    ):
+        raise ValueError(
+            "individual_length_target is required when "
+            "individual_length_weight is nonzero."
+        )
     if extraction is not None:
         if config.num_base_curves > len(extraction.coils):
             raise ValueError("num_base_curves exceeds the available coils.")
@@ -141,9 +154,7 @@ def prepare_stage_two_config(
             or surface_gamma.size == 0
         ):
             raise ValueError("Surface positions and normals must have matching (n, 3) shapes.")
-    if isinstance(config, _PreparedStageTwoConfig):
-        return config
-    return jax.device_put(
+    return runtime_device_put_tree(
         _PreparedStageTwoConfig(
             **{
                 field.name: getattr(config, field.name)
@@ -151,7 +162,7 @@ def prepare_stage_two_config(
             },
             active_terms=tuple(
                 name for name in _STAGE_TWO_NUMERIC_FIELDS
-                if name.endswith("_weight") and getattr(config, name) != 0.0
+                if name.endswith("_weight") and numeric_values[name] != 0.0
             ),
         ),
     )

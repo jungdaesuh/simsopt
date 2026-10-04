@@ -6,11 +6,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
-from numbers import Integral, Real
+from numbers import Real
 from typing import Callable, Literal, Protocol, TypeAlias
 
 import jax
 import numpy as np
+from simsopt_jax._validation import is_integral
 
 from .driver import Driver
 from .shared import (
@@ -32,8 +33,14 @@ class OptionsBase(ABC):
 
 def _validate_positive_integers(**values: int) -> None:
     for name, value in values.items():
-        if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+        if not is_integral(value) or value <= 0:
             raise ValueError(f"{name} must be a positive integer; got {value!r}")
+
+
+def _validate_nonnegative_integers(**values: int) -> None:
+    for name, value in values.items():
+        if not is_integral(value) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer; got {value!r}")
 
 
 def _validate_tolerances(**values: float) -> None:

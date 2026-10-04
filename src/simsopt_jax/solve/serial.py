@@ -148,6 +148,7 @@ class TraceableScalarProblem:
     def __post_init__(self) -> None:
         objective_fn = self.objective_fn
         x = jnp.asarray(self.x)
+        object.__setattr__(self, "x", x)
 
         def normalized_objective(current_x):
             return jnp.asarray(objective_fn(jnp.asarray(current_x)))

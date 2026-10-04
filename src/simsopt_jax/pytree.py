@@ -15,12 +15,21 @@ def registered_pytree_classes() -> tuple[type[object], ...]:
     return tuple(_REGISTERED_CLASSES)
 
 
+def _frozen_dataclass(cls: type[_T]) -> type[_T]:
+    if "__dataclass_fields__" in cls.__dict__:
+        if not cls.__dataclass_params__.frozen:
+            raise TypeError(f"{cls.__name__} must be a frozen dataclass")
+        return cls
+    return dataclass(frozen=True)(cls)
+
+
 def pytree_node(cls: type[_T]) -> type[_T]:
-    """Register a class's custom flatten/unflatten contract in the shared registry.
+    """Freeze a class and register its custom flatten/unflatten contract.
 
     Use this when constructor or reconstruction guarantees cannot be expressed
     by a dataclass data/meta partition. Class options and methods are preserved.
     """
+    cls = _frozen_dataclass(cls)
     jax.tree_util.register_pytree_node_class(cls)
     _REGISTERED_CLASSES.append(cls)
     return cls
@@ -36,11 +45,7 @@ def pytree_dataclass(
     """
 
     def decorate(cls: type[_T]) -> type[_T]:
-        if "__dataclass_fields__" in cls.__dict__:
-            if not cls.__dataclass_params__.frozen:
-                raise TypeError(f"{cls.__name__} must be a frozen dataclass")
-        else:
-            cls = dataclass(frozen=True)(cls)
+        cls = _frozen_dataclass(cls)
         data_names, meta_names = set(data), set(meta)
         if len(data_names) != len(data):
             raise ValueError(f"{cls.__name__}: duplicate names in data")

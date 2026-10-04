@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..contracts import OptionsBase, _validate_positive_integers, _validate_tolerances
+from ..contracts import (
+    OptionsBase,
+    _validate_nonnegative_integers,
+    _validate_positive_integers,
+    _validate_tolerances,
+)
 
 
 @dataclass(frozen=True)
@@ -17,9 +22,8 @@ class SimsoptLBFGSBOptions(OptionsBase):
     maxls: int = 20
 
     def validate(self) -> None:
-        _validate_positive_integers(
-            maxiter=self.maxiter, maxfun=self.maxfun, maxcor=self.maxcor, maxls=self.maxls
-        )
+        _validate_nonnegative_integers(maxiter=self.maxiter, maxfun=self.maxfun)
+        _validate_positive_integers(maxcor=self.maxcor, maxls=self.maxls)
         _validate_tolerances(gtol=self.gtol, ftol=self.ftol)
 
 
@@ -31,9 +35,8 @@ class SimsoptBFGSOptions(OptionsBase):
     line_search_max_steps: int = 20
 
     def validate(self) -> None:
-        _validate_positive_integers(
-            maxiter=self.maxiter, line_search_max_steps=self.line_search_max_steps
-        )
+        _validate_nonnegative_integers(maxiter=self.maxiter)
+        _validate_positive_integers(line_search_max_steps=self.line_search_max_steps)
         _validate_tolerances(gtol=self.gtol, xrtol=self.xrtol)
 
 
@@ -46,6 +49,7 @@ class SimsoptLMQROptions(OptionsBase):
     max_dense_linearization_bytes: int | None = None
 
     def validate(self) -> None:
+        # This driver's maxiter is MINPACK's evaluation limit, not an iteration count.
         _validate_positive_integers(maxiter=self.maxiter)
         _validate_tolerances(ftol=self.ftol, xtol=self.xtol)
         if self.gtol is not None:

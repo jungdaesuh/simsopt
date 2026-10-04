@@ -17,6 +17,8 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import numpy as np
+from simsopt_jax._validation import is_integral
+from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.core import (
     CoilSetDofExtractionSpec,
     CurveFilamentSpec,
@@ -35,6 +37,7 @@ from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec, GroupedCoilSetSpec
 from simsopt_jax.objectives import CoilDofExtractionProvider
 from simsopt_jax.pytree import pytree_dataclass
+from simsopt_jax.runtime.host_boundary import host_value
 
 
 @pytree_dataclass(
@@ -71,24 +74,23 @@ def _prepare_finite_build_config(
     """Validate the symmetry-major pack layout used by the geometry kernel."""
     for name in ("num_base_curves", "symmetry_copies"):
         value = getattr(config, name)
-        if not isinstance(value, int) or value <= 0:
+        if not is_integral(value) or value <= 0:
             raise ValueError(f"{name} must be a positive integer.")
-    if not config.filament_offsets:
+    host_config = host_value(config)
+    if not host_config.filament_offsets:
         raise ValueError("filament_offsets must contain at least one filament.")
     if len(config.length_targets) != config.num_base_curves:
         raise ValueError("length_targets must contain one target per base curve.")
-    for offset in config.filament_offsets:
+    for offset in host_config.filament_offsets:
         if len(offset) != 2 or not all(isfinite(value) for value in offset):
             raise ValueError("Each filament offset must contain two finite values.")
     for value in (
-        *config.length_targets, config.length_weight,
-        config.curve_curve_minimum_distance, config.curve_curve_weight,
+        *host_config.length_targets, host_config.length_weight,
+        host_config.curve_curve_minimum_distance, host_config.curve_curve_weight,
     ):
         if not isfinite(value):
             raise ValueError("Finite-build targets, weights, and thresholds must be finite.")
     pack_count = config.num_base_curves * config.symmetry_copies
-    if pack_count < 2:
-        raise ValueError("Finite-build clearance requires at least two coil packs.")
     if len(extraction.coils) != pack_count * config.filaments_per_base:
         raise ValueError("Finite-build topology does not match the extracted coil count.")
     shapes = {coil.curve.quadpoints.shape for coil in extraction.coils}
@@ -96,7 +98,7 @@ def _prepare_finite_build_config(
         raise ValueError("Finite-build coils require matching nonempty quadrature grids.")
     # Compare the frozen templates once; computation reuses the leading pack's
     # base curve/frame and each symmetry pack's representative current.
-    coils = jax.device_get(extraction).coils
+    coils = host_value(extraction).coils
     for index, coil in enumerate(coils):
         if not isinstance(coil.curve, CurveFilamentSpec):
             raise ValueError("Finite-build objectives require filament curve specs.")
@@ -106,7 +108,7 @@ def _prepare_finite_build_config(
         base_index = (index // config.filaments_per_base) % config.num_base_curves
         base = coils[base_index * config.filaments_per_base]
         base_filament = cast(CurveFilamentSpec, base.curve)
-        if (coil.curve.dn, coil.curve.db) != config.filament_offsets[filament_index]:
+        if (coil.curve.dn, coil.curve.db) != host_config.filament_offsets[filament_index]:
             raise ValueError("filament_offsets do not match the extracted filament order.")
         for actual, expected in (
             (coil.curve.base_curve, base_filament.base_curve),
@@ -133,7 +135,7 @@ def _prepare_finite_build_config(
                 )
         if coil.curve.frame_kind != base_filament.frame_kind:
             raise ValueError("Finite-build filaments must share their frame kind.")
-    return jax.device_put(config)
+    return runtime_device_put_tree(config)
 
 
 def _base_geometry(
@@ -314,6 +316,8 @@ def finite_build_stage_two_diagnostics(
     """Return flux, penalties, minimum clearance, and coil lengths on device."""
     extraction = field.coil_dof_extraction_spec()
     config = _prepare_finite_build_config(config, extraction)
+    if config.num_base_curves * config.symmetry_copies < 2:
+        raise ValueError("Finite-build clearance requires at least two coil packs.")
 
     def diagnostics(parameters: jax.Array) -> jax.Array:
         coil_set, base_gammas, base_gammadashs = _finite_build_geometry(

@@ -157,6 +157,19 @@ def test_serial_solve_uses_explicit_decision_state_without_mutation(
     assert result.nit == 0
 
 
+def test_scalar_problem_preserves_seed_after_caller_mutation() -> None:
+    seed = np.asarray([1.0, 2.0])
+    problem = TraceableScalarProblem(lambda x: jnp.sum(x * x), seed)
+    np.testing.assert_array_equal(problem.objective(), 5.0)
+    seed[0] = 10.0
+    np.testing.assert_array_equal(problem.objective(), 5.0)
+    assert isinstance(problem.x, jax.Array)
+    np.testing.assert_array_equal(problem.x, [1.0, 2.0])
+    value, gradient = problem.value_and_grad()
+    np.testing.assert_array_equal(value, 5.0)
+    np.testing.assert_array_equal(gradient, [2.0, 4.0])
+
+
 def _weighted_quadratic_residual(x):
     return jnp.array(
         (

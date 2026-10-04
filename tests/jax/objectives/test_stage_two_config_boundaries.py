@@ -2,7 +2,7 @@
 
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import jax
 import jax.numpy as jnp
@@ -22,11 +22,16 @@ from simsopt_jax.objectives.stage_two import (
 )
 from simsopt_jax.objectives.stochastic_stage_two import StochasticCoilPerturbations
 from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral
+from simsopt_jax.runtime.host_boundary import (
+    host_transfer_audit,
+    host_transfer_phase,
+)
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 from simsopt_jax_adapters.objectives.finite_build_stage_two import (
     FiniteBuildStageTwoConfig,
     _finite_build_geometry,
     _finite_build_penalties,
+    _prepare_finite_build_config,
     finite_build_stage_two_diagnostics,
     make_finite_build_stage_two_objective,
 )
@@ -34,6 +39,7 @@ from simsopt_jax_adapters.objectives.flux import SquaredFluxJAX
 from simsopt_jax_adapters.objectives.force_stage_two import (
     ForceStageTwoConfig,
     _compiled_force_stage_two_metrics,
+    _prepare_force_config,
     force_stage_two_diagnostics,
 )
 from test_force_stage_two import _stage_two_force_case
@@ -176,6 +182,131 @@ def test_stage_two_numeric_weights_and_targets_vary_without_retracing():
     assert len(traces) == 1
 
 
+def test_repreparing_replaced_config_reenables_length_penalty(force_case):
+    disabled = prepare_stage_two_config(StageTwoObjectiveConfig(num_base_curves=1))
+    settings = StageTwoObjectiveConfig(
+        num_base_curves=1, length_weight=2.0, length_target=1.5
+    )
+    changed = replace(disabled, length_weight=2.0, length_target=1.5)
+    refreshed = prepare_stage_two_config(changed)
+    fresh = prepare_stage_two_config(settings)
+    gamma, gd, gdd = _geometry()
+    evaluate = jax.jit(stage_two_geometric_penalty)
+    np.testing.assert_array_equal(
+        evaluate(gamma, gd, gdd, gamma[0], gamma[0], refreshed), 0.25
+    )
+    np.testing.assert_array_equal(
+        evaluate(gamma, gd, gdd, gamma[0], gamma[0], refreshed),
+        evaluate(gamma, gd, gdd, gamma[0], gamma[0], fresh),
+    )
+
+    field, parameters, _, _, _, _, surface = force_case
+    sg = jax.device_put(surface.gamma().reshape((-1, 3)))
+    sn = jax.device_put(surface.normal().reshape((-1, 3)))
+    objective = make_stage_two_objective(field, lambda p: jnp.sum(p[:0]), sg, sn, changed)
+    equivalent = make_stage_two_objective(field, lambda p: jnp.sum(p[:0]), sg, sn, settings)
+    np.testing.assert_array_equal(objective(parameters), equivalent(parameters))
+    assert float(objective(parameters)) > 0.0
+
+
+def test_repreparing_replaced_config_disables_undefined_geometry():
+    active = prepare_stage_two_config(
+        StageTwoObjectiveConfig(num_base_curves=1, curvature_weight=1.0)
+    )
+    refreshed = prepare_stage_two_config(replace(active, curvature_weight=0.0))
+    gamma, gd, gdd = _geometry()
+    value, gradient = jax.value_and_grad(
+        lambda d: stage_two_geometric_penalty(
+            gamma, d, gdd, gamma[0], gamma[0], refreshed
+        )
+    )(jnp.zeros_like(gd))
+    np.testing.assert_array_equal(value, 0.0)
+    np.testing.assert_array_equal(gradient, np.zeros_like(gd))
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    (
+        ({"num_base_curves": 0}, "positive integer"),
+        ({"length_target_mode": "bad"}, "length_target_mode"),
+        ({"mean_squared_curvature_target_mode": "bad"}, "mean_squared_curvature_target_mode"),
+        ({"length_weight": np.nan}, "length_weight"),
+        ({"individual_length_weight": 1.0}, "individual_length_target is required"),
+    ),
+)
+def test_replaced_prepared_config_is_revalidated_at_factory(force_case, change, message):
+    field, _, _, _, _, _, surface = force_case
+    prepared = prepare_stage_two_config(StageTwoObjectiveConfig(num_base_curves=1))
+    changed = replace(prepared, **change)
+    with pytest.raises(ValueError, match=message):
+        prepare_stage_two_config(changed)
+    with pytest.raises(ValueError, match=message):
+        make_stage_two_objective(
+            field, lambda p: jnp.sum(p), surface.gamma(), surface.normal(), changed
+        )
+
+
+@pytest.mark.parametrize("prepared", (False, True))
+@pytest.mark.parametrize(
+    "name",
+    tuple(
+        field.name for field in fields(StageTwoObjectiveConfig)
+        if field.name not in (
+            "num_base_curves", "length_target_mode", "mean_squared_curvature_target_mode",
+            "length_target", "individual_length_target",
+        )
+    ),
+)
+def test_required_numeric_fields_reject_none_at_factory(force_case, prepared, name):
+    field, _, _, _, _, _, surface = force_case
+    config = StageTwoObjectiveConfig(num_base_curves=1)
+    if prepared:
+        config = prepare_stage_two_config(config)
+    with pytest.raises(ValueError, match=f"{name} must be finite"):
+        make_stage_two_objective(
+            field, lambda p: jnp.sum(p), surface.gamma(), surface.normal(),
+            replace(config, **{name: None}),
+        )
+
+
+def test_optional_length_targets_allow_none():
+    config = prepare_stage_two_config(StageTwoObjectiveConfig(num_base_curves=1))
+    assert config.length_target is None
+    assert config.individual_length_target is None
+
+
+@pytest.mark.parametrize("value", (1, np.int32(1), np.int64(1)))
+def test_stage_count_accepts_python_and_numpy_integers(value):
+    config = prepare_stage_two_config(StageTwoObjectiveConfig(num_base_curves=value))
+    assert config.num_base_curves == 1
+
+
+@pytest.mark.parametrize("value", (True, np.bool_(True), 1.0))
+def test_stage_count_rejects_booleans_and_floats(value):
+    with pytest.raises(ValueError, match="positive integer"):
+        prepare_stage_two_config(StageTwoObjectiveConfig(num_base_curves=value))
+
+
+@pytest.mark.parametrize("integer", (int, np.int32, np.int64))
+def test_force_counts_accept_python_and_numpy_integers(force_case, integer):
+    field, parameters, qp, regs, _, _, _ = force_case
+    diagnostics = force_stage_two_diagnostics(
+        field, qp, regs,
+        ForceStageTwoConfig(num_force_coils=integer(2), downsample=integer(1)),
+    )
+    assert np.all(np.isfinite(diagnostics(parameters)))
+
+
+@pytest.mark.parametrize("name", ("num_force_coils", "downsample"))
+@pytest.mark.parametrize("value", (True, np.bool_(True), 1.0))
+def test_force_counts_reject_booleans_and_floats(force_case, name, value):
+    field, _, qp, regs, _, _, _ = force_case
+    with pytest.raises(ValueError, match=name):
+        force_stage_two_diagnostics(
+            field, qp, regs, replace(ForceStageTwoConfig(num_force_coils=2), **{name: value})
+        )
+
+
 def test_force_power_and_threshold_are_traced_operands(force_case):
     field, parameters, qp, regs, _, _, _ = force_case
     geometry = stage_two_coil_geometry(field.coil_dof_extraction_spec(), parameters)
@@ -258,6 +389,42 @@ def test_finite_build_rejects_nonfilament_geometry(force_case, finite_case):
         make_finite_build_stage_two_objective(field, flux, config)
 
 
+@pytest.mark.parametrize("integer", (int, np.int32, np.int64))
+def test_finite_build_counts_accept_python_and_numpy_integers(finite_case, integer):
+    field, flux, config = finite_case
+    objective = make_finite_build_stage_two_objective(
+        field, flux, replace(config, num_base_curves=integer(2), symmetry_copies=integer(2))
+    )
+    assert np.isfinite(objective(jax.device_put(np.asarray(field.x))))
+
+
+@pytest.mark.parametrize("name", ("num_base_curves", "symmetry_copies"))
+@pytest.mark.parametrize("value", (True, np.bool_(True), 1.0))
+def test_finite_build_counts_reject_booleans_and_floats(finite_case, name, value):
+    field, flux, config = finite_case
+    with pytest.raises(ValueError, match=f"{name} must be a positive integer"):
+        make_finite_build_stage_two_objective(field, flux, replace(config, **{name: value}))
+
+
+def test_single_pack_objective_has_zero_pair_penalty(finite_case):
+    field, flux, config = finite_case
+    single_pack = BiotSavartJAX(list(field.coils[:config.filaments_per_base]))
+    config = replace(config, num_base_curves=1, symmetry_copies=1, length_targets=(1.0,))
+    parameters = jax.device_put(np.asarray(single_pack.x))
+    objective = make_finite_build_stage_two_objective(single_pack, flux, config)
+    coil_set, gamma, gd = _finite_build_geometry(
+        single_pack.coil_dof_extraction_spec(), parameters, jax.device_put(config)
+    )
+    length, distance, _ = _finite_build_penalties(gamma, gd, jax.device_put(config))
+    np.testing.assert_array_equal(distance, 0.0)
+    np.testing.assert_array_equal(objective(parameters), fixed_surface_flux_integral(coil_set, flux) + length)
+    value, gradient = jax.jit(jax.value_and_grad(objective))(parameters)
+    assert np.isfinite(value)
+    assert np.all(np.isfinite(gradient))
+    with pytest.raises(ValueError, match="at least two coil packs"):
+        finite_build_stage_two_diagnostics(single_pack, flux, config)
+
+
 def test_finite_build_rejects_different_currents_within_a_pack(finite_case):
     field, flux, config = finite_case
     coils = list(field.coils)
@@ -296,3 +463,83 @@ def test_finite_build_offsets_weights_and_targets_vary_without_retracing(finite_
     assert float(first_value) != float(second_value)
     assert not np.array_equal(first_gradient, second_gradient)
     assert len(traces) == 1
+
+
+@pytest.mark.parametrize("kind", ("stage", "force", "finite"))
+def test_prepared_configs_audit_validation_and_reuse_device_operands(
+    force_case, finite_case, kind
+):
+    if kind == "stage":
+        host_config = StageTwoObjectiveConfig(
+            num_base_curves=1, length_weight=2.0, length_target=1.5
+        )
+        prepare = prepare_stage_two_config
+        gamma, gd, gdd = _geometry()
+
+        @jax.jit
+        def evaluate(config):
+            return stage_two_geometric_penalty(gamma, gd, gdd, gamma[0], gamma[0], config)
+
+    elif kind == "force":
+        field, parameters, qp, regs, _, _, _ = force_case
+        extraction = field.coil_dof_extraction_spec()
+        host_config = ForceStageTwoConfig(num_force_coils=2)
+
+        def prepare(config):
+            return _prepare_force_config(config, extraction, qp, regs)
+
+        geometry = stage_two_coil_geometry(extraction, parameters)
+
+        @jax.jit
+        def evaluate(config):
+            return _compiled_force_stage_two_metrics(*geometry, qp, regs, config)[0]
+
+    else:
+        field, flux, host_config = finite_case
+        extraction = field.coil_dof_extraction_spec()
+        parameters = jax.device_put(np.asarray(field.x))
+
+        def prepare(config):
+            return _prepare_finite_build_config(config, extraction)
+
+        @jax.jit
+        def evaluate(config):
+            coil_set, gamma, gd = _finite_build_geometry(extraction, parameters, config)
+            length, distance, _ = _finite_build_penalties(gamma, gd, config)
+            return fixed_surface_flux_integral(coil_set, flux) + length + distance
+
+    with host_transfer_audit() as audit:
+        with host_transfer_phase("preparation"):
+            config = prepare(host_config)
+        with host_transfer_phase("warmup"):
+            expected = evaluate(config)
+            expected.block_until_ready()
+        with host_transfer_phase("revalidation"):
+            refreshed = prepare(config)
+        with host_transfer_phase("jit_calls"), jax.transfer_guard("disallow_explicit"):
+            for _ in range(3):
+                actual = evaluate(refreshed)
+                actual.block_until_ready()
+
+    np.testing.assert_array_equal(actual, expected)
+    summaries = {summary.phase: summary for summary in audit.summary()}
+    assert summaries["preparation"].calls == (1 if kind == "finite" else 0)
+    assert summaries["warmup"].calls == 0
+    assert summaries["jit_calls"].calls == 0
+    assert summaries["jit_calls"].bytes == 0
+    leaves = jax.tree.leaves(config)
+    assert all(isinstance(leaf, jax.Array) for leaf in leaves)
+    if kind == "finite":
+        leaves += [leaf for leaf in jax.tree.leaves(extraction) if isinstance(leaf, jax.Array)]
+    assert summaries["revalidation"].calls == (2 if kind == "finite" else 1)
+    assert summaries["revalidation"].leaves == len(leaves)
+    assert summaries["revalidation"].bytes == sum(leaf.nbytes for leaf in leaves)
+
+    # A host scalar in a traced config is uploaded on every invocation. These
+    # controls prove the guard catches H2D traffic the D2H ledger cannot count.
+    host_operand = replace(refreshed, **{
+        "force_power" if kind == "force" else "length_weight": 0.5
+    })
+    for _ in range(2):
+        with jax.transfer_guard("disallow_explicit"), pytest.raises(jax.errors.JaxRuntimeError):
+            evaluate(host_operand).block_until_ready()

@@ -8,6 +8,8 @@ from math import isfinite
 
 import jax
 import jax.numpy as jnp
+from simsopt_jax._validation import is_integral
+from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.core.specs import CoilSetDofExtractionSpec
 from simsopt_jax.objectives.stage_two import (
     CoilDofExtractionProvider,
@@ -18,6 +20,7 @@ from simsopt_jax.objectives.stage_two import (
     stage_two_length_penalty,
 )
 from simsopt_jax.pytree import pytree_dataclass
+from simsopt_jax.runtime.host_boundary import host_value
 
 from simsopt_jax_adapters.field.force import (
     b2energy_pure,
@@ -50,16 +53,17 @@ def _prepare_force_config(
     """Check discretization against the coil layout before tracing metrics."""
     coil_count = len(extraction.coils)
     if (
-        not isinstance(config.num_force_coils, int)
+        not is_integral(config.num_force_coils)
         or not 0 < config.num_force_coils <= coil_count
     ):
         raise ValueError("num_force_coils must select a nonempty subset of the coils.")
-    if not isinstance(config.downsample, int) or config.downsample <= 0:
+    if not is_integral(config.downsample) or config.downsample <= 0:
         raise ValueError("downsample must be a positive integer.")
+    host_config = host_value(config)
     for name in ("force_weight", "vacuum_energy_weight", "force_power", "force_threshold"):
-        if not isfinite(getattr(config, name)):
+        if not isfinite(getattr(host_config, name)):
             raise ValueError(f"{name} must be finite.")
-    if config.force_power <= 0.0:
+    if host_config.force_power <= 0.0:
         raise ValueError("force_power must be positive.")
     shapes = {coil.curve.quadpoints.shape for coil in extraction.coils}
     if len(shapes) != 1 or not next(iter(shapes))[0]:
@@ -69,7 +73,7 @@ def _prepare_force_config(
         raise ValueError("target_quadpoints must match the force target quadrature grids.")
     if regularizations.shape != (coil_count,):
         raise ValueError("regularizations must contain one value per coil.")
-    return jax.device_put(config)
+    return runtime_device_put_tree(config)
 
 
 def _force_stage_two_metrics(
