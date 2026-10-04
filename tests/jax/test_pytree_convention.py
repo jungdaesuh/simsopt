@@ -45,9 +45,6 @@ PENDING: tuple[Violation, ...] = (
     ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "_HostLBFGSState", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "_HostLineSearchState", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizer_host_lbfgs.py", "_HostZoomState", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/exact_final_linearization.py", "_ExactFinalLinearization", "registration", "register_pytree_node_class"),  # step4
-    ("src/simsopt_jax/geo/optimizers/exact_final_linearization.py", "_ExactFinalLinearizationIdentity", "registration", "register_pytree_node_class"),  # step4
-    ("src/simsopt_jax/geo/optimizers/exact_final_linearization.py", "_ExactFinalLinearizationInputs", "registration", "register_pytree_node_class"),  # step4
     ("src/simsopt_jax/geo/optimizers/optimizer.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizers/optimizer.py", "_PrivateOptimizerRuntime", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "<module>", "import", "NamedTuple"),  # step5
@@ -55,10 +52,8 @@ PENDING: tuple[Violation, ...] = (
     ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSObserverHostObservation", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizers/private/_lbfgs.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizers/private/_lbfgs.py", "_LbfgsbStepwiseHostStatus", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/field/biotsavart_backend.py", "BiotSavartFieldPullback", "registration", "register_pytree_node_class"),  # step4
     ("src/simsopt_jax_adapters/geo/boozer_surface.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/boozer_surface.py", "_AnalyticPenaltyBundle", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/boozer_surface.py", "_BoozerResultRecord", "registration", "register_pytree_node"),  # step4
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveCandidateEvaluation", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveIncumbentEvaluation", "namedtuple", "NamedTuple"),  # step5
