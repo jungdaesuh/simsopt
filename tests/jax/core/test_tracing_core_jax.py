@@ -90,6 +90,20 @@ from simsopt_jax_adapters.geo.surface_classifier import (
 _EVENT_TIME_TOLERANCES = parity_ladder_tolerances("event_time_tracing")
 
 
+def _constant_levelset_classifier(value: float):
+    return make_levelset_classifier(
+        build_regular_grid_interpolant_3d(
+            rule=UniformInterpolationRule(1),
+            xrange=(0.0, 10.0, 1),
+            yrange=(0.0, 2.0 * np.pi, 1),
+            zrange=(-10.0, 10.0, 1),
+            value_size=1,
+            f=lambda rs, _phis, _zs: np.full_like(rs, value),
+            out_of_bounds_ok=True,
+        )
+    )
+
+
 @pytest.fixture(scope="module")
 def event_time_lane():
     return dict(_EVENT_TIME_TOLERANCES)
@@ -1330,13 +1344,7 @@ def test_trace_fieldline_batch_shard_map_matches_single_device_vmap(monkeypatch)
         check_phi_hits_count=True,
     )
 
-    classifier_sign = jax.device_put(
-        np.asarray(1.0, dtype=np.float64),
-        devices[0],
-    )
-
-    def classifier(points: jax.Array) -> jax.Array:
-        return jnp.broadcast_to(classifier_sign, (points.shape[0],))
+    classifier = _constant_levelset_classifier(1.0)
 
     def run_boozer_with_levelset():
         return trace_guiding_centers_boozer_batched(
@@ -1780,8 +1788,7 @@ def test_trace_fieldline_levelset_zero_does_not_stop():
     def field_fn(_point: jax.Array) -> jax.Array:
         return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
 
-    def zero_classifier(points: jax.Array) -> jax.Array:
-        return jnp.zeros((points.shape[0],), dtype=points.dtype)
+    zero_classifier = _constant_levelset_classifier(0.0)
 
     spec = FieldlineTracingSpec(
         tmax=0.1,
@@ -1801,6 +1808,24 @@ def test_trace_fieldline_levelset_zero_does_not_stop():
     assert int(result.status) == 0
     assert int(result.phi_hits_count) == 0
     assert float(result.t_final) == spec.tmax
+
+
+def test_levelset_stopping_criterion_rejects_bare_callable():
+    with pytest.raises(TypeError, match="classifier_fn must be a LevelsetClassifier"):
+        LevelsetStoppingCriterion(classifier_fn=lambda points: points[:, 0])
+
+
+def test_levelset_stopping_criterion_roundtrips_and_traces_classifier_data():
+    criterion = LevelsetStoppingCriterion(_constant_levelset_classifier(1.0))
+    leaves, treedef = jax.tree_util.tree_flatten(criterion)
+    assert leaves
+    assert all(isinstance(leaf, jax.Array) for leaf in leaves)
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    classify = jax.jit(lambda stopping, xyz: stopping.classifier_fn(xyz))
+    np.testing.assert_array_equal(
+        np.asarray(classify(restored, jnp.asarray([[1.0, 0.0, 0.0], [11.0, 0.0, 0.0]]))),
+        np.asarray([1.0, -1.0]),
+    )
 
 
 def test_levelset_classifier_rejects_out_of_bounds_unsafe_spec():

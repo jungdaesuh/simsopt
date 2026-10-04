@@ -92,12 +92,13 @@ def _resolve_options(
             f"Driver {driver.value!r} is not valid here. Choose: {allowed}."
         )
     if options is None:
-        return options_type()
+        options = options_type()
     if type(options) is not options_type:
         raise TypeError(
             f"Driver {driver.value!r} requires options of type "
             f"{options_type.__name__}, got {type(options).__name__}."
         )
+    options.validate()
     return options
 
 

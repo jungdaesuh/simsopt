@@ -106,6 +106,7 @@ from simsopt_jax.core.interpolated_boozer_field import (
     freeze_interpolated_boozer_field_state,
 )
 from simsopt_jax.core.regular_grid_interp import (
+    RegularGridInterpolant3DDeviceSpec,
     RegularGridInterpolant3DSpec,
     UniformInterpolationRule as _jax_core_uniform_rule,
 )
@@ -706,6 +707,9 @@ class InterpolatedBoozerFieldJAX(Optimizable):
         )
         self._frozen_state = state
         self._lazy_specs: dict[str, RegularGridInterpolant3DSpec] = dict(state.specs)
+        self._device_specs: dict[str, RegularGridInterpolant3DDeviceSpec] = dict(
+            state.device_specs
+        )
         self._psi0_host = float(field.psi0)
         self._nfp = int(nfp)
         self._stellsym = bool(stellsym)
@@ -736,6 +740,7 @@ class InterpolatedBoozerFieldJAX(Optimizable):
         wrapper._field = None
         wrapper._frozen_state = frozen_state
         wrapper._lazy_specs = dict(frozen_state.specs)
+        wrapper._device_specs = dict(frozen_state.device_specs)
         wrapper._psi0_host = float(psi0)
         wrapper._nfp = int(frozen_state.nfp if nfp is None else nfp)
         wrapper._stellsym = bool(frozen_state.stellsym)
@@ -830,8 +835,12 @@ class InterpolatedBoozerFieldJAX(Optimizable):
         cached = self._cache.get(name)
         if cached is None:
             self._ensure_spec(name)
+            if name not in self._device_specs:
+                self._device_specs[name] = self._frozen_state.get_device(
+                    name, self._lazy_specs
+                )
             cached = _INTERP_EVALUATORS[name](
-                self._frozen_state, self._lazy_specs, self._points
+                self._frozen_state, self._device_specs, self._points
             )
             self._cache[name] = cached
         return cached

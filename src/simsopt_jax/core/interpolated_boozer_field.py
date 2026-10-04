@@ -176,8 +176,8 @@ class InterpolatedBoozerFieldFrozenState:
     Lazy-built host scalars are owned by :class:`InterpolatedBoozerFieldJAX`
     in its ``_lazy_specs`` dict. This state records only the host specs
     constructed by :func:`freeze_interpolated_boozer_field_state`; its
-    ``device_specs`` cache holds staged device mirrors for eager specs and
-    for lazy specs after their first evaluation.
+    ``device_specs`` mapping holds immutable staged mirrors of those specs.
+    Lazy device mirrors are cached by the host wrapper, never in this state.
 
     Meta-fields ``nfp``, ``stellsym``, ``period`` and ``extrapolate`` are
     needed at evaluation time to drive the coordinate fold mirroring
@@ -191,7 +191,7 @@ class InterpolatedBoozerFieldFrozenState:
     """
 
     specs: Mapping[str, RegularGridInterpolant3DSpec]
-    device_specs: dict[str, RegularGridInterpolant3DDeviceSpec]
+    device_specs: Mapping[str, RegularGridInterpolant3DDeviceSpec]
     nfp: int
     stellsym: bool
     extrapolate: bool
@@ -220,7 +220,7 @@ class InterpolatedBoozerFieldFrozenState:
         scalar_name: str,
         specs: Mapping[str, RegularGridInterpolant3DSpec],
     ) -> RegularGridInterpolant3DDeviceSpec:
-        """Return the staged device spec for ``scalar_name``."""
+        """Return an eager mirror or stage a supplied spec without caching it."""
 
         device_spec = self.device_specs.get(scalar_name)
         if device_spec is not None:
@@ -231,9 +231,7 @@ class InterpolatedBoozerFieldFrozenState:
                 f"interpolant for scalar {scalar_name!r} has not been built; "
                 f"available: {sorted(specs)}"
             )
-        device_spec = build_regular_grid_interpolant_3d_device_spec(spec)
-        self.device_specs[scalar_name] = device_spec
-        return device_spec
+        return build_regular_grid_interpolant_3d_device_spec(spec)
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +579,7 @@ def freeze_interpolated_boozer_field_state(
 
     return InterpolatedBoozerFieldFrozenState(
         specs=MappingProxyType(dict(specs)),
-        device_specs=device_specs,
+        device_specs=MappingProxyType(device_specs),
         nfp=nfp_int,
         stellsym=bool(stellsym),
         extrapolate=bool(extrapolate),
@@ -751,10 +749,22 @@ def evaluate_scalar(
             f"interpolant for scalar {scalar_name!r} has not been built; "
             f"available: {sorted(specs)}"
         )
+    return _evaluate_scalar_device(
+        state, state.get_device(scalar_name, specs), scalar_name, points
+    )
+
+
+def _evaluate_scalar_device(
+    state: InterpolatedBoozerFieldFrozenState,
+    device_spec: RegularGridInterpolant3DDeviceSpec,
+    scalar_name: str,
+    points: jax.Array,
+) -> jax.Array:
+    """Evaluate an already staged scalar without mutating host state."""
     if scalar_name in FLUX_FUNCTION_SCALARS:
         folded = _zeroed_flux_points(points)
         return evaluate_batch_device(
-            state.get_device(scalar_name, specs),
+            device_spec,
             folded,
             strict_cell_order=False,
         )
@@ -766,7 +776,7 @@ def evaluate_scalar(
             stellsym=state.stellsym,
         )
         raw = evaluate_batch_device(
-            state.get_device(scalar_name, specs),
+            device_spec,
             folded,
             strict_cell_order=False,
         )
@@ -785,10 +795,12 @@ def _eval_scalar_factory(scalar_name: str):
 
     def _eval(
         state: InterpolatedBoozerFieldFrozenState,
-        specs: Mapping[str, RegularGridInterpolant3DSpec],
+        device_specs: Mapping[str, RegularGridInterpolant3DDeviceSpec],
         points: jax.Array,
     ) -> jax.Array:
-        return evaluate_scalar(state, specs, scalar_name, points)
+        return _evaluate_scalar_device(
+            state, device_specs[scalar_name], scalar_name, points
+        )
 
     _eval.__name__ = f"_eval_interp_{scalar_name}"
     return _eval
@@ -799,7 +811,7 @@ _INTERP_EVALUATORS: dict[
     Callable[
         [
             InterpolatedBoozerFieldFrozenState,
-            Mapping[str, RegularGridInterpolant3DSpec],
+            Mapping[str, RegularGridInterpolant3DDeviceSpec],
             jax.Array,
         ],
         jax.Array,

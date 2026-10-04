@@ -224,6 +224,7 @@ from .interpolated_boozer_field import (
 from .interpolated_field import (
     InterpolatedFieldCylCache,
 )
+from .surface_classifier import LevelsetClassifier
 from .sharding import (
     maybe_shard_trajectory_batch_inputs,
     replicate_tree_on_mesh,
@@ -780,30 +781,24 @@ class IterStoppingCriterion:
     max_iter: int
 
 
-@pytree_dataclass(data=("min_s",), meta=("field_fn",))
+@pytree_dataclass(data=("min_s",))
 @dataclass(frozen=True)
 class MinToroidalFluxStoppingCriterion:
     """Stop when toroidal flux ``s <= min_s`` (Boozer/flux traces only).
 
-    Carve-out keeper: this criterion only applies to flux-coordinate
-    (Boozer) traces. The Cartesian fieldline / GC drivers shipped here
-    never evaluate the user-supplied ``field_fn`` and the criterion is
-    effectively inactive on the JAX path. Kept in the public roster so
-    the field/tracing isinstance dispatch can recognise it and route it
-    to the appropriate Boozer driver once that path lands.
+    This criterion reads ``s`` directly from Boozer states and is
+    inactive on Cartesian fieldline / guiding-centre traces.
     """
 
     min_s: float
-    field_fn: object = None
 
 
-@pytree_dataclass(data=("max_s",), meta=("field_fn",))
+@pytree_dataclass(data=("max_s",))
 @dataclass(frozen=True)
 class MaxToroidalFluxStoppingCriterion:
-    """Stop when toroidal flux ``s >= max_s``. Deferred carve-out keeper."""
+    """Stop when toroidal flux ``s >= max_s`` (Boozer/flux traces only)."""
 
     max_s: float
-    field_fn: object = None
 
 
 @pytree_dataclass(data=("classifier_fn",), meta=())
@@ -812,15 +807,19 @@ class LevelsetStoppingCriterion:
     """Stop when the JAX surface classifier reports the trajectory is outside.
 
     Mirrors :class:`legacy native extension.LevelsetStoppingCriterion`. The
-    ``classifier_fn`` is a JAX-traceable callable ``classifier_fn(x, y, z) ->
-    sign`` produced by
+    ``classifier_fn`` is a registered :class:`LevelsetClassifier` carrying
+    a device-resident grid, produced by
     :func:`simsopt_jax.core.surface_classifier.make_levelset_classifier`
     (returns ``+1`` inside, ``-1`` outside). The criterion fires when the
-    post-step Cartesian position has ``classifier_fn(x, y, z) < 0``, matching
+    post-step Cartesian position has ``classifier_fn(xyz) < 0``, matching
     the upstream C++ ``f < 0`` predicate.
     """
 
-    classifier_fn: object
+    classifier_fn: LevelsetClassifier
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.classifier_fn, LevelsetClassifier):
+            raise TypeError("classifier_fn must be a LevelsetClassifier")
 
 
 def _stopping_criterion_should_stop(
@@ -3669,7 +3668,7 @@ def _interpolated_boozer_evaluator(name: str) -> Callable:
     eval_fn = _INTERP_EVALUATORS[name]
 
     def _eval(state: InterpolatedBoozerFieldFrozenState, point: jax.Array) -> jax.Array:
-        return eval_fn(state, state.specs, point)
+        return eval_fn(state, state.device_specs, point)
 
     return _eval
 

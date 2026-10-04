@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isnan
+from numbers import Real
 
 import numpy as np
 
-from ..contracts import OptionsBase
+from ..contracts import OptionsBase, _validate_positive_integers, _validate_tolerances
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,14 @@ class ScipyLBFGSBOptions(OptionsBase):
     maxls: int = 20
     restart_after_nonwolfe_stop: bool = False
 
+    def validate(self) -> None:
+        _validate_positive_integers(
+            maxiter=self.maxiter, maxfun=self.maxfun, maxcor=self.maxcor, maxls=self.maxls
+        )
+        _validate_tolerances(gtol=self.gtol, ftol=self.ftol)
+        if not isinstance(self.restart_after_nonwolfe_stop, bool):
+            raise ValueError("restart_after_nonwolfe_stop must be a bool")
+
     @classmethod
     def native_matched(
         cls, *, maxiter: int, maxcor: int, tol: float, maxls: int = 20
@@ -131,6 +141,16 @@ class ScipyLMOptions(OptionsBase):
     xtol: float = 1e-8
     gtol: float = 1e-8
 
+    def validate(self) -> None:
+        _validate_positive_integers(max_nfev=self.max_nfev)
+        _validate_tolerances(ftol=self.ftol, xtol=self.xtol, gtol=self.gtol)
+        # SciPy's least_squares(method="lm") requires every tolerance above eps.
+        for name, value in (("ftol", self.ftol), ("xtol", self.xtol), ("gtol", self.gtol)):
+            if value <= np.finfo(float).eps:
+                raise ValueError(
+                    f"{name} must be greater than machine epsilon for SciPy LM"
+                )
+
 
 @dataclass(frozen=True)
 class ScipyBFGSOptions(OptionsBase):
@@ -138,6 +158,15 @@ class ScipyBFGSOptions(OptionsBase):
     gtol: float = 1e-10
     xrtol: float = 0.0
     norm: float = float("inf")
+
+    def validate(self) -> None:
+        _validate_positive_integers(maxiter=self.maxiter)
+        _validate_tolerances(gtol=self.gtol, xrtol=self.xrtol)
+        # SciPy's vector norm uses 1 / norm for finite orders.
+        if not isinstance(self.norm, Real) or isnan(self.norm) or self.norm == 0:
+            raise ValueError(
+                f"norm must be a nonzero real vector norm order (no NaN); got {self.norm!r}"
+            )
 
 
 __all__ = ["ScipyBFGSOptions", "ScipyBounds", "ScipyLBFGSBOptions", "ScipyLMOptions"]

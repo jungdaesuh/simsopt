@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
+from numbers import Integral, Real
 from typing import Callable, Literal, Protocol, TypeAlias
 
 import jax
@@ -19,8 +22,24 @@ from .shared import (
 
 
 @dataclass(frozen=True)
-class OptionsBase:
-    """Marker base for driver-specific optimizer options."""
+class OptionsBase(ABC):
+    """Driver-specific host options validated once before dispatch."""
+
+    @abstractmethod
+    def validate(self) -> None:
+        """Reject unsupported values without changing driver settings."""
+
+
+def _validate_positive_integers(**values: int) -> None:
+    for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer; got {value!r}")
+
+
+def _validate_tolerances(**values: float) -> None:
+    for name, value in values.items():
+        if not isinstance(value, Real) or not isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and non-negative; got {value!r}")
 
 
 ScalarResult: TypeAlias = float | np.floating | jax.Array

@@ -6,6 +6,7 @@ from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from simsopt.field.boozermagneticfield import BoozerAnalytic
 from simsopt_jax_adapters.field.boozer_field import InterpolatedBoozerFieldJAX
@@ -85,6 +86,8 @@ def test_interpolated_boozer_lazy_scalar_device_spec_is_cached_once(monkeypatch)
     )
     wrapper = _build_wrapper(scalars=("modB",))
     assert len(calls) == 1
+    state = wrapper.frozen_state
+    initial_device_specs = tuple(state.device_specs.items())
 
     points = np.asarray([[0.4, 0.5, 1.0]], dtype=np.float64)
     wrapper.set_points(points)
@@ -93,6 +96,23 @@ def test_interpolated_boozer_lazy_scalar_device_spec_is_cached_once(monkeypatch)
     np.asarray(wrapper.K())
 
     assert len(calls) == 2
+    assert tuple(state.device_specs.items()) == initial_device_specs
+    assert not state.has("K")
+    with pytest.raises(TypeError):
+        state.device_specs["K"] = state.device_specs["modB"]
+
+
+def test_interpolated_boozer_wrappers_share_immutable_snapshot_not_cache() -> None:
+    first = _build_wrapper(scalars=("modB",))
+    second = InterpolatedBoozerFieldJAX.from_frozen_state(first.frozen_state, psi0=0.3)
+    points = np.asarray([[0.4, 0.5, 1.0]], dtype=np.float64)
+    first.set_points(points)
+    second.set_points(points)
+    np.testing.assert_array_equal(first.modB(), second.modB())
+    first.K()
+    with pytest.raises(KeyError, match="no base field to lazy-fit"):
+        second.K()
+    assert tuple(first.frozen_state.device_specs) == ("modB",)
 
 
 def test_interpolated_boozer_cached_device_values_match_existing_path() -> None:
