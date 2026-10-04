@@ -1,10 +1,11 @@
 """Private optimizer runtime tests for BoozerSurfaceJAX."""
 
-from dataclasses import fields
 from jax_test_support import (
     fixture_jax_runtime_guard,  # noqa: F401
     enable_non_strict_jax_backend,
 )
+
+from dataclasses import fields
 
 import inspect
 import types

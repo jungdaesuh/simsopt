@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
+from dataclasses import replace
 
 import numpy as np
 

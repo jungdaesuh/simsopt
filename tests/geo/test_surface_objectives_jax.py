@@ -7,7 +7,6 @@ These tests exercise the pure JAX label/objective ingredients directly:
 3. Upstream-shaped ToroidalFlux CPU/JAX parity under tolerance-based checks.
 """
 
-from dataclasses import fields, replace
 from jax_test_support import (
     fixture_jax_runtime_guard,  # noqa: F401
     fixture_parity_lane,  # noqa: F401
@@ -17,6 +16,8 @@ from jax_test_support import (
     parity_default_device,
     parity_rng,
 )
+
+from dataclasses import fields, replace
 
 import os
 from pathlib import Path

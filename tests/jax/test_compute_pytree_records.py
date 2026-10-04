@@ -1,5 +1,7 @@
 """Preserve the field/leaf order of the 53 former compute NamedTuples."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 from dataclasses import FrozenInstanceError, fields
 
 import jax

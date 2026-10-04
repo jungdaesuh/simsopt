@@ -1,5 +1,7 @@
 """Keep JAX registration and immutable record conventions centralized."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import ast
 from collections import Counter
 from dataclasses import FrozenInstanceError, dataclass, field

@@ -1,5 +1,7 @@
 """Public endpoint records retain their identities and share one host schema."""
 
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
 import pickle
 from dataclasses import FrozenInstanceError, asdict, fields, replace
 

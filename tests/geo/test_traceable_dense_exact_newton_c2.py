@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import fields
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
+from dataclasses import fields
 
 from collections.abc import Callable
 from weakref import ref

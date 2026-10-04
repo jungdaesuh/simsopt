@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import fields, replace
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
+from dataclasses import fields, replace
 
 import inspect
 import os
