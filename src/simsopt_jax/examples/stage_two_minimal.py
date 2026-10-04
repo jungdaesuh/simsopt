@@ -42,6 +42,7 @@ from simsopt_jax.objectives import (
     fused_stage_two_values,
     make_fused_stage_two_objective,
 )
+from simsopt_jax.objectives.stage_two import prepare_stage_two_config
 from simsopt_jax.runtime.host_boundary import block_until_ready
 from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
@@ -154,7 +155,6 @@ _value_and_grad_program = jax.jit(
         argnums=0,
         has_aux=True,
     ),
-    static_argnums=(5,),
 )
 
 
@@ -206,10 +206,7 @@ def _taylor_errors_from_operands(
     return central_differences - directional_derivative
 
 
-_taylor_errors_program = jax.jit(
-    _taylor_errors_from_operands,
-    static_argnums=(6,),
-)
+_taylor_errors_program = jax.jit(_taylor_errors_from_operands)
 
 
 def _minimal_stage_two_operands(
@@ -223,16 +220,22 @@ def _minimal_stage_two_operands(
     length_target: float,
 ) -> _MinimalStageTwoOperands:
     """Freeze the extraction spec, device geometry and objective config once."""
+    extraction = field.coil_dof_extraction_spec()
     return _MinimalStageTwoOperands(
-        extraction=field.coil_dof_extraction_spec(),
+        extraction=extraction,
         flux_spec=flux_spec,
         surface_gamma=jnp.asarray(surface_gamma, dtype=jnp.float64),
         surface_normal=jnp.asarray(surface_normal, dtype=jnp.float64),
-        config=StageTwoObjectiveConfig(
-            num_base_curves=num_base_curves,
-            length_weight=length_weight,
-            length_target=length_target,
-            length_target_mode="max",
+        config=prepare_stage_two_config(
+            StageTwoObjectiveConfig(
+                num_base_curves=num_base_curves,
+                length_weight=length_weight,
+                length_target=length_target,
+                length_target_mode="max",
+            ),
+            extraction,
+            surface_gamma,
+            surface_normal,
         ),
     )
 

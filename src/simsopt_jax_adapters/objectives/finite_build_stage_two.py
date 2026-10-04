@@ -11,10 +11,12 @@ coil-clearance penalty remain on the selected JAX device.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from simsopt_jax.core import (
     CoilSetDofExtractionSpec,
     CurveFilamentSpec,
@@ -32,8 +34,19 @@ from simsopt_jax.core.field import grouped_coil_set_spec_from_lists
 from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec, GroupedCoilSetSpec
 from simsopt_jax.objectives import CoilDofExtractionProvider
+from simsopt_jax.pytree import pytree_dataclass
 
 
+@pytree_dataclass(
+    data=(
+        "filament_offsets",
+        "length_targets",
+        "length_weight",
+        "curve_curve_minimum_distance",
+        "curve_curve_weight",
+    ),
+    meta=("num_base_curves", "symmetry_copies"),
+)
 @dataclass(frozen=True, slots=True)
 class FiniteBuildStageTwoConfig:
     """Immutable topology, targets, and weights for a finite-build objective."""
@@ -49,6 +62,78 @@ class FiniteBuildStageTwoConfig:
     @property
     def filaments_per_base(self) -> int:
         return len(self.filament_offsets)
+
+
+def _prepare_finite_build_config(
+    config: FiniteBuildStageTwoConfig,
+    extraction: CoilSetDofExtractionSpec,
+) -> FiniteBuildStageTwoConfig:
+    """Validate the symmetry-major pack layout used by the geometry kernel."""
+    for name in ("num_base_curves", "symmetry_copies"):
+        value = getattr(config, name)
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer.")
+    if not config.filament_offsets:
+        raise ValueError("filament_offsets must contain at least one filament.")
+    if len(config.length_targets) != config.num_base_curves:
+        raise ValueError("length_targets must contain one target per base curve.")
+    for offset in config.filament_offsets:
+        if len(offset) != 2 or not all(isfinite(value) for value in offset):
+            raise ValueError("Each filament offset must contain two finite values.")
+    for value in (
+        *config.length_targets, config.length_weight,
+        config.curve_curve_minimum_distance, config.curve_curve_weight,
+    ):
+        if not isfinite(value):
+            raise ValueError("Finite-build targets, weights, and thresholds must be finite.")
+    pack_count = config.num_base_curves * config.symmetry_copies
+    if pack_count < 2:
+        raise ValueError("Finite-build clearance requires at least two coil packs.")
+    if len(extraction.coils) != pack_count * config.filaments_per_base:
+        raise ValueError("Finite-build topology does not match the extracted coil count.")
+    shapes = {coil.curve.quadpoints.shape for coil in extraction.coils}
+    if len(shapes) != 1 or not next(iter(shapes))[0]:
+        raise ValueError("Finite-build coils require matching nonempty quadrature grids.")
+    # Compare the frozen templates once; computation reuses the leading pack's
+    # base curve/frame and each symmetry pack's representative current.
+    coils = jax.device_get(extraction).coils
+    for index, coil in enumerate(coils):
+        if not isinstance(coil.curve, CurveFilamentSpec):
+            raise ValueError("Finite-build objectives require filament curve specs.")
+        filament_index = index % config.filaments_per_base
+        pack_start = index - filament_index
+        representative = coils[pack_start]
+        base_index = (index // config.filaments_per_base) % config.num_base_curves
+        base = coils[base_index * config.filaments_per_base]
+        base_filament = cast(CurveFilamentSpec, base.curve)
+        if (coil.curve.dn, coil.curve.db) != config.filament_offsets[filament_index]:
+            raise ValueError("filament_offsets do not match the extracted filament order.")
+        for actual, expected in (
+            (coil.curve.base_curve, base_filament.base_curve),
+            (coil.curve.base_curve_map, base_filament.base_curve_map),
+            (coil.curve.rotation, base_filament.rotation),
+            (coil.curve.rotation_map, base_filament.rotation_map),
+            (coil.curve.dofs, base_filament.dofs),
+            (coil.curve.quadpoints, base_filament.quadpoints),
+            (coil.curve_map, base.curve_map),
+            (coil.symmetry, representative.symmetry),
+            (coil.current_map, representative.current_map),
+            (coil.current_term_maps, representative.current_term_maps),
+            (coil.current_term_scales, representative.current_term_scales),
+        ):
+            actual_leaves, actual_tree = jax.tree.flatten(actual)
+            expected_leaves, expected_tree = jax.tree.flatten(expected)
+            if actual_tree != expected_tree or not all(
+                np.array_equal(a, b)
+                for a, b in zip(actual_leaves, expected_leaves, strict=True)
+            ):
+                raise ValueError(
+                    "Finite-build filaments must share their base geometry, "
+                    "frame, and pack current."
+                )
+        if coil.curve.frame_kind != base_filament.frame_kind:
+            raise ValueError("Finite-build filaments must share their frame kind.")
+    return jax.device_put(config)
 
 
 def _base_geometry(
@@ -199,6 +284,7 @@ def make_finite_build_stage_two_objective(
 ):
     """Compose the native finite-build flux, length, and clearance terms."""
     extraction = field.coil_dof_extraction_spec()
+    config = _prepare_finite_build_config(config, extraction)
 
     def objective(parameters: jax.Array) -> jax.Array:
         coil_set, base_gammas, base_gammadashs = _finite_build_geometry(
@@ -227,6 +313,7 @@ def finite_build_stage_two_diagnostics(
 ):
     """Return flux, penalties, minimum clearance, and coil lengths on device."""
     extraction = field.coil_dof_extraction_spec()
+    config = _prepare_finite_build_config(config, extraction)
 
     def diagnostics(parameters: jax.Array) -> jax.Array:
         coil_set, base_gammas, base_gammadashs = _finite_build_geometry(

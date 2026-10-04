@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from math import isfinite
 from typing import Literal, Protocol, cast
 
 import jax
@@ -28,6 +29,7 @@ from simsopt_jax.core.specs import (
     FixedSurfaceFluxSpec,
     apply_coil_symmetry,
 )
+from simsopt_jax.pytree import pytree_dataclass
 
 from .stochastic_stage_two import (
     StochasticCoilPerturbations,
@@ -63,6 +65,96 @@ class StageTwoObjectiveConfig:
     mean_squared_curvature_weight: float = 0.0
     arclength_variation_weight: float = 0.0
     linking_number_weight: float = 0.0
+
+
+_STAGE_TWO_NUMERIC_FIELDS = (
+    "length_weight",
+    "length_target",
+    "individual_length_target",
+    "individual_length_weight",
+    "curve_curve_minimum_distance",
+    "curve_curve_weight",
+    "curve_surface_minimum_distance",
+    "curve_surface_weight",
+    "curvature_threshold",
+    "curvature_weight",
+    "mean_squared_curvature_threshold",
+    "mean_squared_curvature_weight",
+    "arclength_variation_weight",
+    "linking_number_weight",
+)
+
+
+@pytree_dataclass(
+    data=_STAGE_TWO_NUMERIC_FIELDS,
+    meta=(
+        "num_base_curves",
+        "length_target_mode",
+        "mean_squared_curvature_target_mode",
+        "active_terms",
+    ),
+)
+@dataclass(frozen=True, slots=True)
+class _PreparedStageTwoConfig(StageTwoObjectiveConfig):
+    """Numeric operands with a fixed selection of geometry penalties.
+
+    Zero weights disable terms at preparation time, avoiding undefined
+    derivatives from unused geometry. Nonzero weights remain traced operands.
+    """
+
+    active_terms: tuple[str, ...] = ()
+
+
+def prepare_stage_two_config(
+    config: StageTwoObjectiveConfig,
+    extraction: CoilSetDofExtractionSpec | None = None,
+    surface_gamma: jax.Array | None = None,
+    surface_normal: jax.Array | None = None,
+) -> _PreparedStageTwoConfig:
+    """Validate host settings once and partition numeric operands from modes."""
+    if not isinstance(config, _PreparedStageTwoConfig):
+        if not isinstance(config.num_base_curves, int) or config.num_base_curves <= 0:
+            raise ValueError("num_base_curves must be a positive integer.")
+        for name in ("length_target_mode", "mean_squared_curvature_target_mode"):
+            if getattr(config, name) not in ("max", "identity"):
+                raise ValueError(f"{name} must be 'max' or 'identity'.")
+        for name in _STAGE_TWO_NUMERIC_FIELDS:
+            value = getattr(config, name)
+            if value is not None and not isfinite(value):
+                raise ValueError(f"{name} must be finite.")
+        if config.individual_length_weight != 0.0 and config.individual_length_target is None:
+            raise ValueError(
+                "individual_length_target is required when "
+                "individual_length_weight is nonzero."
+            )
+    if extraction is not None:
+        if config.num_base_curves > len(extraction.coils):
+            raise ValueError("num_base_curves exceeds the available coils.")
+        shapes = {coil.curve.quadpoints.shape for coil in extraction.coils}
+        if len(shapes) != 1 or not next(iter(shapes))[0]:
+            raise ValueError("Stage-II coils require matching nonempty quadrature grids.")
+    if surface_gamma is not None and surface_normal is not None:
+        if (
+            surface_gamma.shape != surface_normal.shape
+            or surface_gamma.ndim != 2
+            or surface_gamma.shape[-1] != 3
+            or surface_gamma.size == 0
+        ):
+            raise ValueError("Surface positions and normals must have matching (n, 3) shapes.")
+    if isinstance(config, _PreparedStageTwoConfig):
+        return config
+    return jax.device_put(
+        _PreparedStageTwoConfig(
+            **{
+                field.name: getattr(config, field.name)
+                for field in fields(StageTwoObjectiveConfig)
+            },
+            active_terms=tuple(
+                name for name in _STAGE_TWO_NUMERIC_FIELDS
+                if name.endswith("_weight") and getattr(config, name) != 0.0
+            ),
+        ),
+    )
 
 
 def _zero(reference: jax.Array) -> jax.Array:
@@ -133,12 +225,14 @@ def stage_two_geometric_penalty(
     config: StageTwoObjectiveConfig,
 ) -> jax.Array:
     """Evaluate vectorized length, clearance, and curvature penalties."""
+    if not isinstance(config, _PreparedStageTwoConfig):
+        config = prepare_stage_two_config(config)
     base_gammadash = gammadash[: config.num_base_curves]
     base_gammadashdash = gammadashdash[: config.num_base_curves]
     zero = _zero(gamma)
     result = zero
 
-    if config.length_weight != 0.0:
+    if "length_weight" in config.active_terms:
         lengths = jnp.mean(jnp.linalg.norm(base_gammadash, axis=2), axis=1)
         result = result + stage_two_length_penalty(
             jnp.sum(lengths),
@@ -146,12 +240,7 @@ def stage_two_geometric_penalty(
             config.length_weight,
         )
 
-    if config.individual_length_weight != 0.0:
-        if config.individual_length_target is None:
-            raise ValueError(
-                "individual_length_target is required when "
-                "individual_length_weight is nonzero."
-            )
+    if "individual_length_weight" in config.active_terms:
         individual_lengths = jnp.mean(
             jnp.linalg.norm(base_gammadash, axis=2),
             axis=1,
@@ -165,9 +254,12 @@ def stage_two_geometric_penalty(
 
     base_speed = jnp.linalg.norm(base_gammadash, axis=2)
 
-    if config.curvature_weight != 0.0 or config.mean_squared_curvature_weight != 0.0:
+    if (
+        "curvature_weight" in config.active_terms
+        or "mean_squared_curvature_weight" in config.active_terms
+    ):
         base_kappa = jax.vmap(kappa_pure)(base_gammadash, base_gammadashdash)
-        if config.curvature_weight != 0.0:
+        if "curvature_weight" in config.active_terms:
             curvature = jax.vmap(
                 lambda current_kappa, current_gammadash: (
                     curvature_p_norm_from_kappa_pure(
@@ -179,7 +271,7 @@ def stage_two_geometric_penalty(
                 )
             )(base_kappa, base_gammadash)
             result = result + config.curvature_weight * jnp.sum(curvature)
-        if config.mean_squared_curvature_weight != 0.0:
+        if "mean_squared_curvature_weight" in config.active_terms:
             mean_squared_curvature = jnp.sum(
                 base_kappa * base_kappa * base_speed,
                 axis=1,
@@ -191,12 +283,12 @@ def stage_two_geometric_penalty(
                 0.5 * config.mean_squared_curvature_weight * jnp.sum(excess * excess)
             )
 
-    if config.arclength_variation_weight != 0.0:
+    if "arclength_variation_weight" in config.active_terms:
         result = result + config.arclength_variation_weight * jnp.sum(
             jnp.var(base_speed, axis=1)
         )
 
-    if config.curve_curve_weight != 0.0:
+    if "curve_curve_weight" in config.active_terms:
         pairs = tuple(
             (index, base_index)
             for index in range(int(gamma.shape[0]))
@@ -222,7 +314,7 @@ def stage_two_geometric_penalty(
         )
         result = result + config.curve_curve_weight * jnp.sum(curve_curve)
 
-    if config.curve_surface_weight != 0.0:
+    if "curve_surface_weight" in config.active_terms:
         curve_surface = jax.vmap(
             lambda current_gamma, current_gammadash: (
                 curve_surface_distance_penalty_pure(
@@ -236,7 +328,7 @@ def stage_two_geometric_penalty(
         )(gamma, gammadash)
         result = result + config.curve_surface_weight * jnp.sum(curve_surface)
 
-    if config.linking_number_weight != 0.0:
+    if "linking_number_weight" in config.active_terms:
         result = result + config.linking_number_weight * stage_two_linking_number(
             gamma,
             gammadash,
@@ -329,6 +421,7 @@ def make_stage_two_objective(
 ) -> Callable[[jax.Array], jax.Array]:
     """Compose quadratic flux with immutable filamentary geometry penalties."""
     extraction = field.coil_dof_extraction_spec()
+    config = prepare_stage_two_config(config, extraction, surface_gamma, surface_normal)
 
     def objective(parameters: jax.Array) -> jax.Array:
         gamma, gammadash, gammadashdash, _ = stage_two_coil_geometry(
@@ -410,6 +503,7 @@ def make_fused_stage_two_objective(
 ) -> Callable[[jax.Array], jax.Array]:
     """Compose Stage II without duplicating coil geometry evaluation."""
     extraction = field.coil_dof_extraction_spec()
+    config = prepare_stage_two_config(config, extraction, surface_gamma, surface_normal)
 
     def objective(parameters: jax.Array) -> jax.Array:
         return fused_stage_two_values(
@@ -445,6 +539,7 @@ def make_stochastic_stage_two_objective(
     """
     _validate_sample_tile(sample_tile, perturbations.gamma.shape[0])
     extraction = field.coil_dof_extraction_spec()
+    config = prepare_stage_two_config(config, extraction, surface_gamma, surface_normal)
 
     def objective(parameters: jax.Array) -> jax.Array:
         gamma, gammadash, gammadashdash, currents = stage_two_coil_geometry(

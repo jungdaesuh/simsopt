@@ -13,6 +13,7 @@ from simsopt_jax.objectives.stage_two import (
     CoilDofExtractionProvider,
     StageTwoObjectiveConfig,
     fused_stage_two_values,
+    prepare_stage_two_config,
     stage_two_length_penalty,
 )
 from simsopt_jax.runtime.host_boundary import block_until_ready
@@ -136,7 +137,6 @@ _value_and_grad_program = jax.jit(
         argnums=0,
         has_aux=True,
     ),
-    static_argnums=(5,),
 )
 
 
@@ -232,10 +232,7 @@ def _taylor_errors_from_operands(
     return central_differences - directional_derivative
 
 
-_taylor_errors_program = jax.jit(
-    _taylor_errors_from_operands,
-    static_argnums=(6,),
-)
+_taylor_errors_program = jax.jit(_taylor_errors_from_operands)
 
 
 def _solve_stage(
@@ -318,6 +315,12 @@ def solve_standard_stage_two(
     extraction = field.coil_dof_extraction_spec()
     surface_gamma_device = jnp.asarray(surface_gamma, dtype=jnp.float64)
     surface_normal_device = jnp.asarray(surface_normal, dtype=jnp.float64)
+    regularization_config = prepare_stage_two_config(
+        regularization_config,
+        extraction,
+        surface_gamma_device,
+        surface_normal_device,
+    )
     initial_device = jnp.asarray(initial_parameters, dtype=jnp.float64)
     direction_device = jnp.asarray(taylor_direction, dtype=jnp.float64)
     first_length_weight_device = jnp.asarray(
@@ -430,13 +433,22 @@ def standard_stage_two_state(
     pair the stage under comparison ran with, since the length weight is an
     explicit parameter and not part of the config.
     """
+    extraction = field.coil_dof_extraction_spec()
+    surface_gamma_device = jnp.asarray(surface_gamma, dtype=jnp.float64)
+    surface_normal_device = jnp.asarray(surface_normal, dtype=jnp.float64)
+    regularization_config = prepare_stage_two_config(
+        regularization_config,
+        extraction,
+        surface_gamma_device,
+        surface_normal_device,
+    )
     return block_until_ready(
         _state(
             jnp.asarray(parameters, dtype=jnp.float64),
-            field.coil_dof_extraction_spec(),
+            extraction,
             flux_spec,
-            jnp.asarray(surface_gamma, dtype=jnp.float64),
-            jnp.asarray(surface_normal, dtype=jnp.float64),
+            surface_gamma_device,
+            surface_normal_device,
             regularization_config,
             jnp.asarray(length_weight, dtype=jnp.float64),
         )

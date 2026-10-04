@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 
 import jax
 import jax.numpy as jnp
+from simsopt_jax.core.specs import CoilSetDofExtractionSpec
 from simsopt_jax.objectives.stage_two import (
     CoilDofExtractionProvider,
     StageTwoObjectiveConfig,
+    prepare_stage_two_config,
     stage_two_coil_geometry,
     stage_two_geometric_penalty,
     stage_two_length_penalty,
 )
+from simsopt_jax.pytree import pytree_dataclass
 
 from simsopt_jax_adapters.field.force import (
     b2energy_pure,
@@ -21,6 +25,10 @@ from simsopt_jax_adapters.field.force import (
 )
 
 
+@pytree_dataclass(
+    data=("force_weight", "vacuum_energy_weight", "force_power", "force_threshold"),
+    meta=("num_force_coils", "downsample"),
+)
 @dataclass(frozen=True, slots=True)
 class ForceStageTwoConfig:
     """Immutable weights and discretization for native-equivalent force terms."""
@@ -31,6 +39,37 @@ class ForceStageTwoConfig:
     force_power: float = 4.0
     force_threshold: float = 0.0
     downsample: int = 1
+
+
+def _prepare_force_config(
+    config: ForceStageTwoConfig,
+    extraction: CoilSetDofExtractionSpec,
+    target_quadpoints: jax.Array,
+    regularizations: jax.Array,
+) -> ForceStageTwoConfig:
+    """Check discretization against the coil layout before tracing metrics."""
+    coil_count = len(extraction.coils)
+    if (
+        not isinstance(config.num_force_coils, int)
+        or not 0 < config.num_force_coils <= coil_count
+    ):
+        raise ValueError("num_force_coils must select a nonempty subset of the coils.")
+    if not isinstance(config.downsample, int) or config.downsample <= 0:
+        raise ValueError("downsample must be a positive integer.")
+    for name in ("force_weight", "vacuum_energy_weight", "force_power", "force_threshold"):
+        if not isfinite(getattr(config, name)):
+            raise ValueError(f"{name} must be finite.")
+    if config.force_power <= 0.0:
+        raise ValueError("force_power must be positive.")
+    shapes = {coil.curve.quadpoints.shape for coil in extraction.coils}
+    if len(shapes) != 1 or not next(iter(shapes))[0]:
+        raise ValueError("Force coils require matching nonempty quadrature grids.")
+    point_count = extraction.coils[0].curve.quadpoints.shape[0]
+    if target_quadpoints.shape != (config.num_force_coils, point_count):
+        raise ValueError("target_quadpoints must match the force target quadrature grids.")
+    if regularizations.shape != (coil_count,):
+        raise ValueError("regularizations must contain one value per coil.")
+    return jax.device_put(config)
 
 
 def _force_stage_two_metrics(
@@ -124,10 +163,7 @@ def _force_stage_two_metrics(
     return force_objective, jnp.max(force_norms), vacuum_energy
 
 
-_compiled_force_stage_two_metrics = jax.jit(
-    _force_stage_two_metrics,
-    static_argnames=("config",),
-)
+_compiled_force_stage_two_metrics = jax.jit(_force_stage_two_metrics)
 
 
 def make_force_stage_two_objective(
@@ -142,6 +178,15 @@ def make_force_stage_two_objective(
 ) -> Callable[[jax.Array], jax.Array]:
     """Compose flux, engineering, Lorentz-force, and vacuum-energy terms."""
     extraction = field.coil_dof_extraction_spec()
+    stage_two_config = prepare_stage_two_config(
+        stage_two_config,
+        extraction,
+        surface_gamma,
+        surface_normal,
+    )
+    force_config = _prepare_force_config(
+        force_config, extraction, target_quadpoints, regularizations,
+    )
 
     def objective(parameters: jax.Array) -> jax.Array:
         gamma, gammadash, gammadashdash, currents = stage_two_coil_geometry(
@@ -189,6 +234,7 @@ def make_force_stage_two_length_penalty(
             "config length_weight must be zero."
         )
     extraction = field.coil_dof_extraction_spec()
+    stage_two_config = prepare_stage_two_config(stage_two_config, extraction)
 
     def length_penalty(parameters: jax.Array, length_weight: jax.Array) -> jax.Array:
         _, gammadash, _, _ = stage_two_coil_geometry(extraction, parameters)
@@ -216,6 +262,7 @@ def force_stage_two_diagnostics(
 ) -> Callable[[jax.Array], jax.Array]:
     """Return force objective, maximum force, and vacuum energy on device."""
     extraction = field.coil_dof_extraction_spec()
+    config = _prepare_force_config(config, extraction, target_quadpoints, regularizations)
 
     def diagnostics(parameters: jax.Array) -> jax.Array:
         geometry = stage_two_coil_geometry(extraction, parameters)

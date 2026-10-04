@@ -25,6 +25,7 @@ from simsopt_jax.runtime.host_boundary import host_value
 from .stage_two import (
     CoilDofExtractionProvider,
     StageTwoObjectiveConfig,
+    prepare_stage_two_config,
     stage_two_coil_geometry,
     stage_two_geometric_penalty,
 )
@@ -151,6 +152,7 @@ def make_dynamic_surface_stage_two_objective(
 ):
     """Compose dynamic-surface flux and coil penalties without host callbacks."""
     extraction = freeze_coil_dof_extraction_spec(field)
+    config = prepare_stage_two_config(config, extraction)
 
     def objective(
         coil_dofs: jax.Array,
