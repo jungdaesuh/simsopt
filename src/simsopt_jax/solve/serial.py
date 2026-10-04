@@ -147,7 +147,7 @@ class TraceableScalarProblem:
 
     def __post_init__(self) -> None:
         objective_fn = self.objective_fn
-        x = jnp.asarray(self.x)
+        x = jnp.array(self.x, copy=True)
         object.__setattr__(self, "x", x)
 
         def normalized_objective(current_x):

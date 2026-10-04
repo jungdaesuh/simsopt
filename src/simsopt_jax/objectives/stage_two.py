@@ -165,6 +165,7 @@ def prepare_stage_two_config(
                 if name.endswith("_weight") and numeric_values[name] != 0.0
             ),
         ),
+        preserve_placement=True,
     )
 
 

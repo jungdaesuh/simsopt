@@ -135,7 +135,7 @@ def _prepare_finite_build_config(
                 )
         if coil.curve.frame_kind != base_filament.frame_kind:
             raise ValueError("Finite-build filaments must share their frame kind.")
-    return runtime_device_put_tree(config)
+    return runtime_device_put_tree(config, preserve_placement=True)
 
 
 def _base_geometry(

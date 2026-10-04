@@ -158,9 +158,13 @@ def test_serial_solve_uses_explicit_decision_state_without_mutation(
 
 
 def test_scalar_problem_preserves_seed_after_caller_mutation() -> None:
-    seed = np.asarray([1.0, 2.0])
+    storage = np.empty(10, dtype=np.float64)
+    offset = (-storage.ctypes.data % 64) // storage.itemsize
+    seed = storage[offset:offset + 2]
+    seed[:] = (1.0, 2.0)
+    assert seed.flags.c_contiguous
+    assert seed.ctypes.data % 64 == 0
     problem = TraceableScalarProblem(lambda x: jnp.sum(x * x), seed)
-    np.testing.assert_array_equal(problem.objective(), 5.0)
     seed[0] = 10.0
     np.testing.assert_array_equal(problem.objective(), 5.0)
     assert isinstance(problem.x, jax.Array)

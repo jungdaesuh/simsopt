@@ -3,6 +3,9 @@
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 from dataclasses import fields, replace
+import os
+import subprocess
+import sys
 
 import jax
 import jax.numpy as jnp
@@ -543,3 +546,91 @@ def test_prepared_configs_audit_validation_and_reuse_device_operands(
     for _ in range(2):
         with jax.transfer_guard("disallow_explicit"), pytest.raises(jax.errors.JaxRuntimeError):
             evaluate(host_operand).block_until_ready()
+
+
+@pytest.mark.parametrize("kind", ("stage", "force", "finite"))
+def test_prepared_configs_preserve_caller_placement(force_case, finite_case, kind):
+    devices = jax.devices("cpu")
+    if len(devices) < 2:
+        environment = dict(os.environ)
+        environment.update(
+            JAX_PLATFORMS="cpu",
+            JAX_ENABLE_X64="1",
+            XLA_FLAGS="--xla_force_host_platform_device_count=2",
+        )
+        completed = subprocess.run(
+            (
+                sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-s",
+                f"{__file__}::test_prepared_configs_preserve_caller_placement[{kind}]",
+            ),
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        return
+
+    caller_device = devices[1]
+    if kind == "stage":
+        config = prepare_stage_two_config(StageTwoObjectiveConfig(
+            num_base_curves=1, length_weight=2.0, length_target=1.5
+        ))
+        operands = jax.device_put(_geometry(), caller_device)
+        prepare = prepare_stage_two_config
+
+        @jax.jit
+        def evaluate(data, config):
+            gamma, gd, gdd = data
+            return stage_two_geometric_penalty(gamma, gd, gdd, gamma[0], gamma[0], config)
+
+    elif kind == "force":
+        field, parameters, qp, regs, _, _, _ = force_case
+        extraction = field.coil_dof_extraction_spec()
+        config = ForceStageTwoConfig(num_force_coils=2)
+        operands = jax.device_put(
+            (*stage_two_coil_geometry(extraction, parameters), qp, regs), caller_device
+        )
+
+        def prepare(config):
+            return _prepare_force_config(config, extraction, operands[-2], operands[-1])
+
+        @jax.jit
+        def evaluate(data, config):
+            return _compiled_force_stage_two_metrics(*data, config)[0]
+
+    else:
+        field, flux, config = finite_case
+        extraction = jax.device_put(field.coil_dof_extraction_spec(), caller_device)
+        operands = jax.device_put((extraction, np.asarray(field.x), flux), caller_device)
+
+        def prepare(config):
+            return _prepare_finite_build_config(config, extraction)
+
+        @jax.jit
+        def evaluate(data, config):
+            current_extraction, parameters, current_flux = data
+            coil_set, gamma, gd = _finite_build_geometry(current_extraction, parameters, config)
+            length, distance, _ = _finite_build_penalties(gamma, gd, config)
+            return fixed_surface_flux_integral(coil_set, current_flux) + length + distance
+
+    config = jax.device_put(config, caller_device)
+    expected = evaluate(operands, config)
+    expected.block_until_ready()
+    refreshed = prepare(config)
+    assert all(leaf.devices() == {caller_device} for leaf in jax.tree.leaves(refreshed))
+    assert all(
+        original is current
+        for original, current in zip(jax.tree.leaves(config), jax.tree.leaves(refreshed), strict=True)
+    )
+    with host_transfer_audit() as audit, host_transfer_phase("jit_calls"):
+        with jax.transfer_guard("disallow_explicit"):
+            for _ in range(3):
+                actual = evaluate(operands, refreshed)
+                actual.block_until_ready()
+    assert actual.devices() == {caller_device}
+    np.testing.assert_array_equal(actual, expected)
+    summary, = audit.summary()
+    assert summary.phase == "jit_calls"
+    assert summary.calls == summary.leaves == summary.bytes == 0

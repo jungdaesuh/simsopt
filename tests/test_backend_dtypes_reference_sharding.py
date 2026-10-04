@@ -67,6 +67,23 @@ def test_reference_sharding_still_probes_concrete_array():
     assert result is None
 
 
+def test_runtime_device_put_tree_can_preserve_arrays_and_place_host_leaves():
+    mesh = Mesh(np.asarray(jax.devices()[:1], dtype=object), ("device",))
+    sharding = NamedSharding(mesh, P("device"))
+    array = jax.device_put(np.ones(3, dtype=np.float64), sharding)
+    value = {"device": array, "host": (np.asarray(2.0, dtype=np.float32), None)}
+
+    placed = dtypes.runtime_device_put_tree(value, preserve_placement=True)
+
+    assert placed["device"] is array
+    assert placed["device"].sharding == sharding
+    assert isinstance(placed["host"], tuple)
+    assert isinstance(placed["host"][0], jax.Array)
+    assert placed["host"][0].dtype == np.float32
+    assert placed["host"][1] is None
+    np.testing.assert_array_equal(placed["host"][0], 2.0)
+
+
 def test_staged_scalar_uses_replicated_named_sharding() -> None:
     mesh = Mesh(np.asarray(jax.devices()[:1], dtype=object), ("device",))
     vector_sharding = NamedSharding(mesh, P("device"))

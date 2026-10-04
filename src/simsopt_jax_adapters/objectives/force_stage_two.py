@@ -73,7 +73,7 @@ def _prepare_force_config(
         raise ValueError("target_quadpoints must match the force target quadrature grids.")
     if regularizations.shape != (coil_count,):
         raise ValueError("regularizations must contain one value per coil.")
-    return runtime_device_put_tree(config)
+    return runtime_device_put_tree(config, preserve_placement=True)
 
 
 def _force_stage_two_metrics(

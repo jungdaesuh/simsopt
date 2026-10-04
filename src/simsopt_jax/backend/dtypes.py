@@ -383,10 +383,20 @@ def runtime_device_put_tree(
     *,
     target: jax.Device | Sharding | None = None,
     device: jax.Device | Sharding | None = None,
+    preserve_placement: bool = False,
 ) -> _TreeT:
-    """Place every dynamic pytree leaf without changing leaf dtypes or structure."""
+    """Place dynamic leaves without changing dtypes or structure.
+
+    With no explicit target, ``preserve_placement`` keeps existing JAX arrays
+    unchanged and applies runtime placement only to host leaves.
+    """
     placement = _device_put_target(target, device)
     if placement is None:
+        if preserve_placement:
+            return jax.tree.map(
+                lambda leaf: leaf if isinstance(leaf, jax.Array) else _unplaced_device_put(leaf),
+                value,
+            )
         return _unplaced_device_put(value)
     return jax.device_put(value, placement)
 
