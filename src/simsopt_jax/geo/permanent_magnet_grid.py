@@ -14,6 +14,8 @@ from simsopt_jax.core._math_utils import (
 )
 from simsopt_jax.core.dipole_field import dipole_field_Bn
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "MWPGP_ALPHA_SAFETY_FACTOR",
     "PermanentMagnetGridJAX",
@@ -33,6 +35,21 @@ def _reshape_moments(name: str, value: object, ndipoles: int) -> jax.Array:
     return array
 
 
+@pytree_dataclass(
+    data=(
+        "A_obj",
+        "b_obj",
+        "ATb",
+        "ATA_scale",
+        "m0",
+        "m",
+        "m_proxy",
+        "m_maxima",
+        "dipole_grid_xyz",
+        "pol_vectors",
+    ),
+    meta=("coordinate_flag", "R0", "nfp", "stellsym", "nphi", "ntheta", "ndipoles"),
+)
 @dataclass(frozen=True)
 class PermanentMagnetGridJAX:
     """Immutable JAX payload for a fixed permanent-magnet optimization state."""
@@ -195,32 +212,6 @@ class PermanentMagnetGridJAX:
             ndipoles=ndipoles,
             pol_vectors=pol_vectors_arr,
         )
-
-
-jax.tree_util.register_dataclass(
-    PermanentMagnetGridJAX,
-    data_fields=[
-        "A_obj",
-        "b_obj",
-        "ATb",
-        "ATA_scale",
-        "m0",
-        "m",
-        "m_proxy",
-        "m_maxima",
-        "dipole_grid_xyz",
-        "pol_vectors",
-    ],
-    meta_fields=[
-        "coordinate_flag",
-        "R0",
-        "nfp",
-        "stellsym",
-        "nphi",
-        "ntheta",
-        "ndipoles",
-    ],
-)
 
 
 def permanent_magnet_grid_to_jax(pm_grid) -> PermanentMagnetGridJAX:

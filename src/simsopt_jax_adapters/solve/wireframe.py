@@ -34,6 +34,8 @@ from simsopt_jax.runtime.host_boundary import (
     host_tree as _host_pytree,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "WireframeGSCOResult",
     "WireframeRCLSResult",
@@ -58,6 +60,7 @@ def _is_jax_native_field(field) -> bool:
     return False
 
 
+@pytree_dataclass(data=("x", "f_B", "f_R", "f"), meta=())
 @dataclass(frozen=True)
 class WireframeRCLSResult:
     """Immutable result from ``rcls_wireframe_jax``."""
@@ -66,13 +69,6 @@ class WireframeRCLSResult:
     f_B: jax.Array
     f_R: jax.Array
     f: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    WireframeRCLSResult,
-    data_fields=["x", "f_B", "f_R", "f"],
-    meta_fields=[],
-)
 
 
 def _field_B_at_points(field, points):

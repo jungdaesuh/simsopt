@@ -47,6 +47,8 @@ import numpy as np
 
 from ._math_utils import as_jax_array
 
+from simsopt_jax.pytree import pytree_dataclass
+
 
 # Epsilon used in the C++ kernel to softly clamp points that are within
 # floating-point noise of the domain boundary. Matches
@@ -248,6 +250,31 @@ class RegularGridInterpolant3DSpec:
         )
 
 
+@pytree_dataclass(
+    data=(
+        "cell_table",
+        "cell_to_row",
+        "nodes",
+        "scalings",
+        "xmesh",
+        "ymesh",
+        "zmesh",
+        "xmin",
+        "xmax",
+        "ymin",
+        "ymax",
+        "zmin",
+        "zmax",
+        "hx",
+        "hy",
+        "hz",
+        "nx",
+        "ny",
+        "nz",
+        "sentinel_row",
+    ),
+    meta=("degree", "value_size", "out_of_bounds_ok"),
+)
 @dataclass(frozen=True)
 class RegularGridInterpolant3DDeviceSpec:
     """Device-resident bundle of spec arrays plus static metadata.
@@ -281,34 +308,6 @@ class RegularGridInterpolant3DDeviceSpec:
     degree: int
     value_size: int
     out_of_bounds_ok: bool
-
-
-jax.tree_util.register_dataclass(
-    RegularGridInterpolant3DDeviceSpec,
-    data_fields=[
-        "cell_table",
-        "cell_to_row",
-        "nodes",
-        "scalings",
-        "xmesh",
-        "ymesh",
-        "zmesh",
-        "xmin",
-        "xmax",
-        "ymin",
-        "ymax",
-        "zmin",
-        "zmax",
-        "hx",
-        "hy",
-        "hz",
-        "nx",
-        "ny",
-        "nz",
-        "sentinel_row",
-    ],
-    meta_fields=["degree", "value_size", "out_of_bounds_ok"],
-)
 
 
 def build_regular_grid_interpolant_3d_device_spec(

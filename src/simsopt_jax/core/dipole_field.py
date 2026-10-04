@@ -30,6 +30,8 @@ from ._math_utils import (
     explicit_rsqrt as _explicit_rsqrt,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "DipoleFieldSpec",
     "define_a_uniform_cartesian_grid_between_two_toroidal_surfaces",
@@ -51,6 +53,7 @@ _GRID_RAY_LENGTH = np.float64(4.0)
 _DIPOLE_FIELD_BN_COORDINATE_FLAGS = frozenset(("cartesian", "cylindrical", "toroidal"))
 
 
+@pytree_dataclass(data=("dipole_points", "dipole_moments"), meta=())
 @dataclass(frozen=True)
 class DipoleFieldSpec:
     """Immutable raw dipole payload for pure JAX field evaluation.
@@ -63,13 +66,6 @@ class DipoleFieldSpec:
 
     dipole_points: jax.Array
     dipole_moments: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    DipoleFieldSpec,
-    data_fields=["dipole_points", "dipole_moments"],
-    meta_fields=[],
-)
 
 
 def _scale(reference: jax.Array) -> jax.Array:

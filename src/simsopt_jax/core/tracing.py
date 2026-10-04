@@ -230,6 +230,8 @@ from .sharding import (
     trajectory_batch_sharding_config,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 TracingStateInput = jax.Array | list[ArrayLike] | tuple[ArrayLike, ...]
 
 __all__ = [
@@ -610,6 +612,10 @@ def _run_adaptive_steps(
     return final_carry
 
 
+@pytree_dataclass(
+    data=("tmax", "rtol", "atol", "dtmax"),
+    meta=("max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"),
+)
 @dataclass(frozen=True)
 class FieldlineTracingSpec:
     """Immutable contract for a single fieldline integration call.
@@ -659,13 +665,18 @@ class FieldlineTracingSpec:
     adaptive_loop: AdaptiveLoop = "scan"
 
 
-jax.tree_util.register_dataclass(
-    FieldlineTracingSpec,
-    data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"],
+@pytree_dataclass(
+    data=(
+        "trajectory",
+        "mask",
+        "steps_taken",
+        "status",
+        "t_final",
+        "phi_hits",
+        "phi_hits_count",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class FieldlineTracingResult:
     """Return payload for :func:`trace_fieldline`.
@@ -703,24 +714,10 @@ class FieldlineTracingResult:
     phi_hits_count: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    FieldlineTracingResult,
-    data_fields=[
-        "trajectory",
-        "mask",
-        "steps_taken",
-        "status",
-        "t_final",
-        "phi_hits",
-        "phi_hits_count",
-    ],
-    meta_fields=[],
-)
-
-
 # ── Stopping-criterion dataclasses ────────────────────────────────────
 
 
+@pytree_dataclass(data=("crit_r",), meta=())
 @dataclass(frozen=True)
 class MinRStoppingCriterion:
     """Stop when ``sqrt(x^2 + y^2) <= crit_r``.
@@ -732,6 +729,7 @@ class MinRStoppingCriterion:
     crit_r: float
 
 
+@pytree_dataclass(data=("crit_r",), meta=())
 @dataclass(frozen=True)
 class MaxRStoppingCriterion:
     """Stop when ``sqrt(x^2 + y^2) >= crit_r``."""
@@ -739,6 +737,7 @@ class MaxRStoppingCriterion:
     crit_r: float
 
 
+@pytree_dataclass(data=("crit_z",), meta=())
 @dataclass(frozen=True)
 class MinZStoppingCriterion:
     """Stop when ``z <= crit_z``."""
@@ -746,6 +745,7 @@ class MinZStoppingCriterion:
     crit_z: float
 
 
+@pytree_dataclass(data=("crit_z",), meta=())
 @dataclass(frozen=True)
 class MaxZStoppingCriterion:
     """Stop when ``z >= crit_z``."""
@@ -753,6 +753,7 @@ class MaxZStoppingCriterion:
     crit_z: float
 
 
+@pytree_dataclass(data=("max_transits",), meta=())
 @dataclass(frozen=True)
 class ToroidalTransitStoppingCriterion:
     """Stop after the trajectory has completed ``max_transits`` full toroidal turns.
@@ -766,6 +767,7 @@ class ToroidalTransitStoppingCriterion:
     max_transits: float
 
 
+@pytree_dataclass(data=(), meta=("max_iter",))
 @dataclass(frozen=True)
 class IterStoppingCriterion:
     """Stop after the integrator has run ``max_iter`` steps.
@@ -778,6 +780,7 @@ class IterStoppingCriterion:
     max_iter: int
 
 
+@pytree_dataclass(data=("min_s",), meta=("field_fn",))
 @dataclass(frozen=True)
 class MinToroidalFluxStoppingCriterion:
     """Stop when toroidal flux ``s <= min_s`` (Boozer/flux traces only).
@@ -794,6 +797,7 @@ class MinToroidalFluxStoppingCriterion:
     field_fn: object = None
 
 
+@pytree_dataclass(data=("max_s",), meta=("field_fn",))
 @dataclass(frozen=True)
 class MaxToroidalFluxStoppingCriterion:
     """Stop when toroidal flux ``s >= max_s``. Deferred carve-out keeper."""
@@ -802,6 +806,7 @@ class MaxToroidalFluxStoppingCriterion:
     field_fn: object = None
 
 
+@pytree_dataclass(data=("classifier_fn",), meta=())
 @dataclass(frozen=True)
 class LevelsetStoppingCriterion:
     """Stop when the JAX surface classifier reports the trajectory is outside.
@@ -816,24 +821,6 @@ class LevelsetStoppingCriterion:
     """
 
     classifier_fn: object
-
-
-for _criterion_class, _data_fields, _meta_fields in (
-    (MinRStoppingCriterion, ["crit_r"], []),
-    (MaxRStoppingCriterion, ["crit_r"], []),
-    (MinZStoppingCriterion, ["crit_z"], []),
-    (MaxZStoppingCriterion, ["crit_z"], []),
-    (ToroidalTransitStoppingCriterion, ["max_transits"], []),
-    (IterStoppingCriterion, [], ["max_iter"]),
-    (MinToroidalFluxStoppingCriterion, ["min_s"], ["field_fn"]),
-    (MaxToroidalFluxStoppingCriterion, ["max_s"], ["field_fn"]),
-    (LevelsetStoppingCriterion, ["classifier_fn"], []),
-):
-    jax.tree_util.register_dataclass(
-        _criterion_class,
-        data_fields=_data_fields,
-        meta_fields=_meta_fields,
-    )
 
 
 def _stopping_criterion_should_stop(
@@ -1860,6 +1847,23 @@ def _apply_stopping_criteria_events(
 # ── Adaptive driver ───────────────────────────────────────────────────
 
 
+@pytree_dataclass(
+    data=(
+        "trial_count",
+        "accepted_count",
+        "t",
+        "y",
+        "h",
+        "k_first",
+        "phi_last",
+        "phi_initial",
+        "status_event",
+        "stopped",
+        "no_progress",
+        "field_cache",
+    ),
+    meta=(),
+)
 @dataclass(frozen=True)
 class CartesianTracingContinuationState:
     """Accepted state and controller history needed to resume a Cartesian trace."""
@@ -1881,17 +1885,6 @@ class CartesianTracingContinuationState:
     # chunk boundary exactly as it survives a step. ``None`` for a field that
     # writes every output row.
     field_cache: InterpolatedFieldCylCache | None = None
-
-
-jax.tree_util.register_dataclass(
-    CartesianTracingContinuationState,
-    data_fields=[
-        "trial_count", "accepted_count", "t", "y", "h", "k_first",
-        "phi_last", "phi_initial", "status_event", "stopped", "no_progress",
-        "field_cache",
-    ],
-    meta_fields=[],
-)
 
 
 def _step_control_progress(
@@ -2522,6 +2515,10 @@ def trace_fieldlines_batched(
 # ── Guiding-centre vacuum RHS (4-state Cartesian) ─────────────────────
 
 
+@pytree_dataclass(
+    data=("tmax", "rtol", "atol", "dtmax"),
+    meta=("max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"),
+)
 @dataclass(frozen=True)
 class GuidingCenterTracingSpec:
     """Immutable contract for a single guiding-centre integration call.
@@ -2543,13 +2540,18 @@ class GuidingCenterTracingSpec:
     adaptive_loop: AdaptiveLoop = "scan"
 
 
-jax.tree_util.register_dataclass(
-    GuidingCenterTracingSpec,
-    data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"],
+@pytree_dataclass(
+    data=(
+        "trajectory",
+        "mask",
+        "steps_taken",
+        "status",
+        "t_final",
+        "phi_hits",
+        "phi_hits_count",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class GuidingCenterTracingResult:
     """Return payload for :func:`trace_guiding_center`.
@@ -2582,21 +2584,6 @@ class GuidingCenterTracingResult:
     t_final: jax.Array
     phi_hits: jax.Array
     phi_hits_count: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    GuidingCenterTracingResult,
-    data_fields=[
-        "trajectory",
-        "mask",
-        "steps_taken",
-        "status",
-        "t_final",
-        "phi_hits",
-        "phi_hits_count",
-    ],
-    meta_fields=[],
-)
 
 
 def guiding_center_vacuum_rhs(
@@ -4721,6 +4708,10 @@ def trace_guiding_centers_boozer_batched(
 # ── Full-orbit Lorentz RHS (6-state Cartesian) ────────────────────────
 
 
+@pytree_dataclass(
+    data=("tmax", "rtol", "atol", "dtmax"),
+    meta=("max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"),
+)
 @dataclass(frozen=True)
 class FullorbitTracingSpec:
     """Immutable contract for a single full-orbit Lorentz integration call.
@@ -4746,13 +4737,18 @@ class FullorbitTracingSpec:
     adaptive_loop: AdaptiveLoop = "scan"
 
 
-jax.tree_util.register_dataclass(
-    FullorbitTracingSpec,
-    data_fields=["tmax", "rtol", "atol", "dtmax"],
-    meta_fields=["max_steps", "max_root_iters", "max_phi_hits", "adaptive_loop"],
+@pytree_dataclass(
+    data=(
+        "trajectory",
+        "mask",
+        "steps_taken",
+        "status",
+        "t_final",
+        "phi_hits",
+        "phi_hits_count",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class FullorbitTracingResult:
     """Return payload for :func:`trace_fullorbit`.
@@ -4785,21 +4781,6 @@ class FullorbitTracingResult:
     t_final: jax.Array
     phi_hits: jax.Array
     phi_hits_count: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    FullorbitTracingResult,
-    data_fields=[
-        "trajectory",
-        "mask",
-        "steps_taken",
-        "status",
-        "t_final",
-        "phi_hits",
-        "phi_hits_count",
-    ],
-    meta_fields=[],
-)
 
 
 def fullorbit_vacuum_rhs(

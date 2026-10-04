@@ -1,13 +1,15 @@
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 from dataclasses import replace
+import json
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 import pytest
 
-import simsopt_jax.core.specs as specs_module
+from simsopt._core.json import GSONDecoder, GSONEncoder
+from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.core import (
     apply_coil_symmetry,
     curve_spec_kind,
@@ -364,8 +366,27 @@ def test_curve_spec_data_fields_do_not_recompile_but_meta_fields_do():
     assert meta_treedef != treedef
 
 
-def test_register_jax_spec_helper_preserves_data_meta_partition():
-    @specs_module._register_jax_spec(data_fields=("payload",), meta_fields=("tag",))
+def test_nested_spec_gson_round_trip_preserves_arrays_and_metadata():
+    spec = make_coil_spec(
+        curve=_make_curve_spec(),
+        current=make_current_value_spec(2.0),
+        scale=-1.0,
+    )
+    restored = json.loads(json.dumps(spec, cls=GSONEncoder), cls=GSONDecoder)
+
+    assert type(restored) is type(spec)
+    assert type(restored.curve) is type(spec.curve)
+    assert restored.as_dict() == spec.as_dict()
+    leaves, treedef = jax.tree.flatten(spec)
+    restored_leaves, restored_treedef = jax.tree.flatten(restored)
+    assert restored_treedef == treedef
+    for original, decoded in zip(leaves, restored_leaves, strict=True):
+        assert np.asarray(decoded).dtype == np.asarray(original).dtype
+        assert np.asarray(decoded).tobytes() == np.asarray(original).tobytes()
+
+
+def test_pytree_dataclass_helper_preserves_data_meta_partition():
+    @pytree_dataclass(data=("payload",), meta=("tag",))
     class LocalSpec:
         payload: jax.Array
         tag: int

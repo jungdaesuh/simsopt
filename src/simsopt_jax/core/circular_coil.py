@@ -60,6 +60,8 @@ import numpy as np
 from ._elliptic import ellipe, ellipk
 from ._math_utils import as_jax_float64 as _as_jax_float64
 
+from simsopt_jax.pytree import pytree_dataclass
+
 
 __all__ = [
     "CircularCoilSpec",
@@ -72,6 +74,7 @@ __all__ = [
 # ── Spec ─────────────────────────────────────────────────────────────
 
 
+@pytree_dataclass(data=(), meta=("r0", "center", "Inorm", "normal", "normal_kind"))
 @dataclass(frozen=True)
 class CircularCoilSpec:
     """Immutable payload for a pure JAX ``CircularCoil`` evaluation.
@@ -100,13 +103,6 @@ class CircularCoilSpec:
     Inorm: float
     normal: tuple[float, ...]
     normal_kind: str = "auto"
-
-
-jax.tree_util.register_dataclass(
-    CircularCoilSpec,
-    data_fields=[],
-    meta_fields=["r0", "center", "Inorm", "normal", "normal_kind"],
-)
 
 
 def _resolve_normal_kind(spec: CircularCoilSpec) -> str:

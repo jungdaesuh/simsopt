@@ -11,8 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from dataclasses import field as dataclass_field
+from dataclasses import dataclass, field
 from functools import partial
 from threading import Lock
 from typing import NamedTuple
@@ -102,13 +101,13 @@ from .boozer_surface import (
 class _LazyCompiledGradientState:
     total_gradient: Callable | None = None
     value_and_grad: Callable | None = None
-    gradient_lock: Lock = dataclass_field(default_factory=Lock)
-    value_and_grad_lock: Lock = dataclass_field(default_factory=Lock)
+    gradient_lock: Lock = field(default_factory=Lock)
+    value_and_grad_lock: Lock = field(default_factory=Lock)
 
 
 @dataclass
 class _HostReportingState:
-    baseline_metrics: dict[bool, dict[str, object]] = dataclass_field(
+    baseline_metrics: dict[bool, dict[str, object]] = field(
         default_factory=dict
     )
     resolved_reporting_metrics: Callable | None = None
@@ -117,7 +116,7 @@ class _HostReportingState:
 @dataclass
 class _BaselineValueAndGradState:
     value_and_grad: tuple[float, np.ndarray] | None = None
-    lock: Lock = dataclass_field(default_factory=Lock)
+    lock: Lock = field(default_factory=Lock)
 
 
 def surface_to_surface_shortest_distance_pure(gamma1, gamma2):

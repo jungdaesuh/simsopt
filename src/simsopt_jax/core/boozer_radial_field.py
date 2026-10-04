@@ -17,6 +17,8 @@ from .boozer_radial_interp import (
     inverse_fourier_transform_odd,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "BoozerRadialColumnBundle",
     "BoozerRadialInterpolantFrozenState",
@@ -57,6 +59,40 @@ __all__ = [
 # ----------------------------------------------------------------------
 
 
+@pytree_dataclass(
+    data=(
+        "xm",
+        "xn",
+        "psip",
+        "G",
+        "I",
+        "iota",
+        "dGds",
+        "dIds",
+        "diotads",
+        "bmnc",
+        "dbmncds",
+        "rmnc",
+        "drmncds",
+        "zmns",
+        "dzmnsds",
+        "numns",
+        "dnumnsds",
+        "bmns",
+        "dbmnsds",
+        "rmns",
+        "drmnsds",
+        "zmnc",
+        "dzmncds",
+        "numnc",
+        "dnumncds",
+        "mn_factor",
+        "d_mn_factor",
+        "kmns",
+        "kmnc",
+    ),
+    meta=("stellsym", "no_K"),
+)
 @dataclass(frozen=True)
 class BoozerRadialInterpolantFrozenState:
     """Immutable PPoly payload captured from a CPU ``BoozerRadialInterpolant``.
@@ -128,43 +164,6 @@ class BoozerRadialInterpolantFrozenState:
     # Meta-fields.
     stellsym: bool = True
     no_K: bool = False
-
-
-jax.tree_util.register_dataclass(
-    BoozerRadialInterpolantFrozenState,
-    data_fields=[
-        "xm",
-        "xn",
-        "psip",
-        "G",
-        "I",
-        "iota",
-        "dGds",
-        "dIds",
-        "diotads",
-        "bmnc",
-        "dbmncds",
-        "rmnc",
-        "drmncds",
-        "zmns",
-        "dzmnsds",
-        "numns",
-        "dnumnsds",
-        "bmns",
-        "dbmnsds",
-        "rmns",
-        "drmnsds",
-        "zmnc",
-        "dzmncds",
-        "numnc",
-        "dnumncds",
-        "mn_factor",
-        "d_mn_factor",
-        "kmns",
-        "kmnc",
-    ],
-    meta_fields=["stellsym", "no_K"],
-)
 
 
 @dataclass(frozen=True)

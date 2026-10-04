@@ -47,6 +47,8 @@ from simsopt_jax.solve.contracts import OptimizerResult
 from simsopt_jax.solve.driver import Driver
 from simsopt_jax.solve.scipy.contracts import ScipyLBFGSBOptions
 
+from simsopt_jax.pytree import pytree_dataclass
+
 # Official examples/1_Simple/stage_two_optimization_minimal.py policy.
 MINIMAL_STAGE_TWO_LBFGS_HISTORY: Final[int] = 300
 MINIMAL_STAGE_TWO_NATIVE_ITERATIONS: Final[int] = 300
@@ -63,6 +65,18 @@ MINIMAL_STAGE_TWO_OFFICIAL_DRIVER: Final[Driver] = Driver.SCIPY_LBFGSB
 MINIMAL_STAGE_TWO_DEVICE_DRIVER: Final[Driver] = Driver.SIMSOPT_LBFGSB
 
 
+@pytree_dataclass(
+    data=(
+        "parameters",
+        "objective",
+        "objective_gradient",
+        "squared_flux",
+        "length_penalty",
+        "maximum_normal_field",
+        "total_curve_length",
+    ),
+    meta=(),
+)
 @dataclass(frozen=True)
 class MinimalStageTwoState:
     """Stage-II observables kept on the selected JAX device."""
@@ -74,21 +88,6 @@ class MinimalStageTwoState:
     length_penalty: jax.Array
     maximum_normal_field: jax.Array
     total_curve_length: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    MinimalStageTwoState,
-    data_fields=[
-        "parameters",
-        "objective",
-        "objective_gradient",
-        "squared_flux",
-        "length_penalty",
-        "maximum_normal_field",
-        "total_curve_length",
-    ],
-    meta_fields=[],
-)
 
 
 @dataclass(frozen=True)

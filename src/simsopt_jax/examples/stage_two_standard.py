@@ -26,9 +26,23 @@ from .scalar_stage import (
     two_stage_optimizer_observables,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 _STAGE_TWO_LBFGS_HISTORY_SIZE = 300
 
 
+@pytree_dataclass(
+    data=(
+        "parameters",
+        "objective",
+        "objective_gradient",
+        "squared_flux",
+        "geometric_penalty",
+        "maximum_normal_field",
+        "total_curve_length",
+    ),
+    meta=(),
+)
 @dataclass(frozen=True)
 class StandardStageTwoState:
     """Objective, derivative, and physical diagnostics at one accepted state."""
@@ -40,21 +54,6 @@ class StandardStageTwoState:
     geometric_penalty: jax.Array
     maximum_normal_field: jax.Array
     total_curve_length: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    StandardStageTwoState,
-    data_fields=[
-        "parameters",
-        "objective",
-        "objective_gradient",
-        "squared_flux",
-        "geometric_penalty",
-        "maximum_normal_field",
-        "total_curve_length",
-    ],
-    meta_fields=[],
-)
 
 
 @dataclass(frozen=True)

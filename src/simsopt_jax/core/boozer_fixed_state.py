@@ -22,7 +22,10 @@ from .boozer_radial_interp import (
     inverse_fourier_transform_odd,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
 
+
+@pytree_dataclass(data=("breaks", "coeffs"), meta=())
 @dataclass(frozen=True)
 class PiecewisePolynomial1D:
     """Piecewise polynomial profile in SciPy ``PPoly`` coefficient order."""
@@ -31,13 +34,38 @@ class PiecewisePolynomial1D:
     coeffs: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    PiecewisePolynomial1D,
-    data_fields=["breaks", "coeffs"],
-    meta_fields=[],
+@pytree_dataclass(
+    data=(
+        "xm",
+        "xn",
+        "psip",
+        "G",
+        "I",
+        "iota",
+        "dGds",
+        "dIds",
+        "diotads",
+        "K_sin",
+        "K_cos",
+        "nu_sin",
+        "nu_cos",
+        "dnuds_sin",
+        "dnuds_cos",
+        "R_cos",
+        "R_sin",
+        "dRds_cos",
+        "dRds_sin",
+        "Z_sin",
+        "Z_cos",
+        "dZds_sin",
+        "dZds_cos",
+        "modB_cos",
+        "modB_sin",
+        "dmodBds_cos",
+        "dmodBds_sin",
+    ),
+    meta=("no_K",),
 )
-
-
 @dataclass(frozen=True)
 class BoozerRadialFixedState:
     """Frozen Boozer radial payload for private fixed-state evaluation.
@@ -78,11 +106,27 @@ class BoozerRadialFixedState:
     no_K: bool = False
 
 
-jax.tree_util.register_dataclass(
-    BoozerRadialFixedState,
-    data_fields=[
-        "xm",
-        "xn",
+@pytree_dataclass(
+    data=(
+        "K",
+        "dKdtheta",
+        "dKdzeta",
+        "nu",
+        "dnuds",
+        "dnudtheta",
+        "dnudzeta",
+        "R",
+        "dRds",
+        "dRdtheta",
+        "dRdzeta",
+        "Z",
+        "dZds",
+        "dZdtheta",
+        "dZdzeta",
+        "modB",
+        "dmodBds",
+        "dmodBdtheta",
+        "dmodBdzeta",
         "psip",
         "G",
         "I",
@@ -90,29 +134,9 @@ jax.tree_util.register_dataclass(
         "dGds",
         "dIds",
         "diotads",
-        "K_sin",
-        "K_cos",
-        "nu_sin",
-        "nu_cos",
-        "dnuds_sin",
-        "dnuds_cos",
-        "R_cos",
-        "R_sin",
-        "dRds_cos",
-        "dRds_sin",
-        "Z_sin",
-        "Z_cos",
-        "dZds_sin",
-        "dZds_cos",
-        "modB_cos",
-        "modB_sin",
-        "dmodBds_cos",
-        "dmodBds_sin",
-    ],
-    meta_fields=["no_K"],
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class BoozerRadialEvaluation:
     """Evaluated Boozer public quantities at fixed ``(s, theta, zeta)`` points."""
@@ -143,40 +167,6 @@ class BoozerRadialEvaluation:
     dGds: jax.Array
     dIds: jax.Array
     diotads: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    BoozerRadialEvaluation,
-    data_fields=[
-        "K",
-        "dKdtheta",
-        "dKdzeta",
-        "nu",
-        "dnuds",
-        "dnudtheta",
-        "dnudzeta",
-        "R",
-        "dRds",
-        "dRdtheta",
-        "dRdzeta",
-        "Z",
-        "dZds",
-        "dZdtheta",
-        "dZdzeta",
-        "modB",
-        "dmodBds",
-        "dmodBdtheta",
-        "dmodBdzeta",
-        "psip",
-        "G",
-        "I",
-        "iota",
-        "dGds",
-        "dIds",
-        "diotads",
-    ],
-    meta_fields=[],
-)
 
 
 def _poly_derivative_coeffs(coeffs: jax.Array, order: int) -> jax.Array:

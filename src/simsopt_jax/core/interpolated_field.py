@@ -44,6 +44,8 @@ from .regular_grid_interp import (
     device_spec_grid_kwargs as _device_spec_grid_kwargs,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 
 # ── Spec ─────────────────────────────────────────────────────────────
 
@@ -75,6 +77,7 @@ class InterpolatedFieldSpec:
     _device_GradAbsB: RegularGridInterpolant3DDeviceSpec
 
 
+@pytree_dataclass(data=("B", "GradAbsB"), meta=("nfp", "stellsym"))
 @dataclass(frozen=True)
 class InterpolatedFieldDeviceState:
     """Device-resident state for JAX tracing RHS evaluation."""
@@ -83,13 +86,6 @@ class InterpolatedFieldDeviceState:
     stellsym: bool
     B: RegularGridInterpolant3DDeviceSpec
     GradAbsB: RegularGridInterpolant3DDeviceSpec
-
-
-jax.tree_util.register_dataclass(
-    InterpolatedFieldDeviceState,
-    data_fields=["B", "GradAbsB"],
-    meta_fields=["nfp", "stellsym"],
-)
 
 
 def make_interpolated_field_spec(

@@ -55,6 +55,8 @@ import jax.numpy as jnp
 
 from ._math_utils import as_jax_float64 as _as_jax_float64
 
+from simsopt_jax.pytree import pytree_dataclass
+
 
 __all__ = [
     "ToroidalFieldSpec",
@@ -72,6 +74,7 @@ __all__ = [
 ]
 
 
+@pytree_dataclass(data=(), meta=("R0", "B0"))
 @dataclass(frozen=True)
 class ToroidalFieldSpec:
     """Immutable payload for a pure JAX ``ToroidalField`` evaluation.
@@ -88,13 +91,7 @@ class ToroidalFieldSpec:
     B0: float
 
 
-jax.tree_util.register_dataclass(
-    ToroidalFieldSpec,
-    data_fields=[],
-    meta_fields=["R0", "B0"],
-)
-
-
+@pytree_dataclass(data=(), meta=("R0", "B0", "q"))
 @dataclass(frozen=True)
 class PoloidalFieldSpec:
     """Immutable payload for a pure JAX ``PoloidalField`` evaluation.
@@ -114,13 +111,7 @@ class PoloidalFieldSpec:
     q: float
 
 
-jax.tree_util.register_dataclass(
-    PoloidalFieldSpec,
-    data_fields=[],
-    meta_fields=["R0", "B0", "q"],
-)
-
-
+@pytree_dataclass(data=(), meta=("B0", "gamma", "Z_m"))
 @dataclass(frozen=True)
 class MirrorModelSpec:
     """Immutable payload for a pure JAX ``MirrorModel`` (WHAM) evaluation.
@@ -138,13 +129,6 @@ class MirrorModelSpec:
     B0: float
     gamma: float
     Z_m: float
-
-
-jax.tree_util.register_dataclass(
-    MirrorModelSpec,
-    data_fields=[],
-    meta_fields=["B0", "gamma", "Z_m"],
-)
 
 
 def _validate_points(points: jax.Array) -> jax.Array:

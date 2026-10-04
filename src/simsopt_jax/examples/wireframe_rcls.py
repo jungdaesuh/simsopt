@@ -22,6 +22,8 @@ from simsopt_jax.core._math_utils import (
 )
 from simsopt_jax.core.wireframe import wireframe_B
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = (
     "WireframeRCLSDeviceResult",
     "WireframeRCLSState",
@@ -29,6 +31,18 @@ __all__ = (
 )
 
 
+@pytree_dataclass(
+    data=(
+        "currents",
+        "normal_field_residual",
+        "normal_objective",
+        "regularization_objective",
+        "total_objective",
+        "constraint_residual",
+        "constraint_max_abs",
+    ),
+    meta=(),
+)
 @dataclass(frozen=True)
 class WireframeRCLSState:
     """One complete device-resident RCLS diagnostic state."""
@@ -42,21 +56,18 @@ class WireframeRCLSState:
     constraint_max_abs: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    WireframeRCLSState,
-    data_fields=[
-        "currents",
-        "normal_field_residual",
-        "normal_objective",
-        "regularization_objective",
-        "total_objective",
-        "constraint_residual",
-        "constraint_max_abs",
-    ],
-    meta_fields=[],
+@pytree_dataclass(
+    data=(
+        "initial",
+        "final",
+        "magnetic_field",
+        "normal_field",
+        "mean_relative_normal_field",
+        "maximum_current",
+        "finite_currents",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class WireframeRCLSDeviceResult:
     """Final-state-only RCLS solve and full source-level field diagnostics."""
@@ -68,21 +79,6 @@ class WireframeRCLSDeviceResult:
     mean_relative_normal_field: jax.Array
     maximum_current: jax.Array
     finite_currents: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    WireframeRCLSDeviceResult,
-    data_fields=[
-        "initial",
-        "final",
-        "magnetic_field",
-        "normal_field",
-        "mean_relative_normal_field",
-        "maximum_current",
-        "finite_currents",
-    ],
-    meta_fields=[],
-)
 
 
 @jax.jit

@@ -35,6 +35,8 @@ import jax.numpy as jnp
 
 from ._math_utils import as_jax_float64 as _as_jax_float64
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "BoozerAnalyticFrozenState",
     "_eval_G",
@@ -60,6 +62,10 @@ __all__ = [
 # ----------------------------------------------------------------------
 
 
+@pytree_dataclass(
+    data=("etabar", "B0", "Bbar", "N", "G0", "I0", "G1", "I1", "K1", "iota0", "psi0"),
+    meta=(),
+)
 @dataclass(frozen=True)
 class BoozerAnalyticFrozenState:
     """Immutable scalar payload for ``BoozerAnalytic``-style evaluation.
@@ -81,25 +87,6 @@ class BoozerAnalyticFrozenState:
     K1: jax.Array
     iota0: jax.Array
     psi0: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    BoozerAnalyticFrozenState,
-    data_fields=[
-        "etabar",
-        "B0",
-        "Bbar",
-        "N",
-        "G0",
-        "I0",
-        "G1",
-        "I1",
-        "K1",
-        "iota0",
-        "psi0",
-    ],
-    meta_fields=[],
-)
 
 
 def freeze_boozer_analytic_state(

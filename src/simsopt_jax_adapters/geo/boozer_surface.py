@@ -188,6 +188,8 @@ from simsopt_jax.geo.optimizers.private import (
     _private_bfgs_result_to_optimize_result,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 _new_traceable_solve_state_token = make_state_token_factory()
 
 
@@ -915,12 +917,14 @@ def _maybe_boozer_result_record_type_for(values: Mapping[str, object]):
     return None
 
 
+@pytree_dataclass(data=("surface_dofs", "iota"), meta=())
 @dataclass(frozen=True)
 class _BoozerPenaltyOptimizerState:
     surface_dofs: jax.Array
     iota: jax.Array
 
 
+@pytree_dataclass(data=("surface_dofs", "iota", "G"), meta=())
 @dataclass(frozen=True)
 class _BoozerPenaltyOptimizerStateWithG:
     surface_dofs: jax.Array
@@ -928,19 +932,26 @@ class _BoozerPenaltyOptimizerStateWithG:
     G: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    _BoozerPenaltyOptimizerState,
-    data_fields=["surface_dofs", "iota"],
-    meta_fields=[],
+@pytree_dataclass(
+    data=(
+        "quadpoints_phi",
+        "quadpoints_theta",
+        "scatter_indices",
+        "exact_mask_indices",
+    ),
+    meta=(
+        "quadpoints_phi_signature",
+        "quadpoints_theta_signature",
+        "scatter_indices_signature",
+        "exact_mask_indices_signature",
+        "mpol",
+        "ntor",
+        "nfp",
+        "stellsym",
+        "surface_kind",
+        "clamped_dims",
+    ),
 )
-jax.tree_util.register_dataclass(
-    _BoozerPenaltyOptimizerStateWithG,
-    data_fields=["surface_dofs", "iota", "G"],
-    meta_fields=[],
-)
-
-
-@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class _BoozerSurfaceRuntimeState:
     """Immutable geometry representation shared by every Boozer solver lane.
@@ -960,19 +971,19 @@ class _BoozerSurfaceRuntimeState:
     quadpoints_theta: np.ndarray
     scatter_indices: np.ndarray | None
     exact_mask_indices: np.ndarray | None
-    quadpoints_phi_signature: tuple = field(metadata={"static": True})
-    quadpoints_theta_signature: tuple = field(metadata={"static": True})
-    scatter_indices_signature: tuple | None = field(metadata={"static": True})
-    exact_mask_indices_signature: tuple | None = field(metadata={"static": True})
-    mpol: int = field(metadata={"static": True})
-    ntor: int = field(metadata={"static": True})
-    nfp: int = field(metadata={"static": True})
-    stellsym: bool = field(metadata={"static": True})
-    surface_kind: str = field(metadata={"static": True})
-    clamped_dims: tuple[bool, bool, bool] = field(metadata={"static": True})
+    quadpoints_phi_signature: tuple
+    quadpoints_theta_signature: tuple
+    scatter_indices_signature: tuple | None
+    exact_mask_indices_signature: tuple | None
+    mpol: int
+    ntor: int
+    nfp: int
+    stellsym: bool
+    surface_kind: str
+    clamped_dims: tuple[bool, bool, bool]
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(data=("sdofs", "iota", "G"), meta=("weight_inv_modB",))
 @dataclass(frozen=True)
 class _BoozerSolvedRuntimeState:
     """Immutable solved-state summary for pure/runtime Boozer consumers.
@@ -985,10 +996,10 @@ class _BoozerSolvedRuntimeState:
     sdofs: jax.Array
     iota: jax.Array
     G: jax.Array | None
-    weight_inv_modB: bool = field(metadata={"static": True})
+    weight_inv_modB: bool
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(data=("gamma", "xphi", "xtheta"), meta=())
 @dataclass(frozen=True)
 class _BoozerPenaltyGeometry:
     gamma: jax.Array
@@ -1017,27 +1028,27 @@ def _place_runtime_tree(tree):
     return jax.tree_util.tree_map(place_array, tree)
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(data=("B",), meta=())
 @dataclass(frozen=True)
 class _BoozerForwardLocalFieldTerms:
     B: jax.Array
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(data=("B", "A"), meta=())
 @dataclass(frozen=True)
 class _BoozerForwardToroidalFluxFieldTerms:
     B: jax.Array
     A: jax.Array
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(data=("B", "dB_dX"), meta=())
 @dataclass(frozen=True)
 class _BoozerLocalFieldTerms:
     B: jax.Array
     dB_dX: jax.Array
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(data=("B", "dB_dX", "A", "dA_dX"), meta=())
 @dataclass(frozen=True)
 class _BoozerToroidalFluxFieldTerms:
     B: jax.Array
@@ -1046,7 +1057,20 @@ class _BoozerToroidalFluxFieldTerms:
     dA_dX: jax.Array
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(
+    data=(
+        "G_value",
+        "iota",
+        "B",
+        "dB_dX",
+        "xphi",
+        "xtheta",
+        "dx_ds",
+        "dxphi_ds",
+        "dxtheta_ds",
+    ),
+    meta=(),
+)
 @dataclass(frozen=True)
 class _BoozerPenaltyVectorizedInputs:
     """Boundary inputs to ``boozer_residual_scalar_and_grad_cpu_ordered``.
@@ -1069,19 +1093,61 @@ class _BoozerPenaltyVectorizedInputs:
     dxtheta_ds: jax.Array
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(
+    data=("iota", "G", "targetlabel", "constraint_weight"),
+    meta=("label_type", "phi_idx", "weight_inv_modB"),
+)
 @dataclass(frozen=True)
 class _BoozerPenaltyParams:
     iota: jax.Array
     G: jax.Array
     targetlabel: jax.Array
     constraint_weight: jax.Array
-    label_type: str = field(metadata={"static": True})
-    phi_idx: int = field(metadata={"static": True})
-    weight_inv_modB: bool = field(metadata={"static": True})
+    label_type: str
+    phi_idx: int
+    weight_inv_modB: bool
 
 
-@jax.tree_util.register_dataclass
+@pytree_dataclass(
+    data=(
+        "quadpoints_phi",
+        "quadpoints_theta",
+        "scatter_indices",
+        "surface_dofs",
+        "x",
+        "iota",
+        "G",
+        "field_terms",
+        "coil_set_spec",
+        "geometry",
+        "label_geometry",
+        "label_quadpoints_phi",
+        "label_quadpoints_theta",
+        "label_scatter_indices",
+    ),
+    meta=(
+        "mpol",
+        "ntor",
+        "nfp",
+        "stellsym",
+        "label_type",
+        "phi_idx",
+        "surface_kind",
+        "clamped_dims",
+        "label_mpol",
+        "label_ntor",
+        "label_nfp",
+        "label_stellsym",
+        "label_surface_kind",
+        "label_clamped_dims",
+        "constraint_weight",
+        "targetlabel",
+        "optimize_G",
+        "weight_inv_modB",
+        "coil_indices",
+        "solver_generation",
+    ),
+)
 @dataclass(frozen=True)
 class _BoozerLSGroupedVJPSnapshot:
     quadpoints_phi: jax.Array
@@ -1095,29 +1161,29 @@ class _BoozerLSGroupedVJPSnapshot:
     coil_set_spec: GroupedCoilSetSpec
     geometry: _BoozerPenaltyGeometry
     label_geometry: _BoozerPenaltyGeometry
-    mpol: int = field(metadata={"static": True})
-    ntor: int = field(metadata={"static": True})
-    nfp: int = field(metadata={"static": True})
-    stellsym: bool = field(metadata={"static": True})
-    label_type: str = field(metadata={"static": True})
-    phi_idx: int = field(metadata={"static": True})
-    surface_kind: str = field(metadata={"static": True})
-    clamped_dims: tuple[bool, bool, bool] = field(metadata={"static": True})
-    label_mpol: int = field(metadata={"static": True})
-    label_ntor: int = field(metadata={"static": True})
-    label_nfp: int = field(metadata={"static": True})
-    label_stellsym: bool = field(metadata={"static": True})
-    label_surface_kind: str = field(metadata={"static": True})
-    label_clamped_dims: tuple[bool, bool, bool] = field(metadata={"static": True})
+    mpol: int
+    ntor: int
+    nfp: int
+    stellsym: bool
+    label_type: str
+    phi_idx: int
+    surface_kind: str
+    clamped_dims: tuple[bool, bool, bool]
+    label_mpol: int
+    label_ntor: int
+    label_nfp: int
+    label_stellsym: bool
+    label_surface_kind: str
+    label_clamped_dims: tuple[bool, bool, bool]
     label_quadpoints_phi: jax.Array
     label_quadpoints_theta: jax.Array
     label_scatter_indices: jax.Array | None
-    constraint_weight: float = field(metadata={"static": True})
-    targetlabel: float = field(metadata={"static": True})
-    optimize_G: bool = field(metadata={"static": True})
-    weight_inv_modB: bool = field(metadata={"static": True})
-    coil_indices: tuple[tuple[int, ...], ...] = field(metadata={"static": True})
-    solver_generation: int = field(metadata={"static": True})
+    constraint_weight: float
+    targetlabel: float
+    optimize_G: bool
+    weight_inv_modB: bool
+    coil_indices: tuple[tuple[int, ...], ...]
+    solver_generation: int
 
 
 @dataclass(frozen=True)

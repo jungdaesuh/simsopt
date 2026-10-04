@@ -18,6 +18,8 @@ from simsopt_jax.core.framedcurve import (
     rotation_alphadash,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = (
     "StrainOptimizationDeviceResult",
     "StrainState",
@@ -25,6 +27,18 @@ __all__ = (
 )
 
 
+@pytree_dataclass(
+    data=(
+        "parameters",
+        "objective",
+        "gradient",
+        "torsional_strain",
+        "binormal_curvature_strain",
+        "maximum_torsional_strain",
+        "maximum_binormal_curvature_strain",
+    ),
+    meta=(),
+)
 @dataclass(frozen=True)
 class StrainState:
     """Objective, derivative, and physical strains at one rotation state."""
@@ -38,21 +52,18 @@ class StrainState:
     maximum_binormal_curvature_strain: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    StrainState,
-    data_fields=[
-        "parameters",
-        "objective",
-        "gradient",
-        "torsional_strain",
-        "binormal_curvature_strain",
-        "maximum_torsional_strain",
-        "maximum_binormal_curvature_strain",
-    ],
-    meta_fields=[],
+@pytree_dataclass(
+    data=(
+        "initial",
+        "final",
+        "success",
+        "status",
+        "iterations",
+        "function_evaluations",
+        "gradient_evaluations",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class StrainOptimizationDeviceResult:
     """Initial/final strain states and fixed-size device solver diagnostics."""
@@ -64,21 +75,6 @@ class StrainOptimizationDeviceResult:
     iterations: jax.Array
     function_evaluations: jax.Array
     gradient_evaluations: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    StrainOptimizationDeviceResult,
-    data_fields=[
-        "initial",
-        "final",
-        "success",
-        "status",
-        "iterations",
-        "function_evaluations",
-        "gradient_evaluations",
-    ],
-    meta_fields=[],
-)
 
 
 def _strain_values(

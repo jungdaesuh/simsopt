@@ -33,6 +33,8 @@ from .regular_grid_interp import (
     evaluate_batch_device,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "LevelsetClassifier",
     "make_levelset_classifier",
@@ -40,6 +42,7 @@ __all__ = [
 ]
 
 
+@pytree_dataclass(data=("device_spec",), meta=())
 @dataclass(frozen=True)
 class LevelsetClassifier:
     """Pytree callable carrying a device-resident signed-distance grid."""
@@ -83,13 +86,6 @@ class LevelsetClassifier:
         if was_single:
             return result[0]
         return result
-
-
-jax.tree_util.register_dataclass(
-    LevelsetClassifier,
-    data_fields=["device_spec"],
-    meta_fields=[],
-)
 
 
 def signed_distance_to_cartesian_classifier(

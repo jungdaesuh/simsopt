@@ -1674,6 +1674,66 @@ def test_gpmo_arbvec_backtracking_jax_record_every_jits_under_strict_transfer_gu
     assert np.all(np.isfinite(np.asarray(out)))
 
 
+# Historical constructor and leaf orders from 935f4762b.
+_GPMO_HISTORICAL_CORE_FIELDS = {
+    GPMOBaselineResult: (
+        "x",
+        "x_history",
+        "residual",
+        "residual_history",
+        "selected_dipoles",
+        "selected_components",
+        "selected_signs",
+    ),
+    GPMOMultiResult: (
+        "x",
+        "x_history",
+        "residual",
+        "residual_history",
+        "selected_seed_dipoles",
+        "selected_components",
+        "selected_signs",
+        "selected_groups",
+    ),
+    GPMOBacktrackingResult: (
+        "x",
+        "x_history",
+        "residual",
+        "residual_history",
+        "selected_dipoles",
+        "selected_components",
+        "selected_signs",
+        "num_nonzeros_history",
+        "removed_pair_count_history",
+        "done_history",
+    ),
+    GPMOArbVecResult: (
+        "x",
+        "x_history",
+        "residual",
+        "residual_history",
+        "selected_dipoles",
+        "selected_vector_indices",
+        "selected_signs",
+    ),
+    GPMOArbVecBacktrackingResult: (
+        "x",
+        "x_history",
+        "residual",
+        "residual_history",
+        "selected_dipoles",
+        "selected_vector_indices",
+        "selected_signs",
+        "num_nonzeros_history",
+        "removed_pair_count_history",
+        "done_history",
+        "initial_x",
+        "initial_residual",
+        "initial_num_nonzero",
+    ),
+}
+
+
 def test_gpmo_public_result_wrapper_preserves_pytree_leaf_order() -> None:
     core = CoreGPMOBaselineResult(
         x=jnp.arange(6.0).reshape(2, 3),
@@ -1695,7 +1755,7 @@ def test_gpmo_public_result_wrapper_preserves_pytree_leaf_order() -> None:
     assert tuple(field.name for field in fields(GPMOBaselineResult)) == (
         "m",
         "m_history",
-        *GPMOBaselineResult._legacy_core_fields,
+        *_GPMO_HISTORICAL_CORE_FIELDS[GPMOBaselineResult],
     )
     for result_type in (
         GPMOMultiResult,
@@ -1706,13 +1766,13 @@ def test_gpmo_public_result_wrapper_preserves_pytree_leaf_order() -> None:
         assert tuple(field.name for field in fields(result_type)) == (
             "m",
             "m_history",
-            *result_type._legacy_core_fields,
+            *_GPMO_HISTORICAL_CORE_FIELDS[result_type],
         )
     result_dict = asdict(result)
     assert tuple(result_dict) == (
         "m",
         "m_history",
-        *GPMOBaselineResult._legacy_core_fields,
+        *_GPMO_HISTORICAL_CORE_FIELDS[GPMOBaselineResult],
     )
     assert "core_result" not in result_dict
     assert "_core_result" not in result_dict
@@ -1822,6 +1882,20 @@ def test_gpmo_public_result_preserves_legacy_constructors_and_state() -> None:
 
     for result_type, legacy_state, representative_attr in cases:
         result = result_type(**legacy_state)
+        historical_fields = _GPMO_HISTORICAL_CORE_FIELDS[result_type]
+        assert result_type._legacy_core_fields == historical_fields
+        legacy_values = tuple(legacy_state[name] for name in historical_fields)
+        positional = result_type(m, m_history, *legacy_values)
+        leaves, treedef = jax.tree.flatten(result)
+        expected_leaves = (m, m_history, *legacy_values)
+        assert len(leaves) == len(expected_leaves)
+        for leaf, expected in zip(leaves, expected_leaves, strict=True):
+            np.testing.assert_array_equal(np.asarray(leaf), np.asarray(expected))
+        for candidate in (positional, jax.tree.unflatten(treedef, leaves)):
+            candidate_leaves, candidate_treedef = jax.tree.flatten(candidate)
+            assert candidate_treedef == treedef
+            for leaf, expected in zip(candidate_leaves, expected_leaves, strict=True):
+                np.testing.assert_array_equal(np.asarray(leaf), np.asarray(expected))
         restored = result_type.__new__(result_type)
         restored.__setstate__(legacy_state)
         round_tripped = pickle.loads(pickle.dumps(result))

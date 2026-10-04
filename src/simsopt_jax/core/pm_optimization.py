@@ -81,6 +81,8 @@ from ._math_utils import (
     as_jax_int32 as _as_jax_int32,
 )
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "GPMOArbVecBacktrackingResult",
     "GPMOArbVecBacktrackingSpec",
@@ -201,6 +203,7 @@ def _validate_positive_scalar(name: str, value) -> None:
         raise ValueError(f"{name} must be positive; got {host_value.item()}.")
 
 
+@pytree_dataclass(data=("m_maxima", "m_proxy", "nu", "reg_l2", "alpha"), meta=())
 @dataclass(frozen=True)
 class PMOptimizationSpec:
     """Immutable payload for the JAX MwPGP solver.
@@ -237,13 +240,7 @@ class PMOptimizationSpec:
         _validate_positive_scalar("alpha", self.alpha)
 
 
-jax.tree_util.register_dataclass(
-    PMOptimizationSpec,
-    data_fields=["m_maxima", "m_proxy", "nu", "reg_l2", "alpha"],
-    meta_fields=[],
-)
-
-
+@pytree_dataclass(data=("m_maxima", "reg_l2"), meta=("single_direction",))
 @dataclass(frozen=True)
 class GPMOBaselineSpec:
     """Immutable payload for the JAX baseline GPMO solver.
@@ -266,13 +263,10 @@ class GPMOBaselineSpec:
     single_direction: int = -1
 
 
-jax.tree_util.register_dataclass(
-    GPMOBaselineSpec,
-    data_fields=["m_maxima", "reg_l2"],
-    meta_fields=["single_direction"],
+@pytree_dataclass(
+    data=("m_maxima", "reg_l2", "dipole_grid_xyz"),
+    meta=("single_direction", "Nadjacent"),
 )
-
-
 @dataclass(frozen=True)
 class GPMOMultiSpec:
     """Immutable payload for the JAX multi-neighbour GPMO solver.
@@ -289,13 +283,10 @@ class GPMOMultiSpec:
     Nadjacent: int = 7
 
 
-jax.tree_util.register_dataclass(
-    GPMOMultiSpec,
-    data_fields=["m_maxima", "reg_l2", "dipole_grid_xyz"],
-    meta_fields=["single_direction", "Nadjacent"],
+@pytree_dataclass(
+    data=("m_maxima", "reg_l2", "dipole_grid_xyz"),
+    meta=("single_direction", "Nadjacent", "backtracking", "max_nMagnets"),
 )
-
-
 @dataclass(frozen=True)
 class GPMOBacktrackingSpec:
     """Immutable payload for the JAX backtracking GPMO solver.
@@ -315,13 +306,7 @@ class GPMOBacktrackingSpec:
     max_nMagnets: int = 1000
 
 
-jax.tree_util.register_dataclass(
-    GPMOBacktrackingSpec,
-    data_fields=["m_maxima", "reg_l2", "dipole_grid_xyz"],
-    meta_fields=["single_direction", "Nadjacent", "backtracking", "max_nMagnets"],
-)
-
-
+@pytree_dataclass(data=("m_maxima", "reg_l2", "pol_vectors"), meta=())
 @dataclass(frozen=True)
 class GPMOArbVecSpec:
     """Immutable payload for the JAX arbitrary-vector GPMO solver."""
@@ -331,13 +316,10 @@ class GPMOArbVecSpec:
     pol_vectors: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    GPMOArbVecSpec,
-    data_fields=["m_maxima", "reg_l2", "pol_vectors"],
-    meta_fields=[],
+@pytree_dataclass(
+    data=("m_maxima", "reg_l2", "dipole_grid_xyz", "pol_vectors"),
+    meta=("Nadjacent", "backtracking", "thresh_angle", "max_nMagnets"),
 )
-
-
 @dataclass(frozen=True)
 class GPMOArbVecBacktrackingSpec:
     """Immutable payload for the JAX arbitrary-vector backtracking GPMO solver.
@@ -362,13 +344,18 @@ class GPMOArbVecBacktrackingSpec:
     max_nMagnets: int = 1000
 
 
-jax.tree_util.register_dataclass(
-    GPMOArbVecBacktrackingSpec,
-    data_fields=["m_maxima", "reg_l2", "dipole_grid_xyz", "pol_vectors"],
-    meta_fields=["Nadjacent", "backtracking", "thresh_angle", "max_nMagnets"],
+@pytree_dataclass(
+    data=(
+        "x",
+        "x_history",
+        "residual",
+        "residual_history",
+        "selected_dipoles",
+        "selected_components",
+        "selected_signs",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class GPMOBaselineResult:
     """Result from ``gpmo_baseline_solve`` in normalized coordinates."""
@@ -382,21 +369,18 @@ class GPMOBaselineResult:
     selected_signs: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    GPMOBaselineResult,
-    data_fields=[
+@pytree_dataclass(
+    data=(
         "x",
         "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
-        "selected_components",
+        "selected_vector_indices",
         "selected_signs",
-    ],
-    meta_fields=[],
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class GPMOArbVecResult:
     """Result from ``gpmo_arbvec_solve`` in normalized coordinates."""
@@ -410,21 +394,19 @@ class GPMOArbVecResult:
     selected_signs: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    GPMOArbVecResult,
-    data_fields=[
+@pytree_dataclass(
+    data=(
         "x",
         "x_history",
         "residual",
         "residual_history",
-        "selected_dipoles",
-        "selected_vector_indices",
+        "selected_seed_dipoles",
+        "selected_components",
         "selected_signs",
-    ],
-    meta_fields=[],
+        "selected_groups",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class GPMOMultiResult:
     """Result from ``gpmo_multi_solve`` in normalized coordinates."""
@@ -439,22 +421,21 @@ class GPMOMultiResult:
     selected_groups: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    GPMOMultiResult,
-    data_fields=[
+@pytree_dataclass(
+    data=(
         "x",
         "x_history",
         "residual",
         "residual_history",
-        "selected_seed_dipoles",
+        "selected_dipoles",
         "selected_components",
         "selected_signs",
-        "selected_groups",
-    ],
-    meta_fields=[],
+        "num_nonzeros_history",
+        "removed_pair_count_history",
+        "done_history",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class GPMOBacktrackingResult:
     """Result from ``gpmo_backtracking_solve`` in normalized coordinates."""
@@ -471,24 +452,24 @@ class GPMOBacktrackingResult:
     done_history: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    GPMOBacktrackingResult,
-    data_fields=[
+@pytree_dataclass(
+    data=(
         "x",
         "x_history",
         "residual",
         "residual_history",
         "selected_dipoles",
-        "selected_components",
+        "selected_vector_indices",
         "selected_signs",
         "num_nonzeros_history",
         "removed_pair_count_history",
         "done_history",
-    ],
-    meta_fields=[],
+        "initial_x",
+        "initial_residual",
+        "initial_num_nonzero",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class GPMOArbVecBacktrackingResult:
     """Result from ``gpmo_arbvec_backtracking_solve`` in normalized coordinates.
@@ -514,27 +495,6 @@ class GPMOArbVecBacktrackingResult:
     initial_x: jax.Array
     initial_residual: jax.Array
     initial_num_nonzero: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    GPMOArbVecBacktrackingResult,
-    data_fields=[
-        "x",
-        "x_history",
-        "residual",
-        "residual_history",
-        "selected_dipoles",
-        "selected_vector_indices",
-        "selected_signs",
-        "num_nonzeros_history",
-        "removed_pair_count_history",
-        "done_history",
-        "initial_x",
-        "initial_residual",
-        "initial_num_nonzero",
-    ],
-    meta_fields=[],
-)
 
 
 def _validate_gpmo_static_args(K: int, single_direction: int, ndipoles: int) -> None:

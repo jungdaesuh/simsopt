@@ -11,7 +11,10 @@ from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core.objectives_flux import fixed_surface_flux_integral_from_B
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec
 
+from simsopt_jax.pytree import pytree_dataclass
 
+
+@pytree_dataclass(data=("gamma", "gammadash"), meta=())
 @dataclass(frozen=True, slots=True)
 class StochasticCoilPerturbations:
     """Fixed sampled perturbations for every final coil and quadrature point."""
@@ -26,13 +29,6 @@ class StochasticCoilPerturbations:
             raise ValueError("gammadash must have the same shape as gamma")
         if self.gamma.shape[0] < 1:
             raise ValueError("at least one stochastic sample is required")
-
-
-jax.tree_util.register_dataclass(
-    StochasticCoilPerturbations,
-    data_fields=("gamma", "gammadash"),
-    meta_fields=(),
-)
 
 
 def _validate_sample_tile(sample_tile: int | None, sample_count: int) -> None:

@@ -15,6 +15,8 @@ from ._math_utils import as_runtime_array as _as_runtime_array
 from ._math_utils import has_tracer_leaf as _has_tracer_leaf
 from ._math_utils import runtime_init_scalar as _runtime_init_scalar
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY",
     "WireframeGSCOLiveParams",
@@ -40,6 +42,20 @@ __all__ = [
 WIREFRAME_GSCO_MULTISTEP_STAGE_CAPACITY = 64
 
 
+@pytree_dataclass(
+    data=(
+        "x",
+        "loop_count",
+        "history_length",
+        "iter_history",
+        "curr_history",
+        "loop_history",
+        "f_B_history",
+        "f_S_history",
+        "f_history",
+    ),
+    meta=(),
+)
 @dataclass(frozen=True)
 class WireframeGSCOResult:
     """Immutable fixed-shape result from the JAX GSCO kernel."""
@@ -55,23 +71,21 @@ class WireframeGSCOResult:
     f_history: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    WireframeGSCOResult,
-    data_fields=[
-        "x",
-        "loop_count",
-        "history_length",
-        "iter_history",
-        "curr_history",
-        "loop_history",
-        "f_B_history",
-        "f_S_history",
-        "f_history",
-    ],
-    meta_fields=[],
+@pytree_dataclass(
+    data=(
+        "A",
+        "loops",
+        "free_loops",
+        "segments",
+        "connections",
+        "default_current",
+        "max_current",
+        "lambda_s",
+        "tol",
+        "loop_columns",
+    ),
+    meta=("max_loop_count", "no_crossing", "no_new_coils", "match_current"),
 )
-
-
 @dataclass(frozen=True)
 class WireframeGSCOLiveParams:
     """Fixed-shape GSCO arrays and static loop rules."""
@@ -92,24 +106,26 @@ class WireframeGSCOLiveParams:
     loop_columns: jax.Array | None = None
 
 
-jax.tree_util.register_dataclass(
-    WireframeGSCOLiveParams,
-    data_fields=[
-        "A",
-        "loops",
-        "free_loops",
-        "segments",
-        "connections",
-        "default_current",
-        "max_current",
-        "lambda_s",
-        "tol",
-        "loop_columns",
-    ],
-    meta_fields=["max_loop_count", "no_crossing", "no_new_coils", "match_current"],
+@pytree_dataclass(
+    data=(
+        "x",
+        "loop_count",
+        "residual",
+        "two_f_b",
+        "two_f_s",
+        "two_f",
+        "opt_ind_prev",
+        "history_length",
+        "done",
+        "iter_history",
+        "curr_history",
+        "loop_history",
+        "f_B_history",
+        "f_S_history",
+        "f_history",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class WireframeGSCOLiveState:
     """Fixed-shape restart state for one GSCO live loop."""
@@ -131,29 +147,23 @@ class WireframeGSCOLiveState:
     f_history: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    WireframeGSCOLiveState,
-    data_fields=[
+@pytree_dataclass(
+    data=(
         "x",
+        "previous_x",
         "loop_count",
-        "residual",
-        "two_f_b",
-        "two_f_s",
-        "two_f",
-        "opt_ind_prev",
-        "history_length",
+        "enclosed_segment_mask",
+        "enclosed_segment_mask_before_final",
+        "current_fraction",
+        "has_previous",
         "done",
-        "iter_history",
-        "curr_history",
-        "loop_history",
-        "f_B_history",
-        "f_S_history",
-        "f_history",
-    ],
-    meta_fields=[],
+        "nonfinal_steps",
+        "final_adjustment_run",
+        "stage_objectives",
+        "stage_iterations",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class WireframeGSCOMultistepState:
     """Fixed-shape state for the GSCO multistep orchestration loop.
@@ -179,26 +189,21 @@ class WireframeGSCOMultistepState:
     stage_iterations: jax.Array
 
 
-jax.tree_util.register_dataclass(
-    WireframeGSCOMultistepState,
-    data_fields=[
+@pytree_dataclass(
+    data=(
         "x",
-        "previous_x",
         "loop_count",
         "enclosed_segment_mask",
-        "enclosed_segment_mask_before_final",
-        "current_fraction",
-        "has_previous",
-        "done",
+        "enclosed_segment_mask_before_final_adjustment",
         "nonfinal_steps",
         "final_adjustment_run",
+        "final_objective",
         "stage_objectives",
         "stage_iterations",
-    ],
-    meta_fields=[],
+        "stage_count",
+    ),
+    meta=(),
 )
-
-
 @dataclass(frozen=True)
 class WireframeGSCOMultistepResult:
     """Final fixed-shape result from GSCO multistep orchestration.
@@ -217,24 +222,6 @@ class WireframeGSCOMultistepResult:
     stage_objectives: jax.Array
     stage_iterations: jax.Array
     stage_count: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    WireframeGSCOMultistepResult,
-    data_fields=[
-        "x",
-        "loop_count",
-        "enclosed_segment_mask",
-        "enclosed_segment_mask_before_final_adjustment",
-        "nonfinal_steps",
-        "final_adjustment_run",
-        "final_objective",
-        "stage_objectives",
-        "stage_iterations",
-        "stage_count",
-    ],
-    meta_fields=[],
-)
 
 
 GSCOStopRule = Callable[[WireframeGSCOLiveState], jax.Array]
