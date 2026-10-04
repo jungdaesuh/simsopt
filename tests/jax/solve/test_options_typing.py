@@ -239,5 +239,6 @@ def test_scipy_bfgs_rejects_invalid_norm_before_evaluation(norm):
 def test_scipy_lbfgsb_rejects_nonboolean_restart_policy_before_evaluation():
     with pytest.raises(ValueError, match="restart_after_nonwolfe_stop must be a bool"):
         _dispatch_with_unevaluated_objective(
-            Driver.SCIPY_LBFGSB, ScipyLBFGSBOptions(restart_after_nonwolfe_stop=1)
+            Driver.SCIPY_LBFGSB,
+            replace(ScipyLBFGSBOptions(), **{"restart_after_nonwolfe_stop": 1}),
         )

@@ -252,7 +252,11 @@ def stage_two_geometric_penalty(
             config.length_weight,
         )
 
-    if "individual_length_weight" in config.active_terms:
+    # Preparation requires the target whenever this term is active.
+    if (
+        "individual_length_weight" in config.active_terms
+        and config.individual_length_target is not None
+    ):
         individual_lengths = jnp.mean(
             jnp.linalg.norm(base_gammadash, axis=2),
             axis=1,
