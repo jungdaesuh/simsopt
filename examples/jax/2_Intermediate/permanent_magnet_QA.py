@@ -122,7 +122,7 @@ def _build_grid(
     )
     initial = jax.device_put(np.asarray(field.x, dtype=np.float64))
     problem = TraceableScalarProblem(objective_fn=objective, x=initial)
-    serial_solve_jax(
+    result = serial_solve_jax(
         problem,
         driver=scalar_example_driver(),
         max_steps=max_steps,
@@ -131,7 +131,7 @@ def _build_grid(
         require_success=False,
     )
 
-    accepted_coils = field.coil_set_spec_from_dofs(problem.x)
+    accepted_coils = field.coil_set_spec_from_dofs(result.x)
     normal_field_device = jnp.sum(
         jnp.reshape(
             grouped_biot_savart_B_from_spec(surface_gamma, accepted_coils),

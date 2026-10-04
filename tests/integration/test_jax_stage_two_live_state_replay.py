@@ -572,11 +572,11 @@ def _finitebuild_jax_state(
     prepared: PreparedFiniteBuildStageTwo, device, parameters: np.ndarray, scale: float
 ):
     problem = prepared.problem
-    problem.set_objective_parameter(
-        jax.device_put(np.asarray(scale, dtype=np.float64), device)
-    )
     value, gradient = jax.device_get(
-        problem.value_and_grad(jax.device_put(parameters, device))
+        problem.value_and_grad(
+            jax.device_put(parameters, device),
+            objective_parameter=jax.device_put(np.asarray(scale, dtype=np.float64), device),
+        )
     )
     packed = np.asarray(
         jax.device_get(prepared.diagnostics(jax.device_put(parameters, device))),

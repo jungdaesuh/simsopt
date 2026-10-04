@@ -184,12 +184,12 @@ def solve(
         rtol=FINITE_BUILD_TOLERANCE,
         atol=FINITE_BUILD_TOLERANCE,
     )
-    solution_device = jax.block_until_ready(prepared.problem.x)
-    prepared.problem.set_objective_parameter(
-        jax.device_put(np.asarray(PUBLISHED_OBJECTIVE_SCALE, dtype=np.float64))
-    )
+    solution_device = jax.block_until_ready(result.x)
     _final_objective_device, gradient_device = prepared.problem.value_and_grad(
-        solution_device
+        solution_device,
+        objective_parameter=jax.device_put(
+            np.asarray(PUBLISHED_OBJECTIVE_SCALE, dtype=np.float64)
+        ),
     )
     final_values_device = jax.block_until_ready(prepared.diagnostics(solution_device))
     solution = np.asarray(jax.device_get(solution_device), dtype=np.float64)

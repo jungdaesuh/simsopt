@@ -279,10 +279,8 @@ def test_concurrent_strict_lane_solves_share_one_guard_wrapper(
     one memoized wrapper answers both threads and owns the compiled solvers —
     rather than proving the lock.  The lock itself is correct by inspection
     against its sibling, ``_cached_private_solver``'s double-checked install.
-    Sharing one problem across the two threads deliberately exceeds the
-    class's one-solve-at-a-time contract: every assertion here is
-    race-insensitive (wrapper identity and cache-key identity; shapes and
-    dtypes never vary), and no solve result is read.
+    Both threads share the frozen prepared program and supply independent
+    solve state; the assertions check wrapper and cache-key identity.
     """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SIMSOPT_TARGET_LANE_STRICT", "1")
@@ -301,7 +299,6 @@ def test_concurrent_strict_lane_solves_share_one_guard_wrapper(
 
     monkeypatch.setattr(optimizer, "wraps", synchronized_wraps)
 
-    problem.x = _strict_lane_start()
 
     def solve_once():
         guard = wrap_strict_target_lane_value_and_grad(objective)
@@ -332,7 +329,6 @@ def test_concurrent_strict_lane_solves_share_one_guard_wrapper(
     compiled = dict(getattr(installed, _PRIVATE_SOLVER_CACHE_ATTR))
     assert compiled, "the concurrent solves left no compiled solver behind"
 
-    problem.x = _strict_lane_start()
     serial_solve_jax(
         problem,
         driver=Driver.SIMSOPT_BFGS,

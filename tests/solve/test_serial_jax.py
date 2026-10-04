@@ -11,6 +11,7 @@ import inspect
 import os
 import subprocess
 import sys
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import jax
@@ -34,6 +35,7 @@ from simsopt_jax.solve.serial import (
     TraceableArrayFunction,
     TraceableEqualityConstrainedProblem,
     TraceableLeastSquaresProblem,
+    TraceableParametricScalarProblem,
     TraceableScalarProblem,
     constrained_serial_solve_jax,
     least_squares_serial_solve_jax,
@@ -110,6 +112,49 @@ def test_constrained_serial_solve_jax_fails_until_custom_contract_exists():
         "no SIMSOPT-owned constrained solver",
     ):
         constrained_serial_solve_jax(problem)
+
+
+@pytest.mark.parametrize(
+    "problem_type",
+    [
+        TraceableArrayFunction,
+        TraceableLeastSquaresProblem,
+        TraceableScalarProblem,
+        TraceableParametricScalarProblem,
+        TraceableEqualityConstrainedProblem,
+    ],
+)
+def test_prepared_programs_are_frozen_host_records(problem_type) -> None:
+    initial = jnp.zeros(2, dtype=jnp.float64)
+    if problem_type is TraceableParametricScalarProblem:
+        problem = problem_type(lambda x, target: jnp.sum((x - target) ** 2), initial, initial)
+    elif problem_type is TraceableEqualityConstrainedProblem:
+        problem = problem_type(lambda x: jnp.sum(x**2), lambda x: x, initial)
+    else:
+        problem = problem_type(lambda x: jnp.sum(x**2), initial)
+
+    with pytest.raises(FrozenInstanceError):
+        problem.x = jnp.ones_like(initial)
+    assert jax.tree.leaves(problem) == [problem]
+
+
+@pytest.mark.parametrize("least_squares_problem", [False, True])
+def test_serial_solve_uses_explicit_decision_state_without_mutation(
+    tmp_path, monkeypatch, least_squares_problem
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    initial = jnp.asarray([2.0, -3.0], dtype=jnp.float64)
+    optimum = jnp.ones_like(initial)
+    if least_squares_problem:
+        problem = TraceableLeastSquaresProblem(lambda x: x - 1.0, initial)
+        result = least_squares_serial_solve_jax(problem, x=optimum, max_steps=8)
+    else:
+        problem = TraceableScalarProblem(lambda x: jnp.sum((x - 1.0) ** 2), initial)
+        result = serial_solve_jax(problem, x=optimum, max_steps=8)
+
+    np.testing.assert_array_equal(result.x, optimum)
+    np.testing.assert_array_equal(problem.x, initial)
+    assert result.nit == 0
 
 
 def _weighted_quadratic_residual(x):
@@ -189,18 +234,18 @@ def test_least_squares_serial_solve_jax_matches_host_quadratic_problem():
             atol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_atol"]),
         )
         np.testing.assert_allclose(
-            np.asarray(jax_prob.x),
+            np.asarray(result.x),
             expected_x,
             rtol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_rtol"]),
             atol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_atol"]),
         )
         assert host_prob.objective() <= 1e-16
-        assert float(jax_prob.objective()) <= 1e-16
+        assert float(jax_prob.objective(result.x)) <= 1e-16
         assert result.driver == Driver.SIMSOPT_LM_QR
         assert isinstance(result, OptimizerResult)
         assert isinstance(result.options_used, SimsoptLMQROptions)
         np.testing.assert_allclose(result.x, expected_x)
-        expected_residual = np.asarray(jax_prob.residuals())
+        expected_residual = np.asarray(jax_prob.residuals(result.x))
         expected_gradient = np.diag(np.sqrt([1.0, 2.0, 3.0])) @ expected_residual
         np.testing.assert_allclose(result.residual, expected_residual)
         np.testing.assert_allclose(result.jac, expected_gradient)
@@ -211,7 +256,7 @@ def test_least_squares_serial_solve_jax_matches_host_quadratic_problem():
         np.testing.assert_allclose(
             result.hessian, expected_jacobian.T @ expected_jacobian
         )
-        assert result.fun == pytest.approx(0.5 * float(jax_prob.objective()))
+        assert result.fun == pytest.approx(0.5 * float(jax_prob.objective(result.x)))
         assert result.success
         assert result.status in (0, 1, 2)
         assert 0 < result.nit <= 64
@@ -255,13 +300,13 @@ def test_serial_solve_jax_matches_host_general_quadratic_problem():
             atol=float(_WHOLE_SOLVE_TOLS["whole_solve_value_atol"]),
         )
         np.testing.assert_allclose(
-            np.asarray(jax_prob.x),
+            np.asarray(result.x),
             expected_x,
             rtol=float(_DIRECT_KERNEL_TOLS["rtol"]),
             atol=float(_DIRECT_KERNEL_TOLS["atol"]),
         )
         assert host_prob(host_prob.x) <= 1e-12
-        assert float(jax_prob.objective()) <= 1e-16
+        assert float(jax_prob.objective(result.x)) <= 1e-16
         assert result.driver == Driver.SIMSOPT_BFGS
         assert isinstance(result, OptimizerResult)
         assert isinstance(result.options_used, SimsoptBFGSOptions)
@@ -270,7 +315,7 @@ def test_serial_solve_jax_matches_host_general_quadratic_problem():
         assert result.residual is None
         assert result.residual_jacobian is None
         assert result.hessian is None
-        assert result.fun == pytest.approx(float(jax_prob.objective()))
+        assert result.fun == pytest.approx(float(jax_prob.objective(result.x)))
         assert result.success
         assert result.status == 0
         assert 0 < result.nit <= 64
@@ -317,7 +362,7 @@ def test_serial_solve_jax_supports_simsopt_owned_limited_memory_driver():
             max_steps=64,
         )
 
-        np.testing.assert_allclose(problem.x, np.array([1.5, -0.5]), atol=1.0e-10)
+        np.testing.assert_allclose(result.x, np.array([1.5, -0.5]), atol=1.0e-10)
         assert result.driver == Driver.SIMSOPT_LBFGSB
         assert isinstance(result.options_used, SimsoptLBFGSBOptions)
         assert result.success is True
@@ -356,7 +401,7 @@ def test_serial_solve_jax_can_publish_an_iteration_limited_state() -> None:
 
     assert result.status == 1
     assert result.success is False
-    assert float(problem.objective()) < initial_objective
+    assert float(problem.objective(result.x)) < initial_objective
 
 
 def test_serial_solve_jax_forwards_relative_step_tolerance():
@@ -421,7 +466,7 @@ def test_least_squares_serial_solve_jax_honors_requested_gradient_tolerance(
     assert isinstance(result.options_used, options_type)
     assert result.options_used.gtol == requested_tolerance
     assert result.nit > 0
-    assert abs(float(problem.x[0])) < requested_tolerance
+    assert abs(float(result.x[0])) < requested_tolerance
 
 
 @pytest.mark.parametrize(
@@ -463,8 +508,8 @@ from simsopt_jax.solve.serial import TraceableScalarProblem, serial_solve_jax
 device = jax.devices()[1]
 initial = jax.device_put(np.asarray([2.0], dtype=np.float64), device)
 problem = TraceableScalarProblem(lambda x: jnp.sum((x - 1.0) ** 2), initial)
-serial_solve_jax(problem, max_steps=16)
-assert problem.x.sharding == initial.sharding
+result = serial_solve_jax(problem, max_steps=16)
+assert result.x.sharding == initial.sharding
 """
     environment = dict(os.environ)
     environment.update(

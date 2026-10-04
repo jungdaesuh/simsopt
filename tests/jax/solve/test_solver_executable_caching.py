@@ -5,7 +5,7 @@ stable device callable in ``__post_init__``.  Marking that callable as cacheable
 lets :func:`_cached_private_solver` keep the compiled solver alive across
 solves.  These tests pin the reuse, the numerical equivalence with an unmarked
 callable, per-problem isolation, and the parametric operand contract that makes
-reuse safe when ``set_objective_parameter`` changes the parameter.
+reuse safe when an explicit objective parameter changes between solves.
 
 Every case runs with ``SIMSOPT_TARGET_LANE_STRICT`` off and on.  Under strict
 purity the target lane hands the solver a guard wrapper instead of the problem's
@@ -17,21 +17,28 @@ from __future__ import annotations
 
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
+from concurrent.futures import ThreadPoolExecutor
+
 import jax
 import jax.numpy as jnp
 import pytest
-from simsopt_jax.geo.optimizers._shared import _CACHEABLE_VALUE_AND_GRAD_ATTR
+from simsopt_jax.geo.optimizers._shared import (
+    _CACHEABLE_VALUE_AND_GRAD_ATTR,
+    _VALUE_AND_GRAD_CACHE_OWNER_ATTR,
+)
 from simsopt_jax.geo.optimizers.optimizer import _STRICT_TARGET_LANE_WRAPPER_ATTR
 from simsopt_jax.geo.optimizers.private._common import (
     _PRIVATE_SOLVER_CACHE_ATTR,
     private_optimizer_runtime_is_supported,
 )
 from simsopt_jax.solve.driver import Driver
+from simsopt_jax.solve.dispatch import minimize
 from simsopt_jax.solve.serial import (
     TraceableParametricScalarProblem,
     TraceableScalarProblem,
     serial_solve_jax,
 )
+from simsopt_jax.solve.simsopt.contracts import SimsoptBFGSOptions, SimsoptLBFGSBOptions
 
 pytestmark = [
     pytest.mark.private_optimizer_runtime,
@@ -73,8 +80,7 @@ def _start() -> jax.Array:
 
 
 def _solve(problem, driver: Driver):
-    problem.x = _start()
-    return serial_solve_jax(problem, driver=driver, max_steps=64)
+    return serial_solve_jax(problem, x=_start(), driver=driver, max_steps=64)
 
 
 def _solver_cache_owner(problem, *, strict_target_lane: bool):
@@ -88,7 +94,8 @@ def _solver_cache_owner(problem, *, strict_target_lane: bool):
         f"{_STRICT_TARGET_LANE_ENV} is set and the objective is cacheable, so "
         "both parameters exercise a different cache owner"
     )
-    return objective if guard_wrapper is None else guard_wrapper
+    owner = objective if guard_wrapper is None else guard_wrapper
+    return getattr(owner, _VALUE_AND_GRAD_CACHE_OWNER_ATTR, owner)
 
 
 def _compiled_solvers(problem, *, strict_target_lane: bool) -> dict[object, object]:
@@ -214,11 +221,14 @@ def test_changed_objective_parameter_reaches_the_cached_solver(
     )
     serial_solve_jax(problem, driver=driver, max_steps=64, require_success=False)
     after_first = _compiled_solvers(problem, strict_target_lane=strict_target_lane)
+    first_specializations = {
+        cache_key: solver._cache_size() for cache_key, solver in after_first.items()
+    }
 
-    problem.x = start
-    problem.set_objective_parameter(second_target)
     reused = serial_solve_jax(
         problem,
+        x=start,
+        objective_parameter=second_target,
         driver=driver,
         max_steps=64,
         require_success=False,
@@ -240,8 +250,45 @@ def test_changed_objective_parameter_reaches_the_cached_solver(
     assert after_second.keys() == after_first.keys()
     for cache_key, solver in after_first.items():
         assert after_second[cache_key] is solver
+        assert solver._cache_size() == first_specializations[cache_key]
     assert bool(jnp.all(reused.x == fresh.x)), (
         "the cached solver answered with the previous objective_parameter"
     )
     assert reused.fun == fresh.fun
     assert reused.nit == fresh.nit
+
+
+@pytest.mark.parametrize("driver", _SCALAR_DRIVERS)
+def test_concurrent_parameter_bindings_share_programs_without_sharing_state(
+    driver: Driver, strict_target_lane: bool
+) -> None:
+    start = jnp.asarray([0.3, 0.2], dtype=jnp.float64)
+    targets = (
+        jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+        jnp.asarray([-3.0, 4.0], dtype=jnp.float64),
+    )
+    problem = TraceableParametricScalarProblem(_parametric_objective, targets[0], start)
+    options = (
+        SimsoptBFGSOptions(maxiter=64)
+        if driver is Driver.SIMSOPT_BFGS
+        else SimsoptLBFGSBOptions(maxiter=64, maxfun=1280)
+    )
+
+    def solve(target):
+        return minimize(
+            problem.solver_value_and_grad(target), start, driver=driver, options=options
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        concurrent = tuple(executor.map(solve, targets))
+
+    for target, actual in zip(targets, concurrent, strict=True):
+        fresh = TraceableParametricScalarProblem(_parametric_objective, target, start)
+        expected = minimize(
+            fresh._solver_value_and_grad_fn, start, driver=driver, options=options
+        )
+        assert bool(jnp.all(actual.x == expected.x))
+        assert actual.fun == expected.fun
+        assert actual.nit == expected.nit
+    assert jnp.array_equal(problem.x, start)
+    assert jnp.array_equal(problem.objective_parameter, targets[0])

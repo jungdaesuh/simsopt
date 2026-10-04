@@ -266,7 +266,7 @@ def solve(
         maxcor=configuration.lbfgs_history_size,
         tol=configuration.rtol,
     )
-    solution_device = problem.x
+    solution_device = result.x
     final_objective_device, final_gradient_device = problem.value_and_grad(
         solution_device
     )

@@ -108,9 +108,10 @@ acceptance, or parity comparisons. CPU control is not a GPU-resident optimizer;
 performance claims must state whether they time the JAX region or the complete
 workflow.
 
-The serial wrappers publish `problem.x` and their bounded log only after a
-successful solve; a failed result raises and leaves caller-owned state
-unchanged.
+The serial wrappers return endpoints in `OptimizerResult.x` and write their
+bounded log after a successful solve. Prepared problems remain immutable; pass
+`x=result.x` explicitly to start a subsequent solve from an endpoint. A failed
+result raises unless the scalar caller selects `require_success=False`.
 
 Applications can use the same typed selection before importing JAX-heavy
 modules:

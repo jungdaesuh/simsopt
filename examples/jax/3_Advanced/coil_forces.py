@@ -221,8 +221,10 @@ def _run_stage(
     *,
     driver: Driver,
     max_steps: int,
+    x: jax.Array | None = None,
+    objective_parameter: jax.Array | None = None,
 ) -> OptimizerResult:
-    """One stage from ``problem.x``, at this script's native-matched policy.
+    """One stage from explicit state, at this script's native-matched policy.
 
     ``Driver.SIMSOPT_BFGS`` is not an L-BFGS-B route -- it keeps no curvature
     history and bounds its own line search instead -- so it is driven here.
@@ -232,6 +234,8 @@ def _run_stage(
     if driver == Driver.SIMSOPT_BFGS:
         return serial_solve_jax(
             problem,
+            x=x,
+            objective_parameter=objective_parameter,
             driver=driver,
             max_steps=max_steps,
             line_search_max_steps=40,
@@ -241,6 +245,8 @@ def _run_stage(
         )
     return solve_scalar_stage(
         problem,
+        x=x,
+        objective_parameter=objective_parameter,
         driver=driver,
         max_steps=max_steps,
         maxcor=NATIVE_HISTORY_SIZE,
@@ -300,13 +306,21 @@ def solve(
     taylor_errors_device = _taylor_errors(problem, initial_device, direction_device)
     minimize_region_started = perf_counter()
     first_result = _run_stage(problem, driver=STAGE_DRIVER, max_steps=max_steps)
-    problem.set_objective_parameter(
-        jax.device_put(np.asarray(SECOND_LENGTH_WEIGHT, dtype=np.float64), device)
+    second_length_weight = jax.device_put(
+        np.asarray(SECOND_LENGTH_WEIGHT, dtype=np.float64), device
     )
-    second_result = _run_stage(problem, driver=STAGE_DRIVER, max_steps=max_steps)
+    second_result = _run_stage(
+        problem,
+        driver=STAGE_DRIVER,
+        max_steps=max_steps,
+        x=first_result.x,
+        objective_parameter=second_length_weight,
+    )
     two_stage_minimize_seconds = perf_counter() - minimize_region_started
-    solution_device = jax.block_until_ready(problem.x)
-    final_objective_device, gradient_device = problem.value_and_grad(solution_device)
+    solution_device = jax.block_until_ready(second_result.x)
+    final_objective_device, gradient_device = problem.value_and_grad(
+        solution_device, objective_parameter=second_length_weight
+    )
     # Read before the host boundary: the endpoint objective is an output of the
     # compiled program, so its device is where the optimization actually ran.
     execution_device = str(final_objective_device.device)

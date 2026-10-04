@@ -1,15 +1,14 @@
 """Backend-neutral serial JAX solves for explicit immutable problems.
 
-"Immutable" describes problem structure: the traced objective graph and the
-dtypes and shapes it was built for are fixed when a problem is constructed. The
-published ``x`` and ``objective_parameter`` state is deliberately mutable
-between solves.
+Prepared problems are frozen host-side program holders. Decision vectors and
+objective parameters are explicit inputs; solve endpoints live in
+``OptimizerResult.x`` rather than mutating the prepared problem.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from time import time
 
@@ -52,7 +51,7 @@ __all__ = [
 ]
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceableArrayFunction:
     """Array-valued JAX function with explicit device-resident closure state."""
 
@@ -75,15 +74,15 @@ class TraceableArrayFunction:
         def evaluate(current_x):
             return compiled_function(current_x, function_consts)
 
-        self.x = x
-        self._compiled_function = evaluate
+        object.__setattr__(self, "x", x)
+        object.__setattr__(self, "_compiled_function", evaluate)
 
     def __call__(self, x: jax.Array | None = None) -> jax.Array:
         """Evaluate the compiled function on the active device."""
         return self._compiled_function(self.x if x is None else x)
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceableLeastSquaresProblem:
     """Least-squares residual with explicit JAX state and no host graph wrapping."""
 
@@ -115,9 +114,9 @@ class TraceableLeastSquaresProblem:
         def solver_residual(current_x, *current_consts):
             return compiled_residual(current_x, current_consts)
 
-        self.x = x
-        self._solver_residual_fn = solver_residual
-        self._solver_residual_args = residual_consts
+        object.__setattr__(self, "x", x)
+        object.__setattr__(self, "_solver_residual_fn", solver_residual)
+        object.__setattr__(self, "_solver_residual_args", residual_consts)
 
     @property
     def dof_size(self) -> int:
@@ -134,7 +133,7 @@ class TraceableLeastSquaresProblem:
         return jnp.sum(residuals * residuals)
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceableScalarProblem:
     """Scalar objective with explicit JAX state and no host graph wrapping."""
 
@@ -169,9 +168,11 @@ class TraceableScalarProblem:
             value, _gradient = solver_value_and_grad(current_x)
             return value
 
-        self._solver_objective_fn = solver_objective
-        self._solver_value_and_grad_fn = mark_cacheable_jit_value_and_grad(
-            solver_value_and_grad
+        object.__setattr__(self, "_solver_objective_fn", solver_objective)
+        object.__setattr__(
+            self,
+            "_solver_value_and_grad_fn",
+            mark_cacheable_jit_value_and_grad(solver_value_and_grad),
         )
 
     @property
@@ -190,14 +191,17 @@ class TraceableScalarProblem:
         return jnp.asarray(value), jnp.asarray(gradient)
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceableParametricScalarProblem:
-    """Scalar objective whose fixed-shape device parameter can change between solves."""
+    """Prepared scalar program with explicit fixed-shape device parameters."""
 
     objective_fn: Callable[[jax.Array, jax.Array], jax.Array]
     objective_parameter: jax.Array
     x: jax.Array
     _solver_value_and_grad_fn: ValueAndGradFn = field(init=False, repr=False)
+    _parameter_value_and_grad_fn: Callable[
+        [jax.Array, jax.Array], tuple[jax.Array, jax.Array]
+    ] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         objective_fn = self.objective_fn
@@ -230,31 +234,44 @@ class TraceableParametricScalarProblem:
         )
         compiled_value_and_grad = jax.jit(converted_value_and_grad)
 
-        def solver_value_and_grad(current_x):
+        def parameter_value_and_grad(current_x, current_parameter):
             return compiled_value_and_grad(
                 current_x,
-                self.objective_parameter,
+                current_parameter,
                 value_and_grad_consts,
             )
 
-        self.x = x
-        self.objective_parameter = objective_parameter
-        # ``set_objective_parameter`` mutates state this callable reads, but the
-        # solver re-hoists it into the compiled program's closure operands on
-        # every solve, so a cached executable still sees the current parameter.
-        # The read is not synchronized against writes: one problem instance
-        # serves one solve at a time, and ``set_objective_parameter`` must not be
-        # called while another thread is solving this problem.
-        self._solver_value_and_grad_fn = mark_cacheable_jit_value_and_grad(
-            solver_value_and_grad
+        def solver_value_and_grad(current_x):
+            return parameter_value_and_grad(current_x, objective_parameter)
+
+        object.__setattr__(
+            self, "_parameter_value_and_grad_fn", parameter_value_and_grad
+        )
+
+        object.__setattr__(self, "x", x)
+        object.__setattr__(self, "objective_parameter", objective_parameter)
+        object.__setattr__(
+            self,
+            "_solver_value_and_grad_fn",
+            mark_cacheable_jit_value_and_grad(
+                solver_value_and_grad, cache_owner=parameter_value_and_grad
+            ),
         )
 
     @property
     def dof_size(self) -> int:
         return int(jnp.ravel(self.x).size)
 
-    def set_objective_parameter(self, objective_parameter: jax.Array) -> None:
-        """Replace the parameter without changing its compiled shape or dtype."""
+    def solver_value_and_grad(
+        self, objective_parameter: jax.Array | None = None
+    ) -> ValueAndGradFn:
+        """Bind an immutable parameter while sharing this program's solver cache.
+
+        The solver hoists the bound arrays into explicit operands on every
+        solve. Shared executables therefore see each call's parameter.
+        """
+        if objective_parameter is None:
+            return self._solver_value_and_grad_fn
         parameter = jnp.asarray(objective_parameter)
         if parameter.shape != self.objective_parameter.shape:
             raise ValueError(
@@ -266,26 +283,44 @@ class TraceableParametricScalarProblem:
                 "objective_parameter dtype cannot change between solves: "
                 f"expected {self.objective_parameter.dtype}, got {parameter.dtype}."
             )
-        self.objective_parameter = explicit_device_array(
+        parameter = explicit_device_array(
             parameter,
             dtype=parameter.dtype,
             reference=self.x,
         )
+        parameter_value_and_grad = self._parameter_value_and_grad_fn
 
-    def objective(self, x: jax.Array | None = None) -> jax.Array:
-        value, _gradient = self.value_and_grad(x)
+        def value_and_grad(current_x):
+            return parameter_value_and_grad(current_x, parameter)
+
+        return mark_cacheable_jit_value_and_grad(
+            value_and_grad, cache_owner=self._parameter_value_and_grad_fn
+        )
+
+    def objective(
+        self,
+        x: jax.Array | None = None,
+        *,
+        objective_parameter: jax.Array | None = None,
+    ) -> jax.Array:
+        value, _gradient = self.value_and_grad(
+            x, objective_parameter=objective_parameter
+        )
         return value
 
     def value_and_grad(
         self,
         x: jax.Array | None = None,
+        *,
+        objective_parameter: jax.Array | None = None,
     ) -> tuple[jax.Array, jax.Array]:
-        """Evaluate the compiled objective at the current device parameter."""
-        value, gradient = self._solver_value_and_grad_fn(self.x if x is None else x)
+        """Evaluate with the supplied device parameter, or the prepared default."""
+        value_and_grad = self.solver_value_and_grad(objective_parameter)
+        value, gradient = value_and_grad(self.x if x is None else x)
         return jnp.asarray(value), jnp.asarray(gradient)
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceableEqualityConstrainedProblem:
     """Equality-constrained state awaiting a SIMSOPT-owned JAX solver."""
 
@@ -455,13 +490,14 @@ def _require_success(result: OptimizerResult, *, operation: str) -> None:
 def least_squares_serial_solve_jax(
     prob: TraceableLeastSquaresProblem,
     *,
+    x: jax.Array | None = None,
     driver: Driver = Driver.SIMSOPT_LM_QR,
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
     max_steps: int = 256,
     **kwargs,
 ) -> OptimizerResult:
-    """Solve on the active JAX device and publish the completed state."""
+    """Solve from explicit decision state and return the completed endpoint."""
     if not isinstance(prob, TraceableLeastSquaresProblem):
         raise TypeError(
             "least_squares_serial_solve_jax requires TraceableLeastSquaresProblem."
@@ -470,7 +506,7 @@ def least_squares_serial_solve_jax(
         unsupported = ", ".join(sorted(kwargs))
         raise TypeError(f"Unsupported JAX least-squares options: {unsupported}")
 
-    initial_x = jnp.asarray(prob.x)
+    initial_x = jnp.asarray(prob.x if x is None else x)
     initial_objective = prob.objective(initial_x)
     start_time = time()
     result = least_squares(
@@ -501,13 +537,14 @@ def least_squares_serial_solve_jax(
         final_objective=final_objective,
         start_time=start_time,
     )
-    prob.x = final_x
-    return result
+    return replace(result, x=final_x)
 
 
 def serial_solve_jax(
     prob: TraceableScalarProblem | TraceableParametricScalarProblem,
     *,
+    x: jax.Array | None = None,
+    objective_parameter: jax.Array | None = None,
     driver: Driver = Driver.SIMSOPT_BFGS,
     rtol: float = 1.0e-8,
     atol: float = 1.0e-8,
@@ -517,7 +554,7 @@ def serial_solve_jax(
     require_success: bool = True,
     **kwargs,
 ) -> OptimizerResult:
-    """Minimize on device and optionally publish a nonconverged bounded state."""
+    """Minimize from explicit state; return a possibly nonconverged endpoint."""
     if not isinstance(
         prob,
         TraceableScalarProblem | TraceableParametricScalarProblem,
@@ -542,11 +579,19 @@ def serial_solve_jax(
         if line_search_max_steps < 1:
             raise ValueError("line_search_max_steps must be positive")
 
-    initial_x = jnp.asarray(prob.x)
-    initial_objective = prob.objective(initial_x)
+    initial_x = jnp.asarray(prob.x if x is None else x)
+    if isinstance(prob, TraceableParametricScalarProblem):
+        value_and_grad = prob.solver_value_and_grad(objective_parameter)
+    else:
+        if objective_parameter is not None:
+            raise TypeError(
+                "objective_parameter requires TraceableParametricScalarProblem."
+            )
+        value_and_grad = prob._solver_value_and_grad_fn
+    initial_objective, _ = value_and_grad(initial_x)
     start_time = time()
     result = minimize(
-        prob._solver_value_and_grad_fn,
+        value_and_grad,
         initial_x,
         driver=driver,
         options=_scalar_options(
@@ -565,7 +610,7 @@ def serial_solve_jax(
         dtype=result.x.dtype,
         reference=initial_x,
     )
-    final_objective = prob.objective(final_x)
+    final_objective, _ = value_and_grad(final_x)
     _write_bounded_objective_log(
         problem_type="general",
         ndofs=prob.dof_size,
@@ -575,8 +620,7 @@ def serial_solve_jax(
         final_objective=final_objective,
         start_time=start_time,
     )
-    prob.x = final_x
-    return result
+    return replace(result, x=final_x)
 
 
 def constrained_serial_solve_jax(

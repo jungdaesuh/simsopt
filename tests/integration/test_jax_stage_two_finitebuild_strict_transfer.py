@@ -190,7 +190,7 @@ def test_finite_build_workflow_observes_no_step_on_the_host(
     prepared: PreparedFiniteBuildStageTwo,
 ) -> None:
     solve_result, transfer_calls = _audited_solve(prepared, max_steps=SHORT_BUDGET)
-    solution = np.asarray(jax.device_get(prepared.problem.x), dtype=np.float64)
+    solution = np.asarray(jax.device_get(solve_result.x), dtype=np.float64)
 
     assert transfer_calls.get("final_result", 0) > 0, (
         "the transfer audit recorded no endpoint read-back, so it observed "

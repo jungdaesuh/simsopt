@@ -338,12 +338,16 @@ def _run_jax(initial: np.ndarray, direction: np.ndarray) -> tuple[_LaneRun, Driv
             field, flux_spec, geometry.config
         ),
         initial_parameters=initial_parameters,
-        objective_scale=put(PUBLISHED_OBJECTIVE_SCALE),
+        objective_scale=put(OBJECTIVE_SCALE),
     )
     problem = prepared.problem
 
-    def state(prefix: str, parameters: jax.Array) -> dict[str, np.ndarray]:
-        objective_value, gradient = problem.value_and_grad(parameters)
+    def state(
+        prefix: str, parameters: jax.Array, objective_parameter: jax.Array
+    ) -> dict[str, np.ndarray]:
+        objective_value, gradient = problem.value_and_grad(
+            parameters, objective_parameter=objective_parameter
+        )
         published = jax.device_get(
             (parameters, objective_value, gradient, prepared.diagnostics(parameters))
         )
@@ -360,15 +364,23 @@ def _run_jax(initial: np.ndarray, direction: np.ndarray) -> tuple[_LaneRun, Driv
             coil_lengths=packed[len(FINITE_BUILD_DIAGNOSTIC_FIELDS) :],
         )
 
-    initial_values = state("initial", initial_parameters)
+    initial_values = state("initial", initial_parameters, put(PUBLISHED_OBJECTIVE_SCALE))
     direction_device = put(direction)
-    problem.set_objective_parameter(put(OBJECTIVE_SCALE))
-    _scaled_value, scaled_gradient = problem.value_and_grad(initial_parameters)
+    solve_scale = put(OBJECTIVE_SCALE)
+    _scaled_value, scaled_gradient = problem.value_and_grad(
+        initial_parameters, objective_parameter=solve_scale
+    )
     directional_derivative = jnp.vdot(scaled_gradient, direction_device)
 
     def taylor_error(epsilon: jax.Array) -> jax.Array:
-        plus = problem.objective(initial_parameters + epsilon * direction_device)
-        minus = problem.objective(initial_parameters - epsilon * direction_device)
+        plus = problem.objective(
+            initial_parameters + epsilon * direction_device,
+            objective_parameter=solve_scale,
+        )
+        minus = problem.objective(
+            initial_parameters - epsilon * direction_device,
+            objective_parameter=solve_scale,
+        )
         return (plus - minus) / (epsilon + epsilon) - directional_derivative
 
     taylor_errors = jax.vmap(taylor_error)(put(TAYLOR_EPSILONS))
@@ -379,11 +391,10 @@ def _run_jax(initial: np.ndarray, direction: np.ndarray) -> tuple[_LaneRun, Driv
         rtol=FINITE_BUILD_TOLERANCE,
         atol=FINITE_BUILD_TOLERANCE,
     )
-    problem.set_objective_parameter(put(PUBLISHED_OBJECTIVE_SCALE))
     run = _LaneRun(
         values={
             **initial_values,
-            **state("final", problem.x),
+            **state("final", result.x, put(PUBLISHED_OBJECTIVE_SCALE)),
             "taylor:errors": np.asarray(
                 jax.device_get(taylor_errors), dtype=np.float64
             ),

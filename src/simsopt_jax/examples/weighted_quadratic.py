@@ -101,9 +101,9 @@ def solve_weighted_quadratic(
         rtol=rtol,
         atol=atol,
     )
-    final_parameters = problem.x
-    final_residuals = problem.residuals()
-    final_objective = problem.objective()
+    final_parameters = optimizer.x
+    final_residuals = problem.residuals(final_parameters)
+    final_objective = problem.objective(final_parameters)
     final_gradient = weighted_quadratic_gradient(jacobian, final_residuals)
     completed = block_until_ready(
         (

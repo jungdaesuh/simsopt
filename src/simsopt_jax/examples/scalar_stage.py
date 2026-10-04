@@ -9,8 +9,10 @@ coordinated edit across three examples.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Final
+
+import jax
 
 from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.solve.contracts import OptimizerResult
@@ -28,12 +30,14 @@ def solve_scalar_stage(
     problem: TraceableScalarProblem | TraceableParametricScalarProblem,
     *,
     driver: Driver,
+    x: jax.Array | None = None,
+    objective_parameter: jax.Array | None = None,
     max_steps: int,
     maxcor: int,
     tol: float,
     maxls: int = ScipyLBFGSBOptions.maxls,
 ) -> OptimizerResult:
-    """One L-BFGS-B stage from ``problem.x``; the endpoint becomes ``problem.x``.
+    """One L-BFGS-B stage from explicit state; the endpoint is ``result.x``.
 
     ``Driver.SCIPY_LBFGSB`` is the routine the native scripts use, driven over
     the device objective and named on exactly what a native call names --
@@ -46,6 +50,8 @@ def solve_scalar_stage(
     if driver == Driver.SIMSOPT_LBFGSB:
         return serial_solve_jax(
             problem,
+            x=x,
+            objective_parameter=objective_parameter,
             driver=driver,
             max_steps=max_steps,
             maxcor=maxcor,
@@ -58,14 +64,22 @@ def solve_scalar_stage(
             "solve_scalar_stage supports Driver.SCIPY_LBFGSB or "
             f"Driver.SIMSOPT_LBFGSB, got {driver!r}"
         )
-    initial = problem.x
+    initial = problem.x if x is None else x
+    if isinstance(problem, TraceableParametricScalarProblem):
+        value_and_grad = problem.solver_value_and_grad(objective_parameter)
+    else:
+        if objective_parameter is not None:
+            raise TypeError(
+                "objective_parameter requires TraceableParametricScalarProblem."
+            )
+        value_and_grad = problem._solver_value_and_grad_fn
     # The cache-marked compiled callable ``serial_solve_jax`` drives internally,
     # so the two routes differ in the optimizer and in nothing else.  Neither
     # the whole-objective evaluations that function takes around its solve nor
     # its bounded-objective log write happen on this route, which keeps host
     # round trips out of the region ``wallclock_s`` brackets.
     result = dispatch_minimize(
-        problem._solver_value_and_grad_fn,
+        value_and_grad,
         initial,
         driver=driver,
         options=ScipyLBFGSBOptions.native_matched(
@@ -75,8 +89,10 @@ def solve_scalar_stage(
             maxls=maxls,
         ),
     )
-    problem.x = explicit_device_array(result.x, dtype=initial.dtype, reference=initial)
-    return result
+    return replace(
+        result,
+        x=explicit_device_array(result.x, dtype=initial.dtype, reference=initial),
+    )
 
 
 #: Every observable :func:`stage_optimizer_observables` publishes, in

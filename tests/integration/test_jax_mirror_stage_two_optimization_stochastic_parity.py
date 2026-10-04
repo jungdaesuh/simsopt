@@ -419,7 +419,7 @@ def _jax(shared: _SharedInput) -> _Lane:
         maxcor=configuration.lbfgs_history_size,
         tol=configuration.rtol,
     )
-    final_parameters = problem.x
+    final_parameters = optimizer.x
     final_objective, final_gradient = problem.value_and_grad(final_parameters)
 
     def diagnostics(parameters):

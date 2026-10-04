@@ -464,7 +464,16 @@ def _assert_complete_construction(name: str, source: str) -> None:
                 constant_values["FIRST_LENGTH_WEIGHT"],
             ),
             (
-                _call(script_solve, "problem.set_objective_parameter").args[0],
+                next(
+                    statement.value
+                    for statement in script_solve.body
+                    if isinstance(statement, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name)
+                        and target.id == "second_length_weight"
+                        for target in statement.targets
+                    )
+                ),
                 constant_values["SECOND_LENGTH_WEIGHT"],
             ),
         ]
@@ -604,8 +613,9 @@ def _force_state():
 def test_finitebuild_publishes_the_fresh_unscaled_gradient_bit_for_bit() -> None:
     parameters, problem, objective = _finite_build_state()
     problem.value_and_grad(parameters)
-    problem.set_objective_parameter(_device_scalar(1.0))
-    published_value, published_gradient = problem.value_and_grad(parameters)
+    published_value, published_gradient = problem.value_and_grad(
+        parameters, objective_parameter=_device_scalar(1.0)
+    )
 
     reference = TraceableScalarProblem(objective, parameters)
     reference_value, reference_gradient = reference.value_and_grad(parameters)

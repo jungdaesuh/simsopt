@@ -90,9 +90,9 @@ def solve_finite_build_stage_two(
                 "the official provider is scipy.optimize.minimize(..., tol=...), "
                 "which sets ftol and gtol together, so rtol and atol must be equal"
             )
-        prepared.problem.x = prepared.initial_parameters
         return solve_scalar_stage(
             prepared.problem,
+            x=prepared.initial_parameters,
             driver=driver,
             max_steps=max_steps,
             maxcor=FINITE_BUILD_LBFGS_HISTORY,

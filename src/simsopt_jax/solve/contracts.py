@@ -124,7 +124,7 @@ class LbfgsbRestartEvent:
 
 @dataclass(frozen=True)
 class OptimizerResult:
-    x: np.ndarray
+    x: ArrayResult
     fun: float
     jac: np.ndarray | None
     nit: int

@@ -332,9 +332,9 @@ def _solve_minimal_stage_two_optimizer(
                 "the official provider is scipy.optimize.minimize(..., tol=...), "
                 "which sets ftol and gtol together, so rtol and atol must be equal"
             )
-        prepared.problem.x = prepared.initial_parameters
         optimizer = solve_scalar_stage(
             prepared.problem,
+            x=prepared.initial_parameters,
             driver=driver,
             max_steps=max_steps,
             maxcor=MINIMAL_STAGE_TWO_LBFGS_HISTORY,
@@ -351,7 +351,7 @@ def _solve_minimal_stage_two_optimizer(
             max_function_evaluations=MINIMAL_STAGE_TWO_MAX_FUNCTION_EVALUATIONS,
             lbfgs_line_search_max_steps=MINIMAL_STAGE_TWO_MAX_LINE_SEARCH_STEPS,
         )
-    return optimizer, prepared.problem.x
+    return optimizer, optimizer.x
 
 
 def solve_minimal_stage_two(

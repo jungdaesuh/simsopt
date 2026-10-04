@@ -215,9 +215,10 @@ def test_scipy_route_reports_the_minimize_call_as_its_wall_clock() -> None:
     assert result.driver == Driver.SCIPY_LBFGSB
 
 
-def test_scipy_route_publishes_the_endpoint_back_onto_the_problem() -> None:
-    """The stage endpoint becomes ``problem.x`` so the next stage starts there."""
+def test_scipy_route_returns_endpoint_without_mutating_the_problem() -> None:
+    """The next stage can use ``result.x`` while the prepared start stays fixed."""
     problem, result = _quadratic_stage(32)
 
     assert isinstance(problem.x, jax.Array)
-    assert float(jnp.max(jnp.abs(problem.x - jnp.asarray(result.x)))) == 0.0
+    assert float(jnp.max(jnp.abs(problem.x - jnp.asarray(result.x)))) > 0.0
+    assert float(jnp.max(jnp.abs(result.x))) < 1.0e-10

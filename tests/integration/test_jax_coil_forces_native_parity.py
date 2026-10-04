@@ -384,8 +384,12 @@ def _run_jax(initial: np.ndarray, direction: np.ndarray) -> _LaneRun:
     )
     state_program = TraceableArrayFunction(state_diagnostics, initial_parameters)
 
-    def state(prefix: str, parameters: jax.Array) -> dict[str, np.ndarray]:
-        objective_value, gradient = problem.value_and_grad(parameters)
+    def state(
+        prefix: str, parameters: jax.Array, objective_parameter: jax.Array | None = None
+    ) -> dict[str, np.ndarray]:
+        objective_value, gradient = problem.value_and_grad(
+            parameters, objective_parameter=objective_parameter
+        )
         published = jax.device_get(
             (parameters, objective_value, gradient, state_program(parameters))
         )
@@ -401,11 +405,13 @@ def _run_jax(initial: np.ndarray, direction: np.ndarray) -> _LaneRun:
             total_curve_length=float(scalars[3]),
         )
 
-    def solve():
+    def solve(x=None, objective_parameter=None):
         # The delivered mirror's route (``STAGE_DRIVER``): SciPy's own L-BFGS-B
         # over the device objective, named on what the official call names.
         return solve_scalar_stage(
             problem,
+            x=x,
+            objective_parameter=objective_parameter,
             driver=Driver.SCIPY_LBFGSB,
             max_steps=MAX_STEPS,
             maxcor=min(MAX_STEPS, 300),
@@ -423,10 +429,10 @@ def _run_jax(initial: np.ndarray, direction: np.ndarray) -> _LaneRun:
 
     taylor_errors = jax.vmap(taylor_error)(put(TAYLOR_EPSILONS))
     first = solve()
-    first_values = state("first", problem.x)
-    problem.set_objective_parameter(put(SECOND_LENGTH_WEIGHT))
-    second = solve()
-    final_values = state("final", problem.x)
+    first_values = state("first", first.x)
+    second_weight = put(SECOND_LENGTH_WEIGHT)
+    second = solve(first.x, second_weight)
+    final_values = state("final", second.x, second_weight)
     return _LaneRun(
         values={
             **initial_values,

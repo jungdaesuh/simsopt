@@ -23,6 +23,7 @@ from simsopt_jax.geo.optimizers._evaluation_provider import (
 from simsopt_jax.runtime.host_boundary import host_array
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.10.0"
+_VALUE_AND_GRAD_CACHE_OWNER_ATTR = "_simsopt_value_and_grad_cache_owner"
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
 _CACHEABLE_LINEAR_OPERATOR_ATTR = "_simsopt_cache_jit_linear_operator"
@@ -52,8 +53,14 @@ def _x64_enabled():
     return bool(jax.config.jax_enable_x64)
 
 
-def mark_cacheable_jit_value_and_grad(fun):
-    """Mark a mutable callable for shared value/gradient and operator JIT caches."""
+def mark_cacheable_jit_value_and_grad(fun, *, cache_owner: object | None = None):
+    """Mark a callable as cacheable, optionally sharing one prepared program.
+
+    A shared owner is valid only for the same graph and operand signatures;
+    each solve must hoist its own bound arrays into explicit operands.
+    """
+    if cache_owner is not None:
+        setattr(fun, _VALUE_AND_GRAD_CACHE_OWNER_ATTR, cache_owner)
     setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
     setattr(fun, _CACHEABLE_LINEAR_OPERATOR_ATTR, True)
     return fun

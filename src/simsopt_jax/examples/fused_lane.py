@@ -13,7 +13,7 @@ value no caller chose.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import jax
 
@@ -35,7 +35,7 @@ from simsopt_jax.solve.simsopt.contracts import (
 class PreparedFusedLaneObjective:
     """Prepared solve programs with stable identity across repeated solves.
 
-    The record freezes its references only; solving mutates ``problem.x``.
+    Solve endpoints are returned separately from the frozen prepared program.
     Reusing one prepared record across repeated solves reuses the compiled
     fused executable — constructing a fresh record per solve retraces.
 
@@ -84,8 +84,8 @@ def prepare_fused_lane_objective(
     """Build only the traceable scaled problem, for lanes with no diagnostics.
 
     ``objective_scale`` is the parametric solve scale; callers republish at a
-    different scale through ``problem.set_objective_parameter`` without
-    retracing.
+    different scale through ``problem.value_and_grad(objective_parameter=...)``
+    without retracing.
     """
     return PreparedFusedLaneObjective(
         problem=_prepared_problem(objective_fn, initial_parameters, objective_scale),
@@ -103,8 +103,8 @@ def prepare_fused_lane_solve(
     """Build the traceable scaled problem and diagnostics programs once.
 
     ``objective_scale`` is the parametric solve scale; callers republish at a
-    different scale through ``problem.set_objective_parameter`` without
-    retracing.
+    different scale through ``problem.value_and_grad(objective_parameter=...)``
+    without retracing.
     """
     return PreparedFusedLaneSolve(
         problem=_prepared_problem(objective_fn, initial_parameters, objective_scale),
@@ -182,19 +182,16 @@ def solve_fused_lane(
             ),
         )
     initial = prepared.initial_parameters
-    prepared.problem.x = initial
     result = minimize(
         prepared.problem._solver_value_and_grad_fn,
         initial,
         driver=driver,
         options=options,
     )
-    prepared.problem.x = explicit_device_array(
-        result.x,
-        dtype=result.x.dtype,
-        reference=initial,
+    return replace(
+        result,
+        x=explicit_device_array(result.x, dtype=result.x.dtype, reference=initial),
     )
-    return result
 
 
 __all__ = [

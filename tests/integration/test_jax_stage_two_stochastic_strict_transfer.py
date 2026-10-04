@@ -166,7 +166,7 @@ def test_stochastic_stage_two_has_explicit_device_transfer_boundaries(
             maxcor=configuration.lbfgs_history_size,
             tol=configuration.rtol,
         )
-        final_objective, final_gradient = problem.value_and_grad(problem.x)
+        final_objective, final_gradient = problem.value_and_grad(optimizer.x)
         (
             initial_objective,
             initial_gradient,
@@ -178,7 +178,7 @@ def test_stochastic_stage_two_has_explicit_device_transfer_boundaries(
                 (
                     initial_objective,
                     initial_gradient,
-                    problem.x,
+                    optimizer.x,
                     final_objective,
                     final_gradient,
                 )

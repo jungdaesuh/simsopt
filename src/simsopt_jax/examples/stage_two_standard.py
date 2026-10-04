@@ -244,6 +244,9 @@ def _solve_stage(
     max_steps: int,
     rtol: float,
     atol: float,
+    *,
+    x: jax.Array | None = None,
+    objective_parameter: jax.Array | None = None,
 ) -> OptimizerResult:
     """One stage of this workflow, at the bounded history both drivers share.
 
@@ -261,6 +264,8 @@ def _solve_stage(
         )
     return solve_scalar_stage(
         problem,
+        x=x,
+        objective_parameter=objective_parameter,
         driver=driver,
         max_steps=max_steps,
         maxcor=_STAGE_TWO_LBFGS_HISTORY_SIZE,
@@ -359,7 +364,7 @@ def solve_standard_stage_two(
     minimize_region_started = perf_counter()
     first_optimizer = _solve_stage(problem, driver, int(max_steps), float(rtol), float(atol))
     first = _state(
-        problem.x,
+        first_optimizer.x,
         extraction,
         flux_spec,
         surface_gamma_device,
@@ -368,11 +373,18 @@ def solve_standard_stage_two(
         first_length_weight_device,
     )
 
-    problem.set_objective_parameter(second_length_weight_device)
-    second_optimizer = _solve_stage(problem, driver, int(max_steps), float(rtol), float(atol))
+    second_optimizer = _solve_stage(
+        problem,
+        driver,
+        int(max_steps),
+        float(rtol),
+        float(atol),
+        x=first_optimizer.x,
+        objective_parameter=second_length_weight_device,
+    )
     two_stage_minimize_seconds = perf_counter() - minimize_region_started
     final = _state(
-        problem.x,
+        second_optimizer.x,
         extraction,
         flux_spec,
         surface_gamma_device,

@@ -29,6 +29,7 @@ from simsopt_jax.runtime.host_boundary import host_array as _callback_host_array
 
 from .._shared import (
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
+    _VALUE_AND_GRAD_CACHE_OWNER_ATTR,
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
@@ -251,6 +252,7 @@ def _cached_private_solver(
         cache_owner, _CACHEABLE_VALUE_AND_GRAD_ATTR, False
     ):
         return builder()
+    cache_owner = getattr(cache_owner, _VALUE_AND_GRAD_CACHE_OWNER_ATTR, cache_owner)
     pending: _PendingPrivateSolver | None = None
     with _PRIVATE_SOLVER_CACHE_LOCK:
         cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
@@ -314,6 +316,7 @@ def _cached_private_solver(
 def _private_solver_cache_size(cache_owner: object) -> int:
     """Return the number of retained compiled wrappers for one owner."""
 
+    cache_owner = getattr(cache_owner, _VALUE_AND_GRAD_CACHE_OWNER_ATTR, cache_owner)
     with _PRIVATE_SOLVER_CACHE_LOCK:
         cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
         return 0 if cached is None else len(cached)
