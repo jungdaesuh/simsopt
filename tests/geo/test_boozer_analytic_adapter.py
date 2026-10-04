@@ -160,18 +160,18 @@ def test_analytic_c2_inner_solve_matches_native(monkeypatch, request, native_sca
         actual = route.compiled_kernel(*solve_inputs)
         jax.block_until_ready(actual)
     assert reference["success"]
-    assert bool(actual["success"])
+    assert bool(actual.success)
     expected_x = np.concatenate(
         (native.surface.get_dofs(), [reference["iota"], reference["G"]])
     )
-    np.testing.assert_allclose(actual["x"], expected_x, rtol=1e-10, atol=1e-11)
+    np.testing.assert_allclose(actual.x, expected_x, rtol=1e-10, atol=1e-11)
     final_residual, final_jacobian = device._make_analytic_exact_value_jacobian(False)(
-        actual["x"],
+        actual.x,
         device.coil_set_spec,
     )
     assert float(jnp.linalg.norm(final_residual)) <= 1e-13
     np.testing.assert_allclose(
-        actual["jacobian"], final_jacobian, rtol=2e-12, atol=2e-13
+        actual.jacobian, final_jacobian, rtol=2e-12, atol=2e-13
     )
 
 

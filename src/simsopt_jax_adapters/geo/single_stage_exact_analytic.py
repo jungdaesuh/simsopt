@@ -210,7 +210,7 @@ class ExactAnalyticSingleStage:
         # the three fields the host keeps cross once, explicitly, through the
         # host-boundary owner.
         initial_success, initial_iota, initial_iterations = host_value(
-            (initial["success"], initial["iota"], initial["nit"])
+            (initial.success, initial.iota, initial.nit)
         )
         if not bool(initial_success):
             raise RuntimeError("The initial exact Boozer solve did not converge.")
@@ -260,9 +260,9 @@ class ExactAnalyticSingleStage:
         def evaluate(coil_dofs, x_inner):
             solved = solve(coil_dofs, x_inner)
             value, gradient = value_and_gradient(
-                coil_dofs, solved["x"], solved["jacobian"], solved["success"]
+                coil_dofs, solved.x, solved.jacobian, solved.success
             )
-            return solved["x"], solved["success"], solved["nit"], value, gradient
+            return solved.x, solved.success, solved.nit, value, gradient
 
         # One program per evaluation: the solve and the implicit gradient are
         # dispatched together, with a single device-to-host transfer at the end.
@@ -270,7 +270,7 @@ class ExactAnalyticSingleStage:
         # Every later inner state is a committed output of that program; the
         # initial one is committed explicitly so the first call compiles the
         # same executable instead of a second, uncommitted-input variant.
-        self._x = commit_in_place(initial["x"])
+        self._x = commit_in_place(initial.x)
         self.coil_dofs = np.asarray(field.x, dtype=np.float64)
 
     @property

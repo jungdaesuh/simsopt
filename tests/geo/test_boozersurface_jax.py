@@ -25,7 +25,7 @@ import logging
 import sys
 import types
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from functools import partial
 
 import jax
@@ -177,9 +177,7 @@ def _assert_result_record(result, record_type):
         assert isinstance(result, _bsj._BoozerResultRecord)
         assert result.mode == record_type.mode
         assert result.copy() == dict(result)
-        assert len(jax.tree_util.tree_leaves(result)) == len(
-            jax.tree_util.tree_leaves(dict(result))
-        )
+        assert jax.tree_util.tree_leaves(result) == [result]
 
 
 def _runtime_sdofs_for(booz):
@@ -251,6 +249,53 @@ def test_public_solver_result_record_registry_is_mode_aware():
             set(_bsj.SOLVE_QUALITY_EXACT_FIELDS)
             <= record_types[record_type_name].required_keys
         )
+
+
+@pytest.mark.parametrize("with_variant_telemetry", [False, True])
+def test_exact_compute_payload_is_frozen_and_preserves_dict_leaf_order(
+    with_variant_telemetry,
+):
+    original = {
+        "x": jnp.asarray([1.0, 2.0]),
+        "sdofs": jnp.asarray([1.0]),
+        "iota": jnp.asarray(2.0),
+        "G": jnp.asarray(3.0),
+        "fun": jnp.asarray(4.0),
+        "nit": jnp.asarray(5, dtype=jnp.int32),
+        "success": jnp.asarray(True),
+        "residual": jnp.asarray([6.0, 7.0]),
+    }
+    if with_variant_telemetry:
+        original.update(
+            jacobian=jnp.eye(2),
+            exact_condition_estimate=jnp.asarray(8.0),
+            exact_newton_linear_residual_rel=jnp.asarray(9.0),
+            exact_refinement_correction_rel=jnp.asarray(10.0),
+        )
+        original.update(
+            (name, jnp.asarray(index, dtype=jnp.int32))
+            for index, name in enumerate(_bsj._EXACT_NEWTON_VARIANT_TELEMETRY_KEYS)
+        )
+        payload = _bsj._BoozerExactVariantArrayResult(**original)
+    else:
+        payload = _bsj._BoozerExactArrayResult(**original)
+
+    with pytest.raises(FrozenInstanceError):
+        payload.fun = 0.0
+    expected_leaves = jax.tree_util.tree_leaves(original)
+    actual_leaves, treedef = jax.tree_util.tree_flatten(payload)
+    assert all(
+        actual is expected
+        for actual, expected in zip(actual_leaves, expected_leaves, strict=True)
+    )
+    restored = jax.tree_util.tree_unflatten(treedef, actual_leaves)
+    compiled = jax.jit(lambda value: value)(restored)
+    assert set(compiled.as_dict()) == set(original)
+    for key, value in compiled.as_dict().items():
+        np.testing.assert_array_equal(value, original[key])
+    projected = compiled.as_dict()
+    projected["fun"] = jnp.asarray(-1.0)
+    np.testing.assert_array_equal(compiled.fun, original["fun"])
 
 
 def test_boozer_result_core_helpers_match_schema_sources():
@@ -7682,10 +7727,8 @@ class TestBoozerSurfaceJAXExactPath:
             )
             jax.block_until_ready(array_result)
 
-        array_leaves = jax.tree.leaves(
-            array_result,
-            is_leaf=lambda value: value is None,
-        )
+        assert isinstance(array_result, _bsj._BoozerExactVariantArrayResult)
+        array_leaves = jax.tree.leaves(array_result)
         assert array_leaves
         assert all(isinstance(leaf, jax.Array) for leaf in array_leaves)
         expected_target = (
@@ -7696,7 +7739,7 @@ class TestBoozerSurfaceJAXExactPath:
             * 1.0e-12
         )
         np.testing.assert_allclose(
-            np.asarray(array_result["x"]),
+            np.asarray(array_result.x),
             expected_target,
             rtol=0.0,
             atol=8.0 * np.finfo(np.float64).eps,

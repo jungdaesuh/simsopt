@@ -34,7 +34,7 @@ import hashlib
 import inspect
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import NamedTuple
 import functools
 from functools import partial
@@ -276,6 +276,8 @@ class _BoozerResultRecordType:
 
 
 class _BoozerResultRecord(dict):
+    """Host compatibility projection; never passed through JAX transforms."""
+
     def __init__(self, record_type: _BoozerResultRecordType, values: Mapping):
         super().__init__(values)
         self.record_type = record_type
@@ -329,8 +331,8 @@ class _TraceableExactNewtonBenchmarkRoute:
     """Compiled array kernel plus its host-side reporting projection."""
 
     variant: str
-    compiled_kernel: Callable[..., Mapping[str, jax.Array]]
-    project_result: Callable[[Mapping[str, jax.Array]], Mapping[str, object]]
+    compiled_kernel: Callable[..., "_BoozerExactArrayResult"]
+    project_result: Callable[["_BoozerExactArrayResult"], Mapping[str, object]]
 
 
 _BOOZER_SOLVER_RESULT_CORE_KEYS = frozenset(
@@ -859,24 +861,73 @@ def _boozer_exact_newton_result_core(
     }
 
 
-def _flatten_boozer_result_record(record):
-    keys = tuple(sorted(record.keys()))
-    return tuple(record[key] for key in keys), (record.mode, keys)
-
-
-def _unflatten_boozer_result_record(aux_data, children):
-    mode, keys = aux_data
-    return _BoozerResultRecord(
-        _BOOZER_RESULT_RECORD_TYPES[mode],
-        dict(zip(keys, children, strict=True)),
-    )
-
-
-jax.tree_util.register_pytree_node(
-    _BoozerResultRecord,
-    _flatten_boozer_result_record,
-    _unflatten_boozer_result_record,
+_BOOZER_EXACT_ARRAY_FIELDS = (
+    "G",
+    "exact_condition_estimate",
+    "exact_newton_linear_residual_rel",
+    "exact_refinement_correction_rel",
+    "fun",
+    "iota",
+    "jacobian",
+    "nit",
+    "residual",
+    "sdofs",
+    "success",
+    "x",
 )
+
+
+@pytree_dataclass(data=_BOOZER_EXACT_ARRAY_FIELDS)
+class _BoozerExactArrayResult:
+    """Immutable compiled result; optional diagnostics add no leaves when absent.
+
+    The explicit partition preserves the former array dict's sorted-key order.
+    ``as_dict`` projects the existing reporting keys at the host boundary.
+    """
+
+    x: jax.Array
+    sdofs: jax.Array
+    iota: jax.Array
+    G: jax.Array
+    fun: jax.Array
+    nit: jax.Array
+    success: jax.Array
+    residual: jax.Array
+    jacobian: jax.Array | None = None
+    exact_condition_estimate: jax.Array | None = None
+    exact_newton_linear_residual_rel: jax.Array | None = None
+    exact_refinement_correction_rel: jax.Array | None = None
+
+    def as_dict(self) -> dict[str, jax.Array]:
+        return {
+            item.name: value
+            for item in fields(self)
+            if (value := getattr(self, item.name)) is not None
+        }
+
+
+@pytree_dataclass(
+    data=tuple(sorted((*_BOOZER_EXACT_ARRAY_FIELDS, *_EXACT_NEWTON_VARIANT_TELEMETRY_KEYS)))
+)
+class _BoozerExactVariantArrayResult(_BoozerExactArrayResult):
+    """Fixed telemetry schema for the exact Newton benchmark variants."""
+
+    exact_newton_variant_dense_linearization_used: jax.Array | None = None
+    exact_newton_variant_linear_solve_attempt_count: jax.Array | None = None
+    exact_newton_variant_dense_materialization_count: jax.Array | None = None
+    exact_newton_variant_lu_factorization_count: jax.Array | None = None
+    exact_newton_variant_lu_solve_count: jax.Array | None = None
+    exact_newton_variant_refinement_correction_count: jax.Array | None = None
+    exact_newton_variant_applied_update_count: jax.Array | None = None
+    exact_newton_variant_stop_reason_code: jax.Array | None = None
+    exact_newton_variant_numerical_failure: jax.Array | None = None
+    exact_newton_variant_rollback_branch_taken: jax.Array | None = None
+    exact_newton_variant_rollback_recompute_count: jax.Array | None = None
+    exact_newton_variant_native_persist_predicate: jax.Array | None = None
+    exact_newton_variant_persist_solved_state: jax.Array | None = None
+    exact_newton_variant_initial_norm: jax.Array | None = None
+    exact_newton_variant_assessed_norm: jax.Array | None = None
+    exact_newton_variant_returned_norm: jax.Array | None = None
 
 
 def _maybe_boozer_result_record_type_for(values: Mapping[str, object]):
@@ -7170,7 +7221,9 @@ class BoozerSurfaceJAX(Optimizable):
         ):
             if key in result and result[key] is not None:
                 array_result[key] = result[key]
-        return array_result
+        if any(key in array_result for key in _EXACT_NEWTON_VARIANT_TELEMETRY_KEYS):
+            return _BoozerExactVariantArrayResult(**array_result)
+        return _BoozerExactArrayResult(**array_result)
 
     def _project_traceable_exact_array_result(
         self,
@@ -7181,6 +7234,7 @@ class BoozerSurfaceJAX(Optimizable):
     ):
         """Attach the Python reporting envelope outside the compiled kernel."""
 
+        array_result = array_result.as_dict()
         jacobian = array_result.get("jacobian")
         reporting_source = {
             "message": None,

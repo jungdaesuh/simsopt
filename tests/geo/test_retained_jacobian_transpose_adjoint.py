@@ -65,6 +65,34 @@ def _payload(*, jacobian: jax.Array | None = None, producer_success=True):
     )
 
 
+def test_sealed_linearization_round_trips_through_jit_with_integrity_intact():
+    payload = _payload()
+    restored = jax.jit(lambda value: value)(payload)
+    for expected, actual in zip(
+        jax.tree_util.tree_leaves(payload),
+        jax.tree_util.tree_leaves(restored),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(actual, expected)
+    assert type(restored) is type(payload)
+    assert type(restored.inputs) is type(payload.inputs)
+    assert type(restored.identity) is type(payload.identity)
+    for original, reconstructed in (
+        (payload, restored),
+        (payload.inputs, restored.inputs),
+        (payload.identity, restored.identity),
+    ):
+        assert reconstructed._construction_token is original._construction_token
+        with pytest.raises(RuntimeError, match="must be minted"):
+            replace(reconstructed)
+    solved = _linear_solve._solve_retained_jacobian_transpose_adjoint(
+        restored,
+        jnp.ones(3, dtype=jnp.float64),
+        tol=1.0e-12,
+    )
+    assert bool(solved.status.success)
+
+
 def test_orientation_aware_condition_estimate_reuses_j_factors() -> None:
     jacobian = jnp.asarray(_JACOBIAN)
     lu_piv = jsp_linalg.lu_factor(jacobian)

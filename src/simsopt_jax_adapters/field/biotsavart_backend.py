@@ -24,6 +24,7 @@ from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.runtime.host_boundary import block_until_ready, host_array, host_float
 from simsopt._core.optimizable import Optimizable
 from simsopt_jax.backend import get_field_kernel_tuning
+from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.core.state_tokens import make_state_token_factory
 from simsopt_jax.backend.dtypes import (
     explicit_device_array,
@@ -374,7 +375,7 @@ class _CoilVJPInfo:
     timings: dict[str, float] | None = None
 
 
-@jax.tree_util.register_pytree_node_class
+@pytree_dataclass(data=("d_coil_arrays",), meta=("coil_indices",))
 @dataclass(frozen=True)
 class BiotSavartFieldPullback:
     """Native grouped cotangent payload for ``BiotSavartJAX`` fields.
@@ -386,14 +387,6 @@ class BiotSavartFieldPullback:
 
     d_coil_arrays: tuple[tuple[jax.Array, jax.Array, jax.Array], ...]
     coil_indices: tuple[tuple[int, ...], ...]
-
-    def tree_flatten(self):
-        return (self.d_coil_arrays,), self.coil_indices
-
-    @classmethod
-    def tree_unflatten(cls, coil_indices, children):
-        (d_coil_arrays,) = children
-        return cls(d_coil_arrays=d_coil_arrays, coil_indices=coil_indices)
 
 
 class SpecBackedCurrent:

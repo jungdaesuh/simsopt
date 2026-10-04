@@ -1,4 +1,4 @@
-"""Frozen dataclasses with explicit, ordered JAX pytree partitions."""
+"""Central registration for frozen dataclasses and custom JAX pytree nodes."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields
@@ -13,6 +13,17 @@ _REGISTERED_CLASSES: list[type[object]] = []
 def registered_pytree_classes() -> tuple[type[object], ...]:
     """Return an immutable snapshot of classes registered through this helper."""
     return tuple(_REGISTERED_CLASSES)
+
+
+def pytree_node(cls: type[_T]) -> type[_T]:
+    """Register a class's custom flatten/unflatten contract in the shared registry.
+
+    Use this when constructor or reconstruction guarantees cannot be expressed
+    by a dataclass data/meta partition. Class options and methods are preserved.
+    """
+    jax.tree_util.register_pytree_node_class(cls)
+    _REGISTERED_CLASSES.append(cls)
+    return cls
 
 
 def pytree_dataclass(

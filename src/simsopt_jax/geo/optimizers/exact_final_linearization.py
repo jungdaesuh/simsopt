@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 
 import jax
 
+from simsopt_jax.pytree import pytree_node
+
 _CONSTRUCTION_TOKEN = object()
 
 
-@jax.tree_util.register_pytree_node_class
+@pytree_node
 @dataclass(frozen=True, slots=True)
 class _ExactFinalLinearizationInputs:
     """Atomic solved-state and coil inputs consumed by one linearization."""
@@ -71,7 +73,7 @@ class _ExactFinalLinearizationInputs:
         )
 
 
-@jax.tree_util.register_pytree_node_class
+@pytree_node
 @dataclass(frozen=True, slots=True)
 class _ExactFinalLinearizationIdentity:
     """Exact device snapshot of the fields that define one linearization."""
@@ -138,7 +140,7 @@ class _ExactFinalLinearizationIdentity:
         )
 
 
-@jax.tree_util.register_pytree_node_class
+@pytree_node
 @dataclass(frozen=True, slots=True)
 class _ExactFinalLinearization:
     """Device-only final-state Jacobian and factors bound to atomic inputs."""

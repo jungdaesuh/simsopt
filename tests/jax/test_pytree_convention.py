@@ -6,9 +6,10 @@ from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import pytest
 
-from simsopt_jax.pytree import pytree_dataclass, registered_pytree_classes
+from simsopt_jax.pytree import pytree_dataclass, pytree_node, registered_pytree_classes
 
 ROOT = Path(__file__).resolve().parents[2]
 TREES = (
@@ -28,7 +29,7 @@ REGISTRATION_NAMES = frozenset(
     )
 )
 NAMEDTUPLE_NAMES = frozenset(("NamedTuple", "namedtuple"))
-ALIAS_NAMES = REGISTRATION_NAMES | NAMEDTUPLE_NAMES | {"pytree_dataclass"}
+ALIAS_NAMES = REGISTRATION_NAMES | NAMEDTUPLE_NAMES | {"pytree_dataclass", "pytree_node"}
 Violation = tuple[str, str, str, str]
 
 # Each later migration removes its occurrences; stale exemptions fail below.
@@ -357,8 +358,9 @@ def test_guard_does_not_infer_aliases_for_shadowed_function_parameters():
     )
 
 
-def test_guard_permits_registration_only_in_helper():
-    source = "import jax\njax.tree_util.register_dataclass(Payload)"
+@pytest.mark.parametrize("registration_name", sorted(REGISTRATION_NAMES))
+def test_guard_permits_registration_only_in_helper(registration_name):
+    source = f"import jax\njax.tree_util.{registration_name}(Payload)"
     assert not violations_in_source("src/simsopt_jax/pytree.py", source)
     source = "import typing\nclass Payload(typing.NamedTuple): pass"
     assert violations_in_source("src/simsopt_jax/pytree.py", source) == [
@@ -405,8 +407,7 @@ def test_guard_permits_registration_only_in_helper():
 )
 def test_pending_does_not_hide_added_occurrences(path, addition):
     source = (ROOT / path).read_text()
-    expected = Counter(entry for entry in PENDING if entry[0] == path)
-    assert Counter(violations_in_source(path, source)) == expected
+    expected = Counter(violations_in_source(path, source))
     actual = Counter(violations_in_source(path, source + "\n" + addition))
     assert actual != expected
     assert actual - expected
@@ -425,9 +426,8 @@ def test_pending_counts_missing_occurrences_as_stale():
 
 def test_pending_cannot_authorize_a_different_registration_api():
     path = "src/simsopt_jax/geo/optimizers/exact_final_linearization.py"
-    source = (ROOT / path).read_text()
-    expected = Counter(entry for entry in PENDING if entry[0] == path)
-    assert Counter(violations_in_source(path, source)) == expected
+    source = "@jax.tree_util.register_pytree_node_class\nclass Payload: pass"
+    expected = Counter(violations_in_source(path, source))
     replacement = source.replace("register_pytree_node_class", "register_dataclass", 1)
     actual = Counter(violations_in_source(path, replacement))
     assert actual != expected
@@ -445,6 +445,7 @@ def test_pending_cannot_authorize_a_different_registration_api():
         ("from dataclasses import field as f", "field"),
         ("import dataclasses.field as f", "field"),
         ("from simsopt_jax.pytree import pytree_dataclass as record", "pytree_dataclass"),
+        ("from simsopt_jax.pytree import pytree_node as record", "pytree_node"),
         ("import typing.NamedTuple as Record", "NamedTuple"),
         *((f"from jax.tree_util import {name} as register", name) for name in sorted(REGISTRATION_NAMES)),
     ),
@@ -473,10 +474,10 @@ def test_pending_cannot_hide_replaced_namedtuple_import_alias():
 
 def test_pending_cannot_hide_registration_target_inside_exempt_class():
     path = "src/simsopt_jax/geo/optimizers/exact_final_linearization.py"
-    source = (ROOT / path).read_text()
-    expected = Counter(entry for entry in PENDING if entry[0] == path)
     target = "_ExactFinalLinearizationInputs"
     marker = f"@jax.tree_util.register_pytree_node_class\n@dataclass(frozen=True, slots=True)\nclass {target}:"
+    source = marker + "\n    pass\n"
+    expected = Counter(violations_in_source(path, source))
     surprise = "class Surprise:\n    def tree_flatten(self): return (), None\n    @classmethod\n    def tree_unflatten(cls, aux, children): return cls()\n\n"
     replacement = source.replace(marker, surprise + f"@dataclass(frozen=True, slots=True)\nclass {target}:\n    jax.tree_util.register_pytree_node_class(Surprise)")
     actual = Counter(violations_in_source(path, replacement))
@@ -507,7 +508,7 @@ def test_guard_rejects_reviewers_aliased_field_in_boozer_source():
     path = "src/simsopt_jax_adapters/geo/boozer_surface.py"
     source = (ROOT / path).read_text()
     replacement = "from dataclasses import field as metadata_field\n" + source.replace("quadpoints_phi_signature: tuple\n", "quadpoints_phi_signature: tuple = metadata_field(metadata={'static': True})\n", 1)
-    expected = Counter(entry for entry in PENDING if entry[0] == path)
+    expected = Counter(violations_in_source(path, source))
     actual = Counter(violations_in_source(path, replacement))
     assert actual - expected == Counter({
         (path, "<module>", "alias", "field"): 1,
@@ -646,3 +647,65 @@ def test_undecorated_subclass_cannot_omit_its_new_fields():
     with pytest.raises(ValueError, match="missing=\\['extra'\\]"):
         pytree_dataclass(data=("value",))(Child)
     assert registered_pytree_classes() == before
+
+
+def test_custom_node_preserves_sealed_constructor_and_ordered_reconstruction():
+    before = registered_pytree_classes()
+
+    @dataclass(frozen=True, slots=True, init=False)
+    class Payload:
+        first: object
+        second: object
+        mode: str
+
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("producer only")
+
+        def tree_flatten(self):
+            return (self.second, self.first), self.mode
+
+        @classmethod
+        def tree_unflatten(cls, mode, children):
+            second, first = children
+            instance = object.__new__(cls)
+            object.__setattr__(instance, "first", first)
+            object.__setattr__(instance, "second", second)
+            object.__setattr__(instance, "mode", mode)
+            return instance
+
+    assert pytree_node(Payload) is Payload
+    assert registered_pytree_classes() == (*before, Payload)
+    with pytest.raises(RuntimeError, match="producer only"):
+        Payload(1, 2, "sum")
+    payload = Payload.tree_unflatten("sum", (jnp.asarray(2.0), jnp.asarray(1.0)))
+    leaves, treedef = jax.tree_util.tree_flatten(payload)
+    assert [float(value) for value in leaves] == [2.0, 1.0]
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    assert restored.mode == "sum"
+    with pytest.raises(FrozenInstanceError):
+        restored.first = 3
+    assert not hasattr(restored, "__dict__")
+
+    def weighted_sum(value):
+        return value.first + 2 * value.second
+
+    assert float(jax.jit(weighted_sum)(restored)) == 5.0
+    gradient = jax.grad(weighted_sum)(restored)
+    assert gradient.mode == "sum"
+    assert [float(value) for value in jax.tree_util.tree_leaves(gradient)] == [2.0, 1.0]
+
+
+def test_dataclass_reconstruction_calls_post_init():
+    constructed = []
+
+    @pytree_dataclass(data=("value",))
+    class Payload:
+        value: int
+
+        def __post_init__(self):
+            constructed.append(self.value)
+
+    leaves, treedef = jax.tree_util.tree_flatten(Payload(1))
+    assert leaves == [1]
+    assert jax.tree_util.tree_unflatten(treedef, [2]).value == 2
+    assert constructed == [1, 2]
