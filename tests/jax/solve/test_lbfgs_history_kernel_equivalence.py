@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import jax
@@ -230,7 +231,20 @@ def test_matupd_masked_history_shift_matches_element_loops_bitwise(
     actual = _JITTED_MATUPD(*inputs)
     expected = _JITTED_LEGACY_MATUPD(*inputs)
 
-    for actual_item, expected_item in zip(actual, expected, strict=True):
+    for actual_item, expected_item in zip(
+        (
+            actual.ws,
+            actual.wy,
+            actual.sy,
+            actual.ss,
+            actual.itail,
+            actual.col,
+            actual.head,
+            actual.theta,
+        ),
+        expected,
+        strict=True,
+    ):
         _assert_same_bits(actual_item, expected_item)
 
 
@@ -255,12 +269,13 @@ def test_two_loop_direction_matches_preoptimization_oracle_bitwise(
     wa = state.workspace.wa
     wa = wa.at[lws:lwy].set(jnp.asarray(ws).reshape((-1,)))
     wa = wa.at[lwy:lsy].set(jnp.asarray(wy).reshape((-1,)))
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         wa=wa,
         isave=state.workspace.isave.at[26].set(head).at[27].set(col),
         dsave=state.workspace.dsave.at[0].set(np.float64(1.75)),
     )
-    state = state._replace(g=jnp.asarray(gradient), workspace=workspace)
+    state = replace(state, g=jnp.asarray(gradient), workspace=workspace)
 
     actual = _JITTED_TWO_LOOP(state)
     expected = _JITTED_LEGACY_TWO_LOOP(state)

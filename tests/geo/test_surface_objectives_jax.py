@@ -7,6 +7,7 @@ These tests exercise the pure JAX label/objective ingredients directly:
 3. Upstream-shaped ToroidalFlux CPU/JAX parity under tolerance-based checks.
 """
 
+from dataclasses import replace
 from jax_test_support import (
     fixture_jax_runtime_guard,  # noqa: F401
     fixture_parity_lane,  # noqa: F401
@@ -1804,7 +1805,8 @@ def test_checked_boozer_linear_solve_uses_public_status_boundary(monkeypatch):
 
 def test_checked_boozer_linear_solve_raises_on_failed_status():
     rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
-    failed_status = _mock_linear_solve_status(False)._replace(
+    failed_status = replace(
+        _mock_linear_solve_status(False),
         residual=jnp.asarray(2.5e-13, dtype=jnp.float64),
         residual_relative=jnp.asarray(1.25e-13, dtype=jnp.float64),
         iterations=jnp.asarray(7, dtype=jnp.int32),

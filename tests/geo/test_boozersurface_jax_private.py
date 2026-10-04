@@ -1,5 +1,6 @@
 """Private optimizer runtime tests for BoozerSurfaceJAX."""
 
+from dataclasses import fields
 from jax_test_support import (
     fixture_jax_runtime_guard,  # noqa: F401
     enable_non_strict_jax_backend,
@@ -3221,7 +3222,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         residual = rhs - solution
 
         assert bool(np.asarray(status.success))
-        assert tuple(status._fields[:4]) == (
+        assert tuple(field.name for field in fields(status))[:4] == (
             "success",
             "residual",
             "residual_relative",
@@ -3231,7 +3232,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             "residual_scale",
             "requested_tolerance",
             "effective_tolerance",
-        } <= set(status._fields)
+        } <= {field.name for field in fields(status)}
         assert np.asarray(status.residual).shape == ()
         assert np.asarray(status.residual_relative).shape == ()
         assert np.asarray(status.residual_scale).shape == ()

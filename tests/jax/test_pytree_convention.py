@@ -33,18 +33,6 @@ Violation = tuple[str, str, str, str]
 
 # Each later migration removes its occurrences; stale exemptions fail below.
 PENDING: tuple[Violation, ...] = (
-    ("src/simsopt_jax/core/interpolated_field.py", "<module>", "import", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/interpolated_field.py", "InterpolatedFieldCylCache", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/qfm_solver.py", "<module>", "import", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/qfm_solver.py", "QfmAugmentedLagrangianInfo", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/qfm_solver.py", "QfmExactKktInfo", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/qfm_solver.py", "QfmPenaltySolveInfo", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/qfm_solver.py", "_BFGSResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/qfm_solver.py", "_BFGSState", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/qfm_solver.py", "_QfmMetrics", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/tracing.py", "<module>", "import", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/tracing.py", "_Dopri5AdaptiveStep", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/core/tracing.py", "_Dopri5Stages", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax/examples/boozer_official.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax/examples/boozer_official.py", "BoozerStageOutcome", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax/examples/boozer_official.py", "BoozerStageState", "namedtuple", "NamedTuple"),  # step5
@@ -59,71 +47,23 @@ PENDING: tuple[Violation, ...] = (
     ("src/simsopt_jax/geo/optimizers/exact_final_linearization.py", "_ExactFinalLinearization", "registration", "register_pytree_node_class"),  # step4
     ("src/simsopt_jax/geo/optimizers/exact_final_linearization.py", "_ExactFinalLinearizationIdentity", "registration", "register_pytree_node_class"),  # step4
     ("src/simsopt_jax/geo/optimizers/exact_final_linearization.py", "_ExactFinalLinearizationInputs", "registration", "register_pytree_node_class"),  # step4
-    ("src/simsopt_jax/geo/optimizers/linear_solve.py", "<module>", "import", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/linear_solve.py", "_DenseJacobianMaterialization", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/linear_solve.py", "_DenseJacobianMaterializationTelemetry", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/linear_solve.py", "_ExactFinalLinearizationValidation", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/linear_solve.py", "_LinearSolveStatus", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/linear_solve.py", "_RetainedJacobianTransposeSolve", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/native_ls_newton.py", "<module>", "import", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/native_ls_newton.py", "_NativeLsNewtonState", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax/geo/optimizers/optimizer.py", "<module>", "import", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/optimizer.py", "_DenseExactNewtonDirection", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/optimizer.py", "_NativeDenseExactNewtonC2Result", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax/geo/optimizers/optimizer.py", "_PrivateOptimizerRuntime", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSHostObservation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSObservation", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSObserverHostObservation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSObserverObservation", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_bfgs.py", "_BFGSTransition", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax/geo/optimizers/private/_lbfgs.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax/geo/optimizers/private/_lbfgs.py", "_LbfgsbStepwiseHostStatus", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "<module>", "import", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbActiveResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbBmvResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbCauchyResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbCmprlbResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbDcsrchResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbDcstepResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbFormkResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbFormtResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbFreevResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbHpsolbResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbInverseHessianHistory", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbLnsrlbResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbMacroStepResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbMatupdResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbState", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbSubsmResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_lbfgsb_scipy.py", "LbfgsbWorkspace", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_types.py", "<module>", "import", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_types.py", "_BFGSResults", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_types.py", "_LBFGSInvalidStepRecord", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_types.py", "_LBFGSResults", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_types.py", "_LineSearchResults", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_types.py", "_LineSearchState", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax/geo/optimizers/private/_types.py", "_ZoomState", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax_adapters/field/biotsavart_backend.py", "BiotSavartFieldPullback", "registration", "register_pytree_node_class"),  # step4
     ("src/simsopt_jax_adapters/geo/boozer_surface.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/boozer_surface.py", "_AnalyticPenaltyBundle", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/boozer_surface.py", "_BoozerResultRecord", "registration", "register_pytree_node"),  # step4
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "<module>", "import", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveCandidateEvaluation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveExecutionCounts", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveIncumbentEvaluation", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveInnerState", "namedtuple", "NamedTuple"),  # step3
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveSeededValueAndGrad", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveSolvedPair", "namedtuple", "NamedTuple"),  # step5
     ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "TraceableObjectiveTrialResult", "namedtuple", "NamedTuple"),  # step5
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceableAdjointExecutionEvidence", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceableExactPayloadFusedConsumerResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceableExactPayloadFusedEvidence", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceableExactPayloadFusedResult", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceableExactPayloadFusedStatus", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceableExactReturnedState", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceablePLURefinement", "namedtuple", "NamedTuple"),  # step3
-    ("src/simsopt_jax_adapters/geo/surface_objectives_traceable.py", "_TraceableSuppliedFactorSolveStatus", "namedtuple", "NamedTuple"),  # step3
 )
 
 
@@ -520,11 +460,11 @@ def test_guard_permits_module_and_unrelated_import_aliases(source):
 
 
 def test_pending_cannot_hide_replaced_namedtuple_import_alias():
-    path = "src/simsopt_jax/core/interpolated_field.py"
+    path = "src/simsopt_jax/geo/optimizers/private/_lbfgs.py"
     source = (ROOT / path).read_text()
     expected = Counter(entry for entry in PENDING if entry[0] == path)
     replacement = source.replace("from typing import NamedTuple", "import typing\nfrom typing import NamedTuple as Record")
-    replacement = replacement.replace("class InterpolatedFieldCylCache(NamedTuple):", "class InterpolatedFieldCylCache(typing.NamedTuple):")
+    replacement = replacement.replace("class _LbfgsbStepwiseHostStatus(NamedTuple):", "class _LbfgsbStepwiseHostStatus(typing.NamedTuple):")
     replacement += "\nclass Surprise(Record):\n    value: int\n"
     actual = Counter(violations_in_source(path, replacement))
     assert actual - expected == Counter({(path, "<module>", "alias", "NamedTuple"): 1})

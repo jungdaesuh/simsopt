@@ -1,10 +1,10 @@
-"""NamedTuple result types for private BFGS / L-BFGS solvers."""
+"""Frozen pytree result types for private BFGS / L-BFGS solvers."""
 
 from __future__ import annotations
 
-from typing import NamedTuple
-
 import jax
+
+from simsopt_jax.pytree import pytree_dataclass
 
 # Private L-BFGS terminal status code emitted when f(x), x, or ∇f(x) is
 # non-finite at solver entry, during an attempted step, or at final
@@ -15,7 +15,24 @@ LBFGS_STATUS_CALLBACK_STOP = 99
 BFGS_STATUS_CALLBACK_STOP = 99
 
 
-class _BFGSResults(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "converged",
+        "failed",
+        "k",
+        "nfev",
+        "ngev",
+        "nhev",
+        "x_k",
+        "f_k",
+        "g_k",
+        "H_k",
+        "old_old_fval",
+        "status",
+        "line_search_status",
+    ),
+)
+class _BFGSResults:
     converged: bool | jax.Array
     failed: bool | jax.Array
     k: int | jax.Array
@@ -31,7 +48,37 @@ class _BFGSResults(NamedTuple):
     line_search_status: int | jax.Array
 
 
-class _ZoomState(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "done",
+        "failed",
+        "j",
+        "a_lo",
+        "phi_lo",
+        "dphi_lo",
+        "g_lo",
+        "a_hi",
+        "phi_hi",
+        "dphi_hi",
+        "g_hi",
+        "has_rec",
+        "a_rec",
+        "phi_rec",
+        "dphi_rec",
+        "g_rec",
+        "a_star",
+        "phi_star",
+        "dphi_star",
+        "g_star",
+        "best_a",
+        "best_phi",
+        "best_dphi",
+        "best_g",
+        "nfev",
+        "ngev",
+    ),
+)
+class _ZoomState:
     done: bool | jax.Array
     failed: bool | jax.Array
     j: int | jax.Array
@@ -60,7 +107,32 @@ class _ZoomState(NamedTuple):
     ngev: int | jax.Array
 
 
-class _LineSearchState(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "done",
+        "failed",
+        "i",
+        "a_i2",
+        "phi_i2",
+        "dphi_i2",
+        "g_i2",
+        "a_i1",
+        "phi_i1",
+        "dphi_i1",
+        "g_i1",
+        "best_a",
+        "best_phi",
+        "best_dphi",
+        "best_g",
+        "nfev",
+        "ngev",
+        "a_star",
+        "phi_star",
+        "dphi_star",
+        "g_star",
+    ),
+)
+class _LineSearchState:
     done: jax.Array
     failed: jax.Array
     i: int | jax.Array
@@ -84,7 +156,20 @@ class _LineSearchState(NamedTuple):
     g_star: jax.Array
 
 
-class _LineSearchResults(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "failed",
+        "nit",
+        "nfev",
+        "ngev",
+        "k",
+        "a_k",
+        "f_k",
+        "g_k",
+        "status",
+    ),
+)
+class _LineSearchResults:
     failed: bool | jax.Array
     nit: int | jax.Array
     nfev: int | jax.Array
@@ -96,7 +181,33 @@ class _LineSearchResults(NamedTuple):
     status: bool | jax.Array
 
 
-class _LBFGSResults(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "converged",
+        "failed",
+        "k",
+        "nfev",
+        "ngev",
+        "x_k",
+        "f_k",
+        "g_k",
+        "s_history",
+        "y_history",
+        "rho_history",
+        "gamma",
+        "status",
+        "ls_status",
+        "evaluated_nonfinite_count",
+        "all_accepted_states_finite",
+        "invalid_step_record",
+        "optimizer_state_trace",
+        "hess_inv_s",
+        "hess_inv_y",
+        "hess_inv_n_corrs",
+        "task",
+    ),
+)
+class _LBFGSResults:
     converged: jax.Array
     failed: jax.Array
     k: int | jax.Array
@@ -121,7 +232,20 @@ class _LBFGSResults(NamedTuple):
     task: jax.Array | None = None
 
 
-class _LBFGSInvalidStepRecord(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "recorded",
+        "iteration",
+        "step_scale",
+        "line_search_failed",
+        "nonfinite_step",
+        "ls_status",
+        "failure_reason",
+        "curvature_margin_measured",
+        "curvature_margin",
+    ),
+)
+class _LBFGSInvalidStepRecord:
     """The one rejected-step record an L-BFGS-B solve can publish.
 
     ``setulb`` reports ABNORMAL only when a line search fails with no correction

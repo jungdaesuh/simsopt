@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 from collections.abc import Callable
@@ -192,9 +193,9 @@ def test_c2_one_step_boozer_oracle_preserves_native_maxiter_stop_order() -> None
     assert int(actual.lu_solve_count) == 12
     assert int(actual.refinement_correction_count) == 1
     assert int(actual.rollback_recompute_count) == 0
-    assert "jacobian" not in actual._fields
-    assert "lu" not in actual._fields
-    assert "pivots" not in actual._fields
+    assert "jacobian" not in tuple(field.name for field in fields(actual))
+    assert "lu" not in tuple(field.name for field in fields(actual))
+    assert "pivots" not in tuple(field.name for field in fields(actual))
 
 
 def test_c2_one_slot_persists_a_finite_worsened_final_native_update() -> None:

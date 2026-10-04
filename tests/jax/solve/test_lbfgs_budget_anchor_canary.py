@@ -19,6 +19,7 @@ defaulted, so a gate keyed on any field is keyed on a measurement.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import json
@@ -382,14 +383,16 @@ def _abnormal_state_with_line_search_info(info):
         jnp.asarray([1.0, -2.0], dtype=jnp.float64), m=5
     )
     workspace = state.workspace
-    return state._replace(
-        workspace=workspace._replace(
+    return replace(
+        state,
+        workspace=replace(
+            workspace,
             task=workspace.task.at[0].set(lbfgsb.ABNORMAL),
             isave=workspace.isave.at[34].set(info),
             # A directional derivative survives from an earlier search even when
             # this one never ran a curvature test.
             dsave=workspace.dsave.at[lbfgsb.LBFGSB_DSAVE_GD].set(2.0),
-        )
+        ),
     )
 
 

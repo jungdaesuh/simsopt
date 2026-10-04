@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import NamedTuple, Protocol, cast
 
 import jax
@@ -38,13 +39,30 @@ from ._line_search import _line_search, _line_search_value_and_grad
 from ._step_runtime import ContinueDecision, RuntimeLimits, StepOps, run_eager
 from ._types import BFGS_STATUS_CALLBACK_STOP, _BFGSResults, _LineSearchResults
 
+from simsopt_jax.pytree import pytree_dataclass
 
-class _BFGSTransition(NamedTuple):
+
+@pytree_dataclass(
+    data=(
+        "state",
+        "accepted",
+    )
+)
+class _BFGSTransition:
     state: _BFGSResults
     accepted: bool | jax.Array
 
 
-class _BFGSObservation(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "terminal",
+        "accepted",
+        "iteration",
+        "nfev",
+        "ngev",
+    )
+)
+class _BFGSObservation:
     terminal: bool | jax.Array
     accepted: bool | jax.Array
     iteration: int | jax.Array
@@ -52,7 +70,19 @@ class _BFGSObservation(NamedTuple):
     ngev: int | jax.Array
 
 
-class _BFGSObserverObservation(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "terminal",
+        "accepted",
+        "iteration",
+        "nfev",
+        "ngev",
+        "x_k",
+        "f_k",
+        "g_k",
+    ),
+)
+class _BFGSObserverObservation:
     terminal: bool | jax.Array
     accepted: bool | jax.Array
     iteration: int | jax.Array
@@ -318,7 +348,8 @@ def _bfgs_accepted_step(
     )
 
     def nonfinite_step_result(_operand: object) -> _BFGSResults:
-        return state._replace(
+        return replace(
+            state,
             converged=_bool_scalar(False),
             failed=_bool_scalar(True),
             k=next_k,
@@ -328,7 +359,8 @@ def _bfgs_accepted_step(
         )
 
     def failed_step(_operand: object) -> _BFGSResults:
-        return state._replace(
+        return replace(
+            state,
             converged=_bool_scalar(False),
             failed=_bool_scalar(True),
             k=next_k,
@@ -341,7 +373,8 @@ def _bfgs_accepted_step(
         _emit_iteration_callbacks(
             callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
         )
-        return state._replace(
+        return replace(
+            state,
             converged=converged,
             nfev=next_nfev,
             ngev=next_ngev,
@@ -392,7 +425,8 @@ def _bfgs_finalize_state(
     converged_final = jnp.logical_not(state.failed) & (
         state.converged | (_norm(g_final, ord=norm) < gtol_jax)
     )
-    state = state._replace(
+    state = replace(
+        state,
         converged=converged_final,
         nfev=state.nfev + _int_scalar(1),
         ngev=state.ngev + _int_scalar(1),
@@ -417,7 +451,7 @@ def _bfgs_finalize_state(
             ),
         ),
     )
-    return state._replace(status=status)
+    return replace(state, status=status)
 
 
 def _run_bfgs_eager(
@@ -558,9 +592,17 @@ def _run_bfgs_eager(
                 x_k,
                 f_k,
                 g_k,
-            ) = cast(
-                tuple[bool, bool, int, int, int, np.ndarray, float, np.ndarray],
-                host_value(observation),
+            ) = host_value(
+                (
+                    observation.terminal,
+                    observation.accepted,
+                    observation.iteration,
+                    observation.nfev,
+                    observation.ngev,
+                    observation.x_k,
+                    observation.f_k,
+                    observation.g_k,
+                )
             )
             return _BFGSObserverHostObservation(
                 terminal=bool(terminal),
@@ -572,9 +614,14 @@ def _run_bfgs_eager(
                 f_k=float(f_k),
                 g_k=np.asarray(g_k, dtype=float),
             )
-        terminal, accepted, iteration, nfev, ngev = cast(
-            tuple[bool, bool, int, int, int],
-            host_value(observation),
+        terminal, accepted, iteration, nfev, ngev = host_value(
+            (
+                observation.terminal,
+                observation.accepted,
+                observation.iteration,
+                observation.nfev,
+                observation.ngev,
+            )
         )
         return _BFGSHostObservation(
             terminal=bool(terminal),
@@ -639,11 +686,12 @@ def _run_bfgs_eager(
         sink=sink if callback is not None or progress_callback is not None else None,
     )
     if callback_stopped[0]:
-        state = state._replace(
+        state = replace(
+            state,
             status=_as_jax_dtype(
                 BFGS_STATUS_CALLBACK_STOP,
                 _state_dtype(state.status),
-            )
+            ),
         )
     return finalize_kernel(
         state,
@@ -740,7 +788,8 @@ def _minimize_bfgs_private(
             line_search_status=_int_scalar(0),
         )
     else:
-        state = initial_state._replace(
+        state = replace(
+            initial_state,
             x_k=_as_jax_dtype(initial_state.x_k, x0.dtype),
             f_k=_as_jax_dtype(initial_state.f_k, x0.dtype),
             g_k=_as_jax_dtype(initial_state.g_k, x0.dtype),

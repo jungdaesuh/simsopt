@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import jax
@@ -54,13 +55,16 @@ def test_traceable_gradient_skips_only_exact_zero_adjoint_rhs(
     def solve_linearization(*args, **_kwargs):
         rhs = args[2]
         adjoint = jnp.full_like(rhs, 1.0e6)
-        status = _optimizer._linear_solve_status(
-            adjoint,
-            jnp.zeros_like(rhs),
-            rhs,
-            tol=1.0e-10,
-            iterations=1,
-        )._replace(success=jnp.asarray(True))
+        status = replace(
+            _optimizer._linear_solve_status(
+                adjoint,
+                jnp.zeros_like(rhs),
+                rhs,
+                tol=1.0e-10,
+                iterations=1,
+            ),
+            success=jnp.asarray(True),
+        )
         return adjoint, status
 
     def directional_inner_stationarity(_x_inner, tangent, coil_set_spec, **_kwargs):
@@ -159,13 +163,16 @@ def test_traceable_fused_total_gradient_masks_failed_adjoint(monkeypatch):
     def failed_solve(*args, **_kwargs):
         rhs = args[2]
         adjoint = jnp.ones_like(rhs)
-        status = _optimizer._linear_solve_status(
-            adjoint,
-            jnp.ones_like(rhs),
-            rhs,
-            tol=1.0e-10,
-            iterations=1,
-        )._replace(success=jnp.asarray(False))
+        status = replace(
+            _optimizer._linear_solve_status(
+                adjoint,
+                jnp.ones_like(rhs),
+                rhs,
+                tol=1.0e-10,
+                iterations=1,
+            ),
+            success=jnp.asarray(False),
+        )
         return adjoint, status
 
     monkeypatch.setattr(_traceable, "_traceable_solve_linearization", failed_solve)

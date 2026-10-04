@@ -9,6 +9,7 @@ Optimization*, Section 3.5.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -35,16 +36,18 @@ _ScalarObjective = Callable[[jax.Array], jax.Array]
 _ValueAndGrad = Callable[[jax.Array], tuple[jax.Array, jax.Array]]
 
 
-def _binary_replace(replace_bit, original_dict, new_dict, keys=None):
+def _binary_replace(replace_bit, original_state, new_dict, keys=None):
     if keys is None:
         keys = new_dict.keys()
     return {
-        key: jnp.where(replace_bit, new_dict[key], original_dict[key]) for key in keys
+        key: jnp.where(replace_bit, new_dict[key], getattr(original_state, key))
+        for key in keys
     }
 
 
 def _cache_zoom_sample(state, *, alpha, phi, dphi, grad):
-    return state._replace(
+    return replace(
+        state,
         has_rec=_bool_scalar(True),
         a_rec=alpha,
         phi_rec=phi,
@@ -123,7 +126,7 @@ def _zoom(
             threshold = _as_jax_dtype(1e-5, dalpha.dtype)
         else:
             threshold = _as_jax_dtype(1e-10, dalpha.dtype)
-        state = state._replace(failed=state.failed | (dalpha <= threshold))
+        state = replace(state, failed=state.failed | (dalpha <= threshold))
 
         a_j_cubic = _cubicmin(
             state.a_lo,
@@ -178,13 +181,15 @@ def _zoom(
         phi_j = phi_j.astype(state.phi_lo.dtype)
         dphi_j = dphi_j.astype(state.dphi_lo.dtype)
         g_j = g_j.astype(state.g_star.dtype)
-        state = state._replace(
+        state = replace(
+            state,
             nfev=state.nfev + sample_eval_count,
             ngev=state.ngev + sample_eval_count,
         )
         sample_valid = _line_search_sample_valid(phi_j, dphi_j, g_j)
         improves_best = sample_valid & (phi_j < state.best_phi)
-        state = state._replace(
+        state = replace(
+            state,
             best_a=jnp.where(improves_best, a_j, state.best_a),
             best_phi=jnp.where(improves_best, phi_j, state.best_phi),
             best_dphi=jnp.where(improves_best, dphi_j, state.best_dphi),
@@ -209,10 +214,11 @@ def _zoom(
         previous_dphi_hi = state.dphi_hi
         previous_g_hi = state.g_hi
 
-        state = state._replace(
+        state = replace(
+            state,
             **_binary_replace(
                 hi_to_j,
-                state._asdict(),
+                state,
                 {
                     "a_hi": a_j,
                     "phi_hi": phi_j,
@@ -233,18 +239,20 @@ def _zoom(
             lambda current: current,
             operand=state,
         )
-        state = state._replace(
+        state = replace(
+            state,
             done=star_to_j | state.done,
             **_binary_replace(
                 star_to_j,
-                state._asdict(),
+                state,
                 {"a_star": a_j, "phi_star": phi_j, "dphi_star": dphi_j, "g_star": g_j},
             ),
         )
-        state = state._replace(
+        state = replace(
+            state,
             **_binary_replace(
                 hi_to_lo,
-                state._asdict(),
+                state,
                 {
                     "a_hi": state.a_lo,
                     "phi_hi": state.phi_lo,
@@ -265,10 +273,11 @@ def _zoom(
             lambda current: current,
             operand=state,
         )
-        state = state._replace(
+        state = replace(
+            state,
             **_binary_replace(
                 lo_to_j,
-                state._asdict(),
+                state,
                 {"a_lo": a_j, "phi_lo": phi_j, "dphi_lo": dphi_j, "g_lo": g_j},
             )
         )
@@ -284,8 +293,8 @@ def _zoom(
             lambda current: current,
             operand=state,
         )
-        state = state._replace(j=state.j + _int_scalar(1))
-        state = state._replace(failed=state.failed | (state.j >= max_zoom_iter))
+        state = replace(state, j=state.j + _int_scalar(1))
+        state = replace(state, failed=state.failed | (state.j >= max_zoom_iter))
         return state
 
     state = lax.while_loop(
@@ -298,7 +307,8 @@ def _zoom(
         & (~wolfe_one(state.best_a, state.best_phi))
         & (state.best_phi < phi_0)
     )
-    return state._replace(
+    return replace(
+        state,
         failed=jnp.where(
             state.failed & best_is_acceptable, _bool_scalar(False), state.failed
         ),
@@ -326,14 +336,16 @@ def _apply_zoom_branch_result(
     *,
     wolfe_one,
 ):
-    state = state._replace(
+    state = replace(
+        state,
         nfev=state.nfev + zoom.nfev,
         ngev=state.ngev + zoom.ngev,
     )
     improves_best = _line_search_sample_valid(
         zoom.best_phi, zoom.best_dphi, zoom.best_g
     ) & (zoom.best_phi < state.best_phi)
-    return state._replace(
+    return replace(
+        state,
         best_a=jnp.where(improves_best, zoom.best_a, state.best_a),
         best_phi=jnp.where(improves_best, zoom.best_phi, state.best_phi),
         best_dphi=jnp.where(improves_best, zoom.best_dphi, state.best_dphi),
@@ -427,13 +439,15 @@ def _line_search_from_restricted_func_and_grad(
         a_i = jnp.where(state.i == _int_scalar(1), start_value, state.a_i1 * two)
 
         phi_i, dphi_i, g_i = restricted_func_and_grad(a_i)
-        state = state._replace(
+        state = replace(
+            state,
             nfev=state.nfev + _int_scalar(1),
             ngev=state.ngev + _int_scalar(1),
         )
         sample_valid = _line_search_sample_valid(phi_i, dphi_i, g_i)
         improves_best_i = sample_valid & (phi_i < state.best_phi)
-        state = state._replace(
+        state = replace(
+            state,
             best_a=jnp.where(improves_best_i, a_i, state.best_a),
             best_phi=jnp.where(improves_best_i, phi_i, state.best_phi),
             best_dphi=jnp.where(improves_best_i, dphi_i, state.best_dphi),
@@ -483,7 +497,8 @@ def _line_search_from_restricted_func_and_grad(
             ),
             lambda current: lax.cond(
                 star_to_i,
-                lambda accepted: accepted._replace(
+                lambda accepted: replace(
+                    accepted,
                     done=_bool_scalar(True),
                     a_star=a_i,
                     phi_star=phi_i,
@@ -524,7 +539,8 @@ def _line_search_from_restricted_func_and_grad(
             ),
             operand=state,
         )
-        return state._replace(
+        return replace(
+            state,
             i=state.i + _int_scalar(1),
             a_i2=state.a_i1,
             phi_i2=state.phi_i1,
@@ -544,7 +560,8 @@ def _line_search_from_restricted_func_and_grad(
     best_is_acceptable = _line_search_sample_valid(
         state.best_phi, state.best_dphi, state.best_g
     ) & (state.best_phi < phi_0)
-    state = state._replace(
+    state = replace(
+        state,
         failed=jnp.where(
             (state.failed | (~state.done)) & best_is_acceptable,
             _bool_scalar(False),

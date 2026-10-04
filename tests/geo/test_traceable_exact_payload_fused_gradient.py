@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import fields, replace
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import inspect
@@ -310,13 +311,16 @@ def test_closed_fused_gradient_matches_existing_split_two_pullback(
         matrix = jacobian.T if transpose else jacobian
         solution = jnp.linalg.solve(matrix, rhs)
         residual = rhs - matrix @ solution
-        status = _linear_solve._linear_solve_status(
-            solution,
-            residual,
-            rhs,
-            tol=1.0e-12,
-            iterations=jnp.asarray(0, dtype=jnp.int32),
-        )._replace(success=jnp.asarray(True))
+        status = replace(
+            _linear_solve._linear_solve_status(
+                solution,
+                residual,
+                rhs,
+                tol=1.0e-12,
+                iterations=jnp.asarray(0, dtype=jnp.int32),
+            ),
+            success=jnp.asarray(True),
+        )
         return solution, status
 
     monkeypatch.setattr(
@@ -474,7 +478,9 @@ def test_closed_runtime_accepts_only_coil_dofs():
         _traceable._build_traceable_exact_payload_fused_value_and_gradient
     ).parameters
     runtime_parameters = inspect.signature(evaluator).parameters
-    result_fields = _traceable._TraceableExactPayloadFusedResult._fields
+    result_fields = tuple(
+        field.name for field in fields(_traceable._TraceableExactPayloadFusedResult)
+    )
 
     assert "producer" not in builder_parameters
     assert tuple(runtime_parameters) == ("coil_dofs",)

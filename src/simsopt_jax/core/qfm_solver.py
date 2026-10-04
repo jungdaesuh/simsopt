@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +18,8 @@ from ._surface_dofs_dispatch import (
 )
 from .field import grouped_biot_savart_A_from_spec, grouped_biot_savart_B_from_spec
 
+from simsopt_jax.pytree import pytree_dataclass
+
 __all__ = [
     "QfmAugmentedLagrangianInfo",
     "QfmExactKktInfo",
@@ -32,7 +34,22 @@ __all__ = [
 ]
 
 
-class QfmPenaltySolveInfo(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "success",
+        "status",
+        "fun",
+        "gradient",
+        "nit",
+        "nfev",
+        "njev",
+        "label_value",
+        "label_residual",
+        "qfm_value",
+        "penalty_value",
+    ),
+)
+class QfmPenaltySolveInfo:
     """Device-resident metadata for a QFM penalty solve."""
 
     success: jax.Array
@@ -48,7 +65,24 @@ class QfmPenaltySolveInfo(NamedTuple):
     penalty_value: jax.Array
 
 
-class QfmAugmentedLagrangianInfo(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "success",
+        "status",
+        "fun",
+        "gradient",
+        "nit",
+        "nfev",
+        "njev",
+        "label_value",
+        "label_residual",
+        "qfm_value",
+        "augmented_value",
+        "multiplier",
+        "penalty_weight",
+    ),
+)
+class QfmAugmentedLagrangianInfo:
     """Device-resident metadata for a QFM augmented-Lagrangian solve."""
 
     success: jax.Array
@@ -66,7 +100,16 @@ class QfmAugmentedLagrangianInfo(NamedTuple):
     penalty_weight: jax.Array
 
 
-class QfmExactKktInfo(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "feasibility_abs",
+        "stationarity_inf",
+        "lagrange_multiplier",
+        "qfm_gradient_inf",
+        "label_gradient_norm",
+    ),
+)
+class QfmExactKktInfo:
     """Natural equality-KKT residual for the exact QFM constraint."""
 
     feasibility_abs: jax.Array
@@ -76,7 +119,19 @@ class QfmExactKktInfo(NamedTuple):
     label_gradient_norm: jax.Array
 
 
-class _BFGSResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "x",
+        "success",
+        "status",
+        "fun",
+        "jac",
+        "nit",
+        "nfev",
+        "njev",
+    )
+)
+class _BFGSResult:
     x: jax.Array
     success: jax.Array
     status: jax.Array
@@ -87,7 +142,19 @@ class _BFGSResult(NamedTuple):
     njev: jax.Array
 
 
-class _BFGSState(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "x",
+        "fun",
+        "grad",
+        "hess_inv",
+        "nit",
+        "nfev",
+        "njev",
+        "status",
+    ),
+)
+class _BFGSState:
     x: jax.Array
     fun: jax.Array
     grad: jax.Array
@@ -98,7 +165,14 @@ class _BFGSState(NamedTuple):
     status: jax.Array
 
 
-class _QfmMetrics(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "qfm_value",
+        "label_value",
+        "label_residual",
+    )
+)
+class _QfmMetrics:
     qfm_value: jax.Array
     label_value: jax.Array
     label_residual: jax.Array
@@ -498,11 +572,12 @@ def _make_bfgs_runner(
                 )
 
                 def not_descent(failed_state):
-                    return failed_state._replace(
+                    return replace(
+                        failed_state,
                         status=jnp.asarray(
                             _BFGS_STATUS_NOT_DESCENT,
                             dtype=failed_state.status.dtype,
-                        )
+                        ),
                     )
 
                 def descent_step(descent_state):

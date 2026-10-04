@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import NamedTuple
+
 
 import jax
 import jax.numpy as jnp
@@ -635,7 +635,13 @@ def interpolated_field_state_B_GradAbsB(
     return B, grad_abs_B
 
 
-class InterpolatedFieldCylCache(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "B_cyl",
+        "GradAbsB_cyl",
+    )
+)
+class InterpolatedFieldCylCache:
     """The cylindrical output buffers a native ``InterpolatedField`` keeps.
 
     ``InterpolatedField::_B_cyl_impl`` and ``_GradAbsB_cyl_impl``

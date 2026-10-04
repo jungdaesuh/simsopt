@@ -104,7 +104,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Callable, Literal, NamedTuple
+from typing import Callable, Literal
 
 import jax
 import jax.numpy as jnp
@@ -1025,7 +1025,20 @@ def fieldline_rhs(
 # ── Dormand-Prince single-step ────────────────────────────────────────
 
 
-class _Dopri5Stages(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "y_new",
+        "y_err",
+        "k1",
+        "k3",
+        "k4",
+        "k5",
+        "k6",
+        "k7",
+        "field_cache",
+    ),
+)
+class _Dopri5Stages:
     """One Dormand-Prince step with every stage the dense output needs.
 
     ``k2`` is not carried: boost's ``runge_kutta_dopri5::calc_state`` combines
@@ -1495,7 +1508,20 @@ def bracket_root_jax(
     return t_best, f_best, bracketed_in
 
 
-class _Dopri5AdaptiveStep(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "h_clamped",
+        "y_new",
+        "accepted",
+        "nonfinite_state",
+        "h_next",
+        "t_next",
+        "y_next",
+        "k_next",
+        "stages",
+    ),
+)
+class _Dopri5AdaptiveStep:
     """One adaptive DOPRI5 trial and the carry update it licenses.
 
     ``accepted`` is the step the lane may TAKE: boost accepted it AND its new

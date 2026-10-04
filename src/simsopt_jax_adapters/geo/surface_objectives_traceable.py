@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from threading import Lock
 from typing import NamedTuple
@@ -23,6 +23,7 @@ import numpy as np
 from jax import lax
 from jax.sharding import PartitionSpec as P
 from simsopt.geo.curve import incremental_arclength_pure, kappa_pure
+from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.backend import get_backend_policy
 from simsopt_jax.backend.dtypes import runtime_device_put as _runtime_device_put
 from simsopt_jax.core._device_scalars import staged_like as _staged_like
@@ -203,7 +204,15 @@ _TRACEABLE_NEWTON_TRACE_KEYS = (
 )
 
 
-class TraceableObjectiveInnerState(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "coil_dofs",
+        "solved_x",
+        "objective_value",
+        "eligible",
+    )
+)
+class TraceableObjectiveInnerState:
     """Immutable accepted Boozer state supplied explicitly to candidate solves."""
 
     coil_dofs: jax.Array
@@ -212,7 +221,17 @@ class TraceableObjectiveInnerState(NamedTuple):
     eligible: jax.Array
 
 
-class TraceableObjectiveExecutionCounts(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "newton_iteration_count",
+        "dense_materialization_count",
+        "lu_factorization_count",
+        "lu_solve_count",
+        "refinement_correction_count",
+        "adjoint_execution_count",
+    ),
+)
+class TraceableObjectiveExecutionCounts:
     """Device-resident counts emitted by branches that actually executed."""
 
     newton_iteration_count: jax.Array
@@ -223,7 +242,14 @@ class TraceableObjectiveExecutionCounts(NamedTuple):
     adjoint_execution_count: jax.Array
 
 
-class _TraceableAdjointExecutionEvidence(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "adjoint_output",
+        "residual",
+        "residual_relative",
+    )
+)
+class _TraceableAdjointExecutionEvidence:
     """Device-resident adjoint output and linear-solve residual evidence."""
 
     adjoint_output: jax.Array
@@ -231,14 +257,34 @@ class _TraceableAdjointExecutionEvidence(NamedTuple):
     residual_relative: jax.Array
 
 
-class _TraceableExactReturnedState(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "solved_state",
+        "solve_success",
+    )
+)
+class _TraceableExactReturnedState:
     """Returned exact-solve state and its producer-owned success status."""
 
     solved_state: jax.Array
     solve_success: jax.Array
 
 
-class _TraceableExactPayloadFusedStatus(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "success",
+        "returned_state_solve_success",
+        "producer_solve_success",
+        "returned_state_residual_success",
+        "dynamic_inputs_match",
+        "live_residual_matches_payload",
+        "payload_validation_success",
+        "factorization_valid",
+        "adjoint_solve_success",
+        "finite_outputs",
+    ),
+)
+class _TraceableExactPayloadFusedStatus:
     """Closed-graph success gates without exposing its retained factors."""
 
     success: jax.Array
@@ -253,7 +299,19 @@ class _TraceableExactPayloadFusedStatus(NamedTuple):
     finite_outputs: jax.Array
 
 
-class _TraceableExactPayloadFusedEvidence(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "producer_residual",
+        "live_residual",
+        "producer_residual_inf_norm",
+        "adjoint",
+        "consumer_reuse_counts",
+        "full_graph_counts",
+        "factorization_reconstruction_count",
+        "linearization_primal_traversal_count",
+    ),
+)
+class _TraceableExactPayloadFusedEvidence:
     """Physical producer and consumer evidence for one closed execution."""
 
     producer_residual: jax.Array
@@ -266,7 +324,15 @@ class _TraceableExactPayloadFusedEvidence(NamedTuple):
     linearization_primal_traversal_count: jax.Array
 
 
-class _TraceableExactPayloadFusedResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "value",
+        "gradient",
+        "status",
+        "evidence",
+    )
+)
+class _TraceableExactPayloadFusedResult:
     """Closed exact-payload value, gradient, status, and physical evidence."""
 
     value: jax.Array
@@ -275,7 +341,21 @@ class _TraceableExactPayloadFusedResult(NamedTuple):
     evidence: _TraceableExactPayloadFusedEvidence
 
 
-class _TraceableExactPayloadFusedConsumerResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "success",
+        "value",
+        "gradient",
+        "retained_solve",
+        "dynamic_inputs_match",
+        "live_residual_matches_payload",
+        "returned_state_residual_success",
+        "finite_outputs",
+        "live_residual",
+        "producer_residual_inf_norm",
+    ),
+)
+class _TraceableExactPayloadFusedConsumerResult:
     """Fail-closed internal consumer result and its adjudication evidence."""
 
     success: jax.Array
@@ -816,7 +896,20 @@ _TRACEABLE_SUPPLIED_FACTOR_MAX_CORRECTIONS = MIXED_DENSE_IR_MAX_REFINEMENT_CORRE
 _TRACEABLE_SUPPLIED_FACTOR_FP64_REBUILD_BUDGET = 1
 
 
-class _TraceablePLURefinement(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "solution",
+        "residual",
+        "status",
+        "residual_relative_trace",
+        "contraction_ratio_trace",
+        "residual_relative_trace_length",
+        "contraction_finite",
+        "contraction_monotone",
+        "stagnated",
+    ),
+)
+class _TraceablePLURefinement:
     """One adaptive refinement attempt against an externally supplied operator."""
 
     solution: jax.Array
@@ -830,7 +923,27 @@ class _TraceablePLURefinement(NamedTuple):
     stagnated: jax.Array
 
 
-class _TraceableSuppliedFactorSolveStatus(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "success",
+        "residual",
+        "residual_relative",
+        "iterations",
+        "residual_scale",
+        "requested_tolerance",
+        "effective_tolerance",
+        "supplied_factor_residual_relative_trace",
+        "supplied_factor_residual_relative_trace_length",
+        "supplied_factor_contraction_ratio_trace",
+        "supplied_factor_contraction_finite",
+        "supplied_factor_contraction_monotone",
+        "supplied_factor_stagnated",
+        "fp64_rebuild_count",
+        "fp64_rebuild_residual_relative_trace",
+        "fp64_rebuild_residual_relative_trace_length",
+    ),
+)
+class _TraceableSuppliedFactorSolveStatus:
     """Solve status plus live-operator supplied-factor certificate metrics."""
 
     success: jax.Array
@@ -1008,8 +1121,9 @@ def _traceable_refine_plu_linearization(
 
     refined = lax.while_loop(refinement_active, refine_once, initial_state)
     correction_count = refined.residual_relative_trace_length - 1
-    return refined._replace(
-        status=refined.status._replace(iterations=correction_count),
+    return replace(
+        refined,
+        status=replace(refined.status, iterations=correction_count),
     )
 
 
@@ -1069,7 +1183,8 @@ def _traceable_solve_plu_linearization(
                 tol=linear_solve_tol,
             )
         )
-        rebuilt_status = rebuilt.status._replace(
+        rebuilt_status = replace(
+            rebuilt.status,
             success=rebuilt.status.success & (solve_safe | small_solution_success),
             iterations=supplied.status.iterations + rebuilt.status.iterations,
         )
@@ -2707,10 +2822,11 @@ def _build_traceable_exact_payload_fused_value_and_gradient(
         )
         retained_solve = consumed.retained_solve
         payload_validation = retained_solve.payload_validation
-        consumer_counts = _traceable_adjoint_execution_counts(
-            returned_state.solved_state,
-            retained_solve.status,
-        )._replace(
+        consumer_counts = replace(
+            _traceable_adjoint_execution_counts(
+                returned_state.solved_state,
+                retained_solve.status,
+            ),
             adjoint_execution_count=jnp.where(
                 retained_solve.status.lu_solve_count > 0,
                 _staged_like(
@@ -2723,9 +2839,10 @@ def _build_traceable_exact_payload_fused_value_and_gradient(
                     0,
                     dtype=jnp.int32,
                 ),
-            )
+            ),
         )
-        full_graph_counts = consumer_counts._replace(
+        full_graph_counts = replace(
+            consumer_counts,
             dense_materialization_count=_staged_like(
                 returned_state.solved_state,
                 1,

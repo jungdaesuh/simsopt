@@ -7,12 +7,13 @@ bounded operator refinement. It does not import the optimizer facade.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from collections.abc import Callable
 from enum import IntEnum
 from functools import partial
 from threading import Lock
-from typing import NamedTuple
+
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +46,8 @@ from simsopt_jax.geo.optimizers.exact_final_linearization import (
 from simsopt_jax.numerical_policy import mixed_dense_ir_accuracy_policy
 from simsopt_jax.runtime.host_boundary import host_array, host_int
 
+from simsopt_jax.pytree import pytree_dataclass
+
 _HAGER_HIGHAM_CONDITION_ITERATIONS = 5
 
 _LINEAR_SOLVE_ITERATIONS_UNKNOWN = -1
@@ -56,7 +59,22 @@ _CACHED_HVP_ATTR = "_simsopt_cached_jit_hvp"
 _CACHED_JVP_ATTR = "_simsopt_cached_jit_jvp"
 
 
-class _LinearSolveStatus(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "success",
+        "residual",
+        "residual_relative",
+        "iterations",
+        "residual_scale",
+        "requested_tolerance",
+        "effective_tolerance",
+        "dense_materialization_count",
+        "lu_factorization_count",
+        "lu_solve_count",
+        "refinement_correction_count",
+    ),
+)
+class _LinearSolveStatus:
     success: jax.Array
     residual: jax.Array
     residual_relative: jax.Array
@@ -84,7 +102,18 @@ class _DenseJacobianAssembler(IntEnum):
     VALUE_AND_JACOBIAN = 2
 
 
-class _DenseJacobianMaterializationTelemetry(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "assembler_code",
+        "residual_evaluation_count",
+        "primal_traversal_count",
+        "tangent_batch_count",
+        "tangent_direction_count",
+        "batch_width",
+        "tail_width",
+    ),
+)
+class _DenseJacobianMaterializationTelemetry:
     """Static-shape device telemetry for one dense-Jacobian assembly."""
 
     assembler_code: jax.Array
@@ -96,7 +125,14 @@ class _DenseJacobianMaterializationTelemetry(NamedTuple):
     tail_width: jax.Array
 
 
-class _DenseJacobianMaterialization(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "residual",
+        "jacobian",
+        "telemetry",
+    )
+)
+class _DenseJacobianMaterialization:
     """One fixed-state residual and its column-oriented dense Jacobian."""
 
     residual: jax.Array
@@ -104,7 +140,18 @@ class _DenseJacobianMaterialization(NamedTuple):
     telemetry: _DenseJacobianMaterializationTelemetry
 
 
-class _ExactFinalLinearizationValidation(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "success",
+        "identity_valid",
+        "orientation_valid",
+        "factorization_residual",
+        "factor_metadata_valid",
+        "factorization_valid",
+        "factorization_reconstruction_count",
+    ),
+)
+class _ExactFinalLinearizationValidation:
     success: jax.Array
     identity_valid: jax.Array
     orientation_valid: jax.Array
@@ -114,7 +161,17 @@ class _ExactFinalLinearizationValidation(NamedTuple):
     factorization_reconstruction_count: jax.Array
 
 
-class _RetainedJacobianTransposeSolve(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "solution",
+        "correction",
+        "residual",
+        "condition_estimate",
+        "payload_validation",
+        "status",
+    ),
+)
+class _RetainedJacobianTransposeSolve:
     solution: jax.Array
     correction: jax.Array
     residual: jax.Array
@@ -844,7 +901,8 @@ def _complete_linear_solve_status(status, rhs, *, tol):
         if status.effective_tolerance is None
         else status.effective_tolerance
     )
-    return status._replace(
+    return replace(
+        status,
         residual_scale=residual_scale,
         requested_tolerance=requested_tolerance,
         effective_tolerance=effective_tolerance,
@@ -867,9 +925,7 @@ def _complete_linear_solve_status(status, rhs, *, tol):
 def _terminal_linear_solve_status(status, rhs, *, tol):
     """Complete status and apply the attainable solver authority."""
     completed = _complete_linear_solve_status(status, rhs, tol=tol)
-    return completed._replace(
-        success=_linear_solve_effective_tolerance_reached(completed)
-    )
+    return replace(completed, success=_linear_solve_effective_tolerance_reached(completed))
 
 
 def _dense_linear_solve_status(matvec, solution, rhs, *, tol):
@@ -1249,13 +1305,16 @@ def _solve_retained_jacobian_transpose_adjoint(
     zero_vector = jnp.zeros_like(rhs)
 
     def invalid_payload(_operand):
-        status = _linear_solve_status(
-            nan_vector,
-            nan_vector,
-            rhs,
-            tol=tol,
-            iterations=_device_int32(0, like=rhs),
-        )._replace(success=jnp.asarray(False))
+        status = replace(
+            _linear_solve_status(
+                nan_vector,
+                nan_vector,
+                rhs,
+                tol=tol,
+                iterations=_device_int32(0, like=rhs),
+            ),
+            success=jnp.asarray(False),
+        )
         return _RetainedJacobianTransposeSolve(
             solution=nan_vector,
             correction=nan_vector,
@@ -1267,13 +1326,16 @@ def _solve_retained_jacobian_transpose_adjoint(
 
     def valid_payload(_operand):
         def zero_rhs(_zero_operand):
-            status = _linear_solve_status(
-                zero_vector,
-                zero_vector,
-                rhs,
-                tol=tol,
-                iterations=_device_int32(0, like=rhs),
-            )._replace(success=jnp.asarray(True))
+            status = replace(
+                _linear_solve_status(
+                    zero_vector,
+                    zero_vector,
+                    rhs,
+                    tol=tol,
+                    iterations=_device_int32(0, like=rhs),
+                ),
+                success=jnp.asarray(True),
+            )
             return _RetainedJacobianTransposeSolve(
                 solution=zero_vector,
                 correction=zero_vector,
@@ -1328,7 +1390,8 @@ def _solve_retained_jacobian_transpose_adjoint(
                 solve_dtype=rhs_dtype,
                 condition_estimate=condition_estimate,
             )
-            status = status._replace(
+            status = replace(
+                status,
                 success=(status.success | backward_error_success) & solve_safe,
                 lu_factorization_count=factorization_count,
                 lu_solve_count=(_device_int32(2, like=rhs) + condition_solve_count),
@@ -1460,7 +1523,7 @@ def _solve_square_vector_system_operator_only_nonzero_rhs(
                 & _linear_solve_finite(refined_solution, refined_residual)
                 & (~refined_status.success)
             )
-            rejected_status = status._replace(iterations=refined_iterations)
+            rejected_status = replace(status, iterations=refined_iterations)
             return lax.cond(
                 accept_correction,
                 lambda _: (
@@ -1852,7 +1915,8 @@ def _solve_dense_square_operator_least_squares_system_with_status(
         solve_dtype=rhs_dtype,
         condition_estimate=condition_estimate,
     )
-    return solution, status._replace(
+    return solution, replace(
+        status,
         success=(status.success | backward_error_success) & solve_safe,
         dense_materialization_count=_device_int32(1, like=rhs),
         lu_factorization_count=condition_factorizations,
@@ -1932,7 +1996,8 @@ def _solve_dense_square_operator_lu_system_with_status(
         solve_dtype=rhs_dtype,
         condition_estimate=condition_estimate,
     )
-    return solution, status._replace(
+    return solution, replace(
+        status,
         success=(status.success | backward_error_success) & solve_safe,
         dense_materialization_count=_device_int32(1, like=rhs),
         lu_factorization_count=(_device_int32(1, like=rhs) + condition_factorizations),

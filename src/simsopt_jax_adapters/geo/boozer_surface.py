@@ -34,7 +34,7 @@ import hashlib
 import inspect
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 import functools
 from functools import partial
@@ -5260,9 +5260,7 @@ class BoozerSurfaceJAX(Optimizable):
                     solve_dtype=x.dtype,
                     condition_estimate=condition_estimate,
                 )
-                return status._replace(
-                    success=(status.success | backward_error_success) & solve_safe
-                )
+                return replace(status, success=(status.success | backward_error_success) & solve_safe)
 
             def solve_forward_with_status(rhs):
                 solved = solve_forward(rhs)
@@ -5364,9 +5362,7 @@ class BoozerSurfaceJAX(Optimizable):
                     solve_dtype=x.dtype,
                     condition_estimate=condition_estimate,
                 )
-                return solved, status._replace(
-                    success=(status.success | backward_error_success) & solve_safe
-                )
+                return solved, replace(status, success=(status.success | backward_error_success) & solve_safe)
 
             @_with_host_bridge_transfer_guard
             def solve_transpose_with_status(rhs):
@@ -5394,9 +5390,7 @@ class BoozerSurfaceJAX(Optimizable):
                     solve_dtype=x.dtype,
                     condition_estimate=condition_estimate,
                 )
-                return solved, status._replace(
-                    success=(status.success | backward_error_success) & solve_safe
-                )
+                return solved, replace(status, success=(status.success | backward_error_success) & solve_safe)
 
             return pack_callbacks(
                 apply_forward,

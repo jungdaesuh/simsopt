@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache, wraps
 from itertools import count
@@ -72,6 +72,7 @@ from jax import lax
 from jax.flatten_util import ravel_pytree
 from scipy.optimize import OptimizeResult
 
+from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.backend import (
     get_backend_config,
     get_backend_policy,
@@ -456,7 +457,22 @@ class _ArrayValueAndJacobianWithArgs(Protocol):
     def __call__(self, x: jax.Array, *args: object) -> tuple[jax.Array, jax.Array]: ...
 
 
-class _DenseExactNewtonDirection(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "residual",
+        "jacobian",
+        "lu",
+        "pivots",
+        "initial_solve",
+        "refinement_rhs",
+        "direction",
+        "correction",
+        "linear_residual",
+        "condition_estimate",
+        "status",
+    ),
+)
+class _DenseExactNewtonDirection:
     """Current-state dense linearization, factors, and certified direction."""
 
     residual: jax.Array
@@ -472,7 +488,37 @@ class _DenseExactNewtonDirection(NamedTuple):
     status: _LinearSolveStatus
 
 
-class _NativeDenseExactNewtonC2Result(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "x",
+        "residual",
+        "returned_jacobian",
+        "iteration_count",
+        "applied_update_count",
+        "success",
+        "numerical_failure",
+        "stop_reason_code",
+        "rollback_branch_taken",
+        "native_persist_predicate",
+        "persist_solved_state",
+        "initial_norm",
+        "assessed_norm",
+        "returned_norm",
+        "applied_state_trace",
+        "applied_state_trace_active",
+        "assessed_norm_trace",
+        "assessed_norm_trace_active",
+        "exact_newton_linear_residual_rel",
+        "exact_refinement_correction_rel",
+        "linear_solve_attempt_count",
+        "dense_materialization_count",
+        "lu_factorization_count",
+        "lu_solve_count",
+        "refinement_correction_count",
+        "rollback_recompute_count",
+    ),
+)
+class _NativeDenseExactNewtonC2Result:
     """Native-order C2 result with fixed-shape applied-state telemetry."""
 
     x: jax.Array
@@ -2990,9 +3036,7 @@ def _refine_traceable_newton_operator_gmres_solution(
         tolerance=tol,
         iterations=refined_iterations,
     )
-    fallback_status = status._replace(
-        iterations=_linear_solve_status_iterations(refined_iterations)
-    )
+    fallback_status = replace(status, iterations=_linear_solve_status_iterations(refined_iterations))
     return lax.cond(
         correction_finite,
         lambda _: (refined_solution, refined_status),
@@ -4092,11 +4136,10 @@ def _dense_direct_exact_newton_direction_from_jacobian(
         solve_dtype=rhs_dtype,
         condition_estimate=condition_estimate,
     )
-    status = status._replace(
+    status = replace(
+        status,
         success=(status.success | backward_error_success) & solve_safe,
-        lu_factorization_count=(
-            _device_int32(1, like=residual) + condition_factorizations
-        ),
+        lu_factorization_count=(_device_int32(1, like=residual) + condition_factorizations),
         lu_solve_count=(_device_int32(2, like=residual) + condition_lu_solves),
         refinement_correction_count=_device_int32(1, like=residual),
     )

@@ -38,7 +38,7 @@ JAX reimplementation of SciPy 1.17.1 L-BFGS-B
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NamedTuple
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -48,6 +48,8 @@ import numpy as np
 from simsopt_jax.runtime.host_boundary import host_array
 
 from ._types import LBFGS_STATUS_CALLBACK_STOP, LBFGS_STATUS_NONFINITE
+
+from simsopt_jax.pytree import pytree_dataclass
 
 START = 0
 NO_MSG = 0
@@ -143,7 +145,16 @@ TASK_MESSAGES = {
 }
 
 
-class LbfgsbActiveResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "x",
+        "iwhere",
+        "prjctd",
+        "cnstnd",
+        "boxed",
+    )
+)
+class LbfgsbActiveResult:
     x: jax.Array
     iwhere: jax.Array
     prjctd: jax.Array
@@ -151,7 +162,18 @@ class LbfgsbActiveResult(NamedTuple):
     boxed: jax.Array
 
 
-class LbfgsbWorkspace(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "wa",
+        "iwa",
+        "task",
+        "ln_task",
+        "lsave",
+        "isave",
+        "dsave",
+    )
+)
+class LbfgsbWorkspace:
     wa: jax.Array
     iwa: jax.Array
     task: jax.Array
@@ -161,7 +183,27 @@ class LbfgsbWorkspace(NamedTuple):
     dsave: jax.Array
 
 
-class LbfgsbState(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "m",
+        "x",
+        "l",
+        "u",
+        "nbd",
+        "f",
+        "g",
+        "factr",
+        "pgtol",
+        "maxls",
+        "workspace",
+        "n_iterations",
+        "nfev",
+        "njev",
+        "evaluated_nonfinite_count",
+        "all_accepted_states_finite",
+    ),
+)
+class LbfgsbState:
     m: int
     x: jax.Array
     l: jax.Array
@@ -180,14 +222,34 @@ class LbfgsbState(NamedTuple):
     all_accepted_states_finite: jax.Array
 
 
-class LbfgsbMacroStepResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "state",
+        "accepted_new_x",
+        "terminal",
+        "entry_kind",
+    )
+)
+class LbfgsbMacroStepResult:
     state: LbfgsbState
     accepted_new_x: jax.Array
     terminal: jax.Array
     entry_kind: jax.Array
 
 
-class LbfgsbDcstepResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "stx",
+        "fx",
+        "dx",
+        "sty",
+        "fy",
+        "dy",
+        "stp",
+        "brackt",
+    )
+)
+class LbfgsbDcstepResult:
     stx: jax.Array
     fx: jax.Array
     dx: jax.Array
@@ -198,7 +260,16 @@ class LbfgsbDcstepResult(NamedTuple):
     brackt: jax.Array
 
 
-class LbfgsbDcsrchResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "stp",
+        "task",
+        "task_msg",
+        "isave",
+        "dsave",
+    )
+)
+class LbfgsbDcsrchResult:
     stp: jax.Array
     task: jax.Array
     task_msg: jax.Array
@@ -206,7 +277,19 @@ class LbfgsbDcsrchResult(NamedTuple):
     dsave: jax.Array
 
 
-class LbfgsbMatupdResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "ws",
+        "wy",
+        "sy",
+        "ss",
+        "itail",
+        "col",
+        "head",
+        "theta",
+    )
+)
+class LbfgsbMatupdResult:
     ws: jax.Array
     wy: jax.Array
     sy: jax.Array
@@ -217,28 +300,68 @@ class LbfgsbMatupdResult(NamedTuple):
     theta: jax.Array
 
 
-class LbfgsbBmvResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "p",
+        "info",
+    )
+)
+class LbfgsbBmvResult:
     p: jax.Array
     info: jax.Array
 
 
-class LbfgsbFormtResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "wt",
+        "info",
+    )
+)
+class LbfgsbFormtResult:
     wt: jax.Array
     info: jax.Array
 
 
-class LbfgsbFormkResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "wn",
+        "wn1",
+        "info",
+    )
+)
+class LbfgsbFormkResult:
     wn: jax.Array
     wn1: jax.Array
     info: jax.Array
 
 
-class LbfgsbHpsolbResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "t",
+        "iorder",
+    )
+)
+class LbfgsbHpsolbResult:
     t: jax.Array
     iorder: jax.Array
 
 
-class LbfgsbCauchyResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "iorder",
+        "iwhere",
+        "t",
+        "d",
+        "xcp",
+        "p",
+        "c",
+        "wbp",
+        "v",
+        "nseg",
+        "info",
+    ),
+)
+class LbfgsbCauchyResult:
     iorder: jax.Array
     iwhere: jax.Array
     t: jax.Array
@@ -252,13 +375,30 @@ class LbfgsbCauchyResult(NamedTuple):
     info: jax.Array
 
 
-class LbfgsbCmprlbResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "r",
+        "wa",
+        "info",
+    )
+)
+class LbfgsbCmprlbResult:
     r: jax.Array
     wa: jax.Array
     info: jax.Array
 
 
-class LbfgsbSubsmResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "x",
+        "d",
+        "xp",
+        "iword",
+        "wv",
+        "info",
+    )
+)
+class LbfgsbSubsmResult:
     x: jax.Array
     d: jax.Array
     xp: jax.Array
@@ -267,7 +407,33 @@ class LbfgsbSubsmResult(NamedTuple):
     info: jax.Array
 
 
-class LbfgsbLnsrlbResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "x",
+        "fold",
+        "gd",
+        "gdold",
+        "g",
+        "r",
+        "t",
+        "stp",
+        "dnorm",
+        "dtd",
+        "xstep",
+        "stpmx",
+        "ifun",
+        "iback",
+        "nfgv",
+        "info",
+        "task",
+        "task_msg",
+        "isave",
+        "dsave",
+        "temp_task",
+        "temp_task_msg",
+    ),
+)
+class LbfgsbLnsrlbResult:
     x: jax.Array
     fold: jax.Array
     gd: jax.Array
@@ -292,7 +458,17 @@ class LbfgsbLnsrlbResult(NamedTuple):
     temp_task_msg: jax.Array
 
 
-class LbfgsbFreevResult(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "nfree",
+        "idx",
+        "nenter",
+        "ileave",
+        "idx2",
+        "wrk",
+    )
+)
+class LbfgsbFreevResult:
     nfree: jax.Array
     idx: jax.Array
     nenter: jax.Array
@@ -301,7 +477,14 @@ class LbfgsbFreevResult(NamedTuple):
     wrk: jax.Array
 
 
-class LbfgsbInverseHessianHistory(NamedTuple):
+@pytree_dataclass(
+    data=(
+        "s",
+        "y",
+        "n_corrs",
+    )
+)
+class LbfgsbInverseHessianHistory:
     s: jax.Array
     y: jax.Array
     n_corrs: jax.Array
@@ -572,14 +755,15 @@ def _lbfgsb_setulb_start(state: LbfgsbState) -> LbfgsbState:
     dsave = state.workspace.dsave.at[0].set(jnp.asarray(1.0, dtype=dtype))
     dsave = dsave.at[2].set(state.factr * _lbfgsb_eps(dtype))
 
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         iwa=iwa,
         task=_lbfgsb_task(FG, FG_START),
         lsave=lsave,
         isave=isave,
         dsave=dsave,
     )
-    return state._replace(x=active.x, workspace=workspace)
+    return replace(state, x=active.x, workspace=workspace)
 
 
 def _lbfgsb_setulb_fg_start_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbState:
@@ -866,7 +1050,8 @@ def _lbfgsb_setulb_fg_start_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
     dsave = dsave.at[15].set(search.dtd)
     dsave = dsave.at[16:29].set(search.dsave)
 
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         wa=wa,
         iwa=iwa,
         task=_lbfgsb_task(search.task, search.task_msg),
@@ -875,7 +1060,7 @@ def _lbfgsb_setulb_fg_start_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
         isave=isave,
         dsave=dsave,
     )
-    normal_state = state._replace(x=search.x, workspace=workspace)
+    normal_state = replace(state, x=search.x, workspace=workspace)
     line_search_stopped = _lbfgsb_line_search_stops_iteration(search, state.maxls)
     restart_from_line_search = line_search_stopped & (col != 0)
     restart = restart_from_geometry | restart_from_line_search
@@ -1106,7 +1291,8 @@ def _lbfgsb_setulb_subspace_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
     dsave = dsave.at[15].set(search.dtd)
     dsave = dsave.at[16:29].set(search.dsave)
 
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         wa=wa,
         task=_lbfgsb_task(search.task, search.task_msg),
         ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
@@ -1114,7 +1300,7 @@ def _lbfgsb_setulb_subspace_line_search(state: LbfgsbState, sbgnrm) -> LbfgsbSta
         isave=isave,
         dsave=dsave,
     )
-    normal_state = state._replace(x=search.x, workspace=workspace)
+    normal_state = replace(state, x=search.x, workspace=workspace)
     line_search_stopped = _lbfgsb_line_search_stops_iteration(search, state.maxls)
     restart_from_line_search = line_search_stopped & (col != 0)
     restart = restart_from_geometry | restart_from_line_search
@@ -1250,7 +1436,8 @@ def _lbfgsb_setulb_line_search_continue(state: LbfgsbState) -> LbfgsbState:
     dsave = dsave.at[15].set(search.dtd)
     dsave = dsave.at[16:29].set(search.dsave)
 
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         wa=wa,
         task=_lbfgsb_task(search.task, search.task_msg),
         ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
@@ -1258,7 +1445,8 @@ def _lbfgsb_setulb_line_search_continue(state: LbfgsbState) -> LbfgsbState:
         isave=isave,
         dsave=dsave,
     )
-    normal_state = state._replace(
+    normal_state = replace(
+        state,
         x=search.x,
         workspace=workspace,
         n_iterations=iteration,
@@ -1363,7 +1551,8 @@ def _lbfgsb_setulb_refreshed_memory_state(
     isave = isave.at[30].set(int_zero)
     isave = isave.at[34].set(int_zero)
     dsave = dsave.at[0].set(jnp.asarray(1.0, dtype=dtype))
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         wa=wa,
         iwa=iwa,
         task=_lbfgsb_task(task, task_msg),
@@ -1371,7 +1560,7 @@ def _lbfgsb_setulb_refreshed_memory_state(
         isave=isave,
         dsave=dsave,
     )
-    return state._replace(x=x, f=f, g=g, workspace=workspace)
+    return replace(state, x=x, f=f, g=g, workspace=workspace)
 
 
 def _lbfgsb_setulb_restart_after_line_search(
@@ -1479,7 +1668,8 @@ def _lbfgsb_setulb_line_search_abnormal(
     dsave = dsave.at[15].set(search.dtd)
     dsave = dsave.at[16:29].set(search.dsave)
 
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         wa=wa,
         task=_lbfgsb_task(ABNORMAL, NO_MSG),
         ln_task=_lbfgsb_task(search.temp_task, search.temp_task_msg),
@@ -1487,7 +1677,8 @@ def _lbfgsb_setulb_line_search_abnormal(
         isave=isave,
         dsave=dsave,
     )
-    return state._replace(
+    return replace(
+        state,
         x=search.t,
         f=state.f,
         g=search.r,
@@ -1590,7 +1781,8 @@ def _lbfgsb_setulb_unconstrained_line_search(
     dsave = dsave.at[15].set(search.dtd)
     dsave = dsave.at[16:29].set(search.dsave)
 
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         wa=wa,
         iwa=iwa,
         task=_lbfgsb_task(search.task, search.task_msg),
@@ -1599,7 +1791,7 @@ def _lbfgsb_setulb_unconstrained_line_search(
         isave=isave,
         dsave=dsave,
     )
-    normal_state = state._replace(x=search.x, workspace=workspace)
+    normal_state = replace(state, x=search.x, workspace=workspace)
     line_search_stopped = _lbfgsb_line_search_stops_iteration(search, state.maxls)
     restart_from_line_search = line_search_stopped & (col != 0)
     refreshed_line_search_state = _lbfgsb_setulb_restart_after_line_search(
@@ -1644,11 +1836,12 @@ def _lbfgsb_setulb_new_x_convergence(
     task_msg: jax.Array,
     info: jax.Array,
 ) -> LbfgsbState:
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         task=_lbfgsb_task(CONVERGENCE, task_msg),
         isave=state.workspace.isave.at[34].set(info),
     )
-    return state._replace(workspace=workspace)
+    return replace(state, workspace=workspace)
 
 
 def _lbfgsb_setulb_new_x_next_iteration(
@@ -1686,13 +1879,14 @@ def _lbfgsb_setulb_new_x_next_iteration(
     skip_update = dr <= _lbfgsb_eps(dtype) * ddum
 
     def skip_update_branch(_):
-        workspace = state.workspace._replace(
+        workspace = replace(
+            state.workspace,
             wa=wa.at[lr:ld].set(gradient_delta).at[ld:lt].set(next_direction),
             lsave=state.workspace.lsave.at[3].set(jnp.asarray(False, dtype=jnp.int32)),
             isave=state.workspace.isave.at[25].set(isave[25] + 1),
             dsave=state.workspace.dsave.at[12].set(sbgnrm),
         )
-        return state._replace(workspace=workspace)
+        return replace(state, workspace=workspace)
 
     def update_branch(_):
         iupdat = isave[30] + 1
@@ -1767,14 +1961,15 @@ def _lbfgsb_setulb_new_x_next_iteration(
         next_dsave = dsave.at[0].set(next_theta)
         next_dsave = next_dsave.at[12].set(sbgnrm)
 
-        workspace = state.workspace._replace(
+        workspace = replace(
+            state.workspace,
             wa=next_wa,
             task=_lbfgsb_task(next_task_code, next_task_msg),
             lsave=state.workspace.lsave.at[3].set(next_updatd.astype(jnp.int32)),
             isave=next_isave,
             dsave=next_dsave,
         )
-        return state._replace(workspace=workspace)
+        return replace(state, workspace=workspace)
 
     updated_state = jax.lax.cond(skip_update, skip_update_branch, update_branch, None)
     if unconstrained_fast_path:
@@ -1861,12 +2056,13 @@ def _lbfgsb_setulb_new_x_reentry_impl(
 def _lbfgsb_setulb_fg_start_converged(
     state: LbfgsbState, sbgnrm: jax.Array
 ) -> LbfgsbState:
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         task=_lbfgsb_task(CONVERGENCE, CONV_GRAD),
         isave=state.workspace.isave.at[33].set(jnp.asarray(1, dtype=jnp.int32)),
         dsave=state.workspace.dsave.at[12].set(sbgnrm),
     )
-    return state._replace(workspace=workspace)
+    return replace(state, workspace=workspace)
 
 
 def _lbfgsb_setulb_fg_start_reentry(
@@ -1946,7 +2142,7 @@ def lbfgsb_setulb(state: LbfgsbState) -> LbfgsbState:
         )
         next_state = jax.lax.cond(
             current_state.workspace.task[0] == RESTART,
-            lambda retry_state: retry_state._replace(f=original_f),
+            lambda retry_state: replace(retry_state, f=original_f),
             lambda retry_state: retry_state,
             next_state,
         )
@@ -1978,7 +2174,8 @@ def lbfgsb_start_with_initial_value_and_grad(
     value = jnp.asarray(value, dtype=started.x.dtype)
     grad = jnp.asarray(grad, dtype=started.x.dtype)
     evaluated_nonfinite = (~jnp.isfinite(value)) | jnp.any(~jnp.isfinite(grad))
-    return started._replace(
+    return replace(
+        started,
         f=value,
         g=grad,
         nfev=started.nfev + jnp.asarray(1, dtype=jnp.int32),
@@ -2009,7 +2206,8 @@ def _lbfgsb_evaluate_value_and_grad(
     )
     value = jnp.where(reject_nonfinite_trial, rejected_trial_value, value)
     gradient = jnp.where(reject_nonfinite_trial, jnp.zeros_like(gradient), gradient)
-    return state._replace(
+    return replace(
+        state,
         f=value,
         g=gradient,
         nfev=state.nfev + jnp.asarray(1, dtype=jnp.int32),
@@ -2049,13 +2247,14 @@ def _lbfgsb_stop_after_new_x_limits(
         jnp.asarray(STOP_ITERC, dtype=jnp.int32),
         jnp.asarray(STOP_ITER, dtype=jnp.int32),
     )
-    workspace = state.workspace._replace(
+    workspace = replace(
+        state.workspace,
         task=_lbfgsb_task(
             jnp.where(stopped, jnp.asarray(STOP, dtype=jnp.int32), task[0]),
             jnp.where(stopped, stop_msg, task[1]),
-        )
+        ),
     )
-    return state._replace(workspace=workspace)
+    return replace(state, workspace=workspace)
 
 
 def lbfgsb_public_status_from_state(
@@ -2129,10 +2328,11 @@ def _lbfgsb_finish_transition(
         & jnp.isfinite(state.f)
         & jnp.all(jnp.isfinite(state.g))
     )
-    state = state._replace(
+    state = replace(
+        state,
         all_accepted_states_finite=(
             state.all_accepted_states_finite & (~accepted_new_x | accepted_state_finite)
-        )
+        ),
     )
     if accepted_step_callback is not None:
         state = jax.lax.cond(
@@ -2191,7 +2391,7 @@ def _lbfgsb_search_transition(
             )
         else:
             next_state = _lbfgsb_setulb_fg_start_line_search(state, sbgnrm)
-        return next_state._replace(f=original_f)
+        return replace(next_state, f=original_f)
 
     def non_restart_branch(state):
         return jax.lax.cond(

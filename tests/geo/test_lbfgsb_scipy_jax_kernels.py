@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import numpy as np
@@ -1233,7 +1234,20 @@ def test_lbfgsb_dcstep_matches_c_reference_for_more_thuente_cases():
     for case in cases:
         expected = _dcstep_reference(*case)
         actual = lbfgsb.lbfgsb_dcstep(*case)
-        np.testing.assert_allclose(np.asarray(actual[:-1]), np.asarray(expected[:-1]))
+        np.testing.assert_allclose(
+            np.asarray(
+                (
+                    actual.stx,
+                    actual.fx,
+                    actual.dx,
+                    actual.sty,
+                    actual.fy,
+                    actual.dy,
+                    actual.stp,
+                )
+            ),
+            np.asarray(expected[:-1]),
+        )
         assert bool(actual.brackt) is expected[-1]
 
 
@@ -1268,7 +1282,20 @@ def test_lbfgsb_dcstep_is_jittable_with_fixed_scalar_carry():
         10.0,
     )
 
-    np.testing.assert_allclose(np.asarray(actual[:-1]), np.asarray(expected[:-1]))
+    np.testing.assert_allclose(
+        np.asarray(
+            (
+                actual.stx,
+                actual.fx,
+                actual.dx,
+                actual.sty,
+                actual.fy,
+                actual.dy,
+                actual.stp,
+            )
+        ),
+        np.asarray(expected[:-1]),
+    )
     assert bool(actual.brackt) is expected[-1]
 
 
@@ -1458,7 +1485,20 @@ def test_lbfgsb_matupd_matches_c_reference_before_and_after_ring_wrap():
             stp=0.5,
             dtd=2.25,
         )
-        for actual_item, expected_item in zip(actual, expected, strict=True):
+        for actual_item, expected_item in zip(
+            (
+                actual.ws,
+                actual.wy,
+                actual.sy,
+                actual.ss,
+                actual.itail,
+                actual.col,
+                actual.head,
+                actual.theta,
+            ),
+            expected,
+            strict=True,
+        ):
             np.testing.assert_allclose(np.asarray(actual_item), expected_item)
 
 
@@ -1923,7 +1963,8 @@ def test_lbfgsb_hpsolb_matches_scipy_heap_reference_initial_build():
     iorder = np.array([40, 15, 30, 16, 20, 7], dtype=np.int32)
 
     expected_t, expected_iorder = _hpsolb_reference(5, t, iorder, iheap=0)
-    actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+    heap = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+    actual_t, actual_iorder = heap.t, heap.iorder
 
     np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
     np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
@@ -1934,7 +1975,8 @@ def test_lbfgsb_hpsolb_matches_scipy_heap_reference_repeated_extract():
     iorder = np.array([40, 15, 30, 16, 20, 7], dtype=np.int32)
 
     expected_t, expected_iorder = _hpsolb_reference(5, t, iorder, iheap=0)
-    actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+    heap = lbfgsb.lbfgsb_hpsolb(5, t, iorder, 0)
+    actual_t, actual_iorder = heap.t, heap.iorder
     for last in range(4, 0, -1):
         expected_t, expected_iorder = _hpsolb_reference(
             last,
@@ -1942,12 +1984,13 @@ def test_lbfgsb_hpsolb_matches_scipy_heap_reference_repeated_extract():
             expected_iorder,
             iheap=1,
         )
-        actual_t, actual_iorder = lbfgsb.lbfgsb_hpsolb(
+        heap = lbfgsb.lbfgsb_hpsolb(
             last,
             actual_t,
             actual_iorder,
             1,
         )
+        actual_t, actual_iorder = heap.t, heap.iorder
 
     np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
     np.testing.assert_array_equal(np.asarray(actual_iorder), expected_iorder)
@@ -1958,7 +2001,8 @@ def test_lbfgsb_hpsolb_is_jittable_with_dynamic_last_index():
     t = np.array([2.0, 5.0, 1.0, 3.0], dtype=np.float64)
     iorder = np.array([20, 50, 10, 30], dtype=np.int32)
 
-    actual_t, actual_iorder = hpsolb_jit(np.int32(3), t, iorder, np.int32(0))
+    heap = hpsolb_jit(np.int32(3), t, iorder, np.int32(0))
+    actual_t, actual_iorder = heap.t, heap.iorder
     expected_t, expected_iorder = _hpsolb_reference(3, t, iorder, iheap=0)
 
     np.testing.assert_array_equal(np.asarray(actual_t), expected_t)
@@ -2153,10 +2197,11 @@ def _lbfgsb_state_after_accepted_steps(*, m: int, accepted_steps: int):
 
 def test_finish_transition_latches_nonfinite_accepted_state() -> None:
     state = _lbfgsb_state_after_accepted_steps(m=4, accepted_steps=1)
-    workspace = state.workspace._replace(
-        task=jnp.asarray((lbfgsb.NEW_X, lbfgsb.NO_MSG), dtype=jnp.int32)
+    workspace = replace(
+        state.workspace, task=jnp.asarray((lbfgsb.NEW_X, lbfgsb.NO_MSG), dtype=jnp.int32)
     )
-    nonfinite_accepted = state._replace(
+    nonfinite_accepted = replace(
+        state,
         f=jnp.asarray(jnp.nan, dtype=state.f.dtype),
         workspace=workspace,
     )
@@ -2812,7 +2857,7 @@ def _seed_unwritten_workspace_slots(state):
     for slot in range(int(isave.shape[0])):
         if slot not in _ISAVE_WRITE_SLOTS:
             isave = isave.at[slot].set(-(slot + 1000))
-    return state._replace(workspace=state.workspace._replace(dsave=dsave, isave=isave))
+    return replace(state, workspace=replace(state.workspace, dsave=dsave, isave=isave))
 
 
 def _drive_lbfgsb_to_termination(objective, x0, *, gtol, unconstrained_fast_path):

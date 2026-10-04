@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple, Protocol, cast
 
 import jax
@@ -585,10 +585,10 @@ def _lbfgsb_callback_stop_state_kernel(
     cache_key_prefix: tuple[object, ...] = (),
 ) -> Callable[[lbfgsb.LbfgsbState], lbfgsb.LbfgsbState]:
     def stop_for_callback(state: lbfgsb.LbfgsbState) -> lbfgsb.LbfgsbState:
-        workspace = state.workspace._replace(
-            task=lbfgsb._lbfgsb_task(lbfgsb.STOP, lbfgsb.STOP_CALLB)
+        workspace = replace(
+            state.workspace, task=lbfgsb._lbfgsb_task(lbfgsb.STOP, lbfgsb.STOP_CALLB)
         )
-        return state._replace(workspace=workspace)
+        return replace(state, workspace=workspace)
 
     return _cached_private_solver(
         cache_owner,
@@ -1672,7 +1672,7 @@ def _minimize_lbfgs_private_impl(
             diagnostic_event_callback,
             "lbfgs_effects_barrier_returned",
         )
-    return result._replace(optimizer_state_trace=tuple(optimizer_state_trace))
+    return replace(result, optimizer_state_trace=tuple(optimizer_state_trace))
 
 
 def _minimize_lbfgs_private(

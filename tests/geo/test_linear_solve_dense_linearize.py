@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
 
 import math
@@ -190,7 +191,7 @@ def test_checkpoint_rematerialization_is_not_reported_as_one_residual_execution(
     jax.effects_barrier()
 
     assert len(residual_executions) > 1
-    assert actual._fields == ("residual", "jacobian", "telemetry")
+    assert tuple(field.name for field in fields(actual)) == ("residual", "jacobian", "telemetry")
 
 
 @pytest.mark.parametrize(
