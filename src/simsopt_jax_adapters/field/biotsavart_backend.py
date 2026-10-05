@@ -10,7 +10,7 @@ This module does **not** inherit from ``sopp.BiotSavart`` or
 M0 rewrite contract (adapter pattern, §5).
 """
 
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import partial
 import time
 
@@ -1241,14 +1241,24 @@ def _coil_cotangents_to_dofs_gradient_from_extraction_spec(
     d_coil_arrays,
     coil_indices,
     coil_dofs,
+    *,
+    projection_spec=None,
+    owner_width=None,
 ):
     coil_dofs = _as_jax_float64(coil_dofs)
-    dofs_gradient = coil_dofs - coil_dofs
+    dofs_gradient = (
+        coil_dofs - coil_dofs
+        if owner_width is None
+        else jnp.zeros((owner_width,), dtype=coil_dofs.dtype)
+    )
+    owner_template = dofs_gradient
     coil_specs = coil_specs_from_dof_extraction_spec(
         coil_dof_extraction_spec,
         coil_dofs,
     )
-    extraction_specs = coil_dof_extraction_spec.coils
+    extraction_specs = (
+        coil_dof_extraction_spec if projection_spec is None else projection_spec
+    ).coils
     for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
         for local_i, global_i in enumerate(indices):
             dofs_gradient = _add_extraction_cotangent_to_dofs_gradient(
@@ -1258,9 +1268,20 @@ def _coil_cotangents_to_dofs_gradient_from_extraction_spec(
                 jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
                 jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
                 jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
-                coil_dofs,
+                owner_template,
             )
     return dofs_gradient
+
+
+@partial(jax.jit, static_argnames=("coil_indices", "owner_width"))
+def _jitted_coil_cotangents_to_owner_partials(
+    extraction_spec, projection_spec, d_coil_arrays, coil_indices, coil_dofs,
+    owner_width,
+):
+    return _coil_cotangents_to_dofs_gradient_from_extraction_spec(
+        extraction_spec, d_coil_arrays, coil_indices, coil_dofs,
+        projection_spec=projection_spec, owner_width=owner_width,
+    )
 
 
 @partial(jax.jit, static_argnames=("coil_indices",))
@@ -1433,6 +1454,24 @@ def _unwrap_coil_curve_and_current(coil):
     )
 
 
+def _affine_current_terms(current, coefficient=1.0):
+    """Return scalar current owners and their forward/reverse coefficients."""
+    if isinstance(current, Current):
+        return ((current, coefficient),)
+    if isinstance(current, ScaledCurrent):
+        return _affine_current_terms(
+            current.current_to_scale, coefficient * float(current.scale),
+        )
+    if isinstance(current, CurrentSum):
+        return _affine_current_terms(
+            current.current_a, coefficient,
+        ) + _affine_current_terms(current.current_b, coefficient)
+    raise NotImplementedError(
+        "BiotSavartJAX only supports affine expressions of scalar "
+        f"Current objects; got {type(current).__name__}."
+    )
+
+
 class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
     r"""JAX-backed Biot-Savart magnetic field evaluation.
 
@@ -1523,7 +1562,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             )
 
     def _current_captured_coil_state_fingerprint(self) -> tuple[bytes, ...]:
-        """Fingerprint values captured in specs rather than supplied as free DOFs."""
+        """Fingerprint fixed coordinates on DOF notifications, never on reads."""
         return tuple(
             np.ascontiguousarray(
                 np.asarray(opt.local_full_x, dtype=np.float64)[
@@ -1531,16 +1570,24 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 ]
             ).tobytes()
             for opt in self.unique_dof_lineage
-        ) + tuple(
-            sample.tobytes()
-            for opt in self.ancestors
-            if isinstance(opt, CurvePerturbed)
-            for sample in opt.sample._sample
         )
 
-    def _refresh_captured_coil_state(self) -> None:
-        fingerprint = self._current_captured_coil_state_fingerprint()
-        if fingerprint == self._captured_coil_state_fingerprint:
+    def _perturbation_samples_changed(self) -> bool:
+        return any(
+            curve.sample is not sample
+            or sample._sample is not samples
+            or any(current is not previous for current, previous in
+                   zip(sample._sample, sample_arrays, strict=True))
+            for curve, sample, samples, sample_arrays in self._captured_perturbation_samples
+        )
+
+    def _refresh_captured_coil_state(self, *, check_fixed=True) -> None:
+        fingerprint = (
+            self._current_captured_coil_state_fingerprint()
+            if check_fixed else self._captured_coil_state_fingerprint
+        )
+        if (fingerprint == self._captured_coil_state_fingerprint
+                and not self._perturbation_samples_changed()):
             return
         self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
         self._captured_coil_state_fingerprint = fingerprint
@@ -1666,27 +1713,15 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
     def _build_coil_dof_extraction_spec(self):
         curve_source_ids = {}
-
-        def affine_current_terms(current, coefficient=1.0):
-            if isinstance(current, Current):
-                return ((current, coefficient),)
-            if isinstance(current, ScaledCurrent):
-                return affine_current_terms(
-                    current.current_to_scale,
-                    coefficient * float(current.scale),
-                )
-            if isinstance(current, CurrentSum):
-                return affine_current_terms(
-                    current.current_a,
-                    coefficient,
-                ) + affine_current_terms(
-                    current.current_b,
-                    coefficient,
-                )
-            raise NotImplementedError(
-                "BiotSavartJAX only supports affine expressions of scalar "
-                f"Current objects; got {type(current).__name__}."
-            )
+        # Reconstruction is keyed by shared DOFs; partials retain actual owners.
+        free_slices_by_dofs = {
+            opt.dofs: self.dof_indices[opt] for opt in self.unique_dof_lineage
+            if opt.local_dof_size > 0
+        }
+        self._coil_dof_indices = {
+            opt: free_slices_by_dofs[opt.dofs] for opt in self.ancestors
+            if opt.local_dof_size > 0
+        }
 
         def coil_extraction_spec(coil):
             curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
@@ -1694,7 +1729,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             if curve_id not in curve_source_ids:
                 curve_source_ids[curve_id] = len(curve_source_ids)
             current_terms = (
-                () if isinstance(current, Current) else affine_current_terms(current)
+                () if isinstance(current, Current) else _affine_current_terms(current)
             )
             return make_coil_dof_extraction_spec(
                 curve=curve_spec_from_adapter_curve(curve),
@@ -1718,17 +1753,71 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 scale=scale,
             )
 
-        return make_coil_set_dof_extraction_spec(
+        extraction_spec = make_coil_set_dof_extraction_spec(
             coil_extraction_spec(coil) for coil in self._coils
         )
+        self._captured_perturbation_samples = tuple(
+            (opt, opt.sample, opt.sample._sample, tuple(opt.sample._sample))
+            for opt in self.ancestors if isinstance(opt, CurvePerturbed)
+        )
+        self._build_owner_partial_projection_spec(extraction_spec)
+        return extraction_spec
+
+    def _build_owner_partial_projection_spec(self, extraction_spec):
+        """Cache full partial destinations by actual owner, including fixed DOFs.
+
+        Reconstruction uses the free-vector maps; projection uses full local
+        owner slices. Shared DOFs retain separate native Derivative owner keys.
+        """
+        owner_slices = {}
+        width = 0
+
+        def projection_map(opt, source_map, *, full_graph):
+            nonlocal width
+            owners = (
+                opt._full_dof_indices.items() if full_graph
+                else ((opt, (0, opt.local_full_dof_size)),)
+            )
+            segments = []
+            for owner, (start, end) in owners:
+                if owner.local_full_dof_size == 0:
+                    continue
+                if owner not in owner_slices:
+                    owner_slices[owner] = (width, width + owner.local_full_dof_size)
+                    width += owner.local_full_dof_size
+                owner_start, owner_end = owner_slices[owner]
+                segments.append((owner_start, owner_end, start, end))
+            return replace(source_map, owner_segments=tuple(segments))
+
+        projection_coils = []
+        for coil, spec in zip(self._coils, extraction_spec.coils, strict=True):
+            curve, _rotation, current, _scale = _unwrap_coil_curve_and_current(coil)
+            terms = _affine_current_terms(current)
+            term_maps = spec.current_term_maps or (spec.current_map,)
+            projection_coils.append(replace(
+                spec,
+                curve_map=projection_map(
+                    curve, spec.curve_map, full_graph=_curve_dof_mode(curve) == "full",
+                ),
+                current_term_maps=tuple(
+                    projection_map(term, source_map, full_graph=False)
+                    for (term, _coefficient), source_map in zip(terms, term_maps, strict=True)
+                ),
+                current_term_scales=tuple(coefficient for _term, coefficient in terms),
+            ))
+        self._owner_partial_projection_spec = make_coil_set_dof_extraction_spec(projection_coils)
+        self._owner_partial_slices = tuple(owner_slices.items())
+        self._owner_partial_width = width
+        self._device_projection_contracts = {}
 
     def coil_dof_extraction_spec(self):
         """Return the cached immutable owner-DOF reconstruction contract."""
-        # Resampling changes captured geometry without a DOF graph notification.
+        # Direct sample replacement can bypass the native curve notification.
         previous_spec = self._coil_dof_extraction_spec
-        self._refresh_captured_coil_state()
+        self._refresh_captured_coil_state(check_fixed=False)
         if self._coil_dof_extraction_spec is not previous_spec:
             self._advance_coil_dof_state()
+            self.set_recompute_flag()
         return self._coil_dof_extraction_spec
 
     @property
@@ -1787,7 +1876,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         if opt.local_dof_size == 0:
             return full_x
 
-        start, end = self.dof_indices[opt]
+        start, end = self._coil_dof_indices[opt]
         free_positions = self._local_free_positions(opt)
         coil_slice = _slice_1d(coil_dofs, start, end)
         return _scatter_free_values(full_x, free_positions, coil_slice)
@@ -1798,7 +1887,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         for dep_opt, (start, end) in opt._full_dof_indices.items():
             dep_full_x = _as_jax_float64(dep_opt.local_full_x)
             if dep_opt.local_dof_size > 0:
-                dep_start, dep_end = self.dof_indices[dep_opt]
+                dep_start, dep_end = self._coil_dof_indices[dep_opt]
                 free_positions = self._local_free_positions(dep_opt)
                 dep_slice = _slice_1d(coil_dofs, dep_start, dep_end)
                 dep_full_x = _scatter_free_values(
@@ -1820,12 +1909,15 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 (
                     owner_start,
                     owner_end,
-                    int(target_start),
-                    int(target_end),
+                    int(target_start + local_start),
+                    int(target_start + local_end),
                 )
-                for dep_opt, (target_start, target_end) in opt._full_dof_indices.items()
+                for dep_opt, (target_start, _target_end) in opt._full_dof_indices.items()
                 if dep_opt.local_dof_size > 0
-                for owner_start, owner_end in (self.dof_indices[dep_opt],)
+                for owner_start, owner_end, local_start, local_end in
+                _owner_segments_from_free_positions(
+                    self._coil_dof_indices[dep_opt][0], self._local_free_positions(dep_opt),
+                )
             )
             template_full_dofs = _as_jax_float64(opt.full_x)
             return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
@@ -1834,7 +1926,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         if opt.local_dof_size == 0:
             return self._full_input_dof_map_spec(template_full_dofs, ())
 
-        owner_start, _owner_end = self.dof_indices[opt]
+        owner_start, _owner_end = self._coil_dof_indices[opt]
         owner_segments = _owner_segments_from_free_positions(
             owner_start,
             self._local_free_positions(opt),
@@ -2288,7 +2380,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 dofs_gradient,
                 curve,
                 coeff_cotangent,
-                self.dof_indices,
+                self._coil_dof_indices,
                 free_positions_for_opt=self._local_free_positions,
             )
         else:
@@ -2296,7 +2388,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 dofs_gradient,
                 curve,
                 coeff_cotangent,
-                self.dof_indices,
+                self._coil_dof_indices,
                 free_positions=self._local_free_positions(curve),
             )
 
@@ -2306,7 +2398,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 dofs_gradient,
                 owner,
                 block,
-                self.dof_indices,
+                self._coil_dof_indices,
                 free_positions=self._local_free_positions(owner),
             )
         return dofs_gradient
@@ -2362,11 +2454,26 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         Returns:
             :class:`Derivative` over all coil DOFs.
         """
-        return project_coil_cotangents_to_derivative(
-            self._coils,
-            d_coil_arrays,
-            coil_indices,
+        extraction_spec = self.coil_dof_extraction_spec()
+        coil_dofs = self._normalize_explicit_coil_dofs(self.x)
+        device = coil_dofs.device
+        contract = self._device_projection_contracts.get(device)
+        if contract is None:
+            contract = _place_array_tree_on_device(
+                (extraction_spec, self._owner_partial_projection_spec), device,
+            )
+            self._device_projection_contracts[device] = contract
+        partials = host_array(
+            _jitted_coil_cotangents_to_owner_partials(
+                *contract, d_coil_arrays, _canonical_coil_indices(coil_indices),
+                coil_dofs, self._owner_partial_width,
+            ),
+            dtype=np.float64,
         )
+        return Derivative({
+            owner: partials[start:end].copy()
+            for owner, (start, end) in self._owner_partial_slices
+        })
 
     def dofs_gradient_to_derivative(self, dofs_gradient):
         return dofs_gradient_to_derivative(self.unique_dof_lineage, dofs_gradient)
