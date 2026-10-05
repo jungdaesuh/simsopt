@@ -19,7 +19,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from simsopt._core.derivative import Derivative
+from simsopt._core.json import GSONDecoder
 from simsopt.field.coil import Current, CurrentSum, ScaledCurrent
+from simsopt.geo.curveperturbed import CurvePerturbed
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt_jax.runtime.host_boundary import block_until_ready, host_array, host_float
 from simsopt._core.optimizable import Optimizable
@@ -663,6 +665,9 @@ class SpecBackedRotatedCurve(Optimizable):
 
 
 def _set_biot_savart_points(field, points):
+    # Host inputs are mutable; device placement can alias their storage on CPU.
+    if not isinstance(points, jax.Array):
+        points = np.array(points, copy=True, order="C")
     field._points_jax = _as_jax_float64(points)
     field._points_cyl_jax = None
     field._points_version += 1
@@ -1220,11 +1225,15 @@ def _add_extraction_cotangent_to_dofs_gradient(
         coeff_cotangent,
         coil_dofs,
     )
-    return dofs_gradient + _dof_map_cotangent_to_owner_gradient(
-        extraction_spec.current_map,
-        current_cotangent,
-        coil_dofs,
-    )
+    current_maps = extraction_spec.current_term_maps or (extraction_spec.current_map,)
+    current_scales = extraction_spec.current_term_scales or (1.0,)
+    for current_map, scale in zip(current_maps, current_scales, strict=True):
+        dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
+            current_map,
+            _as_jax_float64(scale) * current_cotangent,
+            coil_dofs,
+        )
+    return dofs_gradient
 
 
 def _coil_cotangents_to_dofs_gradient_from_extraction_spec(
@@ -1354,9 +1363,8 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
 
     deriv_data = {}
     _merge_curve_pullback_data(deriv_data, curve, dg, dgd)
-    if current.dof_size > 0:
-        current_cotangent = jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc))
-        _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
+    current_cotangent = jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc))
+    _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
     return deriv_data
 
 
@@ -1375,7 +1383,9 @@ def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
                     d_c[local_i],
                 ),
             )
-    return Derivative(deriv_data)
+    return Derivative(
+        {opt: host_array(block, dtype=np.float64) for opt, block in deriv_data.items()}
+    )
 
 
 def dofs_gradient_to_derivative(unique_dof_lineage, dofs_gradient):
@@ -1458,6 +1468,23 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
     _simsopt_jax_native_field = True
 
+    def as_dict(self, serial_objs_dict=None) -> dict:
+        serialized = super().as_dict(serial_objs_dict=serial_objs_dict)
+        serialized["points"] = (
+            None if self._points_jax is None else self.get_points_cart()
+        )
+        return serialized
+
+    @classmethod
+    def from_dict(cls, d, serial_objs_dict, recon_objs):
+        decoder = GSONDecoder()
+        coils = decoder.process_decoded(d["coils"], serial_objs_dict, recon_objs)
+        field = cls(coils)
+        points = decoder.process_decoded(d.get("points"), serial_objs_dict, recon_objs)
+        if points is not None:
+            field.set_points(points)
+        return field
+
     def __init__(self, coils):
         self._coils = list(coils)
         self._points_jax = None
@@ -1481,8 +1508,8 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         self._introspect_coils()
         self._free_dof_layout_ready = True
         self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
-        self._fixed_coil_dof_template_fingerprint = (
-            self._current_fixed_coil_dof_template_fingerprint()
+        self._captured_coil_state_fingerprint = (
+            self._current_captured_coil_state_fingerprint()
         )
 
     def update_free_dof_size_indices(self) -> None:
@@ -1491,11 +1518,12 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         if self._free_dof_layout_ready:
             self._dof_layout_version += 1
             self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
-            self._fixed_coil_dof_template_fingerprint = (
-                self._current_fixed_coil_dof_template_fingerprint()
+            self._captured_coil_state_fingerprint = (
+                self._current_captured_coil_state_fingerprint()
             )
 
-    def _current_fixed_coil_dof_template_fingerprint(self) -> tuple[bytes, ...]:
+    def _current_captured_coil_state_fingerprint(self) -> tuple[bytes, ...]:
+        """Fingerprint values captured in specs rather than supplied as free DOFs."""
         return tuple(
             np.ascontiguousarray(
                 np.asarray(opt.local_full_x, dtype=np.float64)[
@@ -1503,14 +1531,19 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 ]
             ).tobytes()
             for opt in self.unique_dof_lineage
+        ) + tuple(
+            sample.tobytes()
+            for opt in self.ancestors
+            if isinstance(opt, CurvePerturbed)
+            for sample in opt.sample._sample
         )
 
-    def _refresh_fixed_coil_dof_template(self) -> None:
-        fingerprint = self._current_fixed_coil_dof_template_fingerprint()
-        if fingerprint == self._fixed_coil_dof_template_fingerprint:
+    def _refresh_captured_coil_state(self) -> None:
+        fingerprint = self._current_captured_coil_state_fingerprint()
+        if fingerprint == self._captured_coil_state_fingerprint:
             return
         self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
-        self._fixed_coil_dof_template_fingerprint = fingerprint
+        self._captured_coil_state_fingerprint = fingerprint
 
     def _advance_coil_dof_state(self) -> None:
         self._coil_dofs_generation += 1
@@ -1523,7 +1556,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             and not self._suppress_dependency_coil_dof_state
         ):
             self._advance_coil_dof_state()
-            self._refresh_fixed_coil_dof_template()
+            self._refresh_captured_coil_state()
         super().set_recompute_flag(parent=parent)
 
     def _set_global_coil_dofs(
@@ -1540,7 +1573,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             self._suppress_dependency_coil_dof_state = False
         self._advance_coil_dof_state()
         if rebuild_extraction_spec:
-            self._refresh_fixed_coil_dof_template()
+            self._refresh_captured_coil_state()
 
     @property
     def x(self):
@@ -1691,6 +1724,11 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
 
     def coil_dof_extraction_spec(self):
         """Return the cached immutable owner-DOF reconstruction contract."""
+        # Resampling changes captured geometry without a DOF graph notification.
+        previous_spec = self._coil_dof_extraction_spec
+        self._refresh_captured_coil_state()
+        if self._coil_dof_extraction_spec is not previous_spec:
+            self._advance_coil_dof_state()
         return self._coil_dof_extraction_spec
 
     @property
@@ -1923,10 +1961,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         instance, so callers should not share one ``BiotSavartJAX`` across
         concurrent evaluation threads.
         """
-        points_array = (
-            points if isinstance(points, jax.Array) else np.ascontiguousarray(points)
-        )
-        return _set_biot_savart_points(self, points_array)
+        return _set_biot_savart_points(self, points)
 
     def set_points_cart(self, points):
         return self.set_points(points)
@@ -2112,7 +2147,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         """
         points = self._points_jax
         v_jax = _as_jax_float64(v)
-        free_coil_set_spec = self._free_coil_set_spec_from_explicit_state()
+        coil_set_spec = self._coil_set_spec_from_explicit_state()
         d_coil_arrays = tuple(
             biot_savart_B_vjp_maybe_collective(
                 points,
@@ -2121,11 +2156,11 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 group.gammadashs,
                 group.currents,
             )
-            for group in free_coil_set_spec.groups
+            for group in coil_set_spec.groups
         )
         return BiotSavartFieldPullback(
             d_coil_arrays=d_coil_arrays,
-            coil_indices=free_coil_set_spec.coil_index_lists(),
+            coil_indices=coil_set_spec.coil_index_lists(),
         )
 
     def _pullback_to_derivative(self, pullback):
@@ -2138,7 +2173,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         r"""Vector-Jacobian product of B w.r.t. coil DOFs.
 
         Given a cotangent vector ``v`` (typically ``dJ/dB``), returns
-        a :class:`Derivative` mapping every free coil DOF to its
+        a :class:`Derivative` mapping every coil DOF, including fixed DOFs, to its
         contribution to the scalar objective.
 
         Uses ``jax.vjp`` through the pure Biot-Savart kernel, then
@@ -2158,8 +2193,8 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         grouped_forward,
         cotangent,
     ):
-        free_coil_set_spec = self._free_coil_set_spec_from_explicit_state()
-        coil_arrays = free_coil_set_spec.field_inputs()
+        coil_set_spec = self._coil_set_spec_from_explicit_state()
+        coil_arrays = coil_set_spec.field_inputs()
         if not coil_arrays:
             return BiotSavartFieldPullback((), ())
 
@@ -2170,7 +2205,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         d_coil_arrays = pullback(_as_jax_float64(cotangent))[0]
         return BiotSavartFieldPullback(
             d_coil_arrays=tuple(d_coil_arrays),
-            coil_indices=free_coil_set_spec.coil_index_lists(),
+            coil_indices=coil_set_spec.coil_index_lists(),
         )
 
     def A_pullback_native(self, v):
@@ -2265,13 +2300,14 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 free_positions=self._local_free_positions(curve),
             )
 
-        if current.dof_size > 0:
+        current_cotangent = jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc))
+        for owner, block in current.vjp(current_cotangent).data.items():
             dofs_gradient = _add_local_cotangent_to_dofs_gradient(
                 dofs_gradient,
-                current,
-                jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc)),
+                owner,
+                block,
                 self.dof_indices,
-                free_positions=self._local_free_positions(current),
+                free_positions=self._local_free_positions(owner),
             )
         return dofs_gradient
 
@@ -2288,7 +2324,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
         if _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays):
             extraction_spec = _place_array_tree_on_device(
-                self._coil_dof_extraction_spec,
+                self.coil_dof_extraction_spec(),
                 coil_dofs.device,
             )
             return _jitted_coil_cotangents_to_dofs_gradient(
@@ -2314,8 +2350,8 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.
 
-        Curves are projected through immutable specs into the flat field
-        free-DOF layout, then converted once into the public ``Derivative``.
+        Curves are projected through immutable specs into full owner partials.
+        Free/fixed filtering belongs to ``Derivative.__call__``.
 
         Args:
             d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``
@@ -2326,20 +2362,11 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         Returns:
             :class:`Derivative` over all coil DOFs.
         """
-        if not _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays) or not hasattr(
-            self, "_coil_dof_extraction_spec"
-        ):
-            return project_coil_cotangents_to_derivative(
-                self._coils,
-                d_coil_arrays,
-                coil_indices,
-            )
-
-        dofs_gradient = self.coil_cotangents_to_dofs_gradient(
+        return project_coil_cotangents_to_derivative(
+            self._coils,
             d_coil_arrays,
-            _canonical_coil_indices(coil_indices),
+            coil_indices,
         )
-        return self.dofs_gradient_to_derivative(dofs_gradient)
 
     def dofs_gradient_to_derivative(self, dofs_gradient):
         return dofs_gradient_to_derivative(self.unique_dof_lineage, dofs_gradient)

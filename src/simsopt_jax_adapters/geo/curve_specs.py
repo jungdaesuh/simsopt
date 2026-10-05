@@ -9,6 +9,7 @@ from simsopt.geo.curveperturbed import CurvePerturbed
 from simsopt.geo.curveplanarfourier import CurvePlanarFourier
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
 from simsopt.geo.finitebuild import CurveFilament
 from simsopt.geo.framedcurve import FrameRotation, FramedCurveFrenet, ZeroRotation
 from simsopt_jax.core import (
@@ -19,6 +20,7 @@ from simsopt_jax.core import (
     make_curve_planarfourier_spec,
     make_curve_rzfourier_spec,
     make_curve_xyzfourier_spec,
+    make_curve_xyzfouriersymmetries_spec,
     make_frame_rotation_spec,
     make_zero_rotation_spec,
 )
@@ -36,6 +38,7 @@ def supports_adapter_curve_spec(curve: object) -> bool:
         curve,
         (
             CurveXYZFourier,
+            CurveXYZFourierSymmetries,
             CurveHelical,
             CurvePlanarFourier,
             CurveRZFourier,
@@ -52,6 +55,15 @@ def adapter_curve_dof_mode(curve: object) -> str:
 
 
 def curve_spec_from_adapter_curve(curve):
+    if isinstance(curve, CurveXYZFourierSymmetries):
+        return make_curve_xyzfouriersymmetries_spec(
+            dofs=curve.get_dofs(),
+            quadpoints=curve.quadpoints,
+            order=curve.order,
+            nfp=curve.nfp,
+            stellsym=curve.stellsym,
+            ntor=curve.ntor,
+        )
     if isinstance(curve, CurveXYZFourier):
         return make_curve_xyzfourier_spec(
             dofs=curve.get_dofs(),
