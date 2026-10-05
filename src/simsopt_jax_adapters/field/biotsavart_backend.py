@@ -91,6 +91,7 @@ from simsopt_jax.core.specs import (
 from simsopt_jax_adapters.field._coil_graph import (
     _unwrap_coil_curve_and_current_objects,
 )
+from simsopt_jax_adapters.geo.curve_contract import _optimizable_dof_layout
 from simsopt_jax_adapters.geo.curve_specs import (
     adapter_curve_dof_mode,
     curve_spec_from_adapter_curve,
@@ -1775,7 +1776,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         def projection_map(opt, source_map, *, full_graph):
             nonlocal width
             owners = (
-                opt._full_dof_indices.items() if full_graph
+                _optimizable_dof_layout(opt, separate_owners=True)[1].items() if full_graph
                 else ((opt, (0, opt.local_full_dof_size)),)
             )
             segments = []
@@ -1789,15 +1790,27 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 segments.append((owner_start, owner_end, start, end))
             return replace(source_map, owner_segments=tuple(segments))
 
+        owner_extraction_coils = []
         projection_coils = []
         for coil, spec in zip(self._coils, extraction_spec.coils, strict=True):
             curve, _rotation, current, _scale = _unwrap_coil_curve_and_current(coil)
+            full_graph = _curve_dof_mode(curve) == "full"
+            owner_spec = (
+                replace(
+                    spec,
+                    curve=curve_spec_from_adapter_curve(curve, separate_owners=True),
+                    curve_map=self._free_vector_dof_map_spec(
+                        curve, full_graph=True, separate_owners=True,
+                    ),
+                ) if full_graph else spec
+            )
+            owner_extraction_coils.append(owner_spec)
             terms = _affine_current_terms(current)
             term_maps = spec.current_term_maps or (spec.current_map,)
             projection_coils.append(replace(
-                spec,
+                owner_spec,
                 curve_map=projection_map(
-                    curve, spec.curve_map, full_graph=_curve_dof_mode(curve) == "full",
+                    curve, owner_spec.curve_map, full_graph=full_graph,
                 ),
                 current_term_maps=tuple(
                     projection_map(term, source_map, full_graph=False)
@@ -1805,6 +1818,7 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                 ),
                 current_term_scales=tuple(coefficient for _term, coefficient in terms),
             ))
+        self._owner_partial_extraction_spec = make_coil_set_dof_extraction_spec(owner_extraction_coils)
         self._owner_partial_projection_spec = make_coil_set_dof_extraction_spec(projection_coils)
         self._owner_partial_slices = tuple(owner_slices.items())
         self._owner_partial_width = width
@@ -1903,8 +1917,9 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
             return self._full_dofs_from_free_vector(curve, coil_dofs)
         return self._local_full_dofs_from_free_vector(curve, coil_dofs)
 
-    def _free_vector_dof_map_spec(self, opt, *, full_graph):
+    def _free_vector_dof_map_spec(self, opt, *, full_graph, separate_owners=False):
         if full_graph:
+            full_dofs, full_indices = _optimizable_dof_layout(opt, separate_owners=separate_owners)
             owner_segments = tuple(
                 (
                     owner_start,
@@ -1912,14 +1927,14 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
                     int(target_start + local_start),
                     int(target_start + local_end),
                 )
-                for dep_opt, (target_start, _target_end) in opt._full_dof_indices.items()
+                for dep_opt, (target_start, _target_end) in full_indices.items()
                 if dep_opt.local_dof_size > 0
                 for owner_start, owner_end, local_start, local_end in
                 _owner_segments_from_free_positions(
                     self._coil_dof_indices[dep_opt][0], self._local_free_positions(dep_opt),
                 )
             )
-            template_full_dofs = _as_jax_float64(opt.full_x)
+            template_full_dofs = _as_jax_float64(full_dofs)
             return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
 
         template_full_dofs = _as_jax_float64(opt.local_full_x)
@@ -2454,13 +2469,13 @@ class BiotSavartJAX(_BiotSavartFieldEvaluationMixin, Optimizable):
         Returns:
             :class:`Derivative` over all coil DOFs.
         """
-        extraction_spec = self.coil_dof_extraction_spec()
+        self.coil_dof_extraction_spec()
         coil_dofs = self._normalize_explicit_coil_dofs(self.x)
         device = coil_dofs.device
         contract = self._device_projection_contracts.get(device)
         if contract is None:
             contract = _place_array_tree_on_device(
-                (extraction_spec, self._owner_partial_projection_spec), device,
+                (self._owner_partial_extraction_spec, self._owner_partial_projection_spec), device,
             )
             self._device_projection_contracts[device] = contract
         partials = host_array(

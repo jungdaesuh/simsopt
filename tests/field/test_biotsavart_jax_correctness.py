@@ -10,6 +10,8 @@ from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
 from simsopt.geo import create_equally_spaced_curves
 from simsopt.geo.curveperturbed import CurvePerturbed, GaussianSampler, PerturbationSample
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
+from simsopt.geo.finitebuild import CurveFilament
+from simsopt.geo.framedcurve import FrameRotation, FramedCurveFrenet
 from simsopt_jax_adapters.field.biotsavart_backend import BiotSavartJAX
 
 
@@ -175,3 +177,89 @@ def test_native_symmetry_curve_converts_for_fields_and_vjps(stellsym):
         print(f"R7 stellsym={stellsym} {quantity}: error={np.max(np.abs(actual-expected)):.16g}")
         np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-13)
         np.testing.assert_allclose(_vjp(adapter, quantity, _cotangent(quantity))(adapter), _vjp(native, quantity, _cotangent(quantity))(native), rtol=1e-11, atol=1e-13)
+
+
+@pytest.mark.parametrize("quantity", ["B", "dB_by_dX"])
+@pytest.mark.parametrize("fixed", [False, True])
+@pytest.mark.parametrize("wrapper", [
+    "shared_filament", "nested_perturbed", "perturbed_filament",
+    "perturbed_shared_filament",
+])
+def test_composed_curves_match_native_fields_owner_vjps_and_finite_difference(
+    quantity, fixed, wrapper,
+):
+    curve = create_equally_spaced_curves(
+        1, 1, stellsym=False, R0=1.0, R1=0.25, order=1, numquadpoints=24,
+    )[0]
+    current = Current(1e5)
+    shared = "shared" in wrapper
+    rotation = FrameRotation(
+        curve.quadpoints, order=4 if shared else 1,
+        dofs=curve.dofs if shared else None,
+    )
+    if not shared:
+        rotation.local_full_x = np.array([0.2, -0.1, 0.05])
+    if fixed:
+        curve.fix(0)
+        rotation.fix(1)
+        current.fix_all()
+    sampler = GaussianSampler(curve.quadpoints, 1e-3, 0.2, n_derivs=1)
+    sample = PerturbationSample(sampler, randomgen=np.random.default_rng(20261005))
+    if wrapper == "nested_perturbed":
+        wrapped = CurvePerturbed(CurvePerturbed(curve, sample), sample)
+    else:
+        wrapped = CurveFilament(FramedCurveFrenet(curve, rotation), 0.01, 0.02)
+        if wrapper.startswith("perturbed"):
+            wrapped = CurvePerturbed(wrapped, sample)
+    coils = [Coil(wrapped, current)]
+    native = BiotSavart(coils).set_points(_POINTS)
+    expected_field = getattr(native, quantity)().copy()
+    cotangent = _cotangent(quantity)
+    expected_vjp = _vjp(native, quantity, cotangent)
+    expected_gradient = expected_vjp(native)
+    expected_partials = expected_vjp(native, as_derivative=True)
+    adapter = BiotSavartJAX(coils).set_points(_POINTS)
+    np.testing.assert_allclose(
+        getattr(adapter, quantity)(), expected_field, rtol=1e-12, atol=1e-14,
+    )
+    actual_vjp = _vjp(adapter, quantity, cotangent)
+    actual_gradient = actual_vjp(adapter)
+    actual_partials = actual_vjp(adapter, as_derivative=True)
+    np.testing.assert_allclose(
+        actual_gradient, expected_gradient, rtol=1e-11, atol=1e-13,
+    )
+    assert curve in actual_partials.data
+    if wrapper != "nested_perturbed":
+        assert rotation in actual_partials.data
+    for owner in expected_partials.data:
+        np.testing.assert_allclose(
+            actual_partials.data[owner], expected_partials.data[owner],
+            rtol=1e-11, atol=1e-13,
+        )
+    pullback = (
+        adapter.B_pullback_native(cotangent) if quantity == "B"
+        else adapter.dB_by_dX_pullback_native(cotangent)
+    )
+    flat = adapter.coil_cotangents_to_dofs_gradient(
+        pullback.d_coil_arrays, pullback.coil_indices,
+    )
+    np.testing.assert_allclose(flat, expected_gradient, rtol=1e-11, atol=1e-13)
+
+    dofs = native.x.copy()
+    direction = np.linspace(-0.3, 0.4, dofs.size)
+    step = 1e-4
+    objectives = []
+    for multiple in (2, 1, -1, -2):
+        native.x = dofs + multiple * step * direction
+        perturbed_field = getattr(native, quantity)()
+        np.testing.assert_allclose(
+            getattr(adapter, quantity)(), perturbed_field, rtol=1e-12, atol=1e-14,
+        )
+        objectives.append(np.sum(perturbed_field * cotangent))
+    native.x = dofs
+    finite_difference = (
+        -objectives[0] + 8 * objectives[1] - 8 * objectives[2] + objectives[3]
+    ) / (12 * step)
+    np.testing.assert_allclose(
+        actual_gradient @ direction, finite_difference, rtol=1e-9, atol=1e-14,
+    )

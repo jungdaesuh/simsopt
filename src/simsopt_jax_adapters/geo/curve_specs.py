@@ -24,7 +24,11 @@ from simsopt_jax.core import (
     make_frame_rotation_spec,
     make_zero_rotation_spec,
 )
-from simsopt_jax_adapters.geo.curve_contract import _optimizable_dof_map_spec
+from simsopt_jax_adapters.geo.curve_contract import (
+    _optimizable_dof_layout,
+    _optimizable_dof_map_spec,
+    adapter_curve_dof_mode,
+)
 
 __all__ = [
     "adapter_curve_dof_mode",
@@ -48,13 +52,8 @@ def supports_adapter_curve_spec(curve: object) -> bool:
     ) or callable(getattr(curve, "to_spec", None))
 
 
-def adapter_curve_dof_mode(curve: object) -> str:
-    if isinstance(curve, (CurvePerturbed, CurveFilament)):
-        return "full"
-    return getattr(curve, "_jax_curve_dof_mode", "local")
-
-
-def curve_spec_from_adapter_curve(curve):
+def curve_spec_from_adapter_curve(curve, *, separate_owners: bool = False):
+    """Capture geometry with shared DOFs or independent actual-owner VJP slots."""
     if isinstance(curve, CurveXYZFourierSymmetries):
         return make_curve_xyzfouriersymmetries_spec(
             dofs=curve.get_dofs(),
@@ -95,9 +94,9 @@ def curve_spec_from_adapter_curve(curve):
             stellsym=curve.stellsym,
         )
     if isinstance(curve, CurvePerturbed):
-        return _curve_perturbed_spec_from_curve(curve)
+        return _curve_perturbed_spec_from_curve(curve, separate_owners=separate_owners)
     if isinstance(curve, CurveFilament):
-        return _curve_filament_spec_from_curve(curve)
+        return _curve_filament_spec_from_curve(curve, separate_owners=separate_owners)
 
     to_spec = getattr(curve, "to_spec", None)
     if callable(to_spec):
@@ -106,7 +105,7 @@ def curve_spec_from_adapter_curve(curve):
     return _pure_curve_spec_from_curve(curve)
 
 
-def _curve_perturbed_spec_from_curve(curve: CurvePerturbed):
+def _curve_perturbed_spec_from_curve(curve: CurvePerturbed, *, separate_owners: bool):
     sample_gamma = curve.sample[0]
     sample_gammadash = curve.sample[1]
     sample_gammadashdash = (
@@ -121,10 +120,10 @@ def _curve_perturbed_spec_from_curve(curve: CurvePerturbed):
     )
 
     return make_curve_perturbed_spec(
-        dofs=curve.full_x,
+        dofs=_optimizable_dof_layout(curve, separate_owners=separate_owners)[0],
         quadpoints=curve.quadpoints,
-        base_curve=curve_spec_from_adapter_curve(curve.curve),
-        base_curve_map=_optimizable_dof_map_spec(curve, curve.curve),
+        base_curve=curve_spec_from_adapter_curve(curve.curve, separate_owners=separate_owners),
+        base_curve_map=_optimizable_dof_map_spec(curve, curve.curve, separate_owners=separate_owners),
         sample_gamma=sample_gamma,
         sample_gammadash=sample_gammadash,
         sample_gammadashdash=sample_gammadashdash,
@@ -132,14 +131,14 @@ def _curve_perturbed_spec_from_curve(curve: CurvePerturbed):
     )
 
 
-def _curve_filament_spec_from_curve(curve: CurveFilament):
+def _curve_filament_spec_from_curve(curve: CurveFilament, *, separate_owners: bool):
     return make_curve_filament_spec(
-        dofs=curve.full_x,
+        dofs=_optimizable_dof_layout(curve, separate_owners=separate_owners)[0],
         quadpoints=curve.quadpoints,
-        base_curve=curve_spec_from_adapter_curve(curve.curve),
-        base_curve_map=_optimizable_dof_map_spec(curve, curve.curve),
+        base_curve=curve_spec_from_adapter_curve(curve.curve, separate_owners=separate_owners),
+        base_curve_map=_optimizable_dof_map_spec(curve, curve.curve, separate_owners=separate_owners),
         rotation=_rotation_spec_from_curve(curve.rotation, curve.curve.quadpoints),
-        rotation_map=_optimizable_dof_map_spec(curve, curve.rotation),
+        rotation_map=_optimizable_dof_map_spec(curve, curve.rotation, separate_owners=separate_owners),
         frame_kind="frenet"
         if isinstance(curve.framedcurve, FramedCurveFrenet)
         else "centroid",
