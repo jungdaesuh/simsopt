@@ -1,11 +1,11 @@
 from math import pi
 import numpy as np
-
-from simsopt._core.optimizable import Optimizable
-from simsopt._core.derivative import Derivative
-from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt.geo.curve import RotatedCurve
 import simsoptpp as sopp
+
+from simsopt._core.derivative import Derivative
+from simsopt._core.optimizable import Optimizable
+from simsopt.geo.curve import RotatedCurve
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
 
 __all__ = ['Coil', 'RegularizedCoil', 'CircularRegularizedCoil', 'RectangularRegularizedCoil',
            'Current', 'coils_via_symmetries',
@@ -19,8 +19,8 @@ class Coil(sopp.Coil, Optimizable):
     """
     Represents a magnetic coil as a combination of a geometric curve and an electric current.
 
-    This class combines a :class:`~simsopt.geo.curve.Curve` and a :class:`Current` object, and 
-    is used as input for :class:`~simsopt.field.biotsavart.BiotSavart` field calculations. 
+    This class combines a :class:`~simsopt.geo.curve.Curve` and a :class:`Current` object, and
+    is used as input for :class:`~simsopt.field.biotsavart.BiotSavart` field calculations.
 
     Args:
         curve (simsopt.geo.curve.Curve) : The geometric curve describing the coil shape.
@@ -50,9 +50,11 @@ class Coil(sopp.Coil, Optimizable):
         Returns:
             The vector-Jacobian product of the coil.
         """
-        return self.curve.dgamma_by_dcoeff_vjp(v_gamma) \
-            + self.curve.dgammadash_by_dcoeff_vjp(v_gammadash) \
+        return (
+            self.curve.dgamma_by_dcoeff_vjp(v_gamma)
+            + self.curve.dgammadash_by_dcoeff_vjp(v_gammadash)
             + self.current.vjp(v_current)
+        )
 
     def plot(self, **kwargs):
         """
@@ -70,7 +72,7 @@ class RegularizedCoil(Coil):
     """
     A coil with a model for its cross section. This cross section is used to compute the
     forces and torques on the coil.
-    
+
     Args:
         curve (simsopt.geo.curve.Curve) : The geometric curve describing the coil shape.
         current (Current) : The current object describing the electric current in the coil.
@@ -83,7 +85,7 @@ class RegularizedCoil(Coil):
     @staticmethod
     def _coil_force_pure(B, I, t):
         r"""
-        Compute the pointwise Lorentz force per unit length on a coil with n quadrature points, in Newtons/meter. 
+        Compute the pointwise Lorentz force per unit length on a coil with n quadrature points, in Newtons/meter.
 
         .. math::
             dF/d\ell = I \vec{t} \times \vec{B}
@@ -104,38 +106,42 @@ class RegularizedCoil(Coil):
     
     def B_regularized(self):
         """Calculate the regularized field on this coil following the Landreman and Hurwitz method.
-        
+
         Returns:
             array (shape (n,3)): The regularized field on the coil.
         """
+        import jax
+
         from .selffield import B_regularized_pure
         return B_regularized_pure(
-            self.curve.gamma(),
-            self.curve.gammadash(),
-            self.curve.gammadashdash(),
-            self.curve.quadpoints,
-            self._current.get_value(),
-            self.regularization,
+            jax.device_put(np.asarray(self.curve.gamma())),
+            jax.device_put(np.asarray(self.curve.gammadash())),
+            jax.device_put(np.asarray(self.curve.gammadashdash())),
+            jax.device_put(np.asarray(self.curve.quadpoints)),
+            jax.device_put(np.asarray(self._current.get_value())),
+            jax.device_put(np.asarray(self.regularization)),
         )
     
     def self_force(self):
         """
         Compute the self-force per unit length of this coil, in Newtons/meter.
-        
+
         Returns:
             array (shape (n,3)): Array of self-force per unit length.
         """
-        I = self.current.get_value()
+        import jax
+
+        I = jax.device_put(np.asarray(self.current.get_value()))
         gammadash = self.curve.gammadash()
         gammadash_norm = np.linalg.norm(gammadash, axis=1)[:, None]
         tangent = gammadash / gammadash_norm
         B = self.B_regularized()
-        return self._coil_force_pure(B, I, tangent)
-    
+        return self._coil_force_pure(B, I, jax.device_put(tangent))
+
     def force(self, source_coils):
         r"""
         Compute the force per unit length on this coil from other coils, in Newtons/meter.
-        
+
         .. math::
             dF_i/d\ell = I_i \vec{t_i} \times (\vec{B_{self}} + \vec{B_{mutual}})
 
@@ -144,8 +150,8 @@ class RegularizedCoil(Coil):
         :math:`\vec{B_{mutual}}` is the mutual field from the other coils.
 
         Args:
-            source_coils (list of Coil or RegularizedCoil, shape (m,)): 
-                List of coils contributing forces on this coil. 
+            source_coils (list of Coil or RegularizedCoil, shape (m,)):
+                List of coils contributing forces on this coil.
                 Can be a mix of Coil and RegularizedCoil objects.
         Returns:
             array (shape (n,3)): Array of forces per unit length along the coil curve.
@@ -158,9 +164,11 @@ class RegularizedCoil(Coil):
         mutual_field = BiotSavart(mutual_coils).set_points(self.curve.gamma())
         B_mutual = mutual_field.B()
         mutualforce = np.cross(self.current.get_value() * tangent, B_mutual)
-        selfforce = self.self_force()
-        return (selfforce + mutualforce)
-    
+        import jax
+
+        selfforce = np.asarray(jax.device_get(self.self_force()))
+        return selfforce + mutualforce
+
     def net_force(self, source_coils):
         r"""
         Compute the net forces on this coil from other coils, in Newtons. This is
@@ -170,8 +178,8 @@ class RegularizedCoil(Coil):
             F_net = \int (dF_i/d\ell) d\ell
 
         Args:
-            source_coils (list of Coil or RegularizedCoil, shape (m,)): 
-                List of coils contributing forces on this coil. 
+            source_coils (list of Coil or RegularizedCoil, shape (m,)):
+                List of coils contributing forces on this coil.
                 Can be a mix of Coil and RegularizedCoil objects.
         Returns:
             np.array (shape (3,)): Array of net forces.
@@ -184,20 +192,20 @@ class RegularizedCoil(Coil):
     
     def torque(self, source_coils):
         r"""
-        Compute the torques per unit length on this coil from other coils in Newtons 
-        (note that the force is per unit length, so the force has units of Newtons/meter 
+        Compute the torques per unit length on this coil from other coils in Newtons
+        (note that the force is per unit length, so the force has units of Newtons/meter
         and the torques per unit length have units of Newtons).
 
         .. math::
             dT_i/d\ell = (\gamma_i - c_i) \times (dF_i/d\ell)
 
-        where :math:`\gamma_i` is the position vector of the ith coil curve, 
+        where :math:`\gamma_i` is the position vector of the ith coil curve,
         :math:`c_i` is the centroid of the ith coil curve,
         :math:`dF_i/d\ell` is the pointwise force per unit length on the ith coil curve.
 
         Args:
-            source_coils (list of Coil or RegularizedCoil, shape (m,)): 
-                List of coils contributing torques on this coil. 
+            source_coils (list of Coil or RegularizedCoil, shape (m,)):
+                List of coils contributing torques on this coil.
                 Can be a mix of Coil and RegularizedCoil objects.
         Returns:
             np.array (shape (n,3)): Array of torques per unit length along the coil curve.
@@ -215,8 +223,8 @@ class RegularizedCoil(Coil):
             T_net = \int dT_i/d\ell d\ell
 
         Args:
-            source_coils (list of Coil or RegularizedCoil, shape (m,)): 
-                List of coils contributing torques on this coil. 
+            source_coils (list of Coil or RegularizedCoil, shape (m,)):
+                List of coils contributing torques on this coil.
                 Can be a mix of Coil and RegularizedCoil objects.
         Returns:
             np.array (shape (3,)): Array of net torques.
@@ -232,7 +240,7 @@ class CircularRegularizedCoil(RegularizedCoil):
     """
     A coil with a circular cross section. The regularization parameter is computed
     from the radius during initialization.
-    
+
     Args:
         curve (simsopt.geo.curve.Curve) : The geometric curve describing the coil shape.
         current (Current) : The current object describing the electric current in the coil.
@@ -249,7 +257,7 @@ class RectangularRegularizedCoil(RegularizedCoil):
     """
     A coil with a rectangular cross section. The regularization parameter is computed
     from the width and height during initialization.
-    
+
     Args:
         curve (simsopt.geo.curve.Curve) : The geometric curve describing the coil shape.
         current (Current) : The current object describing the electric current in the coil.
@@ -355,10 +363,10 @@ class CurrentBase(Optimizable):
 
 class Current(sopp.Current, CurrentBase):
     """
-    An optimizable object that wraps around a single scalar degree of freedom representing 
+    An optimizable object that wraps around a single scalar degree of freedom representing
     an electric current.
 
-    This class is used for the current in a coil, or in a set of coils constrained 
+    This class is used for the current in a coil, or in a set of coils constrained
     to use the same current.
 
     Args:
@@ -401,7 +409,7 @@ class Current(sopp.Current, CurrentBase):
 
 class ScaledCurrent(sopp.CurrentBase, CurrentBase):
     """
-    Represents a current that is a scaled version of another current object 
+    Represents a current that is a scaled version of another current object
     (Scales :mod:`Current` by a factor.). The 'scale' is not treated as a dof, so it is not optimized.
     The scaled current has value I = scale * I_0 where `I_0` is the 'current_to_scale'.
 
@@ -512,7 +520,7 @@ def apply_symmetries_to_curves(base_curves, nfp, stellsym):
 def apply_symmetries_to_currents(base_currents, nfp, stellsym):
     """
     Generate a list of currents by applying rotational and (optionally) stellarator symmetries.
-        
+
     Take a list of ``n`` :mod:`Current`s and return ``n * nfp * (1+int(stellsym))``
     :mod:`Current` objects obtained by copying (for ``nfp`` rotations) and
     sign-flipping (optionally for stellarator symmetry).
@@ -633,7 +641,7 @@ def coils_via_symmetries(curves, currents, nfp, stellsym, regularizations=None):
     to ``nfp`` fold rotational symmetry and optionally stellarator symmetry.
 
     If regularizations are provided for the base curves, then RegularizedCoil objects are returned. This
-    is a coil class that carries around a regularization for a finite cross section, which is used 
+    is a coil class that carries around a regularization for a finite cross section, which is used
     for computing e.g. forces and torques on the coil. Format is e.g.
     regularizations = [regularization_circ(0.05) for _ in range(ncoils)]
 
@@ -663,8 +671,8 @@ def load_coils_from_makegrid_file(filename, order, ppp=20, group_names=None):
     """
     Load coils from a mgrid input file, returning a list of Coil objects.
 
-    This function loads a file in MAKEGRID input format containing the Cartesian coordinates 
-    and the currents for several coils and returns an array with the corresponding coils. 
+    This function loads a file in MAKEGRID input format containing the Cartesian coordinates
+    and the currents for several coils and returns an array with the corresponding coils.
     The format is described at
     https://princetonuniversity.github.io/STELLOPT/MAKEGRID
 

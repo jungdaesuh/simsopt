@@ -41,6 +41,10 @@ in the repository's home directory. This script runs only the tests
 that have ``mpi`` in the name, and the tests are run on 1, 2, and 3
 processors.
 
+Pytest-dependent JAX tests live under ``tests/jax`` and run with ``python -m pytest tests/jax``.
+Keep ``tests/jax`` without an ``__init__.py`` so upstream unittest discovery,
+including discovery from ``tests``, does not import the pytest-only suites.
+
 The tests make use of data files in the :simsopt:`tests/test_files` directory.
 
 Modular testing

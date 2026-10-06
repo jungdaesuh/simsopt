@@ -1,6 +1,7 @@
 import numpy as np
 import scipy as sp
 import simsoptpp as sopp
+from simsopt._core.array_contracts import require_nonnegative_int32_indices
 from .magneticfield import MagneticField
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
@@ -22,6 +23,7 @@ class WireframeField(sopp.WireframeField, MagneticField):
 
     def __init__(self, wframe):
 
+        require_nonnegative_int32_indices("wframe.segments", wframe.segments)
         sopp.WireframeField.__init__(self, wframe.nodes, wframe.segments,
                                      wframe.seg_signs, wframe.currents)
         MagneticField.__init__(self)

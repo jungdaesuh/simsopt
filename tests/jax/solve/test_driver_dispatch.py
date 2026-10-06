@@ -1,0 +1,263 @@
+from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+
+import numpy as np
+from typing import cast
+
+import simsopt_jax.geo.optimizers.optimizer as legacy_optimizer
+from scipy.optimize import OptimizeResult
+from simsopt_jax.solve import (
+    Driver,
+    InverseHessianOperator,
+    SimsoptBFGSCallbackEvent,
+    SimsoptBFGSOptions,
+    SimsoptLBFGSBOptions,
+    SimsoptLMQRCallbackEvent,
+    SimsoptLMQROptions,
+    dispatch,
+)
+from simsopt_jax.solve.dispatch import least_squares, minimize
+
+
+def _fake_result():
+    return OptimizeResult(
+        x=np.zeros(2),
+        fun=0.0,
+        jac=np.zeros(2),
+        nit=0,
+        nfev=1,
+        njev=1,
+        status=0,
+        success=True,
+        message="ok",
+    )
+
+
+def _value_and_grad(x):
+    return 0.0, np.zeros_like(np.asarray(x, dtype=float))
+
+
+def _residual(x):
+    return np.asarray(x, dtype=float)
+
+
+def test_every_minimize_driver_reaches_documented_dispatch_path(monkeypatch):
+    calls = []
+
+    def scipy_minimize(_fn, _x0, *, driver, options, callback, bounds):
+        assert bounds is None, "an unbounded minimize must not reach SciPy with bounds"
+        calls.append(("scipy", driver.value, type(options).__name__, callback))
+        return _fake_result()
+
+    def reference_minimize(*_args, **kwargs):
+        calls.append(("legacy_reference", kwargs["method"]))
+        return _fake_result()
+
+    def target_minimize(*_args, **kwargs):
+        calls.append(("legacy_target", kwargs["method"]))
+        return _fake_result()
+
+    monkeypatch.setattr(dispatch, "_run_scipy_minimize", scipy_minimize)
+    monkeypatch.setattr(legacy_optimizer, "reference_minimize", reference_minimize)
+    monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
+
+    for driver in [
+        Driver.SCIPY_LBFGSB,
+        Driver.SCIPY_BFGS,
+        Driver.SIMSOPT_LBFGSB,
+        Driver.SIMSOPT_BFGS,
+    ]:
+        result = minimize(_value_and_grad, np.zeros(2), driver=driver)
+        assert result.driver is driver
+
+    assert calls == [
+        ("scipy", "scipy_lbfgsb", "ScipyLBFGSBOptions", None),
+        ("scipy", "scipy_bfgs", "ScipyBFGSOptions", None),
+        ("legacy_target", "lbfgs-ondevice"),
+        ("legacy_target", "bfgs-ondevice"),
+    ]
+
+
+def test_every_least_squares_driver_reaches_documented_dispatch_path(monkeypatch):
+    calls = []
+
+    def scipy_lm(_fn, _x0, *, options):
+        calls.append(("scipy_lm", type(options).__name__))
+        return _fake_result()
+
+    def target_least_squares(*_args, **kwargs):
+        calls.append(("legacy_target", kwargs["method"]))
+        return _fake_result()
+
+    monkeypatch.setattr(dispatch, "_scipy_lm_result", scipy_lm)
+    monkeypatch.setattr(legacy_optimizer, "target_least_squares", target_least_squares)
+
+    for driver in [
+        Driver.SCIPY_LM,
+        Driver.SIMSOPT_LM_QR,
+    ]:
+        result = least_squares(_residual, np.zeros(2), driver=driver)
+        assert result.driver is driver
+
+    assert calls == [
+        ("scipy_lm", "ScipyLMOptions"),
+        ("legacy_target", "lm-minpack-ondevice"),
+    ]
+
+
+def test_legacy_dispatch_uses_driver_method_ssot(monkeypatch):
+    calls = []
+
+    def target_minimize(*_args, **kwargs):
+        calls.append(("target_minimize", kwargs["method"]))
+        return _fake_result()
+
+    def target_least_squares(*_args, **kwargs):
+        calls.append(("target_least_squares", kwargs["method"]))
+        return _fake_result()
+
+    monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
+    monkeypatch.setattr(legacy_optimizer, "target_least_squares", target_least_squares)
+    monkeypatch.setattr(
+        dispatch,
+        "legacy_target_minimize_method",
+        lambda driver: f"ssot-target-minimize:{driver.value}",
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "legacy_target_least_squares_method",
+        lambda driver: f"ssot-target-ls:{driver.value}",
+    )
+
+    minimize(_value_and_grad, np.zeros(2), driver=Driver.SIMSOPT_LBFGSB)
+    least_squares(_residual, np.zeros(2), driver=Driver.SIMSOPT_LM_QR)
+
+    assert calls == [
+        ("target_minimize", "ssot-target-minimize:simsopt_lbfgsb"),
+        ("target_least_squares", "ssot-target-ls:simsopt_lm_qr"),
+    ]
+
+
+def test_simsopt_lbfgsb_default_maxcor_matches_ondevice_history_default(monkeypatch):
+    captured = {}
+
+    def target_minimize(*_args, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
+
+    minimize(_value_and_grad, np.zeros(2), driver=Driver.SIMSOPT_LBFGSB)
+
+    assert SimsoptLBFGSBOptions().maxcor == 10
+    assert captured["method"] == "lbfgs-ondevice"
+    assert captured["options"]["maxcor"] == 10
+
+
+def test_simsopt_lbfgsb_public_result_preserves_inverse_hessian_operator(monkeypatch):
+    from scipy.optimize._lbfgsb_py import LbfgsInvHessProduct
+
+    s_history = np.asarray([[1.0, 0.0]], dtype=np.float64)
+    y_history = np.asarray([[2.0, 0.0]], dtype=np.float64)
+    inverse_hessian = LbfgsInvHessProduct(s_history, y_history)
+
+    def target_minimize(*_args, **_kwargs):
+        return OptimizeResult(
+            x=np.zeros(2, dtype=np.float64),
+            fun=0.0,
+            jac=np.zeros(2, dtype=np.float64),
+            nit=1,
+            nfev=1,
+            njev=1,
+            status=0,
+            success=True,
+            message="ok",
+            hess_inv=inverse_hessian,
+        )
+
+    monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
+
+    result = minimize(_value_and_grad, np.zeros(2), driver=Driver.SIMSOPT_LBFGSB)
+
+    public_inverse_hessian = cast(InverseHessianOperator, result.hess_inv)
+    assert public_inverse_hessian is inverse_hessian
+    assert result.hessian is None
+    np.testing.assert_allclose(
+        public_inverse_hessian(np.asarray([1.0, 0.0], dtype=np.float64)),
+        inverse_hessian(np.asarray([1.0, 0.0], dtype=np.float64)),
+    )
+
+
+def test_simsopt_minimize_callback_adapter_emits_typed_event(monkeypatch):
+    events = []
+
+    def target_minimize(*_args, **kwargs):
+        kwargs["callback"](np.array([0.25, -0.5], dtype=np.float64))
+        kwargs["progress_callback"](1, 0.3125, 1.0)
+        return _fake_result()
+
+    def value_and_grad(x):
+        return float(np.dot(x, x)), 2.0 * np.asarray(x, dtype=float)
+
+    monkeypatch.setattr(legacy_optimizer, "target_minimize", target_minimize)
+
+    minimize(
+        value_and_grad,
+        np.array([1.0, -2.0]),
+        driver=Driver.SIMSOPT_BFGS,
+        options=SimsoptBFGSOptions(maxiter=1),
+        callback=events.append,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], SimsoptBFGSCallbackEvent)
+    assert events[0].driver is Driver.SIMSOPT_BFGS
+    np.testing.assert_allclose(events[0].x, np.array([0.25, -0.5]))
+    assert events[0].fun == 0.3125
+
+
+def test_simsopt_least_squares_callback_adapter_emits_typed_event(monkeypatch):
+    events = []
+
+    def target_least_squares(*_args, **kwargs):
+        kwargs["callback"](np.array([0.25, -0.5], dtype=np.float64))
+        kwargs["progress_callback"](1, 1.40625, 1.5)
+        return _fake_result()
+
+    def residual(x):
+        return np.asarray(x, dtype=float) - np.array([1.0, -2.0])
+
+    monkeypatch.setattr(legacy_optimizer, "target_least_squares", target_least_squares)
+
+    least_squares(
+        residual,
+        np.array([1.0, -2.0]),
+        driver=Driver.SIMSOPT_LM_QR,
+        options=SimsoptLMQROptions(maxiter=1),
+        callback=events.append,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], SimsoptLMQRCallbackEvent)
+    assert events[0].driver is Driver.SIMSOPT_LM_QR
+    np.testing.assert_allclose(events[0].x, np.array([0.25, -0.5]))
+    assert np.isclose(events[0].residual_norm, np.linalg.norm([-0.75, 1.5]))
+
+
+def test_simsopt_least_squares_callback_adapter_accepts_progress_before_state():
+    events = []
+    legacy_callback, legacy_progress = dispatch._legacy_least_squares_callbacks(
+        events.append,
+        driver=Driver.SIMSOPT_LM_QR,
+        options=SimsoptLMQROptions(maxiter=1),
+    )
+
+    legacy_progress(1, 1.40625, 1.5)
+    assert events == []
+
+    legacy_callback(np.array([0.25, -0.5], dtype=np.float64))
+
+    assert len(events) == 1
+    assert isinstance(events[0], SimsoptLMQRCallbackEvent)
+    assert events[0].driver is Driver.SIMSOPT_LM_QR
+    np.testing.assert_allclose(events[0].x, np.array([0.25, -0.5]))
+    assert events[0].fun == 1.40625

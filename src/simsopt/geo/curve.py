@@ -1,14 +1,14 @@
 from math import sin, cos
 
 import numpy as np
-from jax import vjp, jacfwd, jvp
+from jax import device_get, device_put, jacfwd, jvp, vjp
 import jax.numpy as jnp
 
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
 
-from .jit import jit
+from .jit import jit, native_jax_device
 from .plotting import fix_matplotlib_3d
 
 __all__ = ['Curve', 'JaxCurve', 'RotatedCurve', 'curves_to_vtk', 'create_equally_spaced_curves',
@@ -36,13 +36,18 @@ def incremental_arclength_pure(d1gamma):
     .. math::
         \text{incremental arclength} = \|\mathbf{\gammadash}(\phi)\| d\phi
 
-    where :math:`\mathbf{\gammadash}(\phi)` is the derivative of the 
+    where :math:`\mathbf{\gammadash}(\phi)` is the derivative of the
     position vector to the curve.
     """
     return jnp.linalg.norm(d1gamma, axis=1)
 
 
-incremental_arclength_vjp = jit(lambda d1gamma, v: vjp(lambda d1g: incremental_arclength_pure(d1g), d1gamma)[1](v)[0])
+def _incremental_arclength_vjp(d1gamma, v):
+    """Upstream's (9e027eac3) VJP of the incremental arclength, the same lambda."""
+    return vjp(lambda d1g: incremental_arclength_pure(d1g), d1gamma)[1](v)[0]
+
+
+incremental_arclength_vjp = jit(_incremental_arclength_vjp)
 
 
 @jit
@@ -53,7 +58,7 @@ def kappa_pure(d1gamma, d2gamma):
     .. math::
         \kappa(\phi) = \frac{\|\mathbf{\gammadash} \times \mathbf{\gammadashdash}\|}{\|\mathbf{\gammadash}\|^3}
 
-    where :math:`\mathbf{\gammadash}` is the tangent vector to the curve and 
+    where :math:`\mathbf{\gammadash}` is the tangent vector to the curve and
     :math:`\mathbf{\gammadashdash}` is the derivative of the tangent vector.
     """
     return jnp.linalg.norm(jnp.cross(d1gamma, d2gamma), axis=1)/jnp.linalg.norm(d1gamma, axis=1)**3
@@ -73,8 +78,8 @@ def torsion_pure(d1gamma, d2gamma, d3gamma):
     .. math::
         \tau(\phi) = \frac{\mathbf{\gammadash} \times \mathbf{\gammadashdash} \cdot \mathbf{\gammadashdashdash}}{\|\mathbf{\gammadash} \times \mathbf{\gammadashdash}\|^2}
 
-    where :math:`\mathbf{\gammadash}` is the tangent vector to the curve, 
-    :math:`\mathbf{\gammadashdash}` is the derivative of the tangent vector, and 
+    where :math:`\mathbf{\gammadash}` is the tangent vector to the curve,
+    :math:`\mathbf{\gammadashdash}` is the derivative of the tangent vector, and
     :math:`\mathbf{\gammadashdashdash}` is the derivative of the derivative of the tangent vector.
     """
     return jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1) / jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1)**2, axis=1)
@@ -94,7 +99,7 @@ def frenet_frame_pure(gammadash, gammadashdash, incremental_arclength):
     .. math::
         \mathbf{t} = \frac{1}{l} \mathbf{\gammadash}
 
-    where :math:`l` is the the derivative of arclength with respect 
+    where :math:`l` is the derivative of arclength with respect
     to the curve parameter. t = gammadash / |gammadash|.
 
     .. math::
@@ -237,19 +242,34 @@ class Curve(Optimizable):
         .. math::
             v^T \frac{\partial \|\Gamma'\|}{\partial \mathbf{c}}
 
-        where :math:`\|\Gamma'\|` is the incremental arclength, :math:`\Gamma'` is the tangent 
+        where :math:`\|\Gamma'\|` is the incremental arclength, :math:`\Gamma'` is the tangent
         to the curve and :math:`\mathbf{c}` are the curve dofs.
         """
 
-        return self.dgammadash_by_dcoeff_vjp(
-            incremental_arclength_vjp(self.gammadash(), v))
+        # Upstream's jitted VJP, on the device ``native_jax_device`` names and
+        # through explicit transfers, so the native gradient stays host-owned.
+        device = native_jax_device()
+        incremental_arclength_cotangent = np.asarray(
+            device_get(
+                incremental_arclength_vjp(
+                    device_put(self.gammadash(), device), device_put(v, device)
+                )
+            )
+        )
+        return self.dgammadash_by_dcoeff_vjp(incremental_arclength_cotangent)
 
     def kappa_impl(self, kappa):
         r"""
         This function implements the curvature, :math:`\kappa(\varphi)`.
         """
-        kappa[:] = np.asarray(kappa_pure(
-            self.gammadash(), self.gammadashdash()))
+        gammadash = self.gammadash()
+        gammadashdash = self.gammadashdash()
+        cross_norm = np.linalg.norm(
+            np.cross(gammadash, gammadashdash),
+            axis=1,
+        )
+        speed = np.linalg.norm(gammadash, axis=1)
+        kappa[:] = cross_norm / (speed * speed * speed)
 
     def dkappa_by_dcoeff_impl(self, dkappa_by_dcoeff):
         r"""
@@ -307,20 +327,26 @@ class Curve(Optimizable):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \kappa}{\partial \mathbf{c}} 
+            v^T \frac{\partial \kappa}{\partial \mathbf{c}}
 
         where :math:`\mathbf c` are the curve dofs and :math:`\kappa` is the curvature.
         """
 
-        return self.dgammadash_by_dcoeff_vjp(kappavjp0(self.gammadash(), self.gammadashdash(), v)) \
-            + self.dgammadashdash_by_dcoeff_vjp(kappavjp1(self.gammadash(), self.gammadashdash(), v))
+        d1gamma = device_put(self.gammadash())
+        d2gamma = device_put(self.gammadashdash())
+        cotangent = device_put(v)
+        d1_cotangent = np.asarray(device_get(kappavjp0(d1gamma, d2gamma, cotangent)))
+        d2_cotangent = np.asarray(device_get(kappavjp1(d1gamma, d2gamma, cotangent)))
+        return self.dgammadash_by_dcoeff_vjp(
+            d1_cotangent
+        ) + self.dgammadashdash_by_dcoeff_vjp(d2_cotangent)
 
     def dtorsion_by_dcoeff_vjp(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \tau}{\partial \mathbf{c}} 
+            v^T  \frac{\partial \tau}{\partial \mathbf{c}}
 
         where :math:`\mathbf c` are the curve dofs, and :math:`\tau` is the torsion.
         """
@@ -353,7 +379,7 @@ class Curve(Optimizable):
 
     def dfrenet_frame_by_dcoeff(self):
         r"""
-        This function returns the derivative of the curve's Frenet frame, 
+        This function returns the derivative of the curve's Frenet frame,
 
         .. math::
             \left(\frac{\partial \mathbf{t}}{\partial \mathbf{c}}, \frac{\partial \mathbf{n}}{\partial \mathbf{c}}, \frac{\partial \mathbf{b}}{\partial \mathbf{c}}\right),
@@ -375,8 +401,11 @@ class Curve(Optimizable):
         dt_by_dcoeff, dn_by_dcoeff, db_by_dcoeff = (np.zeros((N, 3, self.num_dofs())), np.zeros((N, 3, self.num_dofs())), np.zeros((N, 3, self.num_dofs())))
         t, n, b = self.frenet_frame()
 
-        dt_by_dcoeff[:, :, :] = -(dl_by_dcoeff[:, None, :]/l[:, None, None]**2) * dgamma_by_dphi[:, :, None] \
+        dt_by_dcoeff[:, :, :] = (
+            -(dl_by_dcoeff[:, None, :] / l[:, None, None] ** 2)
+            * dgamma_by_dphi[:, :, None]
             + d2gamma_by_dphidcoeff / l[:, None, None]
+        )
 
         tdash = (1./l[:, None])**2 * (
             l[:, None] * d2gamma_by_dphidphi
@@ -399,7 +428,7 @@ class Curve(Optimizable):
 
     def dkappadash_by_dcoeff(self):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \kappa'(\phi)}{\partial \mathbf{c}}.
@@ -454,7 +483,7 @@ class Curve(Optimizable):
         return dkappadash_by_dcoeff
 
     def centroid(self):
-        r""" 
+        r"""
         Compute the centroid of the curve
 
         .. math::
@@ -530,9 +559,18 @@ class JaxCurve(sopp.Curve, Curve):
         """
         return self.incremental_arclength_jax(self.get_dofs())
 
+    def kappa_impl(self, kappa):
+        """Evaluate JAX-backed curve curvature with the JAX kernel."""
+        kappa[:] = np.asarray(
+            kappa_pure(
+                self.gammadash(),
+                self.gammadashdash(),
+            )
+        )
+
     def dgamma_by_dcoeff_impl(self, dgamma_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma}{\partial \mathbf c}
@@ -547,7 +585,7 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -564,7 +602,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadash_by_dcoeff_impl(self, dgammadash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -577,7 +615,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadash_by_dcoeff_vjp_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \mathbf v^T \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -597,7 +635,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadashdash_by_dcoeff_impl(self, dgammadashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma''}{\partial \mathbf c}
@@ -613,7 +651,7 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -632,7 +670,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadashdashdash_by_dcoeff_impl(self, dgammadashdashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'''}{\partial \mathbf c}
@@ -648,7 +686,7 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -674,7 +712,7 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \tau}{\partial \mathbf{c}} 
+            v^T \frac{\partial \tau}{\partial \mathbf{c}}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\tau` is the torsion.
 
@@ -783,7 +821,7 @@ class RotatedCurve(sopp.Curve, Curve):
 
     def dgammadash_by_dcoeff_impl(self, dgammadash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -796,7 +834,7 @@ class RotatedCurve(sopp.Curve, Curve):
 
     def dgammadashdash_by_dcoeff_impl(self, dgammadashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma''}{\partial \mathbf c}
@@ -810,7 +848,7 @@ class RotatedCurve(sopp.Curve, Curve):
 
     def dgammadashdashdash_by_dcoeff_impl(self, dgammadashdashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'''}{\partial \mathbf c}
@@ -827,7 +865,7 @@ class RotatedCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -841,7 +879,7 @@ class RotatedCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma'}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma'}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -855,7 +893,7 @@ class RotatedCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma''}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -870,7 +908,7 @@ class RotatedCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma'''}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma'''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -921,19 +959,19 @@ def curves_to_vtk(curves, filename, close=False, extra_data=None):
 
 def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
     """
-    Generate a uniform 3D grid of points where a set of circular coils 
+    Generate a uniform 3D grid of points where a set of circular coils
     will be initialized to have their centers. The coils are uniformly
-    spaced on the Cartesian grid, although the grid may have different spacing 
+    spaced on the Cartesian grid, although the grid may have different spacing
     in the x, y, and z directions, and it is appropriately initialized to
     respect the discrete symmetries of the plasma.
 
     The grid is defined by the inner and outermost points of a toroidal surface s_outer.
-    Filtering on this grid is done to avoid coil overlap and respect stellarator and 
+    Filtering on this grid is done to avoid coil overlap and respect stellarator and
     field-period symmetries.
 
-    This function is typically used to initialize candidate coil center locations for planar 
-    coil optimization. 
-    It computes a uniform grid in the bounding box from the min and max points of the toroidal surface 
+    This function is typically used to initialize candidate coil center locations for planar
+    coil optimization.
+    It computes a uniform grid in the bounding box from the min and max points of the toroidal surface
     s_outer (typically generated using s.extend_via_normal() or similar function). Then it:
     1. Generates a uniform grid for a set of circular coils by:
         (a) X = np.linspace(dx / 2.0 + x_min, x_max - dx / 2.0, Nx, endpoint=True)
@@ -946,8 +984,8 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
             Nmin = min(dx, min(dy, dz))
             R = Nmin / Nmin_factor
             - As long as Nmin_factor > 2, then the coils cannot overlap.
-        (e) Removes points too close to the unique sector [0, pi / nfp] (or [0, 2pi / nfp] 
-            for stellsym = False) to avoid overlap after symmetry operations. To guarantee that 
+        (e) Removes points too close to the unique sector [0, pi / nfp] (or [0, 2pi / nfp]
+            for stellsym = False) to avoid overlap after symmetry operations. To guarantee that
             the symmetrized coils do not overlap, we remove points according to the following logic:
             - Compute the coil curve in the x-y plane.
             - Compute the angle of every point on the coil curve.
@@ -957,7 +995,7 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
     Parameters
     ----------
     s_outer : Surface
-        The outer toroidal surface (for grid bounding box). Assumed to have the same 
+        The outer toroidal surface (for grid bounding box). Assumed to have the same
         discrete symmetries as the plasma surface.
     Nx : int
         Number of grid points in the x direction.
@@ -966,8 +1004,8 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
     Nz : int
         Number of grid points in the z direction.
     Nmin_factor : float, optional
-        Factor to set minimum coil spacing (default: 2.01). The coil radius is set to Nmin / Nmin_factor, 
-        where Nmin is the minimum grid spacing. So as long as Nmin_factor > 2, then the coils 
+        Factor to set minimum coil spacing (default: 2.01). The coil radius is set to Nmin / Nmin_factor,
+        where Nmin is the minimum grid spacing. So as long as Nmin_factor > 2, then the coils
         (which are initialized as circles of radius R) will not overlap.
 
     Returns
@@ -1061,9 +1099,9 @@ def create_planar_curves_between_two_toroidal_surfaces(
     Nmin_factor=2.01,
 ):
     """
-    Create a list of planar curves between two toroidal surfaces. The curves are initialized as 
-    circular coils of radius R and then the coils are rotated and flipped to satisfy stellarator 
-    symmetry. They are originally initialized on a uniform Cartesian grid and then filtered to 
+    Create a list of planar curves between two toroidal surfaces. The curves are initialized as
+    circular coils of radius R and then the coils are rotated and flipped to satisfy stellarator
+    symmetry. They are originally initialized on a uniform Cartesian grid and then filtered to
     only include points that are between the two toroidal surfaces.
 
     Args:
@@ -1088,8 +1126,8 @@ def create_planar_curves_between_two_toroidal_surfaces(
         numquadpoints : int, optional
             Number of quadrature points to use.
         Nmin_factor : float, optional
-            Factor to set minimum coil spacing (default: 2.01). The coil radius is set to Nmin / Nmin_factor, 
-            where Nmin is the minimum grid spacing. So as long as Nmin_factor > 2, then the coils 
+            Factor to set minimum coil spacing (default: 2.01). The coil radius is set to Nmin / Nmin_factor,
+            where Nmin is the minimum grid spacing. So as long as Nmin_factor > 2, then the coils
             (which are initialized as circles of radius R) will not overlap.
 
     Returns:

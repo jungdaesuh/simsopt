@@ -34,6 +34,12 @@ class Surface {
             auto loc = cache.find(key);
             if(loc == cache.end()){ // Key not found --> allocate array
                 loc = cache.insert(std::make_pair(key, CachedArray<Array>(xt::zeros<double>(dims)))).first;
+            } else if(!((loc->second).status)){
+                // Stale: recompute into a new array. The old one was returned to
+                // Python and may still be read by a pending computation (JAX on
+                // CPU aliases numpy inputs and runs asynchronously), so it is
+                // never written again.
+                loc->second = CachedArray<Array>(xt::zeros<double>(dims));
             }
             if(!((loc->second).status)){ // needs recomputing
                 impl((loc->second).data);

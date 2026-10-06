@@ -1,10 +1,11 @@
 from deprecated import deprecated
 
 import numpy as np
-from jax import grad
+from jax import device_get, device_put, grad
 import jax.numpy as jnp
 
-from .jit import jit
+from .jit import jit, native_jax_device
+from ._curve_surface_distance_owners import curve_surface_distance_owners
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 import simsoptpp as sopp
@@ -40,23 +41,33 @@ class CurveLength(Optimizable):
 
     def __init__(self, curve):
         self.curve = curve
-        self.dJ_dl = jit(lambda l: grad(curve_length_pure)(l))
         super().__init__(depends_on=[curve])
 
     def J(self):
         """
-        This returns the value of the quantity.
+        This returns the value of the quantity: upstream's ``jnp.mean`` of the
+        incremental arclengths, evaluated through explicit transfers on the
+        device :func:`simsopt.geo.jit.native_jax_device` names.
         """
-        return curve_length_pure(self.curve.incremental_arclength())
+        return np.float64(
+            device_get(
+                curve_length_pure(
+                    device_put(self.curve.incremental_arclength(), native_jax_device())
+                )
+            )
+        )
 
     @derivative_dec
     def dJ(self):
-        """
-        This returns the derivative of the quantity with respect to the curve dofs.
-        """
-
+        """Return the derivative with respect to the curve DOFs."""
+        incremental_arclength = self.curve.incremental_arclength()
+        incremental_arclength_gradient = np.full_like(
+            incremental_arclength,
+            1.0 / incremental_arclength.size,
+        )
         return self.curve.dincremental_arclength_by_dcoeff_vjp(
-            self.dJ_dl(self.curve.incremental_arclength()))
+            incremental_arclength_gradient
+        )
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -182,16 +193,16 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance, downsample=1):
         gamma2 (array-like): Points along the second curve.
         l2 (array-like): Tangent vectors along the second curve.
         minimum_distance (float): The minimum allowed distance between curves.
-        downsample (int, default=1): 
-            Factor by which to downsample the quadrature points 
+        downsample (int, default=1):
+            Factor by which to downsample the quadrature points
             by skipping through the array by a factor of ``downsample``,
-            e.g. curve.gamma()[::downsample, :]. 
+            e.g. curve.gamma()[::downsample, :].
             Setting this parameter to a value larger than 1 will speed up the calculation,
             which may be useful if the set of coils is large, though it may introduce
-            inaccuracy if ``downsample`` is set too large, or not a multiple of the 
-            total number of quadrature points (since this will produce a nonuniform set of points). 
-            This parameter is used to speed up expensive calculations during optimization, 
-            while retaining higher accuracy for the other objectives. 
+            inaccuracy if ``downsample`` is set too large, or not a multiple of the
+            total number of quadrature points (since this will produce a nonuniform set of points).
+            This parameter is used to speed up expensive calculations during optimization,
+            while retaining higher accuracy for the other objectives.
 
     Returns:
         float: The curve-curve distance penalty value.
@@ -345,48 +356,92 @@ class CurveSurfaceDistance(Optimizable):
 
     """
 
-    def __init__(self, curves, surface, minimum_distance):
+    def __init__(self, curves, surface, minimum_distance, downsample=1):
         self.curves = curves
         self.surface = surface
         self.minimum_distance = minimum_distance
+        self.downsample = downsample
 
-        self.J_jax = jit(lambda gammac, lc, gammas, ns: cs_distance_pure(gammac, lc, gammas, ns, minimum_distance))
-        self.dJ_dgamma = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=0)(gammac, lc, gammas, ns))
-        self.dJ_dlc = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=1)(gammac, lc, gammas, ns))
+        self.J_jax = jit(
+            lambda gammac, lc, gammas, ns: cs_distance_pure(
+                gammac, lc, gammas, ns, minimum_distance
+            )
+        )
+        self.dJ_dargs = jit(
+            lambda gammac, lc, gammas, ns: grad(
+                self.J_jax,
+                argnums=(0, 1, 2, 3),
+            )(gammac, lc, gammas, ns)
+        )
         self.candidates = None
-        super().__init__(depends_on=curves)  # Bharat's comment: Shouldn't we add surface here
+        super().__init__(depends_on=curve_surface_distance_owners(curves, surface))
 
     def recompute_bell(self, parent=None):
         self.candidates = None
 
-    def compute_candidates(self):
+    def compute_candidates(self, surface_gamma=None):
         if self.candidates is None:
-            candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
-                [c.gamma() for c in self.curves], [self.surface.gamma().reshape((-1, 3))], self.minimum_distance)
-            self.candidates = candidates
+            resolved_surface_gamma = (
+                self.surface.gamma() if surface_gamma is None else surface_gamma
+            )
+            candidates = (
+                sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+                    [c.gamma() for c in self.curves],
+                    [resolved_surface_gamma.reshape((-1, 3))],
+                    self.minimum_distance,
+                )
+            )
+            self.candidates = [] if candidates is None else candidates
+
+    def _shortest_distance_pointclouds(self):
+        xyz_surf = self.surface.gamma()[
+            :: self.downsample, :: self.downsample, :
+        ].reshape((-1, 3))
+        gammas = [curve.gamma()[:: self.downsample, :] for curve in self.curves]
+        return gammas, xyz_surf
+
+    def _shortest_distance_candidates(self, gammas, xyz_surf):
+        candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+            gammas,
+            [xyz_surf],
+            self.minimum_distance,
+        )
+        return [] if candidates is None else candidates
+
+    def _shortest_distance_among_candidates(self, gammas, xyz_surf, candidates):
+        from scipy.spatial.distance import cdist
+
+        return min(
+            [self.minimum_distance]
+            + [np.min(cdist(gammas[i], xyz_surf)) for i, _ in candidates]
+        )
 
     def shortest_distance_among_candidates(self):
-        self.compute_candidates()
-        from scipy.spatial.distance import cdist
-        xyz_surf = self.surface.gamma().reshape((-1, 3))
-        return min([self.minimum_distance] + [np.min(cdist(self.curves[i].gamma(), xyz_surf)) for i, _ in self.candidates])
+        gammas, xyz_surf = self._shortest_distance_pointclouds()
+        candidates = self._shortest_distance_candidates(gammas, xyz_surf)
+        return self._shortest_distance_among_candidates(gammas, xyz_surf, candidates)
 
     def shortest_distance(self):
-        self.compute_candidates()
-        if len(self.candidates) > 0:
-            return self.shortest_distance_among_candidates()
         from scipy.spatial.distance import cdist
-        xyz_surf = self.surface.gamma().reshape((-1, 3))
-        return min([np.min(cdist(self.curves[i].gamma(), xyz_surf)) for i in range(len(self.curves))])
+
+        gammas, xyz_surf = self._shortest_distance_pointclouds()
+        candidates = self._shortest_distance_candidates(gammas, xyz_surf)
+        if candidates:
+            return self._shortest_distance_among_candidates(
+                gammas, xyz_surf, candidates
+            )
+        return min(np.min(cdist(gamma, xyz_surf)) for gamma in gammas)
 
     def J(self):
         """
         This returns the value of the quantity.
         """
-        self.compute_candidates()
         res = 0
-        gammas = self.surface.gamma().reshape((-1, 3))
-        ns = self.surface.normal().reshape((-1, 3))
+        surface_gamma = self.surface.gamma()
+        surface_normal = self.surface.normal()
+        self.compute_candidates(surface_gamma)
+        gammas = surface_gamma.reshape((-1, 3))
+        ns = surface_normal.reshape((-1, 3))
         for i, _ in self.candidates:
             gammac = self.curves[i].gamma()
             lc = self.curves[i].gammadash()
@@ -395,25 +450,44 @@ class CurveSurfaceDistance(Optimizable):
 
     @derivative_dec
     def dJ(self):
-        """
-        This returns the derivative of the quantity with respect to the curve dofs.
-        """
-        self.compute_candidates()
+        """Return the derivative with respect to curve and surface DOFs."""
         dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
-        dgammadash_by_dcoeff_vjp_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]
-        gammas = self.surface.gamma().reshape((-1, 3))
-
-        gammas = self.surface.gamma().reshape((-1, 3))
-        ns = self.surface.normal().reshape((-1, 3))
+        dgammadash_by_dcoeff_vjp_vecs = [
+            np.zeros_like(c.gammadash()) for c in self.curves
+        ]
+        surface_gamma = self.surface.gamma()
+        surface_normal = self.surface.normal()
+        self.compute_candidates(surface_gamma)
+        gammas = surface_gamma.reshape((-1, 3))
+        ns = surface_normal.reshape((-1, 3))
+        surface_gamma_vjp = np.zeros_like(surface_gamma)
+        surface_normal_vjp = np.zeros_like(surface_normal)
         for i, _ in self.candidates:
             gammac = self.curves[i].gamma()
             lc = self.curves[i].gammadash()
-            dgamma_by_dcoeff_vjp_vecs[i] += self.dJ_dgamma(gammac, lc, gammas, ns)
-            dgammadash_by_dcoeff_vjp_vecs[i] += self.dJ_dlc(gammac, lc, gammas, ns)
-        res = [self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i]) + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i]) for i in range(len(self.curves))]
-        return sum(res)
+            grad_gamma, grad_lc, grad_gammas, grad_ns = self.dJ_dargs(
+                gammac, lc, gammas, ns
+            )
+            dgamma_by_dcoeff_vjp_vecs[i] += grad_gamma
+            dgammadash_by_dcoeff_vjp_vecs[i] += grad_lc
+            surface_gamma_vjp += np.asarray(grad_gammas).reshape(surface_gamma.shape)
+            surface_normal_vjp += np.asarray(grad_ns).reshape(surface_normal.shape)
+        res = [
+            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
+            + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i])
+            for i in range(len(self.curves))
+        ]
+        surface_derivative = Derivative(
+            {
+                self.surface: (
+                    self.surface.dgamma_by_dcoeff_vjp(surface_gamma_vjp)
+                    + self.surface.dnormal_by_dcoeff_vjp(surface_normal_vjp)
+                )
+            }
+        )
+        return sum(res) + surface_derivative
 
-    return_fn_map = {'J': J, 'dJ': dJ}
+    return_fn_map = {"J": J, "dJ": dJ}
 
 
 @jit

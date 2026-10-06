@@ -651,6 +651,29 @@ class JsonTest(unittest.TestCase):
         obj = json.loads(json.dumps(d), cls=GSONDecoder)
         self.assertEqual(type(obj), dict)
 
+    def test_redirect_across_modules_resolves_moved_class(self):
+        # Regression: a redirect whose target module differs from the source
+        # module must reconstruct the moved class. The prior implementation
+        # reassigned ``modname`` to the new module before the second REDIRECT
+        # lookup, raising KeyError whenever old_module != new_module.
+        # (``test_redirect`` above cannot catch this: its redirect target
+        # module equals the source.)
+        GSONable.REDIRECT["retired.legacy.location"] = {
+            "RetiredName": {"@class": "GoodGSONClass", "@module": "core.test_json"}
+        }
+        try:
+            d = {
+                "@class": "RetiredName",
+                "@module": "retired.legacy.location",
+                "a": 1,
+                "b": 1,
+                "c": 1,
+            }
+            obj = json.loads(json.dumps(d), cls=GSONDecoder)
+        finally:
+            GSONable.REDIRECT.pop("retired.legacy.location", None)
+        self.assertEqual(type(obj), GoodGSONClass)
+
     def test_redirect_settings_file(self):
         data = _load_redirect(os.path.join(test_dir, "test_settings.yaml"))
         self.assertEqual(
