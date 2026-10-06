@@ -229,6 +229,7 @@ from .sharding import (
     maybe_shard_trajectory_batch_inputs,
     replicate_tree_on_mesh,
     trajectory_batch_sharding_config,
+    trim_leading_axis,
 )
 
 from simsopt_jax.pytree import pytree_dataclass
@@ -2471,6 +2472,7 @@ def trace_fieldlines_batched(
         spec, magnetic_field_fn, phis, stopping_criteria
     )
 
+    lane_count = int(y0s_arr.shape[0])
     config = trajectory_batch_sharding_config(y0s_arr)
     if config is not None:
         y0s_arr, dtmaxs_arr = maybe_shard_trajectory_batch_inputs(
@@ -2503,7 +2505,7 @@ def trace_fieldlines_batched(
                     (y0s_block, dtmaxs_block),
                 )
 
-            return trace_shard(y0s_arr, dtmaxs_arr)
+            return trim_leading_axis(trace_shard(y0s_arr, dtmaxs_arr), lane_count)
 
         field_state_specs = jax.tree.map(lambda _leaf: P(), magnetic_field_state)
 
@@ -2524,7 +2526,10 @@ def trace_fieldlines_batched(
                 (y0s_block, dtmaxs_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state)
+        return trim_leading_axis(
+            trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state),
+            lane_count,
+        )
 
     return _trace_fieldlines_batched_unsharded(
         spec,
@@ -3285,6 +3290,7 @@ def trace_guiding_centers_batched(
         spec, magnetic_field_fn, m, q, phis, stopping_criteria
     )
 
+    lane_count = int(y0s_arr.shape[0])
     config = trajectory_batch_sharding_config(y0s_arr)
     if config is not None:
         y0s_arr, dtmaxs_arr, mus_arr = maybe_shard_trajectory_batch_inputs(
@@ -3322,7 +3328,10 @@ def trace_guiding_centers_batched(
                     (y0s_block, dtmaxs_block, mus_block),
                 )
 
-            return trace_shard(y0s_arr, dtmaxs_arr, mus_arr)
+            return trim_leading_axis(
+                trace_shard(y0s_arr, dtmaxs_arr, mus_arr),
+                lane_count,
+            )
 
         field_state_specs = jax.tree.map(lambda _leaf: P(), magnetic_field_state)
 
@@ -3349,7 +3358,10 @@ def trace_guiding_centers_batched(
                 (y0s_block, dtmaxs_block, mus_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr, mus_arr, magnetic_field_state)
+        return trim_leading_axis(
+            trace_shard(y0s_arr, dtmaxs_arr, mus_arr, magnetic_field_state),
+            lane_count,
+        )
 
     return _trace_guiding_centers_batched_unsharded(
         spec,
@@ -4623,6 +4635,7 @@ def trace_guiding_centers_boozer_batched(
         for criterion in stopping_criteria
     )
 
+    lane_count = int(y0s_arr.shape[0])
     config = trajectory_batch_sharding_config(y0s_arr)
     if config is not None and shardable_field and shardable_criteria:
         y0s_arr, dtmaxs_arr, mus_arr = maybe_shard_trajectory_batch_inputs(
@@ -4684,7 +4697,10 @@ def trace_guiding_centers_boozer_batched(
                 (y0s_block, dtmaxs_block, mus_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr, mus_arr, shared_state)
+        return trim_leading_axis(
+            trace_shard(y0s_arr, dtmaxs_arr, mus_arr, shared_state),
+            lane_count,
+        )
 
     if isinstance(
         frozen_state, (BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState)
@@ -5334,6 +5350,7 @@ def trace_fullorbits_batched(
             stopping_criteria=stopping_criteria,
         )
 
+    lane_count = int(y0s_arr.shape[0])
     config = trajectory_batch_sharding_config(y0s_arr)
     if config is not None:
         y0s_arr, dtmaxs_arr = maybe_shard_trajectory_batch_inputs(
@@ -5366,7 +5383,7 @@ def trace_fullorbits_batched(
                     (y0s_block, dtmaxs_block),
                 )
 
-            return trace_shard(y0s_arr, dtmaxs_arr)
+            return trim_leading_axis(trace_shard(y0s_arr, dtmaxs_arr), lane_count)
 
         field_state_specs = jax.tree.map(lambda _leaf: P(), magnetic_field_state)
 
@@ -5387,7 +5404,10 @@ def trace_fullorbits_batched(
                 (y0s_block, dtmaxs_block),
             )
 
-        return trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state)
+        return trim_leading_axis(
+            trace_shard(y0s_arr, dtmaxs_arr, magnetic_field_state),
+            lane_count,
+        )
 
     return _trace_fullorbits_batched_unsharded(
         spec,

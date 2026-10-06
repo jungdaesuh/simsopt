@@ -237,56 +237,43 @@ def test_jvp_safe_decision_split_preserves_float32_primal_dtype():
 
 
 def test_split_decision_vector_float32_vjp_under_transfer_guard():
-    from simsopt_jax.backend import get_backend_config, set_backend
+    x_with_G = jnp.asarray([0.1, 0.2, 0.3, 0.4, 0.5], dtype=jnp.float32)
+    x_without_G = jnp.asarray([0.6, 0.7, 0.8], dtype=jnp.float32)
+    cotangent = jnp.asarray(1.0, dtype=jnp.float32)
+    x_with_G.block_until_ready()
+    x_without_G.block_until_ready()
+    cotangent.block_until_ready()
 
-    previous = get_backend_config()
-    set_backend("jax_cpu_float32_smoke", configure_runtime=False)
-    try:
-        x_with_G = jnp.asarray([0.1, 0.2, 0.3, 0.4, 0.5], dtype=jnp.float32)
-        x_without_G = jnp.asarray([0.6, 0.7, 0.8], dtype=jnp.float32)
-        cotangent = jnp.asarray(1.0, dtype=jnp.float32)
-        x_with_G.block_until_ready()
-        x_without_G.block_until_ready()
-        cotangent.block_until_ready()
+    def scalar_with_G(x):
+        sdofs, iota, G = _split_decision_vector(x, optimize_G=True)
+        return jnp.sum(sdofs * sdofs) + iota * G
 
-        def scalar_with_G(x):
-            sdofs, iota, G = _split_decision_vector(x, optimize_G=True)
-            return jnp.sum(sdofs * sdofs) + iota * G
+    def scalar_without_G(x):
+        sdofs, iota, G = _split_decision_vector(x, optimize_G=False)
+        assert G is None
+        return jnp.sum(sdofs * sdofs) + iota
 
-        def scalar_without_G(x):
-            sdofs, iota, G = _split_decision_vector(x, optimize_G=False)
-            assert G is None
-            return jnp.sum(sdofs * sdofs) + iota
-
-        with jax.transfer_guard("disallow"):
-            _value_with_G, pullback_with_G = jax.vjp(scalar_with_G, x_with_G)
-            (grad_with_G,) = pullback_with_G(cotangent)
-            _value_without_G, pullback_without_G = jax.vjp(
-                scalar_without_G,
-                x_without_G,
-            )
-            (grad_without_G,) = pullback_without_G(cotangent)
-            grad_with_G.block_until_ready()
-            grad_without_G.block_until_ready()
-
-        np.testing.assert_allclose(
-            host_array(grad_with_G, dtype=np.float32),
-            np.asarray([0.2, 0.4, 0.6, 0.5, 0.4], dtype=np.float32),
+    with jax.transfer_guard("disallow"):
+        _value_with_G, pullback_with_G = jax.vjp(scalar_with_G, x_with_G)
+        (grad_with_G,) = pullback_with_G(cotangent)
+        _value_without_G, pullback_without_G = jax.vjp(
+            scalar_without_G,
+            x_without_G,
         )
-        np.testing.assert_allclose(
-            host_array(grad_without_G, dtype=np.float32),
-            np.asarray([1.2, 1.4, 1.0], dtype=np.float32),
-        )
-    finally:
-        set_backend(
-            previous.mode,
-            precision=previous.precision,
-            strict=previous.strict,
-            debug_nans=previous.debug_nans,
-            transfer_guard=previous.transfer_guard,
-            compilation_cache_dir=previous.compilation_cache_dir,
-            configure_runtime=False,
-        )
+        (grad_without_G,) = pullback_without_G(cotangent)
+        grad_with_G.block_until_ready()
+        grad_without_G.block_until_ready()
+
+    assert grad_with_G.dtype == jnp.float32
+    assert grad_without_G.dtype == jnp.float32
+    np.testing.assert_allclose(
+        host_array(grad_with_G, dtype=np.float32),
+        np.asarray([0.2, 0.4, 0.6, 0.5, 0.4], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        host_array(grad_without_G, dtype=np.float32),
+        np.asarray([1.2, 1.4, 1.0], dtype=np.float32),
+    )
 
 
 def test_unpack_decision_vector_rejects_unknown_split_mode():

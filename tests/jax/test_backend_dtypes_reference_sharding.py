@@ -38,7 +38,7 @@ def test_reference_sharding_short_circuits_on_tracer():
     @jax.jit
     def f(x):
         with mock.patch.object(dtypes, "_compatible_reference_sharding") as compat:
-            captured["result"] = dtypes._reference_sharding(x, ndim=1)
+            captured["result"] = dtypes._reference_sharding(x, shape=(3,))
             captured["compat_calls"] = compat.call_count
         return x
 
@@ -59,7 +59,7 @@ def test_reference_sharding_still_probes_concrete_array():
         "_compatible_reference_sharding",
         wraps=dtypes._compatible_reference_sharding,
     ) as compat:
-        result = dtypes._reference_sharding(arr, ndim=1)
+        result = dtypes._reference_sharding(arr, shape=(3,))
 
     # The concrete array goes through the probe; a single-device sharding is not
     # a NamedSharding, so the compatible result is None -- but the path runs.
@@ -194,7 +194,7 @@ def test_reference_sharding_handles_tracer_leaf_in_sequence():
     @jax.jit
     def f(x):
         with mock.patch.object(dtypes, "_compatible_reference_sharding") as compat:
-            captured["result"] = dtypes._reference_sharding([x], ndim=1)
+            captured["result"] = dtypes._reference_sharding([x], shape=(3,))
             captured["compat_calls"] = compat.call_count
         return x
 
@@ -413,6 +413,63 @@ def test_unplaced_values_join_data_committed_to_another_device():
     )
     completed = subprocess.run(
         (sys.executable, "-c", _UNPLACED_JOINS_COMMITTED_CHILD),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+_ROW_ALIGNED_REFERENCE_CHILD = """
+import jax
+import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+jax.config.update("jax_enable_x64", True)
+from simsopt_jax.backend import dtypes
+
+mesh = Mesh(np.asarray(jax.devices("cpu")[:2], dtype=object), ("d",))
+points = jax.device_put(np.zeros((4, 3)), NamedSharding(mesh, P("d", None)))
+cotangent = dtypes.as_compute_array(np.ones((4, 3)), reference=points)
+coils = dtypes.as_compute_array(np.ones((3, 5, 3)), reference=points)
+same_rows_coils = dtypes.as_runtime_array(np.ones((4, 5, 3)), reference=points)
+scalar = dtypes.as_runtime_array(np.asarray(2.0), reference=points)
+explicit = dtypes.explicit_device_array(
+    np.ones((3, 3)), dtype=np.float64, reference=points
+)
+assert cotangent.sharding == points.sharding, cotangent.sharding
+assert same_rows_coils.sharding.spec == P("d", None), same_rows_coils.sharding
+for value in (coils, scalar, explicit):
+    assert value.sharding == NamedSharding(mesh, P()), value.sharding
+replicated = dtypes.replicated_placement(points)
+assert replicated == NamedSharding(mesh, P()), replicated
+placed = dtypes.as_compute_array(np.ones((4, 5, 3)), target=replicated)
+assert placed.sharding == replicated, placed.sharding
+assert dtypes.replicated_placement(np.zeros(3)) is None
+assert dtypes.replicated_placement(jax.device_put(np.zeros(3), mesh.devices[0])) is None
+"""
+
+
+def test_reference_lends_its_partition_only_to_row_aligned_values():
+    """A value placed by a sharded reference keeps its partition only when aligned.
+
+    A cotangent of point-sharded points (same extent on the sharded axis) takes
+    the points' partition; coil data and scalars are replicated on the points'
+    mesh. Copying ``P("d", None)`` onto 3 coils on 2 devices was rejected as
+    indivisible, and onto any coil count it partitioned an unrelated axis.
+    """
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "JAX_PLATFORMS": "cpu",
+            "JAX_ENABLE_X64": "1",
+            "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        }
+    )
+    completed = subprocess.run(
+        (sys.executable, "-c", _ROW_ALIGNED_REFERENCE_CHILD),
         env=environment,
         check=False,
         capture_output=True,

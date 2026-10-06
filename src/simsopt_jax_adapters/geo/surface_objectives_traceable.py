@@ -41,6 +41,7 @@ from simsopt_jax.core.field import (
 from simsopt_jax.core.sharding import (
     maybe_shard_seed_batch_inputs,
     seed_batch_sharding_config,
+    trim_leading_axis,
 )
 from simsopt_jax.geo._pairwise_reductions import (
     pairwise_min_distance_batched_pure,
@@ -5137,6 +5138,7 @@ def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for)
         coil_dofs_batch = _as_jax_float64(coil_dofs_batch)
         config = seed_batch_sharding_config(coil_dofs_batch)
         if config is not None:
+            seed_count = int(coil_dofs_batch.shape[0])
             (coil_dofs_batch,) = maybe_shard_seed_batch_inputs(
                 coil_dofs_batch,
                 config=config,
@@ -5152,7 +5154,7 @@ def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for)
             def score_seed_shard(coil_dofs_block):
                 return lax.map(compiled_value_and_grad_for, coil_dofs_block)
 
-            return score_seed_shard(coil_dofs_batch)
+            return trim_leading_axis(score_seed_shard(coil_dofs_batch), seed_count)
 
         return lax.map(compiled_value_and_grad_for, coil_dofs_batch)
 

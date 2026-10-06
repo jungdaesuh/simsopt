@@ -691,6 +691,16 @@ def _get_biot_savart_points_cyl(field):
 class _BiotSavartFieldEvaluationMixin:
     """Shared grouped-kernel field API for graph-backed and spec-backed fields."""
 
+    _points_jax: jax.Array | None
+
+    def _evaluation_points(self) -> jax.Array:
+        """The points set by ``set_points``, which every evaluation needs."""
+        if self._points_jax is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.set_points() must be called before evaluation."
+            )
+        return self._points_jax
+
     def clear_points(self) -> None:
         """Clear mutable point buffers without changing source geometry."""
         self._points_jax = None
@@ -707,44 +717,48 @@ class _BiotSavartFieldEvaluationMixin:
 
     def B(self):
         """Magnetic field B at the evaluation points."""
-        return grouped_biot_savart_B_from_spec(self._points_jax, self.coil_set_spec())
+        return grouped_biot_savart_B_from_spec(
+            self._evaluation_points(), self.coil_set_spec()
+        )
 
     def A(self):
         """Vector potential A at the evaluation points."""
-        return grouped_biot_savart_A_from_spec(self._points_jax, self.coil_set_spec())
+        return grouped_biot_savart_A_from_spec(
+            self._evaluation_points(), self.coil_set_spec()
+        )
 
     def dA_by_dX(self):
         """Spatial Jacobian dA/dX at the evaluation points."""
         return grouped_biot_savart_dA_by_dX_from_spec(
-            self._points_jax,
+            self._evaluation_points(),
             self.coil_set_spec(),
         )
 
     def d2A_by_dXdX(self):
         """Spatial Hessian d2A/dXdX at the evaluation points."""
         return grouped_biot_savart_d2A_by_dXdX_from_spec(
-            self._points_jax,
+            self._evaluation_points(),
             self.coil_set_spec(),
         )
 
     def dB_by_dX(self):
         """Spatial Jacobian dB/dX at the evaluation points."""
         return grouped_biot_savart_dB_by_dX_from_spec(
-            self._points_jax,
+            self._evaluation_points(),
             self.coil_set_spec(),
         )
 
     def d2B_by_dXdX(self):
         """Spatial Hessian d2B/dXdX at the evaluation points."""
         return grouped_biot_savart_d2B_by_dXdX_from_spec(
-            self._points_jax,
+            self._evaluation_points(),
             self.coil_set_spec(),
         )
 
     def B_and_dB(self):
         """Combined B and dB/dX."""
         return grouped_biot_savart_B_and_dB_from_spec(
-            self._points_jax,
+            self._evaluation_points(),
             self.coil_set_spec(),
         )
 

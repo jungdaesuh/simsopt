@@ -75,7 +75,6 @@ from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.backend import (
     get_backend_config,
     get_backend_policy,
-    is_float32_smoke_policy,
     raise_if_strict_jax_fallback,
     strict_target_lane_purity,
     target_lane_purity_requested,
@@ -1410,8 +1409,6 @@ def require_target_backend_x64(optimizer_backend):
         return
     if _x64_enabled():
         return
-    if is_float32_smoke_policy(get_backend_policy()):
-        return
     role = OPTIMIZER_BACKEND_ROLE[optimizer_backend]
     raise RuntimeError(
         f"optimizer_backend='{optimizer_backend}' ({role}) requires "
@@ -1425,8 +1422,6 @@ def require_boozer_inner_backend_x64(optimizer_backend):
     if optimizer_backend not in BOOZER_INNER_X64_REQUIRED_OPTIMIZER_BACKENDS:
         return
     if _x64_enabled():
-        return
-    if is_float32_smoke_policy(get_backend_policy()):
         return
     role = (
         "target-host-control"

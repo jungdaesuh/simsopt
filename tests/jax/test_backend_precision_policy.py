@@ -14,7 +14,6 @@ _MODE_DEFAULTS = {
     "native_cpu": ("fp64", "float64", "float64", "highest"),
     "jax_cpu_fast": ("fp64", "float64", "float64", "default"),
     "jax_cpu_parity": ("fp64", "float64", "float64", "highest"),
-    "jax_cpu_float32_smoke": ("fp32_smoke", "float32", "float32", "default"),
     "jax_gpu_fast": ("fp64", "float64", "float64", "default"),
     "jax_gpu_parity": ("fp64", "float64", "float64", "highest"),
 }
@@ -71,23 +70,37 @@ def test_explicit_fp64_preserves_the_selected_mode_matmul_contract():
     assert policy.matmul_precision == "default"
 
 
-@pytest.mark.parametrize(
-    ("mode", "precision", "message"),
-    (
-        (
-            "jax_cpu_float32_smoke",
-            "fp64",
-            "only supports precision='mode_default'",
-        ),
-    ),
+_REMOVED_MODE_MESSAGE = (
+    r"Backend mode 'jax_cpu_float32_smoke' is not valid\. Accepted: "
+    r"\('native_cpu', 'jax_cpu_fast', 'jax_cpu_parity', 'jax_gpu_fast', "
+    r"'jax_gpu_parity'\)"
 )
-def test_unsupported_mode_precision_pairs_fail_loudly(
-    mode: str,
-    precision: str,
-    message: str,
-):
-    with pytest.raises(ValueError, match=message):
-        runtime.set_backend(mode, precision=precision, configure_runtime=False)
+
+
+def test_removed_float32_mode_is_rejected_by_set_backend():
+    """Every mode computes in FP64; the removed float32 mode is no longer valid."""
+    with pytest.raises(ValueError, match=_REMOVED_MODE_MESSAGE):
+        runtime.set_backend("jax_cpu_float32_smoke", configure_runtime=False)
+
+
+def test_removed_float32_mode_is_rejected_from_the_environment(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_float32_smoke")
+    runtime.invalidate_backend_cache()
+
+    with pytest.raises(ValueError, match=_REMOVED_MODE_MESSAGE):
+        runtime.get_backend_config()
+
+
+@pytest.mark.parametrize("mode", runtime.VALID_BACKEND_MODES)
+def test_every_mode_requires_x64_and_float64(mode: str):
+    policy = _policy(mode)
+
+    assert policy.requires_x64 is True
+    assert (policy.runtime_dtype, policy.host_dtype, policy.compute_dtype) == (
+        "float64",
+        "float64",
+        "float64",
+    )
 
 
 def test_public_precision_precedence_and_normalized_environment(monkeypatch):
@@ -105,14 +118,7 @@ def test_public_precision_precedence_and_normalized_environment(monkeypatch):
     assert explicit.precision == "mode_default"
     assert os.environ["SIMSOPT_PRECISION"] == "mode_default"
 
-    cleared = runtime.set_backend(
-        "jax_cpu_float32_smoke",
-        precision="mode_default",
-        configure_runtime=False,
-    )
-    assert cleared.precision == "mode_default"
-    assert os.environ["SIMSOPT_PRECISION"] == "mode_default"
-    assert runtime.get_resolved_precision() == "fp32_smoke"
+    assert runtime.get_resolved_precision() == "fp64"
 
 
 @pytest.mark.parametrize("invalid", ("", "fp32", "true", "mixed", "MIXED", "auto"))

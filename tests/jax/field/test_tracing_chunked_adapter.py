@@ -227,8 +227,15 @@ def test_adapter_device_boundaries_obey_strict_transfer_guard(monkeypatch):
 _FORCED_TWO_DEVICES = "SIMSOPT_TRACING_TEST_FORCED_TWO_DEVICES"
 
 
-def test_two_device_criterion_chunk_sharding_matches_single_device(monkeypatch):
+@pytest.mark.parametrize("lane_count", [4, 3])
+def test_two_device_criterion_chunk_sharding_matches_single_device(
+    monkeypatch, request, lane_count
+):
     """The sharded chunk path, on a box that has one CPU device by default.
+
+    Three lanes on two devices exercise the padded mesh: the lanes are padded
+    to four and the padded lane must not reach the returned paths, hits,
+    statuses or summary.
 
     Repository convention for a multi-device assertion
     (``tests/jax/core/test_points_coils_sharding.py:15-16``,
@@ -269,8 +276,7 @@ def test_two_device_criterion_chunk_sharding_matches_single_device(monkeypatch):
         completed = subprocess.run(
             (
                 sys.executable, "-S", "-m", "pytest", "-p", "no:cacheprovider", "-q",
-                f"{Path(__file__).resolve()}::"
-                "test_two_device_criterion_chunk_sharding_matches_single_device",
+                f"{Path(__file__).resolve()}::{request.node.name}",
             ),
             check=False, capture_output=True, text=True, timeout=900,
             env=environment,
@@ -279,7 +285,7 @@ def test_two_device_criterion_chunk_sharding_matches_single_device(monkeypatch):
         return
     monkeypatch.setattr(adapter, "_TRACING_CHUNK_TRIALS", 2)
     field = ToroidalFieldJAX(1.3, 0.8)
-    inputs = ([1.2, 1.4, 1.2, 1.4], [0.0] * 4)
+    inputs = ([1.2, 1.4, 1.2, 1.4][:lane_count], [0.0] * lane_count)
     kwargs = dict(
         tmax=1.0, tol=1e-8, phis=(0.3,),
         stopping_criteria=[MaxRStoppingCriterion(1.3)],
@@ -296,13 +302,13 @@ def test_two_device_criterion_chunk_sharding_matches_single_device(monkeypatch):
     )
     sharded = adapter.compute_fieldlines_with_status(field, *inputs, **kwargs)
     np.testing.assert_array_equal(sharded[2], reference[2])
-    assert sharded[2].tolist() == [0, -1, 0, -1]
+    assert sharded[2].tolist() == [0, -1, 0, -1][:lane_count]
     for sharded_rows, reference_rows in zip(sharded[0], reference[0], strict=True):
         np.testing.assert_allclose(sharded_rows, reference_rows, rtol=0, atol=1e-12)
     for sharded_hits, reference_hits in zip(sharded[1], reference[1], strict=True):
         np.testing.assert_allclose(sharded_hits, reference_hits, rtol=0, atol=1e-12)
 
-    xyz = np.array([[1.2, 0.0, 0.0], [1.4, 0.0, 0.0]] * 2)
+    xyz = np.array([[1.2, 0.0, 0.0], [1.4, 0.0, 0.0]] * 2)[:lane_count]
     particle_kwargs = dict(
         tmax=1.0, mass=1.0, charge=1.0, Ekin=0.5, tol=1e-8,
         comm=None, phis=(0.3,),
@@ -311,16 +317,16 @@ def test_two_device_criterion_chunk_sharding_matches_single_device(monkeypatch):
     )
     monkeypatch.setattr(adapter, "trajectory_batch_sharding_config", lambda _y0s: None)
     particle_reference = adapter.trace_particles_with_status(
-        field, xyz, [0.8] * 4, **particle_kwargs
+        field, xyz, [0.8] * lane_count, **particle_kwargs
     )
     monkeypatch.setattr(
         adapter, "trajectory_batch_sharding_config", lambda _y0s: sharding
     )
     particle_sharded = adapter.trace_particles_with_status(
-        field, xyz, [0.8] * 4, **particle_kwargs
+        field, xyz, [0.8] * lane_count, **particle_kwargs
     )
     np.testing.assert_array_equal(particle_sharded[2], particle_reference[2])
-    assert particle_sharded[2].tolist() == [0, -1, 0, -1]
+    assert particle_sharded[2].tolist() == [0, -1, 0, -1][:lane_count]
     for sharded_rows, reference_rows in zip(
         particle_sharded[0], particle_reference[0], strict=True
     ):
@@ -333,11 +339,11 @@ def test_two_device_criterion_chunk_sharding_matches_single_device(monkeypatch):
     # The device-side endpoint gather must also hold across a sharded mesh.
     forget_kwargs = {**particle_kwargs, "forget_exact_path": True}
     forget_sharded = adapter.trace_particles_with_status(
-        field, xyz, [0.8] * 4, **forget_kwargs
+        field, xyz, [0.8] * lane_count, **forget_kwargs
     )
     monkeypatch.setattr(adapter, "trajectory_batch_sharding_config", lambda _y0s: None)
     forget_reference = adapter.trace_particles_with_status(
-        field, xyz, [0.8] * 4, **forget_kwargs
+        field, xyz, [0.8] * lane_count, **forget_kwargs
     )
     np.testing.assert_array_equal(forget_sharded[2], forget_reference[2])
     for sharded_rows, reference_rows in zip(

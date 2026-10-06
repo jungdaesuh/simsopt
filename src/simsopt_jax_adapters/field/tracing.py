@@ -27,6 +27,7 @@ from simsopt_jax.core.sharding import (
     maybe_shard_trajectory_batch_inputs,
     replicate_tree_on_mesh,
     trajectory_batch_sharding_config,
+    trim_leading_axis,
 )
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax.runtime.host_boundary import host_array as _jax_trace_host_array
@@ -395,6 +396,9 @@ def _trace_cartesian_chunks(
                 y0s, dtmaxs, mus, phis, stopping_criteria,
                 field_state, continuation
             )
+        # Lanes past ``lane_count`` pad the mesh (copies of the last lane); the
+        # continuation keeps them for the next chunk's shard_map.
+        result = trim_leading_axis(result, lane_count)
         local_hits = _batched_jax_event_rows(result, event_context=event_context)
         if forget_exact_path:
             # Only the two rows the caller keeps cross the device boundary.
@@ -448,8 +452,8 @@ def _trace_cartesian_chunks(
     hits = [np.concatenate(parts, axis=0) for parts in hit_parts]
     summary = replace(
         result,
-        steps_taken=continuation.accepted_count,
-        t_final=continuation.t,
+        steps_taken=trim_leading_axis(continuation.accepted_count, lane_count),
+        t_final=trim_leading_axis(continuation.t, lane_count),
     )
     return paths, hits, summary
 

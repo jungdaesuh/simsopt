@@ -536,7 +536,7 @@ def test_legacy_geo_jit_preserves_cpu_default_without_platform_env() -> None:
         ("no_selector", None),
         ("native_cpu", {"SIMSOPT_BACKEND_MODE": "native_cpu"}),
         ("explicit_x64_off", {"JAX_ENABLE_X64": "0"}),
-        ("geo_before_smoke", None),
+        ("curve_before_parity", {"SIMSOPT_BACKEND_MODE": "jax_cpu_parity"}),
     ],
 )
 def test_native_precision_geo_first(
@@ -551,7 +551,7 @@ def test_native_precision_geo_first(
     )
 
 
-@pytest.mark.parametrize("case", ["smoke_before_geo", "fp64_before_geo"])
+@pytest.mark.parametrize("case", ["native_before_geo", "fp64_before_geo"])
 def test_native_precision_backend_first(case: str) -> None:
     _assert_python_script_passes(
         _NATIVE_PRECISION_BACKEND_FIRST_PATH,
@@ -786,7 +786,6 @@ def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
         "precision-env-inherited",
         "precision-explicit-fp64",
         "precision-explicit-mode-default",
-        "precision-smoke-mode-default",
         "precision-invalid-environment",
         "precision-parity-runtime-config",
         "precision-fp64-runtime-default",

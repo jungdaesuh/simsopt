@@ -7,6 +7,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 from simsopt_jax.backend.dtypes import (
     _shape_tuple,
     as_compute_array,
@@ -18,6 +19,7 @@ from simsopt_jax.backend.dtypes import (
     as_runtime_value,
     explicit_device_array as _explicit_device_array,
     host_dtype,
+    replicated_placement,
     require_float64_dtype,
     require_runtime_dtype,
     runtime_device_put,
@@ -46,6 +48,8 @@ __all__ = (
     "host_dtype",
     "iter_axis0_entries",
     "pad_axis",
+    "pad_axis_edge",
+    "replicated_placement",
     "require_float64_dtype",
     "require_runtime_dtype",
     "runtime_device_put",
@@ -118,6 +122,29 @@ def pad_axis(array, *, axis: int, padded_size: int):
             array,
             zero_padding_like(array, axis=axis_index, pad_width=pad_width),
         ),
+        axis=axis_index,
+    )
+
+
+def pad_axis_edge(array, *, axis: int, padded_size: int):
+    """Pad ``axis`` to ``padded_size`` with copies of its last entry.
+
+    A copied point or coil is exactly as regular as the one it copies, so a
+    kernel evaluated on the padding meets no singularity it does not meet on
+    the real entries; ``pad_axis`` pads with zeros, which puts padded points
+    and coil nodes at the origin.
+    """
+    axis_index = int(axis) if axis >= 0 else array.ndim + int(axis)
+    size = int(array.shape[axis_index])
+    pad_width = int(padded_size) - size
+    if pad_width <= 0:
+        return array
+    last = lax.slice_in_dim(array, size - 1, size, axis=axis_index)
+    target_shape = (
+        array.shape[:axis_index] + (pad_width,) + array.shape[axis_index + 1 :]
+    )
+    return jnp.concatenate(
+        (array, jnp.broadcast_to(last, target_shape)),
         axis=axis_index,
     )
 

@@ -6482,23 +6482,6 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-12,
         )
 
-    def test_linear_solve_tolerance_uses_float32_smoke_floor(self, request):
-        from simsopt_jax.backend import (
-            get_backend_config,
-            get_backend_policy,
-            set_backend,
-        )
-
-        previous_backend = get_backend_config()
-        request.addfinalizer(lambda: _restore_backend_config(previous_backend))
-        set_backend("jax_cpu_float32_smoke", configure_runtime=False)
-        expected_floor = get_backend_policy().linear_solve_tolerance_floor
-        booz = _make_mock_boozer_surface()
-        booz.options["bfgs_tol"] = 1.0e-10
-        booz.options["newton_tol"] = 1.0e-6
-
-        assert booz._linear_solve_tolerance() == pytest.approx(expected_floor)
-
     def test_linear_solve_tolerance_preserves_float64_floor(self, request):
         from simsopt_jax.backend import get_backend_config, set_backend
 

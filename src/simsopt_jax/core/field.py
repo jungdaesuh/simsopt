@@ -21,6 +21,12 @@ from ._math_utils import (
     pad_axis as _pad_axis,
 )
 from ._math_utils import (
+    pad_axis_edge as _pad_axis_edge,
+)
+from ._math_utils import (
+    replicated_placement as _replicated_placement,
+)
+from ._math_utils import (
     runtime_device_put,
 )
 from .biotsavart import (
@@ -44,6 +50,9 @@ from .sharding import (
     coil_group_collective_config,
     collective_field_sharding_summary,
     maybe_shard_grouped_field_inputs,
+    pad_rows_to_mesh,
+    padded_extent,
+    trim_leading_axis,
 )
 from .specs import (
     CoilDofExtractionSpec,
@@ -91,7 +100,7 @@ def _zeros_float64(shape):
     return runtime_device_put(np.zeros(shape, dtype=np.float64), dtype=np.float64)
 
 
-def _empty_grouped_field_result(points: object, kernel):
+def _empty_grouped_field_result(points: jax.Array | np.ndarray, kernel):
     point_count = points.shape[0]
     if kernel in {biot_savart_B, biot_savart_A}:
         return _zeros_float64((point_count, 3))
@@ -111,44 +120,36 @@ def _tree_add(left, right):
     return jax.tree.map(lambda x, y: x + y, left, right)
 
 
-def _tree_trim_axis0(tree, size: int):
-    return jax.tree.map(
-        lambda leaf: lax.slice_in_dim(leaf, start_index=0, limit_index=size, axis=0),
-        tree,
-    )
+def _compute_group_inputs(points, gammas, gammadashs, currents):
+    """Coil arrays in the points' dtype, on the points' devices but unpartitioned.
 
-
-def _compute_group_inputs(reference, gammas, gammadashs, currents):
-    field_dtype = jnp.asarray(reference).dtype
+    Coil data never takes the points' partition: the coil axis is unrelated
+    to the point axis (a coil-axis collective partitions it itself).
+    """
+    field_dtype = jnp.asarray(points).dtype
+    placement = _replicated_placement(points)
     return (
-        _as_compute_array(gammas, dtype=field_dtype, reference=reference),
-        _as_compute_array(gammadashs, dtype=field_dtype, reference=reference),
-        _as_compute_array(currents, dtype=field_dtype, reference=reference),
+        _as_compute_array(gammas, dtype=field_dtype, target=placement),
+        _as_compute_array(gammadashs, dtype=field_dtype, target=placement),
+        _as_compute_array(currents, dtype=field_dtype, target=placement),
     )
 
 
 def _pad_coil_axis_to_device_count(gammas, gammadashs, currents, device_count: int):
-    coil_count = int(currents.shape[0])
-    pad_count = (-coil_count) % device_count
-    if pad_count == 0:
-        return gammas, gammadashs, currents
-    padded_count = coil_count + pad_count
-    # Sharding requires axis sizes divisible by the device count. The padding
-    # cost is bounded by device_count - 1 entries; keep this simple unless a
-    # JAX device-memory profile shows material peak-memory pressure.
+    """Pad the coil axis to a multiple of ``device_count`` with field-free coils.
+
+    A padded coil copies the last coil's geometry and carries zero current, so
+    its kernel is finite wherever that real coil's is (zero geometry would put
+    every node at the origin: NaN there in values and in pullbacks) and its
+    contribution, and its geometry cotangent, are exactly zero. The cost is at
+    most ``device_count - 1`` extra coils.
+    """
+    padded_count = padded_extent(int(currents.shape[0]), device_count)
     return (
-        _pad_axis(gammas, axis=0, padded_size=padded_count),
-        _pad_axis(gammadashs, axis=0, padded_size=padded_count),
+        _pad_axis_edge(gammas, axis=0, padded_size=padded_count),
+        _pad_axis_edge(gammadashs, axis=0, padded_size=padded_count),
         _pad_axis(currents, axis=0, padded_size=padded_count),
     )
-
-
-def _pad_point_axis_to_device_count(points, device_count: int):
-    point_count = int(points.shape[0])
-    pad_count = (-point_count) % device_count
-    if pad_count == 0:
-        return points
-    return _pad_axis(points, axis=0, padded_size=point_count + pad_count)
 
 
 def _field_out_specs(kernel, config):
@@ -216,7 +217,7 @@ def _collective_kernel(kernel, config):
 def _collective_group_field(points, gammas, gammadashs, currents, kernel, config):
     point_count = int(points.shape[0])
     if config.point_axis_name is not None:
-        points = _pad_point_axis_to_device_count(points, config.point_device_count)
+        points = pad_rows_to_mesh(points, config.point_device_count)
     group_kernel = _collective_kernel(kernel, config)
     gammas, gammadashs, currents = _pad_coil_axis_to_device_count(
         gammas,
@@ -264,7 +265,7 @@ def _collective_group_field(points, gammas, gammadashs, currents, kernel, config
     result = _group_kernel(points, gammas, gammadashs, currents)
     if config.point_axis_name is None:
         return result
-    return _tree_trim_axis0(result, point_count)
+    return trim_leading_axis(result, point_count)
 
 
 def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
@@ -293,13 +294,14 @@ def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
 
 
 def _accumulate_grouped_field_with_config(
-    points: object,
+    points: jax.Array | np.ndarray,
     coil_spec: GroupedCoilSetSpec,
     kernel,
 ):
     coil_arrays = grouped_field_inputs_from_spec(coil_spec)
     if not coil_arrays:
         return _empty_grouped_field_result(points, kernel), None
+    point_count = int(points.shape[0])
     points, coil_arrays = maybe_shard_grouped_field_inputs(points, coil_arrays)
 
     result, collective_config = _evaluate_grouped_field_group(
@@ -318,15 +320,19 @@ def _accumulate_grouped_field_with_config(
         result = _tree_add(result, group_result)
         if collective_config is None:
             collective_config = group_config
-    return result, collective_config
+    return trim_leading_axis(result, point_count), collective_config
 
 
-def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, kernel):
+def _accumulate_grouped_field(
+    points: jax.Array | np.ndarray, coil_spec: GroupedCoilSetSpec, kernel
+):
     result, _config = _accumulate_grouped_field_with_config(points, coil_spec, kernel)
     return result
 
 
-def grouped_field_sharding_summary(points: object, coil_spec: GroupedCoilSetSpec):
+def grouped_field_sharding_summary(
+    points: jax.Array | np.ndarray, coil_spec: GroupedCoilSetSpec
+):
     """Return grouped-field output sharding plus collective-route metadata."""
     result, config = _accumulate_grouped_field_with_config(
         points,
@@ -377,10 +383,7 @@ def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
         padded_gammadashs,
         padded_currents,
     )
-    return _tree_trim_axis0(
-        pullback(compute_v),
-        coil_count,
-    )
+    return trim_leading_axis(pullback(compute_v), coil_count)
 
 
 def grouped_coil_set_spec_from_lists(
@@ -630,46 +633,56 @@ def grouped_coil_currents_from_inputs(coil_arrays: object):
     )
 
 
-def grouped_biot_savart_B_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
+def grouped_biot_savart_B_from_spec(
+    points: jax.Array | np.ndarray, coil_spec: GroupedCoilSetSpec
+):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_B)
 
 
-def grouped_biot_savart_B_from_inputs(points: object, coil_arrays: object):
+def grouped_biot_savart_B_from_inputs(
+    points: jax.Array | np.ndarray, coil_arrays: object
+):
     return grouped_biot_savart_B_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
     )
 
 
-def grouped_biot_savart_B(points: object, coil_arrays: object):
+def grouped_biot_savart_B(points: jax.Array | np.ndarray, coil_arrays: object):
     """Compatibility name for the canonical grouped ``B`` dispatcher."""
     return grouped_biot_savart_B_from_inputs(points, coil_arrays)
 
 
-def grouped_biot_savart_A_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
+def grouped_biot_savart_A_from_spec(
+    points: jax.Array | np.ndarray, coil_spec: GroupedCoilSetSpec
+):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_A)
 
 
-def grouped_biot_savart_A_from_inputs(points: object, coil_arrays: object):
+def grouped_biot_savart_A_from_inputs(
+    points: jax.Array | np.ndarray, coil_arrays: object
+):
     return grouped_biot_savart_A_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
     )
 
 
-def grouped_biot_savart_A(points: object, coil_arrays: object):
+def grouped_biot_savart_A(points: jax.Array | np.ndarray, coil_arrays: object):
     """Compatibility name for the canonical grouped ``A`` dispatcher."""
     return grouped_biot_savart_A_from_inputs(points, coil_arrays)
 
 
 def grouped_biot_savart_dA_by_dX_from_spec(
-    points: object,
+    points: jax.Array | np.ndarray,
     coil_spec: GroupedCoilSetSpec,
 ):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_dA_by_dX)
 
 
-def grouped_biot_savart_dA_by_dX_from_inputs(points: object, coil_arrays: object):
+def grouped_biot_savart_dA_by_dX_from_inputs(
+    points: jax.Array | np.ndarray, coil_arrays: object
+):
     return grouped_biot_savart_dA_by_dX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
@@ -677,13 +690,15 @@ def grouped_biot_savart_dA_by_dX_from_inputs(points: object, coil_arrays: object
 
 
 def grouped_biot_savart_d2A_by_dXdX_from_spec(
-    points: object,
+    points: jax.Array | np.ndarray,
     coil_spec: GroupedCoilSetSpec,
 ):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_d2A_by_dXdX)
 
 
-def grouped_biot_savart_d2A_by_dXdX_from_inputs(points: object, coil_arrays: object):
+def grouped_biot_savart_d2A_by_dXdX_from_inputs(
+    points: jax.Array | np.ndarray, coil_arrays: object
+):
     return grouped_biot_savart_d2A_by_dXdX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
@@ -691,13 +706,15 @@ def grouped_biot_savart_d2A_by_dXdX_from_inputs(points: object, coil_arrays: obj
 
 
 def grouped_biot_savart_d2B_by_dXdX_from_spec(
-    points: object,
+    points: jax.Array | np.ndarray,
     coil_spec: GroupedCoilSetSpec,
 ):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_d2B_by_dXdX)
 
 
-def grouped_biot_savart_d2B_by_dXdX_from_inputs(points: object, coil_arrays: object):
+def grouped_biot_savart_d2B_by_dXdX_from_inputs(
+    points: jax.Array | np.ndarray, coil_arrays: object
+):
     return grouped_biot_savart_d2B_by_dXdX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
@@ -705,13 +722,15 @@ def grouped_biot_savart_d2B_by_dXdX_from_inputs(points: object, coil_arrays: obj
 
 
 def grouped_biot_savart_dB_by_dX_from_spec(
-    points: object,
+    points: jax.Array | np.ndarray,
     coil_spec: GroupedCoilSetSpec,
 ):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_dB_by_dX)
 
 
-def grouped_biot_savart_dB_by_dX_from_inputs(points: object, coil_arrays: object):
+def grouped_biot_savart_dB_by_dX_from_inputs(
+    points: jax.Array | np.ndarray, coil_arrays: object
+):
     return grouped_biot_savart_dB_by_dX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
@@ -719,7 +738,7 @@ def grouped_biot_savart_dB_by_dX_from_inputs(points: object, coil_arrays: object
 
 
 def grouped_biot_savart_B_and_dB_from_spec(
-    points: object,
+    points: jax.Array | np.ndarray,
     coil_spec: GroupedCoilSetSpec,
 ):
     B, dB = _accumulate_grouped_field(points, coil_spec, biot_savart_B_and_dB)

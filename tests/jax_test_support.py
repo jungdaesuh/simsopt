@@ -93,6 +93,7 @@ _JAX_RUNTIME_CONFIG_DEFAULTS = {
     "jax_disable_jit": False,
     "jax_transfer_guard": None,
     "jax_platforms": None,
+    "jax_platform_name": "",
     "jax_compilation_cache_dir": None,
 }
 _PARITY_SEED_BASE = 1729
@@ -235,8 +236,9 @@ def _snapshot_loaded_jax_runtime_config() -> dict[str, object]:
     jax_module = sys.modules.get("jax")
     if jax_module is None:
         return dict(_JAX_RUNTIME_CONFIG_DEFAULTS)
+    # ``config.values``: the deprecated ``jax_platform_name`` has no attribute.
     return {
-        name: getattr(jax_module.config, name) for name in _JAX_RUNTIME_CONFIG_DEFAULTS
+        name: jax_module.config.values[name] for name in _JAX_RUNTIME_CONFIG_DEFAULTS
     }
 
 
@@ -317,8 +319,8 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict, precision=None
 
     ``precision`` must travel with ``mode`` instead of being exported into
     ``SIMSOPT_PRECISION`` beforehand: the previous-config snapshot below
-    resolves the *outgoing* mode against the already-exported precision, and
-    invalid pairs (``jax_cpu_float32_smoke`` + ``fp64``) fail closed there.
+    resolves the *outgoing* mode against the already-exported precision, so an
+    early export would record a precision the outgoing mode never had.
     """
     _require_jax()
     lane = _PARITY_MODE_TO_LANE.get(mode)

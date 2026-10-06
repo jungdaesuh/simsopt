@@ -13,18 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, TypeVar, cast
 
-import numpy as np
-
 _ExplicitT = TypeVar("_ExplicitT")
 _ResolvedT = TypeVar("_ResolvedT")
 
 PrecisionSelection = Literal["mode_default", "fp64"]
-ResolvedPrecision = Literal["fp32_smoke", "fp64"]
+ResolvedPrecision = Literal["fp64"]
 BackendMode = Literal[
     "native_cpu",
     "jax_cpu_fast",
     "jax_cpu_parity",
-    "jax_cpu_float32_smoke",
     "jax_gpu_fast",
     "jax_gpu_parity",
 ]
@@ -33,7 +30,7 @@ ExecutionIntent = Literal["fast", "parity"]
 
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda")
-_VALID_POLICY_DTYPES = ("float32", "float64")
+_VALID_POLICY_DTYPES = ("float64",)
 _VALID_PRECISION_SELECTIONS = ("mode_default", "fp64")
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -113,7 +110,6 @@ VALID_BACKEND_MODES: tuple[BackendMode, ...] = (
     "native_cpu",
     "jax_cpu_fast",
     "jax_cpu_parity",
-    "jax_cpu_float32_smoke",
     "jax_gpu_fast",
     "jax_gpu_parity",
 )
@@ -129,7 +125,6 @@ _MODE_TO_RUNTIME = {
     "native_cpu": ("cpu", "cpu"),
     "jax_cpu_fast": ("jax", "cpu"),
     "jax_cpu_parity": ("jax", "cpu"),
-    "jax_cpu_float32_smoke": ("jax", "cpu"),
     "jax_gpu_parity": ("jax", "cuda"),
     "jax_gpu_fast": ("jax", "cuda"),
 }
@@ -156,15 +151,9 @@ _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_CPU = 4 * 1024 * 1024 * 1024
 _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU = 256 * 1024 * 1024
 _FLOAT64_LINEAR_SOLVE_TOLERANCE_FLOOR = 1e-14
 _FLOAT64_LINEAR_SOLVE_TOLERANCE_CAP = 1e-10
-_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR = float(np.sqrt(np.finfo(np.float32).eps))
-_FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP = 1e-3
 _FLOAT64_LINEAR_SOLVE_DEFAULTS = {
     "linear_solve_tolerance_floor": _FLOAT64_LINEAR_SOLVE_TOLERANCE_FLOOR,
     "linear_solve_tolerance_cap": _FLOAT64_LINEAR_SOLVE_TOLERANCE_CAP,
-}
-_FLOAT32_SMOKE_LINEAR_SOLVE_DEFAULTS = {
-    "linear_solve_tolerance_floor": _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_FLOOR,
-    "linear_solve_tolerance_cap": _FLOAT32_SMOKE_LINEAR_SOLVE_TOLERANCE_CAP,
 }
 _HOST_CALLBACK_SUPPORTED_DEFAULTS = {"supports_host_callback": True}
 _BUFFER_DONATION_SUPPORTED_DEFAULTS = {"supports_buffer_donation": True}
@@ -224,24 +213,6 @@ _MODE_POLICY_DEFAULTS = {
         **_NO_GPU_MEMORY_DEFAULTS,
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
-    "jax_cpu_float32_smoke": {
-        "parity_mode": False,
-        "requires_x64": False,
-        "runtime_dtype": "float32",
-        "host_dtype": "float32",
-        "default_residency": "device",
-        "default_optimizer_backend": "ondevice",
-        **_HOST_CALLBACK_SUPPORTED_DEFAULTS,
-        **_BUFFER_DONATION_SUPPORTED_DEFAULTS,
-        "chunk_policy": "stable_default",
-        "tolerance_tier": "float32_smoke",
-        "compilation_cache_policy": "optional_persistent",
-        "matmul_precision": "default",
-        "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES_GPU,
-        **_FLOAT32_SMOKE_LINEAR_SOLVE_DEFAULTS,
-        **_NO_GPU_MEMORY_DEFAULTS,
-        **_NO_CI_REPRODUCIBILITY_DEFAULTS,
-    },
     "jax_gpu_parity": {
         "parity_mode": True,
         "requires_x64": True,
@@ -287,7 +258,6 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "native_cpu": None,
     "jax_cpu_fast": "log",
     "jax_cpu_parity": "log",
-    "jax_cpu_float32_smoke": "log",
     "jax_gpu_parity": "log",
     "jax_gpu_fast": "log",
 }
@@ -485,24 +455,6 @@ def _reject_obsolete_precision_environment() -> None:
         )
 
 
-def _validate_precision_for_mode(
-    mode: str,
-    precision: PrecisionSelection,
-) -> PrecisionSelection:
-    if mode == "jax_cpu_float32_smoke" and precision != "mode_default":
-        raise ValueError(
-            "jax_cpu_float32_smoke only supports precision='mode_default'; "
-            "its full-FP32 contract cannot be overridden."
-        )
-    return precision
-
-
-def _resolved_precision_for_mode(mode: str) -> ResolvedPrecision:
-    if mode == "jax_cpu_float32_smoke":
-        return "fp32_smoke"
-    return "fp64"
-
-
 def _validate_transfer_guard(value: str | None, *, source: str) -> str | None:
     if value in (None, ""):
         return None
@@ -667,21 +619,18 @@ def _config_from_mode(
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
     debug_overlay = _debug_overlay_enabled()
     defaults = _get_mode_policy_defaults(mode)
-    resolved_precision = _validate_precision_for_mode(
-        mode,
-        _resolve_kwarg(
-            precision,
-            parse_explicit=lambda value: _validate_precision_selection(
-                value,
-                source="precision",
-            ),
-            env_names=(_PRECISION_ENV,),
-            parse_env=lambda value, source: _validate_precision_selection(
-                value,
-                source=source,
-            ),
-            read_default=lambda: "mode_default",
+    resolved_precision: PrecisionSelection = _resolve_kwarg(
+        precision,
+        parse_explicit=lambda value: _validate_precision_selection(
+            value,
+            source="precision",
         ),
+        env_names=(_PRECISION_ENV,),
+        parse_env=lambda value, source: _validate_precision_selection(
+            value,
+            source=source,
+        ),
+        read_default=lambda: "mode_default",
     )
     if debug_overlay:
         resolved_debug_nans = True
@@ -833,8 +782,6 @@ def _optional_float_policy_default(value: object) -> float | None:
 
 def _policy_from_config(config: BackendConfig) -> BackendPolicy:
     defaults = _get_mode_policy_defaults(config.mode)
-    resolved_precision = _resolved_precision_for_mode(config.mode)
-    compute_dtype = "float32" if resolved_precision == "fp32_smoke" else "float64"
     return BackendPolicy(
         mode=config.mode,
         backend=config.backend,
@@ -843,7 +790,7 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         parity_mode=bool(defaults["parity_mode"]),
         requires_x64=bool(defaults["requires_x64"]),
         precision=config.precision,
-        resolved_precision=resolved_precision,
+        resolved_precision="fp64",
         runtime_dtype=_validate_policy_dtype(
             defaults["runtime_dtype"],
             mode=config.mode,
@@ -854,7 +801,7 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
             mode=config.mode,
             field="host_dtype",
         ),
-        compute_dtype=compute_dtype,
+        compute_dtype="float64",
         default_residency=_validate_default_residency(
             defaults["default_residency"],
             mode=config.mode,
@@ -942,12 +889,3 @@ def _mode_from_legacy_env(backend: str, platform: str) -> BackendMode:
     if platform == "cpu":
         return resolve_jax_execution_profile("cpu").mode
     return resolve_jax_execution_profile("gpu").mode
-
-
-def is_float32_smoke_policy(policy: BackendPolicy) -> bool:
-    """Return True when ``policy`` describes a float32 smoke-tolerance lane."""
-    return (
-        not policy.requires_x64
-        and policy.runtime_dtype == "float32"
-        and policy.tolerance_tier == "float32_smoke"
-    )

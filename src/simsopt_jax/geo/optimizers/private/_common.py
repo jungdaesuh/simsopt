@@ -19,10 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
-from simsopt_jax.backend import (
-    get_backend_policy,
-    is_float32_smoke_policy,
-)
+from simsopt_jax.backend import get_backend_policy
 from simsopt_jax.backend.dtypes import explicit_device_array
 from simsopt_jax.core.sharding import active_replicated_sharding
 from simsopt_jax.runtime.host_boundary import host_array as _callback_host_array
@@ -342,7 +339,7 @@ def _require_private_optimizer_runtime(
             "Use a supported JAX runtime or select optimizer_backend='scipy'."
         )
     policy = get_backend_policy()
-    if not _x64_enabled() and not is_float32_smoke_policy(policy):
+    if not _x64_enabled():
         raise RuntimeError(
             "On-device optimizer requires jax_enable_x64=True before import/use."
         )

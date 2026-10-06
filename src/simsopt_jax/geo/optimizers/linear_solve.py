@@ -1249,10 +1249,10 @@ def _dense_matrix_solve_numerically_safe(
     float32 only.  At large ``n`` (the float64 production regime) the 1-norm
     condition estimate inflates ~``n``-fold over the 2-norm conditioning,
     tripping the bound's ``sqrt(eps)`` gate even on an accurate solve, so it
-    would false-reject production.  Float32 smoke solves instead clear the
-    broader ``1 / (sqrt(n) * eps)`` condition screen, which admits moderately
-    conditioned operators that float32 precision cannot resolve to smoke
-    tolerance; those must additionally satisfy the forward-error bound before the
+    would false-reject production.  Float32 solves (a caller's float32 rhs)
+    instead clear the broader ``1 / (sqrt(n) * eps)`` condition screen, which
+    admits moderately conditioned operators that float32 precision cannot
+    resolve; those must additionally satisfy the forward-error bound before the
     solve is accepted.  ``solve_dtype`` (the caller's rhs dtype) selects the lane
     so the gate keys on the intended working precision even when the operator is
     materialized at the runtime float64 policy dtype.
@@ -1975,7 +1975,7 @@ def _solve_dense_square_operator_lu_system_with_status(
     # near-singular operator still yields a forward-garbage solution that the
     # backward-error gate above cannot detect.  Fail closed when the Hager-Higham
     # condition estimate exceeds the dtype-specific degeneracy threshold; float32
-    # smoke solves that pass the broader threshold must also satisfy the forward
+    # solves that pass the broader threshold must also satisfy the forward
     # error bound.  A degenerate J^T then fails closed instead of silently
     # returning a wrong adjoint, while the well-conditioned production J^T
     # (cond ~ 1e3-1e6) passes with many orders of margin.  The cached ``lu_piv``

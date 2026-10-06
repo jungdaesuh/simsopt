@@ -19,7 +19,6 @@ PrecisionCase = Literal[
     "precision-env-inherited",
     "precision-explicit-fp64",
     "precision-explicit-mode-default",
-    "precision-smoke-mode-default",
     "precision-invalid-environment",
     "precision-parity-runtime-config",
     "precision-fp64-runtime-default",
@@ -28,7 +27,6 @@ _CASES: tuple[PrecisionCase, ...] = (
     "precision-env-inherited",
     "precision-explicit-fp64",
     "precision-explicit-mode-default",
-    "precision-smoke-mode-default",
     "precision-invalid-environment",
     "precision-parity-runtime-config",
     "precision-fp64-runtime-default",
@@ -62,14 +60,6 @@ def _run_case(case: PrecisionCase) -> None:
         )
         assert config.precision == "mode_default"
         assert simsopt_config.get_resolved_precision() == "fp64"
-    elif case == "precision-smoke-mode-default":
-        os.environ["SIMSOPT_PRECISION"] = "mode_default"
-        config = simsopt_config.set_backend(
-            "jax_cpu_float32_smoke",
-            configure_runtime=False,
-        )
-        assert config.precision == "mode_default"
-        assert simsopt_config.get_resolved_precision() == "fp32_smoke"
     elif case == "precision-invalid-environment":
         os.environ["SIMSOPT_PRECISION"] = "fp32"
         try:

@@ -10,7 +10,6 @@ this module's sharding builder reads and writes.
 from __future__ import annotations
 
 import logging
-import subprocess
 import sys
 from dataclasses import dataclass
 
@@ -55,7 +54,6 @@ _FIELD_KERNEL_DEFAULTS = {
     "native_cpu": {"coil_chunk_size": 0, "quadrature_block_size": 0},
     "jax_cpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
     "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
-    "jax_cpu_float32_smoke": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
 }
@@ -69,7 +67,6 @@ _MODE_SHARDING_DEFAULTS = {
     "native_cpu": "none",
     "jax_cpu_fast": "none",
     "jax_cpu_parity": "none",
-    "jax_cpu_float32_smoke": "none",
     "jax_gpu_parity": "none",
     "jax_gpu_fast": "hybrid",
 }
@@ -377,7 +374,8 @@ def _parse_visible_cuda_device_index() -> int | None:
     return value if value >= 0 else None
 
 
-def _detect_imported_jax_cuda_device_index() -> int | None:
+def _detect_imported_jax_cuda_device():
+    """The first local CUDA device of an already imported JAX, or ``None``."""
     jax = sys.modules.get("jax")
     if jax is None:
         return None
@@ -391,7 +389,13 @@ def _detect_imported_jax_cuda_device_index() -> int | None:
         return None
     if not devices:
         return None
-    device = devices[0]
+    return devices[0]
+
+
+def _detect_imported_jax_cuda_device_index() -> int | None:
+    device = _detect_imported_jax_cuda_device()
+    if device is None:
+        return None
     for attr in ("local_hardware_id", "id"):
         value = getattr(device, attr, None)
         if isinstance(value, int) and value >= 0:
@@ -406,78 +410,17 @@ def _detect_active_jax_cuda_device_index() -> int | None:
     return _parse_visible_cuda_device_index()
 
 
-def _detect_active_jax_cuda_device_selector() -> int | str | None:
-    runtime_index = _detect_imported_jax_cuda_device_index()
-    if runtime_index is not None:
-        return runtime_index
-    return _visible_cuda_device_selector()
-
-
-def _parse_nvidia_smi_indexed_value_row(raw_row: str) -> tuple[int, float] | None:
-    # External-input parse contract: a single nvidia-smi CSV row. The
-    # narrow ValueError catch handles malformed rows from the external
-    # tool, not runtime errors in this process.
-    fields = [field.strip() for field in raw_row.split(",")]
-    if len(fields) != 2:
-        return None
-    try:
-        return int(float(fields[0])), float(fields[1])
-    except ValueError:
-        return None
-
-
-def _query_gpu_metric_mb_from_nvidia_smi(
-    metric_name: str,
-    device_selector: int | str | None = None,
-) -> float | None:
-    command = [
-        "nvidia-smi",
-        f"--query-gpu=index,{metric_name}",
-        "--format=csv,noheader,nounits",
-    ]
-    if device_selector is not None:
-        command.extend(["-i", str(device_selector)])
-    # External-tool availability boundary: nvidia-smi may be absent from
-    # PATH (FileNotFoundError) or exit non-zero on hosts without an
-    # NVIDIA driver (CalledProcessError). Both are expected absence
-    # signals, not runtime errors; return None so the caller can continue
-    # the ordered GPU-detection chain.
-    try:
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not lines:
-        return None
-    for line in lines:
-        parsed = _parse_nvidia_smi_indexed_value_row(line)
-        if parsed is None:
-            continue
-        index, value = parsed
-        if isinstance(device_selector, int) and index != device_selector:
-            continue
-        if value >= 0:
-            return float(value)
-    return None
-
-
-def _query_gpu_total_memory_mb_from_nvidia_smi(
-    device_selector: int | str | None = None,
-) -> int | None:
-    value = _query_gpu_metric_mb_from_nvidia_smi("memory.total", device_selector)
-    if value is None or value <= 0:
-        return None
-    return int(value)
-
-
 def _resolve_gpu_total_memory_mb(
     policy: BackendPolicy,
 ) -> tuple[int | None, str | None]:
+    """Device memory (MiB) of the CUDA device JAX computes on, and its source.
+
+    Read from the JAX device itself (``device_memory_bytes_limit``, what the
+    CUDA client sees on that GPU), so no CUDA ordinal is mapped to a physical
+    GPU: JAX's ordinals count only the ``CUDA_VISIBLE_DEVICES`` GPUs, in
+    ``CUDA_DEVICE_ORDER``, and an ``nvidia-smi`` query by that ordinal could
+    name another board. Before JAX has a CUDA device there is no measurement.
+    """
     if policy.jax_platform != "cuda":
         return None, None
     env_value = _optional_nonneg_int_env(_GPU_MEMORY_TOTAL_MB_ENV)
@@ -485,13 +428,10 @@ def _resolve_gpu_total_memory_mb(
         if env_value == 0:
             raise ValueError(f"{_GPU_MEMORY_TOTAL_MB_ENV} must be > 0 when set")
         return env_value, _GPU_MEMORY_TOTAL_MB_ENV
-    device_selector = _detect_active_jax_cuda_device_selector()
-    detected = _query_gpu_total_memory_mb_from_nvidia_smi(device_selector)
-    if detected is None:
+    device = _detect_imported_jax_cuda_device()
+    if device is None:
         return None, None
-    if device_selector is None:
-        return detected, "nvidia-smi"
-    return detected, f"nvidia-smi[{device_selector}]"
+    return int(device.device_memory_bytes_limit) // 2**20, f"jax[{device}]"
 
 
 def _resolve_autotuned_chunk_sizes(

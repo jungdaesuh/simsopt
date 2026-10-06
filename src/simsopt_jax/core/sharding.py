@@ -1,10 +1,19 @@
-"""Explicit sharding helpers for pure grouped-field and pairwise kernels."""
+"""Explicit sharding helpers for pure grouped-field and pairwise kernels.
+
+A mesh axis partitions an array axis only when the axis extent is a multiple
+of the mesh-axis size. Inputs whose outputs keep that axis (field points,
+trajectory lanes, restart seeds) are padded with copies of their last row and
+the outputs trimmed back (``pad_rows_to_mesh`` / ``trim_leading_axis``);
+surface-quadrature inputs are padded with zero-area nodes, which add nothing
+to the integrals; pairwise-reduction rows are sharded only when their count
+divides evenly, since copied rows would change sum-type reductions.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TypeVar
+from typing import Callable, TypeVar
 
 import jax
 from jax import lax
@@ -17,6 +26,7 @@ from simsopt_jax.backend import (
     register_backend_cache_clear,
 )
 from simsopt_jax.backend.dtypes import runtime_device_put
+from simsopt_jax.core._math_utils import pad_axis, pad_axis_edge
 
 __all__ = [
     "CoilGroupCollectiveConfig",
@@ -33,6 +43,8 @@ __all__ = [
     "maybe_shard_seed_batch_inputs",
     "maybe_shard_surface_quadrature_inputs",
     "maybe_shard_trajectory_batch_inputs",
+    "pad_rows_to_mesh",
+    "padded_extent",
     "place_active_replicated",
     "replicate_tree_on_mesh",
     "seed_batch_sharding_config",
@@ -42,6 +54,7 @@ __all__ = [
     "summarize_array_sharding",
     "trajectory_batch_sharding_config",
     "trajectory_batch_sharding_summary",
+    "trim_leading_axis",
 ]
 
 
@@ -223,6 +236,49 @@ def _place_array(array, sharding, *, dtype=None):
     return runtime_device_put(array, dtype=dtype, target=sharding)
 
 
+def padded_extent(extent: int, device_count: int) -> int:
+    """The smallest multiple of ``device_count`` that holds ``extent`` rows."""
+    return int(extent) + (-int(extent)) % int(device_count)
+
+
+def _pad_rows(array, device_count: int, *, copy_last_row: bool):
+    extent = int(array.shape[0])
+    padded = padded_extent(extent, device_count)
+    if not isinstance(array, jax.Array):
+        # Host rows are padded on the host, so the placement that follows stays
+        # the one explicit transfer (JAX padding would be an implicit one).
+        host = np.asarray(array)
+        widths = [(0, padded - extent)] + [(0, 0)] * (host.ndim - 1)
+        return np.pad(host, widths, mode="edge" if copy_last_row else "constant")
+    pad = pad_axis_edge if copy_last_row else pad_axis
+    return pad(array, axis=0, padded_size=padded)
+
+
+def pad_rows_to_mesh(array, device_count: int):
+    """Pad the leading axis to a multiple of ``device_count`` with copies of its last row.
+
+    A copy is as regular as the row it copies, so kernels meet no singularity
+    in the padding (zero rows would put padded points at the origin). Callers
+    drop the padded rows of each output with :func:`trim_leading_axis`.
+    """
+    return _pad_rows(array, device_count, copy_last_row=True)
+
+
+def _pad_rows_with_zeros(array, device_count: int):
+    return _pad_rows(array, device_count, copy_last_row=False)
+
+
+def trim_leading_axis(tree, extent: int):
+    """Keep the first ``extent`` rows of every array leaf of ``tree``."""
+
+    def trim_leaf(leaf):
+        if int(leaf.shape[0]) == extent:
+            return leaf
+        return lax.slice_in_dim(leaf, start_index=0, limit_index=extent, axis=0)
+
+    return jax.tree.map(trim_leaf, tree)
+
+
 def place_active_replicated(value, *, dtype=None, mode: str | None = None):
     """Place an array leaf on the active replicated point-axis mesh."""
     sharding = active_replicated_sharding(mode=mode)
@@ -275,6 +331,14 @@ def _first_row_array_leaf(tree):
         if ndim is not None and ndim > 0:
             return leaf
     return None
+
+
+def _row_counts_divide(tree, device_count: int) -> bool:
+    return all(
+        int(leaf.shape[0]) % device_count == 0
+        for leaf in jax.tree.leaves(tree)
+        if (_array_leaf_ndim(leaf) or 0) > 0
+    )
 
 
 def _place_tree(
@@ -377,7 +441,12 @@ def coil_group_collective_config(
 
 
 def maybe_shard_grouped_field_inputs(points, coil_arrays, *, mode: str | None = None):
-    """Shard grouped-field point clouds while replicating coil-group inputs."""
+    """Shard grouped-field point clouds while replicating coil-group inputs.
+
+    Sharded points are padded to a multiple of the device count with copies
+    of the last point (:func:`pad_rows_to_mesh`); the caller trims each field
+    output back to the original point count with :func:`trim_leading_axis`.
+    """
     tuning = get_sharding_tuning(mode)
     if not _should_shard_points(points, tuning):
         return points, coil_arrays
@@ -394,7 +463,10 @@ def maybe_shard_grouped_field_inputs(points, coil_arrays, *, mode: str | None = 
     if point_sharding is None or replicated_sharding is None:
         return points, coil_arrays
 
-    sharded_points = _place_array(points, point_sharding)
+    sharded_points = _place_array(
+        pad_rows_to_mesh(points, point_sharding.mesh.shape[tuning.mesh_axis_name]),
+        point_sharding,
+    )
     replicated_arrays = tuple(
         (
             _place_array(gammas, replicated_sharding),
@@ -427,7 +499,12 @@ def maybe_shard_pairwise_row_trees(
     *,
     mode: str | None = None,
 ):
-    """Shard row-owned pairwise pytrees while replicating the RHS pytrees."""
+    """Shard row-owned pairwise pytrees while replicating the RHS pytrees.
+
+    Rows are sharded only when every row-owned leaf has a row count divisible
+    by the device count: the pairwise kernels reduce over rows (minima and
+    sums), so padding rows would change sum-type results.
+    """
     tuning = get_sharding_tuning(mode)
     left_row_leaf = _first_row_array_leaf(left_tree)
     if left_row_leaf is None or not _should_shard_pairwise_rows(left_row_leaf, tuning):
@@ -443,6 +520,9 @@ def maybe_shard_pairwise_row_trees(
         tuning.mesh_axis_name,
     )
     if left_sharding is None or replicated_sharding is None:
+        return left_tree, right_tree
+    device_count = int(left_sharding.mesh.shape[tuning.mesh_axis_name])
+    if not _row_counts_divide(left_tree, device_count):
         return left_tree, right_tree
 
     return (
@@ -531,6 +611,7 @@ def _maybe_shard_leading_axis_inputs(
     mode: str | None,
     config: _LeadingAxisBatchShardingConfig | None,
     config_cls: type[_LeadingAxisConfigT],
+    pad_rows: Callable,
 ):
     if len(arrays) == 0:
         return ()
@@ -544,7 +625,7 @@ def _maybe_shard_leading_axis_inputs(
         return arrays
 
     return _place_leading_axis_arrays(
-        arrays,
+        tuple(pad_rows(array, config.device_count) for array in arrays),
         mesh=config.mesh,
         axis_name=config.axis_name,
     )
@@ -555,12 +636,17 @@ def maybe_shard_trajectory_batch_inputs(
     mode: str | None = None,
     config: TrajectoryBatchShardingConfig | None = None,
 ):
-    """Shard the leading trajectory axis for each array when policy is active."""
+    """Shard the leading trajectory axis for each array when policy is active.
+
+    Lanes are padded to a multiple of the device count with copies of the last
+    lane; trim the traced results with :func:`trim_leading_axis`.
+    """
     return _maybe_shard_leading_axis_inputs(
         *arrays,
         mode=mode,
         config=config,
         config_cls=TrajectoryBatchShardingConfig,
+        pad_rows=pad_rows_to_mesh,
     )
 
 
@@ -569,12 +655,17 @@ def maybe_shard_seed_batch_inputs(
     mode: str | None = None,
     config: SeedBatchShardingConfig | None = None,
 ):
-    """Shard the leading restart-seed axis for each array when policy is active."""
+    """Shard the leading restart-seed axis for each array when policy is active.
+
+    Seeds are padded to a multiple of the device count with copies of the last
+    seed; trim the scored results with :func:`trim_leading_axis`.
+    """
     return _maybe_shard_leading_axis_inputs(
         *arrays,
         mode=mode,
         config=config,
         config_cls=SeedBatchShardingConfig,
+        pad_rows=pad_rows_to_mesh,
     )
 
 
@@ -583,12 +674,17 @@ def maybe_shard_surface_quadrature_inputs(
     mode: str | None = None,
     config: SurfaceQuadratureShardingConfig | None = None,
 ):
-    """Shard the leading surface-quadrature axis for each array when active."""
+    """Shard the leading surface-quadrature axis for each array when active.
+
+    The axis is padded to a multiple of the device count with zero rows: a
+    node with a zero normal has zero area and adds nothing to a flux integral.
+    """
     return _maybe_shard_leading_axis_inputs(
         *arrays,
         mode=mode,
         config=config,
         config_cls=SurfaceQuadratureShardingConfig,
+        pad_rows=_pad_rows_with_zeros,
     )
 
 

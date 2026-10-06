@@ -32,6 +32,7 @@ from ._math_utils import (
     explicit_rsqrt as _explicit_rsqrt,
     eye as _eye,
     pad_axis as _pad_axis,
+    pad_axis_edge as _pad_axis_edge,
     scalar_like as _scalar_like,
     zeros as _zeros,
 )
@@ -431,7 +432,9 @@ def _point_direction_chunk_reduce(
 
     ``left_directions`` and ``right_directions`` must share the point leading
     axis with ``points``. The helper preserves that axis and trims any padding
-    before returning the chunked result tree.
+    before returning the chunked result tree. Padded points copy the last point
+    (zero rows would put them at the origin, singular when a coil passes
+    through it, and a zero cotangent times that singularity is NaN).
     """
     point_count = points.shape[0]
     if point_count == 0 or chunk_size <= 0 or point_count <= chunk_size:
@@ -439,7 +442,7 @@ def _point_direction_chunk_reduce(
 
     chunk_count = (point_count + chunk_size - 1) // chunk_size
     padded_point_count = chunk_count * chunk_size
-    padded_points = _pad_axis(points, axis=0, padded_size=padded_point_count)
+    padded_points = _pad_axis_edge(points, axis=0, padded_size=padded_point_count)
     padded_left_directions = _pad_axis(
         left_directions,
         axis=0,

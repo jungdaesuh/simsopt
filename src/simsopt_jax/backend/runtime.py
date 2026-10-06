@@ -7,7 +7,6 @@ an explicit mode-based public API for the new runtime surface:
 - ``native_cpu``
 - ``jax_cpu_fast``
 - ``jax_cpu_parity``
-- ``jax_cpu_float32_smoke``
 - ``jax_gpu_fast``
 - ``jax_gpu_parity``
 
@@ -103,7 +102,6 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _resolve_legacy_platform,
     _resolve_legacy_value,
     _resolve_policy_max_dense_jacobian_bytes,
-    _resolved_precision_for_mode,
     _runtime_env_value,
     _runtime_jax_backend_name,
     _runtime_jax_platform_value,
@@ -116,11 +114,9 @@ from simsopt_jax.backend._runtime_policy import (  # noqa: F401
     _validate_mode,
     _validate_platform,
     _validate_policy_dtype,
-    _validate_precision_for_mode,
     _validate_precision_selection,
     _validate_tf_gpu_allocator,
     _validate_transfer_guard,
-    is_float32_smoke_policy,
     resolve_jax_execution_profile,
 )
 from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
@@ -147,16 +143,13 @@ from simsopt_jax.backend._runtime_tuning import (  # noqa: F401
     _build_chunk_tuning,
     _build_sharding_tuning,
     _detect_active_jax_cuda_device_index,
-    _detect_active_jax_cuda_device_selector,
+    _detect_imported_jax_cuda_device,
     _detect_imported_jax_cuda_device_index,
     _detect_local_jax_device_count,
     _factor_device_count_2d,
     _pairwise_penalty_chunk_size_default,
-    _parse_nvidia_smi_indexed_value_row,
     _parse_visible_cuda_device_index,
     _point_chunk_size_default,
-    _query_gpu_metric_mb_from_nvidia_smi,
-    _query_gpu_total_memory_mb_from_nvidia_smi,
     _resolve_autotuned_chunk_sizes,
     _resolve_chunk_autotune_enabled,
     _resolve_coil_sharding_axis_name,
@@ -218,10 +211,8 @@ __all__ = [
     "get_transfer_guard",
     "invalidate_backend_cache",
     "is_backend_strict",
-    "is_float32_smoke_policy",
     "is_jax_backend",
     "is_parity_mode",
-    "query_active_gpu_memory_mb",
     "raise_if_strict_jax_fallback",
     "raise_if_target_lane_bypass",
     "register_backend_cache_clear",
@@ -640,23 +631,13 @@ def get_runtime_jax_device(mode: str | None = None):
 
 
 def get_active_cuda_device_index(mode: str | None = None) -> int | None:
-    """Return the active CUDA device index implied by env or JAX runtime state."""
-    policy = get_backend_policy(mode)
-    if (
-        policy.jax_platform != "cuda"
-        and _detect_active_jax_cuda_device_selector() is None
-    ):
-        return None
+    """Return the active CUDA device index implied by env or JAX runtime state.
+
+    The index is the imported JAX device's CUDA ordinal, else the first
+    ``CUDA_VISIBLE_DEVICES`` entry; ``mode`` does not change it.
+    """
+    del mode
     return _detect_active_jax_cuda_device_index()
-
-
-def query_active_gpu_memory_mb(mode: str | None = None) -> float | None:
-    """Return coarse memory usage for the active CUDA device when available."""
-    policy = get_backend_policy(mode)
-    device_selector = _detect_active_jax_cuda_device_selector()
-    if policy.jax_platform != "cuda" and device_selector is None:
-        return None
-    return _query_gpu_metric_mb_from_nvidia_smi("memory.used", device_selector)
 
 
 def get_sharding_strategy(mode: str | None = None) -> str:
@@ -1114,6 +1095,12 @@ def apply_jax_runtime_config() -> None:
         "jax_platforms",
         _runtime_jax_platforms_value(config.jax_platform),
     )
+    # JAX resolves the default backend from the deprecated ``jax_platform_name``
+    # before ``jax_platforms``. ``simsopt.geo`` sets it to ``"cpu"`` when no JAX
+    # platform environment variable is set, which would keep the selected
+    # platform from becoming the default (or fail when CPU is not listed).
+    # Clearing it makes the selected platform, listed first, the default.
+    jax.config.update("jax_platform_name", "")
     jax.config.update("jax_enable_x64", policy.requires_x64)
     jax.config.update("jax_default_matmul_precision", policy.matmul_precision)
     jax.config.update("jax_debug_nans", config.debug_nans)

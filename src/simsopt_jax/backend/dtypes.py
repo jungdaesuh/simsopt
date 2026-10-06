@@ -41,6 +41,7 @@ __all__ = [
     "compute_np_dtype",
     "explicit_device_array",
     "host_dtype",
+    "replicated_placement",
     "require_float64_dtype",
     "require_runtime_dtype",
     "runtime_device_put",
@@ -103,7 +104,7 @@ def _has_only_traced_jax_leaves(value) -> bool:
     return _has_jax_array_value(value) and not _contains_concrete_jax_leaves(value)
 
 
-def _reference_placement(reference, *, ndim: int | None = None):
+def _reference_placement(reference, *, shape: tuple[int, ...] | None = None):
     # A tracer is a ``jax.Array`` but carries no concrete sharding; probing
     # ``tracer.sharding`` raises ``AttributeError`` whose message eagerly walks
     # the entire jaxpr (jax's ``_origin_msg``/``find_progenitors``) only to be
@@ -115,17 +116,17 @@ def _reference_placement(reference, *, ndim: int | None = None):
     if _is_jax_tracer(reference):
         return None
     if isinstance(reference, jax.Array):
-        return _committed_placement(reference, ndim=ndim)
+        return _committed_placement(reference, shape=shape)
     if isinstance(reference, (list, tuple)):
         for leaf in jax.tree.leaves(reference):
             if isinstance(leaf, jax.Array) and not _is_jax_tracer(leaf):
-                placement = _committed_placement(leaf, ndim=ndim)
+                placement = _committed_placement(leaf, shape=shape)
                 if placement is not None:
                     return placement
     return None
 
 
-def _committed_placement(array: jax.Array, *, ndim: int | None):
+def _committed_placement(array: jax.Array, *, shape: tuple[int, ...] | None):
     """The placement a concrete array claims, or ``None`` if it claims none.
 
     An uncommitted array (placed by nobody, JAX's default device) makes no
@@ -136,7 +137,9 @@ def _committed_placement(array: jax.Array, *, ndim: int | None):
         return None
     sharding = array.sharding
     if isinstance(sharding, NamedSharding):
-        return _compatible_reference_sharding(sharding, ndim=ndim)
+        return _compatible_reference_sharding(
+            sharding, reference_shape=tuple(array.shape), shape=shape
+        )
     return _single_device_placement(sharding)
 
 
@@ -162,33 +165,70 @@ def _single_device_placement(sharding):
     return device
 
 
-def _reference_sharding(reference, *, ndim: int | None = None):
-    placement = _reference_placement(reference, ndim=ndim)
+def _reference_sharding(reference, *, shape: tuple[int, ...] | None = None):
+    placement = _reference_placement(reference, shape=shape)
     if placement is None or isinstance(placement, NamedSharding):
         return placement
-    return _compatible_reference_sharding(placement, ndim=ndim)
+    return _compatible_reference_sharding(placement, reference_shape=None, shape=shape)
 
 
-def _compatible_reference_sharding(sharding, *, ndim: int | None):
+def _compatible_reference_sharding(
+    sharding,
+    *,
+    reference_shape: tuple[int, ...] | None,
+    shape: tuple[int, ...] | None,
+):
+    """The mesh placement of a value of ``shape`` placed by a sharded reference.
+
+    The value keeps the reference's partition only as a row-aligned sibling:
+    at least as many dimensions as the spec names and the reference's extent
+    on every partitioned axis (a cotangent of sharded points). Any other value
+    (coil data next to sharded points, a scalar) is replicated on the
+    reference's mesh, since a partition copied onto an unrelated axis means
+    nothing and fails whenever that extent is not a multiple of the mesh axis.
+    """
     if not isinstance(sharding, NamedSharding):
         return None
-    if ndim is None or len(sharding.spec) <= ndim:
+    if (
+        shape is not None
+        and reference_shape is not None
+        and len(sharding.spec) <= len(shape)
+        and all(
+            shape[axis] == reference_shape[axis]
+            for axis, mesh_axes in enumerate(sharding.spec)
+            if mesh_axes is not None
+        )
+    ):
         return sharding
     return NamedSharding(sharding.mesh, P())
 
 
-def _value_ndim(value) -> int | None:
+def _value_shape(value) -> tuple[int, ...] | None:
     if isinstance(value, (list, tuple)) and _contains_jax_leaves(value):
         return None
     if _contains_traced_jax_leaves(value):
         return None
     if isinstance(value, jax.Array):
-        return int(value.ndim)
+        return tuple(value.shape)
     if hasattr(value, "aval"):
         return None
     if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return int(np.ndim(value))
+        return tuple(np.shape(value))
     return None
+
+
+def replicated_placement(reference) -> NamedSharding | None:
+    """``reference``'s mesh with no axis partitioned, or ``None`` without a mesh.
+
+    For data that shares the reference's devices but none of its axes (coil
+    arrays next to sharded points). A traced, uncommitted or single-device
+    reference names no mesh, so the value is placed as without a reference.
+    """
+    if not isinstance(reference, jax.Array) or _is_jax_tracer(reference):
+        return None
+    if not reference.committed or not isinstance(reference.sharding, NamedSharding):
+        return None
+    return NamedSharding(reference.sharding.mesh, P())
 
 
 def _array_like_dtype(value) -> np.dtype | None:
@@ -446,7 +486,7 @@ def as_jax_int32(value) -> jax.Array:
 
 def as_runtime_array(value, *, dtype=None, reference=None):
     resolved_dtype = _resolve_jnp_dtype(dtype, source="dtype")
-    reference_sharding = _reference_sharding(reference, ndim=_value_ndim(value))
+    reference_sharding = _reference_sharding(reference, shape=_value_shape(value))
     if reference_sharding is not None and not _has_only_traced_jax_leaves(value):
         return runtime_device_put(
             value, dtype=resolved_dtype, target=reference_sharding
@@ -454,8 +494,13 @@ def as_runtime_array(value, *, dtype=None, reference=None):
     return as_jax_array(value, dtype=resolved_dtype)
 
 
-def as_compute_array(value, *, dtype=None, reference=None) -> jax.Array:
-    """Place proposal data using compute dtype and optional reference sharding."""
+def as_compute_array(value, *, dtype=None, reference=None, target=None) -> jax.Array:
+    """Place proposal data using compute dtype and an optional placement.
+
+    ``target`` is an explicit placement; without one, a ``reference`` lends its
+    placement (see ``_compatible_reference_sharding``). Traced values are
+    never placed.
+    """
     resolved_dtype = (
         compute_jnp_dtype()
         if dtype is None
@@ -463,12 +508,16 @@ def as_compute_array(value, *, dtype=None, reference=None) -> jax.Array:
     )
     if _has_only_traced_jax_leaves(value):
         return jnp.asarray(value, dtype=resolved_dtype)
-    reference_sharding = _reference_sharding(reference, ndim=_value_ndim(value))
-    if reference_sharding is not None:
+    placement = (
+        target
+        if target is not None
+        else _reference_sharding(reference, shape=_value_shape(value))
+    )
+    if placement is not None:
         return _compute_device_put(
             value,
             dtype=resolved_dtype,
-            target=reference_sharding,
+            target=placement,
         )
     if _has_jax_array_value(value):
         return jnp.asarray(value, dtype=resolved_dtype)
@@ -547,7 +596,7 @@ def explicit_device_array(
         raise TypeError(
             "explicit_device_array accepts reference or explicit target/device, not both."
         )
-    reference_placement = _reference_placement(reference, ndim=_value_ndim(value))
+    reference_placement = _reference_placement(reference, shape=_value_shape(value))
     return _device_put_preserving_dtype(
         value,
         dtype=dtype,

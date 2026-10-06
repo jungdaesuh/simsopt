@@ -123,9 +123,9 @@ simsopt_config.set_backend("jax", device="cpu")
 simsopt_config.set_backend("jax", device="gpu", intent="parity")
 ```
 
-Passing a canonical mode such as `jax_cpu_float32_smoke` remains supported and
-cannot be combined with `device` or `intent`. An unavailable requested GPU
-fails; it never falls back to CPU.
+Passing a canonical mode such as `jax_cpu_parity` remains supported and cannot
+be combined with `device` or `intent`. An unavailable requested GPU fails; it
+never falls back to CPU.
 
 ## Native/JAX same-state parity
 

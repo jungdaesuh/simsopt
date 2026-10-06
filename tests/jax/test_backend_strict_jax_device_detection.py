@@ -8,8 +8,6 @@ exceptions are:
 - ``ImportError`` for ``import jax`` (JAX is genuinely absent).
 - ``RuntimeError`` from ``jax.local_devices(backend="gpu")`` (GPU backend
   unavailable on this host).
-- ``FileNotFoundError`` / ``subprocess.CalledProcessError`` from ``nvidia-smi``
-  (external tool absent or non-zero exit).
 - ``ValueError`` when ``_parse_visible_cuda_device_index`` parses an
   ``int`` from ``CUDA_VISIBLE_DEVICES`` (garbage values map to ``None``).
 
@@ -31,8 +29,8 @@ Tests (one per situation):
    ``None``; any other exception type propagates.
 6. ``test_parse_visible_cuda_device_index_*`` — §3-viii: garbage env values
    map to ``None``; valid non-negative integers parse through.
-7. ``test_query_gpu_metric_mb_from_nvidia_smi_*`` — §3-ix: ``nvidia-smi``
-   absence / non-zero exit returns ``None``; a valid stdout row parses.
+7. ``test_gpu_total_memory_*`` / ``test_rtx_5090_chunk_sizes_*`` — §3-ix: the
+   autotune reads GPU memory from the JAX device, never from ``nvidia-smi``.
 """
 
 from __future__ import annotations
@@ -56,7 +54,6 @@ from simsopt_jax.backend.runtime import (
     _detect_local_jax_device_count,
     _parse_visible_cuda_device_index,
     _policy_from_config,
-    _query_gpu_metric_mb_from_nvidia_smi,
     get_runtime_jax_device,
 )
 
@@ -351,108 +348,103 @@ def test_parse_visible_cuda_device_index_returns_first_index(
 
 
 # ---------------------------------------------------------------------------
-# §3-ix — ``_query_gpu_metric_mb_from_nvidia_smi`` external-tool boundary.
+# §3-ix — GPU memory for chunk autotuning comes from the JAX device itself.
 # ---------------------------------------------------------------------------
 
-
-def test_query_gpu_metric_mb_returns_none_when_nvidia_smi_missing(monkeypatch):
-    """``FileNotFoundError`` from ``subprocess.run`` -> ``None`` (tool absent)."""
-    captured = {"calls": 0}
-
-    def _missing(cmd, *, check, capture_output, text):
-        del check, capture_output, text
-        captured["calls"] += 1
-        assert cmd[0] == "nvidia-smi"
-        raise FileNotFoundError("nvidia-smi not on PATH")
-
-    monkeypatch.setattr(subprocess, "run", _missing)
-
-    assert _query_gpu_metric_mb_from_nvidia_smi("memory.total") is None
-    assert captured["calls"] == 1
+_RTX_5090_DEVICE_MEMORY_BYTES = 33_667_612_672  # jax 0.10 on the RTX 5090
 
 
-def test_query_gpu_metric_mb_returns_none_on_called_process_error(monkeypatch):
-    """``CalledProcessError`` (e.g. no NVIDIA driver) -> ``None``."""
-
-    def _failing(cmd, *, check, capture_output, text):
-        del check, capture_output, text
-        raise subprocess.CalledProcessError(returncode=9, cmd=cmd)
-
-    monkeypatch.setattr(subprocess, "run", _failing)
-
-    assert _query_gpu_metric_mb_from_nvidia_smi("memory.total") is None
-
-
-def test_query_gpu_metric_mb_parses_valid_output(monkeypatch):
-    """A valid nvidia-smi CSV row parses to a float value."""
-
-    def _fake_run(cmd, *, check, capture_output, text):
-        del check, capture_output, text
-        assert cmd[0] == "nvidia-smi"
-        return types.SimpleNamespace(stdout="3, 24576\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    assert _query_gpu_metric_mb_from_nvidia_smi(
-        "memory.total", device_selector=3
-    ) == pytest.approx(24576.0)
-
-
-def test_query_gpu_metric_mb_filters_by_integer_device_selector(monkeypatch):
-    """When the selector is an int, only the matching index row is returned."""
-
-    def _fake_run(cmd, *, check, capture_output, text):
-        del check, capture_output, text
-        return types.SimpleNamespace(stdout="0, 1024\n1, 2048\n3, 24576\n")
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    assert _query_gpu_metric_mb_from_nvidia_smi(
-        "memory.total", device_selector=1
-    ) == pytest.approx(2048.0)
-
-
-def test_query_gpu_metric_mb_returns_none_on_empty_output(monkeypatch):
-    """Empty stdout yields ``None`` rather than a misleading default."""
-
-    def _fake_run(cmd, *, check, capture_output, text):
-        del check, capture_output, text
-        return types.SimpleNamespace(stdout="\n   \n")
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
-
-    assert _query_gpu_metric_mb_from_nvidia_smi("memory.total") is None
-
-
-def test_query_active_gpu_memory_uses_detected_cuda_selector_without_cuda_policy(
-    monkeypatch,
-):
-    """Memory snapshots follow the active JAX CUDA device, not only policy labels."""
-    metric_calls = []
-
-    monkeypatch.setattr(
-        runtime_module,
-        "get_backend_policy",
-        lambda mode=None: _policy_for_mode("native_cpu"),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "_detect_active_jax_cuda_device_selector",
-        lambda: 0,
+def _fake_cuda_jax(device_memory_bytes):
+    device = types.SimpleNamespace(
+        local_hardware_id=0, device_memory_bytes_limit=device_memory_bytes
     )
 
-    def _metric(metric_name, device_selector):
-        metric_calls.append((metric_name, device_selector))
-        return 4096.0
+    def _local_devices(*, backend=None):
+        assert backend == "gpu"
+        return [device]
 
-    monkeypatch.setattr(
-        runtime_module,
-        "_query_gpu_metric_mb_from_nvidia_smi",
-        _metric,
+    return types.SimpleNamespace(local_devices=_local_devices)
+
+
+def _no_nvidia_smi(*args, **kwargs):
+    raise AssertionError("GPU memory must not be queried through nvidia-smi")
+
+
+@pytest.mark.parametrize("visible_devices", [None, "1", "GPU-7951f78e-c05d"])
+def test_gpu_total_memory_is_the_jax_device_memory(monkeypatch, visible_devices):
+    """The memory of the device JAX computes on, whatever CUDA_VISIBLE_DEVICES says.
+
+    JAX's CUDA ordinal 0 is the first *visible* GPU (here physical GPU 1, or a
+    UUID), so the former ``nvidia-smi -i 0`` query read another board.
+    """
+    if visible_devices is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.delenv("SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB", raising=False)
+    monkeypatch.setattr(subprocess, "run", _no_nvidia_smi)
+    monkeypatch.setitem(sys.modules, "jax", _fake_cuda_jax(24 * 2**30))
+
+    total_mb, source = runtime_module._resolve_gpu_total_memory_mb(
+        _policy_for_mode("jax_gpu_fast")
     )
 
-    assert runtime_module.query_active_gpu_memory_mb() == pytest.approx(4096.0)
-    assert metric_calls == [("memory.used", 0)]
+    assert total_mb == 24 * 1024
+    assert source is not None and source.startswith("jax[")
+
+
+def test_gpu_total_memory_is_unknown_before_jax_has_a_cuda_device(monkeypatch):
+    """No JAX CUDA device, no measurement: an ordinal is never guessed."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.delenv("SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB", raising=False)
+    monkeypatch.setattr(subprocess, "run", _no_nvidia_smi)
+    monkeypatch.setitem(sys.modules, "jax", None)
+
+    assert runtime_module._resolve_gpu_total_memory_mb(
+        _policy_for_mode("jax_gpu_fast")
+    ) == (None, None)
+
+
+def test_gpu_total_memory_environment_override_wins(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB", "8000")
+    monkeypatch.setitem(sys.modules, "jax", _fake_cuda_jax(24 * 2**30))
+
+    assert runtime_module._resolve_gpu_total_memory_mb(
+        _policy_for_mode("jax_gpu_fast")
+    ) == (8000, "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB")
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("jax_gpu_parity", (32, 0, 512)),
+        ("jax_gpu_fast", (128, 128, 2048)),
+    ],
+)
+def test_rtx_5090_chunk_sizes_from_jax_device_memory(monkeypatch, mode, expected):
+    """The RTX 5090 (32108 MiB through JAX) lands in the 32 GB tuning bucket."""
+    for name in (
+        "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB",
+        "SIMSOPT_JAX_CHUNK_AUTOTUNE",
+        "SIMSOPT_JAX_COIL_CHUNK_SIZE",
+        "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
+        "SIMSOPT_JAX_POINT_CHUNK_SIZE",
+        "SIMSOPT_JAX_TRANSFER_GUARD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setitem(
+        sys.modules, "jax", _fake_cuda_jax(_RTX_5090_DEVICE_MEMORY_BYTES)
+    )
+
+    tuning = runtime_module._build_chunk_tuning(mode, _policy_for_mode(mode))
+
+    assert tuning.autotuned is True
+    assert tuning.gpu_total_memory_mb == 32107
+    assert (
+        tuning.coil_chunk_size,
+        tuning.quadrature_block_size,
+        tuning.point_chunk_size,
+    ) == expected
 
 
 def _fake_jax(jax_platforms, local_devices):

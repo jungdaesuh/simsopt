@@ -79,8 +79,6 @@ are:
      - FP64 JAX CPU execution with reference-oriented numerical policy.
    * - ``jax_cpu_fast``
      - JAX CPU execution with performance-oriented policy.
-   * - ``jax_cpu_float32_smoke``
-     - CPU smoke testing of float32-compatible paths.
    * - ``jax_gpu_parity``
      - FP64 GPU execution with reference-oriented numerical policy.
    * - ``jax_gpu_fast``
@@ -111,10 +109,9 @@ SIMSOPT JAX solver family and scientific-success checks.  Parity is explicit
 and is the only intent eligible for certification; an ordinary example-runner
 result is diagnostic even when its intent is parity.
 
-The full canonical modes remain available for low-level configuration,
-including ``jax_cpu_float32_smoke``.  A canonical mode cannot be combined with
-``device`` or ``intent``, and ``set_backend("jax")`` requires an explicit
-device.
+The full canonical modes remain available for low-level configuration.  A
+canonical mode cannot be combined with ``device`` or ``intent``, and
+``set_backend("jax")`` requires an explicit device.
 
 Select the mode before importing JAX-heavy SIMSOPT modules.  Backend selection,
 precision, allocator configuration, and compilation-cache policy are process
@@ -140,6 +137,10 @@ runtime mode.  ``"fp64"`` requests FP64 explicitly.  The equivalent process
 setting is ``SIMSOPT_PRECISION=mode_default|fp64``; an explicit non-``None``
 ``precision`` argument takes precedence.  The native CPU default and every
 omitted-precision JAX route remain unchanged.
+
+Every mode computes in FP64.  Importing ``simsopt.geo`` enables JAX's x64
+mode, as upstream SIMSOPT does, unless ``JAX_ENABLE_X64`` is set, and
+``set_backend`` enables it for every JAX mode.
 
 Quick smoke run
 ~~~~~~~~~~~~~~~
@@ -362,10 +363,9 @@ New code can select JAX placement independently from its execution policy::
 
 After JAX is explicitly selected, omitted ``intent`` means ``"fast"``.  An
 entirely unset selector still means ``native_cpu``.  Explicit canonical modes
-such as ``jax_gpu_fast``, ``jax_gpu_parity``, and
-``jax_cpu_float32_smoke`` remain supported and take no ``device`` or ``intent``
-keywords.  Requested GPU execution fails if CUDA is unavailable rather than
-falling back to CPU.
+such as ``jax_gpu_fast`` and ``jax_gpu_parity`` remain supported and take no
+``device`` or ``intent`` keywords.  Requested GPU execution fails if CUDA is
+unavailable rather than falling back to CPU.
 
 For the example suite, replace ``--lane cpu-smoke`` with ``--device cpu
 --intent parity`` and ``--lane gpu-strict`` with ``--device gpu --intent
