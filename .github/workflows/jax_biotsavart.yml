@@ -37,11 +37,16 @@ jobs:
           python -m unittest discover -t tests -s tests/field -v
           python -m unittest discover -t tests -s tests/geo -v
           python -m unittest discover -t tests -s tests/objectives -v
+      - name: Run descendant pytest coverage
+        run: |
+          python -m pip install pytest
+          python -m pytest -q tests/jax
       - name: Verify package import and native stage-II example
         run: |
           python -c "import simsopt_jax_adapters.field"
           python examples/2_Intermediate/stage_two_optimization.py
           python examples/2_Intermediate/stage_two_optimization.py --use-jax
+          python examples/2_Intermediate/stage_two_optimization_jax.py
       - name: Check shipped Python code
         run: |
           ruff check src/simsopt_jax src/simsopt_jax_adapters tests/unittest_jax_support.py \
@@ -72,5 +77,7 @@ jobs:
             tests/core/test_host_boundary_ssot_ratchet.py \
             tests/core/test_pytree_convention.py \
             tests/field/test_stage_two_biotsavart_jax.py \
-            examples/2_Intermediate/stage_two_optimization.py
+            examples/2_Intermediate/stage_two_optimization.py \
+            tests/jax \
+            examples/2_Intermediate/stage_two_optimization_jax.py
           pyright --pythonpath "$(command -v python)"
