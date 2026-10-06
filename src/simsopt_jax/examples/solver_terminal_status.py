@@ -10,7 +10,7 @@ way. This module is that single derivation for the GSCO family
 ``examples/jax/3_Advanced/wireframe_gsco_multistep.py``). It lives in the
 installed package because the examples are executed as standalone
 scripts, with no repository root on ``sys.path``
-(``tests/integration/test_jax_external_solver_free_examples.py``).
+(``tests/jax/integration/test_jax_external_solver_free_examples.py``).
 
 GSCO has three stop conditions (``src/simsoptpp/wireframe_optimization.cpp``
 lines 264-279 **of this branch**, the binary the lanes link): no eligible loop,

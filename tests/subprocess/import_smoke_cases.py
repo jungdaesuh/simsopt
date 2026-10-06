@@ -3,7 +3,7 @@ Extracted import-smoke test case functions.
 
 Each ``case_*`` function is a standalone callable that runs the exact same
 logic previously embedded as inline string literals in
-``tests/test_jax_import_smoke.py``.  The module intentionally avoids
+``tests/jax/test_jax_import_smoke.py``.  The module intentionally avoids
 non-stdlib imports at the top level so that subprocess isolation semantics
 are preserved: each case function handles its own imports internally.
 """

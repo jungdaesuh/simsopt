@@ -69,7 +69,7 @@ def solve_weighted_quadratic(
     mirror reproduces that in ``examples/jax/1_Simple/just_a_quadratic.py``
     through ``simsopt_jax.examples.official_tiny_least_squares.solve_jax_residual``.
     This device solver is a different algorithm over the same physics and has
-    no caller outside ``tests/integration/``
+    no caller outside ``tests/jax/integration/``
     ``test_jax_weighted_quadratic_strict_transfer.py``, which it exists to keep
     exercising; it may not be used to publish an official observable.
     """

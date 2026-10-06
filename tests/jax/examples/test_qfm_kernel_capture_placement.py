@@ -18,7 +18,7 @@ of the jaxpr, which fails on CPU exactly when a device array is captured.
 ``simsopt_jax.core.specs.host_resident_spec`` is the repository's single owner
 of this rule and states it in its own docstring; the sibling pins for the other
 two capture sites are ``tests/jax/core/test_coil_dof_extraction_spec_placement.py``
-and ``tests/geo/test_captured_coil_spec_placement.py``.
+and ``tests/jax/geo/test_captured_coil_spec_placement.py``.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Import the remaining JAX surfaces with ``simsoptpp`` blocked; print the mode.
 
-Run as a script by ``tests/integration/test_remaining_jax_surfaces_mode_matrix.py``
+Run as a script by ``tests/jax/integration/test_remaining_jax_surfaces_mode_matrix.py``
 in one fresh child per backend mode, with ``PYTHONPATH`` set to ``src``.
 """
 

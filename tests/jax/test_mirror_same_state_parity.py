@@ -14,12 +14,12 @@ applied as ``allclose(native, jax)``.
 Not covered here, because no initial-state comparison applies (``surf_vol_area``
 declared none; the three tracing examples start from the shared seed input) or
 because their own tests compare them with native SIMSOPT: ``surf_vol_area``
-and the tracing examples (``tests/integration/test_jax_official_tiny_least_squares.py``,
-``tests/integration/test_jax_tracing_*``), ``permanent_magnet_MUSE`` and ``_QA``
-(``tests/integration/test_jax_permanent_magnet_{arbvec,qa}_native_parity.py``),
+and the tracing examples (``tests/jax/integration/test_jax_official_tiny_least_squares.py``,
+``tests/jax/integration/test_jax_tracing_*``), ``permanent_magnet_MUSE`` and ``_QA``
+(``tests/jax/integration/test_jax_permanent_magnet_{arbvec,qa}_native_parity.py``),
 ``stage_two_optimization_stochastic``
 (``tests/jax/examples/test_stochastic_matched_state_parity.py``) and
-``wireframe_rcls_with_ports`` (``tests/integration/test_jax_wireframe_rcls_matches_native.py``).
+``wireframe_rcls_with_ports`` (``tests/jax/integration/test_jax_wireframe_rcls_matches_native.py``).
 The planned single-stage example has no mirror to compare.
 """
 

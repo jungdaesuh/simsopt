@@ -126,7 +126,7 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         # singular values exceed ``σ_max * 1e-8``) and compare there. The
         # canonical action-level threshold is ``1e-6`` (one order looser
         # than ``exact_well_conditioned_adjoint``) and is enforced by
-        # ``tests/geo/test_boozersurface_jax.py::``
+        # ``tests/jax/geo/test_boozersurface_jax.py::``
         # ``TestBoozerSurfaceJAXClass::``
         # ``test_exact_ill_conditioned_operator_adjoint_action_level_parity``.
         "action_level_rtol": 1e-6,

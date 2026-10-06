@@ -76,21 +76,21 @@ jobs:
         continue-on-error: true
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/test_jax_import_smoke.py -v --tb=short
+            python -m pytest tests/jax/test_jax_import_smoke.py -v --tb=short
 
       - name: Biot-Savart JAX unit
         id: bs_unit
         continue-on-error: true
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/field/test_biotsavart_jax.py -v --tb=short
+            python -m pytest tests/jax/field/test_biotsavart_jax.py -v --tb=short
 
       - name: Boozer residual JAX
         id: boozer
         continue-on-error: true
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/geo/test_boozer_residual_jax.py \
+            python -m pytest tests/jax/geo/test_boozer_residual_jax.py \
             -k gpu_parity -v --tb=short
 
       - name: Surface Fourier JAX
@@ -98,7 +98,7 @@ jobs:
         continue-on-error: true
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
+            python -m pytest tests/jax/geo/test_surface_fourier_jax.py -v --tb=short
 
       - name: Precision and public derivative authority
         id: precision_authority
@@ -107,9 +107,9 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest \
               tests/jax/core/test_surface_objective_fused_gradients.py \
-              tests/geo/test_curve_objectives_strict_gpu_jax.py \
-              tests/geo/test_surface_objectives_strict_gpu_jax.py \
-              tests/geo/test_core_geometry_strict_gpu_jax.py \
+              tests/jax/geo/test_curve_objectives_strict_gpu_jax.py \
+              tests/jax/geo/test_surface_objectives_strict_gpu_jax.py \
+              tests/jax/geo/test_core_geometry_strict_gpu_jax.py \
               -v --tb=short
 
       - name: Dense optimizer cross-device placement
@@ -119,7 +119,7 @@ jobs:
           JAX_PLATFORMS: cuda,cpu
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/geo/test_optimizer_strict_gpu_jax.py \
+            python -m pytest tests/jax/geo/test_optimizer_strict_gpu_jax.py \
             -v --tb=short
 
       - name: Native/JAX same-state mirror parity
@@ -262,7 +262,7 @@ jobs:
       - name: Run CUDA strict transfer-guard smoke slice
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/test_jax_import_smoke.py \
+            python -m pytest tests/jax/test_jax_import_smoke.py \
             -k "gpu_ondevice_loops_with_host_constants or grouped_biot_savart_gpu_spec_eval or grouped_biot_savart_gpu_current_arrays" \
             -v --tb=short
 
@@ -279,13 +279,13 @@ jobs:
       - name: Run remaining JAX surface CUDA import mode matrix
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/integration/test_remaining_jax_surfaces_mode_matrix.py \
+            python -m pytest tests/jax/integration/test_remaining_jax_surfaces_mode_matrix.py \
             -k "simsoptpp_free_import_mode_matrix" \
             -v --tb=short
 
       - name: Run BoozerSurfaceJAX CUDA inner-solve tests
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/geo/test_boozersurface_jax.py \
+            python -m pytest tests/jax/geo/test_boozersurface_jax.py \
             -k "run_code_traceable_exact_executes_inner_solve_on_gpu or run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu" \
             -v --tb=short

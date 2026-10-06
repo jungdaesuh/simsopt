@@ -1,6 +1,6 @@
 """JAX mirror of the native self-field-force suite.
 
-Native oracle suite: ``tests/field/test_selffieldforces.py`` (23 test functions,
+Native oracle suite: ``tests/jax/field/test_selffieldforces.py`` (23 test functions,
 classes ``SpecialFunctionsTests`` and ``CoilForcesTest``).  Implementation under
 test: ``simsopt_jax_adapters.field.force``.  Unit 1 of the mirror-wave plan
 (formerly ``docs/jax_native_test_mirror_wave_implementation_plan.md``, commit
@@ -37,7 +37,7 @@ implementation evaluated in this same process — direct ``import simsopt.field
 .force as native_force`` calls alongside the adapter under test, at whatever
 configuration each test below states.
 The native HSX self-force oracle is itself pinned to the CoilForces.jl benchmark
-by ``tests/field/test_selffieldforces.py::CoilForcesTest::test_hsx_coil``.
+by ``tests/jax/field/test_selffieldforces.py::CoilForcesTest::test_hsx_coil``.
 
 Every test runs under the ``parity_lane`` fixture, so the suite executes on GPU
 when CUDA is present and skips that lane cleanly otherwise.

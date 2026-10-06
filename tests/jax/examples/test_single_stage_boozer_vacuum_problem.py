@@ -1,7 +1,7 @@
 """The shipped mirror's problem module carries the native example's policy.
 
 The value/gradient parity of the underlying evaluator against native is proven
-in ``tests/geo/test_single_stage_exact_analytic.py``; what this file holds is
+in ``tests/jax/geo/test_single_stage_exact_analytic.py``; what this file holds is
 that the example's own problem -- the bounded scale its ``--smoke`` lane runs --
 is wired to that policy: the frozen seed targets, the published endpoint
 physics, and the failed-inner-solve rule (native's 1.0e3 sentinel with the
@@ -135,7 +135,7 @@ def test_persisted_inner_failure_reports_the_sentinel_and_keeps_the_warm_start(
 
     # A coil move far enough that the exact Newton exhausts its 20-iteration
     # cap on a finite, improved iterate -- the case native keeps internally and
-    # then rolls back.  ``tests/geo/test_single_stage_exact_analytic.py`` pins
+    # then rolls back.  ``tests/jax/geo/test_single_stage_exact_analytic.py`` pins
     # the same draw against the native lane.
     direction = np.random.default_rng(2).standard_normal(seed_coils.size)
     failed_value, failed_gradient = bounded_problem.value_and_gradient(

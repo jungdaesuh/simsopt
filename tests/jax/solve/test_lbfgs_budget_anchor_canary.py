@@ -6,7 +6,7 @@ a rejected-step record for abnormal terminations.  Downstream gates read both:
 they subtract label timestamps to charge a solve against a seed budget and a
 main-optimizer budget, and they key repeated failures on the anchor fields the
 rejected-step record carries.  Label *ordering* is pinned elsewhere
-(``tests/geo/test_boozersurface_jax_private.py``); what these tests pin is the
+(``tests/jax/geo/test_boozersurface_jax_private.py``); what these tests pin is the
 arithmetic underneath the budgets -- that the phases are closed and disjoint,
 that seeding repartitions work instead of adding it, that each budget line
 appears exactly when its work does -- and the semantics of the anchor a gate

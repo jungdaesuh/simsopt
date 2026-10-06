@@ -127,7 +127,7 @@ def _adaptive_loop_for_backend_mode(mode: str) -> AdaptiveLoop:
 # through them and ``scan`` buys only cost: it runs every masked body iteration of
 # the chunk after the last lane has finished. The two forms are bitwise equal on
 # the trajectory, the event rows, ``t_final`` and ``h``
-# (``tests/field/test_tracing_chunked_adapter.py::``
+# (``tests/jax/field/test_tracing_chunked_adapter.py::``
 # ``test_chunked_routes_use_the_early_exit_loop_and_match_the_scan_form``).
 #
 # What this does NOT do: ``while`` shortens a chunk once ALL lanes are done,

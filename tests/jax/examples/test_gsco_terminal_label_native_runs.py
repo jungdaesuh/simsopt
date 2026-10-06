@@ -1,7 +1,7 @@
 """The GSCO stop rule has ONE definition, and it labels native SIMSOPT's own runs.
 
 The three executable GSCO examples run as standalone scripts with no repository
-root on ``sys.path`` (``tests/integration/test_jax_external_solver_free_examples.py``),
+root on ``sys.path`` (``tests/jax/integration/test_jax_external_solver_free_examples.py``),
 so the derivation lives in the installed package as
 ``simsopt_jax.examples.solver_terminal_status``. This file pins what the rule
 does on the arrays native ``simsopt.solve.wireframe_optimization.gsco_wireframe``

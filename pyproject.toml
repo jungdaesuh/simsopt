@@ -147,12 +147,12 @@ include = [
     "src/simsopt_jax/solve/shared",
     "src/simsopt_jax/solve/simsopt",
     "src/simsopt_jax_adapters/mhd/vmec_host.py",
-    "tests/integration/test_jax_execution_scale_contract.py",
+    "tests/jax/integration/test_jax_execution_scale_contract.py",
     "tests/jax/adapters/test_vmec_host_evaluation.py",
     "tests/jax/solve/test_import_boundaries.py",
     "tests/jax/solve/test_optimizer_result_schema.py",
     "tests/jax/solve/test_options_typing.py",
-    "tests/test_jax_native_to_jax_index.py",
+    "tests/jax/test_jax_native_to_jax_index.py",
 ]
 extraPaths = ["src"]
 pythonVersion = "3.11"
