@@ -15,6 +15,7 @@ from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
 from simsopt.field import Coil, Current, RegularizedCoil, coils_via_symmetries
 from simsopt.field.force import (
+    _B_at_point_from_coil_set_pure,
     B2Energy,
     LpCurveForce,
     LpCurveTorque,
@@ -38,6 +39,37 @@ from simsopt_jax_adapters.field import (
 )
 
 _NCOILS = 2
+
+
+@pytest.mark.parametrize("torque", [False, True], ids=["integrated_force", "integrated_torque"])
+def test_squared_mean_objectives_integrate_without_length_normalization(torque):
+    """Squared-mean objectives square integrated force/torque, without dividing by coil length."""
+    targets, coils = _coils()
+    target = targets[0]
+    sources = coils[1:]
+    gamma, dash = target.curve.gamma(), target.curve.gammadash()
+    speed = np.linalg.norm(dash, axis=1)
+    source_geometry = (
+        jnp.asarray(np.stack([coil.curve.gamma() for coil in sources])),
+        jnp.asarray(np.stack([coil.curve.gammadash() for coil in sources])),
+        jnp.asarray([coil.current.get_value() for coil in sources]),
+    )
+    field = np.asarray(jax.vmap(
+        lambda point: _B_at_point_from_coil_set_pure(point, *source_geometry, -1, 1e-10)
+    )(jnp.asarray(gamma)))
+    density = target.current.get_value() * np.cross(dash / speed[:, None], field) / 1e6
+    if torque:
+        center = np.sum(gamma * speed[:, None], axis=0) / np.sum(speed)
+        density = np.cross(gamma - center, density)
+        objective = JaxSquaredMeanTorque([target], sources)
+    else:
+        objective = JaxSquaredMeanForce([target], sources)
+    integrated = np.mean(density * speed[:, None], axis=0)
+    expected = np.dot(integrated, integrated)
+    length = np.mean(speed)
+    assert expected > 0 and not np.isclose(length, 1.0)
+    np.testing.assert_allclose(objective.J(), expected, rtol=1e-12, atol=0.0)
+    assert not np.isclose(objective.J(), expected / length**2, rtol=1e-4, atol=0.0)
 
 
 def _coils(*, shared_dofs: bool = False) -> tuple[list, list]:

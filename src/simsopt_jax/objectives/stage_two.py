@@ -104,7 +104,7 @@ class StageTwoObjectiveConfig:
     threshold, mode)`` per base curve. The coil terms take the first
     ``num_basecurves`` coils as targets and the other coils as sources,
     ``force_downsample`` as ``downsample``, and need a field without
-    filaments: ``LpCurveForce(targets, sources, force_p, force_threshold)``,
+    filaments: ``LpCurveForce(targets, sources, p=force_p, threshold=force_threshold)``,
     ``LpCurveTorque`` likewise, ``SquaredMeanForce``, ``SquaredMeanTorque``
     and ``B2Energy`` over all coils.
 
@@ -133,10 +133,10 @@ class StageTwoObjectiveConfig:
         individual_length_target_mode: str, "max" clips negative excess; "identity" keeps signed excess.
         curve_curve_pairs: str, "base" uses native num_basecurves pairs; "all" uses every centerline pair.
         filaments_per_pack: int, positive number of consecutive filament coils sharing a centerline, rotation and symmetry.
-        force_weight: float or None, multiplier of the Lp force integral.
+        force_weight: float or None, multiplier of the Lp force integral in (MN/m)^force_p m.
         force_p: float, dimensionless force exponent.
         force_threshold: float, force-density threshold in MN/m.
-        torque_weight: float or None, multiplier of the Lp torque integral.
+        torque_weight: float or None, multiplier of the Lp torque integral in MN^torque_p m.
         torque_p: float, dimensionless torque exponent.
         torque_threshold: float, torque-density threshold in MN.
         squared_mean_force_weight: float or None, multiplier of squared integrated force in MN^2.
