@@ -95,7 +95,7 @@ JF = Jf \
 def stage_two_problem(length_weight):
     """The fused objective's operands; rebuilt problems reuse the compiled programs."""
     return make_stage_two_problem(bs, Jf.fixed_surface_flux_spec(), StageTwoObjectiveConfig(
-        num_base_curves=ncoils,
+        num_basecurves=ncoils,
         length_weight=length_weight,
         curve_curve_minimum_distance=CC_THRESHOLD,
         curve_curve_weight=CC_WEIGHT,
