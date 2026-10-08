@@ -74,6 +74,7 @@ def _central_difference(native, owner: Optimizable, seed, step):
 @pytest.mark.parametrize("case", ["one", "ncsx"])
 @pytest.mark.parametrize("fixed", ["free", "partial", "all"])
 def test_gradgradb_vjp_matches_native_curve_and_current_central_differences(case, fixed):
+    """Hessian VJPs match native finite differences for free and fixed coil DOFs."""
     set_backend("jax", device="cpu", intent="parity")
     field, native, curves, currents, seeds = _ncsx_case(case, fixed)
     assert not np.array_equal(seeds[2], seeds[2].swapaxes(1, 2))
@@ -102,6 +103,7 @@ def test_gradgradb_vjp_matches_native_curve_and_current_central_differences(case
 
 @pytest.mark.parametrize("case", ["one", "ncsx"])
 def test_first_two_slots_equal_existing_B_and_dB_vjp(case):
+    """Adding the Hessian slot preserves both existing field and gradient VJPs."""
     field, _, _, _, seeds = _ncsx_case(case, "partial")
     expected = field.B_and_dB_vjp(*seeds[:2])
     actual = field.B_and_dB_and_d2B_vjp(*seeds)
@@ -122,6 +124,7 @@ def _set_reverse_tile(monkeypatch, tile):
 
 @pytest.mark.parametrize("point_count", [0, 1, 4, 5, 8, 12, 13, 37])
 def test_tiled_hessian_vjp_matches_dense_tile_zero_with_multiple_groups(monkeypatch, point_count):
+    """Tiled Hessian pullbacks match dense and direct autodiff across coil groups."""
     curves = create_equally_spaced_curves(
         2, 1, stellsym=False, R0=1.0, R1=0.3, order=2, numquadpoints=12,
     )
@@ -167,6 +170,7 @@ def test_nonsymmetric_seed_contracts_native_ordered_hessian_current_gradient():
 
 
 def test_new_seeds_reuse_compiled_hessian_vjp(monkeypatch):
+    """Changing the Hessian seed reuses compilation and scales the cotangents."""
     field, _, _, _, seeds = _ncsx_case("one", "free")
     _set_reverse_tile(monkeypatch, 4)
     kernel = cast(_CompiledCache, core._make_d2B_vjp_kernel(0, 0, 4))

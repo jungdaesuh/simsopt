@@ -44,16 +44,17 @@ _FIELD_KERNEL_ENV_BY_KEY = {
 
 @dataclass(frozen=True)
 class FieldKernelTuning:
-    """Immutable tile sizes for Biot-Savart field evaluation.
+    """Immutable field-kernel tiles; zero disables tiling on the selected axis.
 
     Args:
-        mode (str): Canonical backend mode: native_cpu, jax_cpu_fast, jax_cpu_parity,
-            jax_gpu_fast or jax_gpu_parity.
-        chunk_policy (str): Resolved tiling-policy name; a dense_audit suffix denotes
-            disabled tiling.
-        coil_chunk_size (int): Coils per tile; zero disables coil tiling.
-        quadrature_block_size (int): Quadrature nodes per block; zero disables blocking.
-        point_chunk_size (int): Evaluation points per tile; zero disables point tiling.
+        mode (str): Resolved backend mode, such as ``jax_cpu_parity``.
+        chunk_policy (str): Point-tiling policy, with ``_dense_audit`` appended
+            when the transfer guard disables all tiling.
+        coil_chunk_size (int): Number of coils per reduction tile.
+        quadrature_block_size (int): Number of quadrature nodes per tile.
+        point_chunk_size (int): Number of evaluation points per forward tile.
+        hessian_vjp_point_chunk_size (int): Number of evaluation points per
+            Hessian reverse tile, independent of ``point_chunk_size``.
     """
     mode: str
     chunk_policy: str

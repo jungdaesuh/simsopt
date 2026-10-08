@@ -1706,8 +1706,18 @@ class JaxBiotSavart(Optimizable):
     def d2B_by_dXdX_pullback_native(self, vgradgrad) -> BiotSavartFieldPullback:
         r"""Native grouped cotangents of ``d2B/dXdX``, accumulated per point tile.
 
-        ``vgradgrad`` has shape ``(npoints, 3, 3, 3)`` in the same index order
-        as ``d2B_by_dXdX()``; it need not be symmetric.
+        Args:
+            vgradgrad (jax.Array or numpy.ndarray): Hessian seed of shape
+                ``(npoints, 3, 3, 3)`` in ``[point, d1, d2, component]`` order;
+                it need not be symmetric. For an objective in U, units are
+                U m²/T.
+
+        Returns:
+            BiotSavartFieldPullback: One tuple of JAX array cotangents per
+                quadrature group, with geometry/tangent shapes
+                ``(ncoils, nquad, 3)`` and current shape ``(ncoils,)``. Units are
+                U/m for geometry/tangents and U/A for currents. ``coil_indices``
+                maps group rows to the public coil list; DOFs are not projected.
         """
         return self._group_pullback_native(group_biot_savart_d2B_by_dXdX_vjp, vgradgrad)
 
@@ -1808,8 +1818,21 @@ class JaxBiotSavart(Optimizable):
     def B_and_dB_and_d2B_vjp(self, v, vgrad, vgradgrad) -> tuple[Derivative, Derivative, Derivative]:
         r"""Separate coil-DOF VJPs of ``B``, ``dB/dX`` and ``d2B/dXdX``.
 
-        Seeds have the respective field shapes, including ``(npoints, 3, 3, 3)``
-        for the Hessian. Each Derivative retains fixed and shared DOF owners.
+        Args:
+            v (jax.Array or numpy.ndarray): Field seed of shape
+                ``(npoints, 3)``; units U/T for an objective in U.
+            vgrad (jax.Array or numpy.ndarray): Gradient seed of shape
+                ``(npoints, 3, 3)`` in ``[point, derivative, component]`` order;
+                units U m/T.
+            vgradgrad (jax.Array or numpy.ndarray): Hessian seed of shape
+                ``(npoints, 3, 3, 3)`` in ``[point, d1, d2, component]`` order;
+                units U m²/T. Symmetry is not required.
+
+        Returns:
+            tuple[Derivative, Derivative, Derivative]: Separate coil-DOF
+                cotangents for ``B``, ``dB/dX`` and ``d2B/dXdX``. Each retains
+                fixed and shared owners; entries are full local DOF arrays of
+                shape ``(owner.local_full_dof_size,)``, in U per DOF unit.
         """
         b_derivative, db_derivative = self.B_and_dB_vjp(v, vgrad)
         return (

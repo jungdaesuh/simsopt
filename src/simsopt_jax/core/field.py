@@ -151,7 +151,29 @@ def group_biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
 
 
 def group_biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents):
-    """Return the tiled Hessian pullback for one group in the points' dtype."""
+    """Pull back a Hessian seed for one equal-quadrature coil group.
+
+    All inputs are cast to the floating dtype of ``points``. The contraction
+    and cotangent units follow :func:`biot_savart_d2B_by_dXdX_vjp`.
+
+    Args:
+        points (jax.Array or numpy.ndarray): Cartesian positions of shape
+            ``(npoints, 3)``, in meters.
+        vgradgrad (jax.Array or numpy.ndarray): Hessian seed of shape
+            ``(npoints, 3, 3, 3)`` in ``[point, d1, d2, component]`` order;
+            symmetry is not required.
+        gammas (jax.Array or numpy.ndarray): Coil positions of shape
+            ``(ncoils, nquad, 3)``, in meters.
+        gammadashs (jax.Array or numpy.ndarray): Coil tangents of shape
+            ``(ncoils, nquad, 3)``, in meters per dimensionless curve parameter.
+        currents (jax.Array or numpy.ndarray): Coil currents of shape
+            ``(ncoils,)``, in amperes.
+
+    Returns:
+        tuple[jax.Array, jax.Array, jax.Array]: Geometry, tangent and current
+            cotangents in the points' dtype, with shapes ``(ncoils, nquad, 3)``,
+            ``(ncoils, nquad, 3)`` and ``(ncoils,)``, respectively.
+    """
     compute_points, gammas, gammadashs, currents = _compute_group_inputs(
         points, gammas, gammadashs, currents,
     )
@@ -560,7 +582,23 @@ def grouped_biot_savart_d2B_by_dXdX_from_spec(
 
 
 def grouped_biot_savart_d2B_by_dXdX_from_inputs(points: object, coil_arrays: Iterable[tuple[jax.Array, jax.Array, jax.Array]]):
-    """Evaluate the native-layout Hessian from grouped geometry/current arrays."""
+    """Sum magnetic-field Hessians over equal-quadrature coil groups.
+
+    Args:
+        points (jax.Array or numpy.ndarray): Cartesian positions of shape
+            ``(npoints, 3)``, in meters.
+        coil_arrays (Iterable[tuple[jax.Array, jax.Array, jax.Array]]): One
+            ``(gammas, gammadashs, currents)`` tuple per group, with shapes
+            ``(ncoils, nquad, 3)``, ``(ncoils, nquad, 3)`` and ``(ncoils,)``.
+            Positions and tangents are in meters (the curve parameter is
+            dimensionless); currents are in amperes. Node counts may differ
+            between groups, and each group's nodes are uniform on [0, 1).
+
+    Returns:
+        jax.Array: Hessian of shape ``(npoints, 3, 3, 3)``, in tesla per square
+            meter, with ``result[p, i, j, c] = d_i d_j B_c(points[p])``. An empty
+            iterable yields zeros.
+    """
     return grouped_biot_savart_d2B_by_dXdX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),

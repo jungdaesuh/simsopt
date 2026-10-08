@@ -868,7 +868,33 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
 
 
 def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents):
-    """Coil-array pullback of a seed in native ``[point, d1, d2, component]`` order."""
+    """Pull back a magnetic-field Hessian seed to coil geometry and currents.
+
+    Contracts ``vgradgrad[p, i, j, c]`` with ``d_i d_j B_c(points[p])``.
+    The seed need not be symmetric. Reverse passes accumulate point tiles
+    without differentiating the points themselves.
+
+    Args:
+        points (jax.Array or numpy.ndarray): Cartesian positions of shape
+            ``(npoints, 3)``, in meters.
+        vgradgrad (jax.Array or numpy.ndarray): Hessian cotangent of shape
+            ``(npoints, 3, 3, 3)`` in ``[point, d1, d2, component]`` order.
+            For a scalar objective with units U, the seed has units U m²/T.
+        gammas (jax.Array or numpy.ndarray): Coil positions of shape
+            ``(ncoils, nquad, 3)``, in meters.
+        gammadashs (jax.Array or numpy.ndarray): Coil tangents of shape
+            ``(ncoils, nquad, 3)``, in meters per unit dimensionless curve
+            parameter; quadrature uses uniformly spaced nodes on [0, 1).
+        currents (jax.Array or numpy.ndarray): Coil currents of shape
+            ``(ncoils,)``, in amperes.
+
+    Returns:
+        tuple[jax.Array, jax.Array, jax.Array]: Cotangents of ``gammas``,
+            ``gammadashs`` and ``currents``, with their respective input shapes
+            ``(ncoils, nquad, 3)``, ``(ncoils, nquad, 3)`` and ``(ncoils,)``.
+            For an objective in U, geometry cotangents have units U/m and current
+            cotangents have units U/A.
+    """
     tuning = get_field_kernel_tuning()
     return _make_d2B_vjp_kernel(
         tuning.coil_chunk_size, tuning.quadrature_block_size,
