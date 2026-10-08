@@ -51,7 +51,9 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
     ``biotsavart``, ``axis`` and ``boozer_surface`` are read at every
     evaluation; ``boozer_surface`` may be a ``BoozerSurfaceJAX`` or a native
     ``BoozerSurface``. Unlike native, ``bs``'s evaluation points are left as
-    they were.
+    they were, and ``bs`` is a parent alongside ``boozer_surface``: coils
+    that only ``bs`` holds are part of ``x`` and ``dJ`` and invalidate ``J``
+    when they change.
     """
 
     def __init__(
@@ -65,7 +67,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         assert type(boozer_surface.surface) is SurfaceXYZTensorFourier
         if not isinstance(bs, BiotSavartJAX):
             raise TypeError(f"NonQuasiSymmetricRatioJAX needs a BiotSavartJAX field, got {type(bs).__name__}.")
-        Optimizable.__init__(self, depends_on=[boozer_surface])
+        Optimizable.__init__(self, depends_on=[boozer_surface, bs])
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
         self.surface = SurfaceXYZTensorFourier(

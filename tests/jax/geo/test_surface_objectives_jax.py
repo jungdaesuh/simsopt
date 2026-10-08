@@ -46,8 +46,10 @@ from scipy.optimize import minimize
 from simsopt._core.derivative import Derivative
 from simsopt.configs import get_data
 from simsopt.field.biotsavart import BiotSavart
+from simsopt.field.coil import Coil, Current
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo.curveobjectives import CurveLength
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.surfaceobjectives import (
     Area,
     Iotas,
@@ -425,6 +427,38 @@ def test_shared_surface_dofs_and_fixed_coil_partials_match_native():
         assert_matches_native(actual_partials.data[owner], native_partials.data[owner], f"partials for {owner}")
     assert_matches_native(objective.dJ(), expected.dJ(), "free gradient after fixing a current")
     np.testing.assert_array_equal(objective.surface.get_dofs(), problem.boozer.surface.get_dofs())
+
+
+def test_coils_only_in_the_objective_field_are_parents():
+    """A coil that ``bs`` holds and the Boozer surface's field does not is
+    part of ``x``, invalidates ``J`` when it changes, and carries the direct
+    derivative in ``dJ`` (the surface does not depend on it, so no re-solve)."""
+    problem = _problem(True)
+    ring = CurveXYZFourier(64, 1)
+    ring_dofs = {"xc(1)": 2.5, "ys(1)": 2.5, "zc(0)": 0.4}
+    ring.x = np.array([ring_dofs.get(name, 0.0) for name in ring.local_dof_names])
+    extra = Coil(ring, Current(2.0e4))
+    objective = NonQuasiSymmetricRatioJAX(problem.boozer, BiotSavartJAX([*problem.coils, extra]))
+    extra_names = set(extra.dof_names)
+    assert extra_names <= set(objective.dof_names)
+    J0 = float(np.asarray(objective.J()))
+    gradient = dict(zip(objective.dof_names, np.asarray(objective.dJ()), strict=True))
+    x0 = np.asarray(extra.x, dtype=np.float64)
+    direction = parity_rng(12).standard_normal(x0.size) * np.maximum(np.abs(x0), 1.0)
+    adjoint = sum(gradient[name] * d for name, d in zip(extra.dof_names, direction, strict=True))
+    step = 1e-6
+
+    def value(sign: float) -> float:
+        extra.x = x0 + sign * step * direction
+        assert objective._J is None
+        assert not problem.boozer.need_to_run_code
+        return float(np.asarray(objective.J()))
+
+    central = (value(1.0) - value(-1.0)) / (2 * step)
+    assert central != 0.0
+    assert abs(adjoint - central) <= 1e-7 * abs(central), f"adjoint {adjoint} != difference {central}"
+    extra.x = x0
+    assert float(np.asarray(objective.J())) == J0
 
 
 def test_evaluation_preserves_the_fields_existing_points():
