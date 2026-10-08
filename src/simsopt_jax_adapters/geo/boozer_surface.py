@@ -149,6 +149,20 @@ class JaxBoozerSurface(Optimizable):
     :meth:`run_code`; the solvers, their arguments, defaults, ``options`` and
     ``res`` keys are native's. Every solve reads the current ``surface``,
     coils, ``label``, ``targetlabel`` and options.
+
+    Args:
+        biotsavart (JaxBiotSavart): Field whose coil DOFs are this solver's parents.
+        surface (SurfaceXYZFourier | SurfaceXYZTensorFourier): Mutable native surface;
+            geometry has shape (nphi, ntheta, 3); exact solves require the tensor class.
+        label (Volume | Area | AspectRatio | ToroidalFlux): Constraint label on the
+            surface or a surface sharing its DOFs.
+        targetlabel (float): Target label in cubic meters (volume), square meters
+            (area), webers (toroidal flux), or dimensionless (aspect ratio).
+        constraint_weight (float | None): Native penalty coefficient for the squared
+            label and z constraints; None for an exact problem. Truthy selects BoozerLS;
+            otherwise run_code uses BoozerExact.
+        options (dict | None): Native solver options overriding the defaults for the
+            selected formulation.
     """
 
     res: dict
@@ -175,11 +189,31 @@ class JaxBoozerSurface(Optimizable):
         self.options = {**_DEFAULT_OPTIONS[self.boozer_type], **(options or {})}
 
     def recompute_bell(self, parent=None):
+        """Invalidate the cached computation after a parent changes.
+
+        Args:
+            parent (Optimizable | None): Parent notifying the solver of changed DOFs;
+                unused.
+
+        Returns:
+            None: Marks the surface solve as needing to run again.
+        """
         self.need_to_run_code = True
 
     def run_code(self, iota, G=None):
         """Native ``run_code``: BoozerExact Newton, or BFGS then the penalty
-        Newton for BoozerLS, with the options' tolerances and caps."""
+        Newton for BoozerLS, with the options' tolerances and caps.
+
+        Args:
+            iota (float): Initial dimensionless rotational transform.
+            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
+                during penalty solves, optimized during exact solves).
+
+        Returns:
+            dict | None: Native solve result stored in res, after updating the surface; None
+                if no solve is needed. BoozerLS runs BFGS then Newton, while BoozerExact
+                runs exact Newton.
+        """
         if not self.need_to_run_code:
             return
 
@@ -257,7 +291,27 @@ class JaxBoozerSurface(Optimizable):
         weight_inv_modB=True,
         verbose=False,
     ):
-        """Native's: SciPy BFGS (or L-BFGS-B) on the penalty."""
+        """Native's: SciPy BFGS (or L-BFGS-B) on the penalty.
+
+        Args:
+            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
+                specific for SciPy).
+            maxiter (int | float): Native iteration or evaluation cap for the selected
+                solver.
+            constraint_weight (float): Native penalty coefficient for the squared label and
+                z constraints.
+            iota (float): Initial dimensionless rotational transform.
+            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
+                during penalty solves, optimized during exact solves).
+            limited_memory (bool): Use L-BFGS-B when true, otherwise BFGS.
+            weight_inv_modB (bool): Divide each point's Boozer residual by the field
+                magnitude in teslas.
+            verbose (bool): Print the native-style solver summary.
+
+        Returns:
+            dict: Cached or newly stored native-style result, including value, gradient,
+                iteration count, success, iota and G; updates the surface DOFs.
+        """
         if not self.need_to_run_code:
             return self.res
         optimize_G = G is not None
@@ -313,7 +367,28 @@ class JaxBoozerSurface(Optimizable):
         weight_inv_modB=True,
         verbose=False,
     ):
-        """Native's: Newton on the penalty with its analytic Hessian."""
+        """Native's: Newton on the penalty with its analytic Hessian.
+
+        Args:
+            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
+                specific for SciPy).
+            maxiter (int | float): Native iteration or evaluation cap for the selected
+                solver.
+            constraint_weight (float): Native penalty coefficient for the squared label and
+                z constraints.
+            iota (float): Initial dimensionless rotational transform.
+            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
+                during penalty solves, optimized during exact solves).
+            stab (float): Diagonal Hessian shift for step solves, in native units.
+            weight_inv_modB (bool): Divide each point's Boozer residual by the field
+                magnitude in teslas.
+            verbose (bool): Print the native-style solver summary.
+
+        Returns:
+            dict: Cached or newly stored native-style result with final derivatives,
+                success, LU factors and coil VJP; updates the surface, including the last
+                iterate before a singular-step error.
+        """
         if not self.need_to_run_code:
             return self.res
         optimize_G = G is not None
@@ -368,7 +443,27 @@ class JaxBoozerSurface(Optimizable):
     ):
         """Native's: SciPy ``least_squares(method=method)`` on the penalty's
         residuals, or for ``method='manual'`` native's damped Gauss-Newton
-        (whose result, as natively, is returned but not stored in ``res``)."""
+        (whose result, as natively, is returned but not stored in ``res``).
+
+        Args:
+            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
+                specific for SciPy).
+            maxiter (int | float): Native iteration or evaluation cap for the selected
+                solver.
+            constraint_weight (float): Native penalty coefficient for the squared label and
+                z constraints.
+            iota (float): Initial dimensionless rotational transform.
+            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
+                during penalty solves, optimized during exact solves).
+            method (str): SciPy least_squares method, or manual for damped Gauss-Newton.
+            weight_inv_modB (bool): Divide each point's Boozer residual by the field
+                magnitude in teslas.
+
+        Returns:
+            dict: Native-style least-squares result after updating the surface. SciPy
+                results are cached in res; the manual result is returned without storing it,
+                as natively.
+        """
         if not self.need_to_run_code:
             return self.res
         optimize_G = G is not None
@@ -434,7 +529,23 @@ class JaxBoozerSurface(Optimizable):
 
     def solve_residual_equation_exactly_newton(self, tol=1e-10, maxiter=10, iota=0.0, G=None, verbose=False):
         """Native's BoozerExact Newton on ``get_stellsym_mask()``'s residuals,
-        the label and, without stellarator symmetry, ``z(0, 0)``."""
+        the label and, without stellarator symmetry, ``z(0, 0)``.
+
+        Args:
+            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
+                specific for SciPy).
+            maxiter (int | float): Native iteration or evaluation cap for the selected
+                solver.
+            iota (float): Initial dimensionless rotational transform.
+            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
+                during penalty solves, optimized during exact solves).
+            verbose (bool): Print the native-style solver summary.
+
+        Returns:
+            dict: Cached or newly stored native-style exact solve result, including
+                residual, Jacobian, mask, LU factors, coil VJP and success; updates the
+                surface after completed steps.
+        """
         if not self.need_to_run_code:
             return self.res
         mask = boozer_exact_residual_mask(self.surface)
@@ -506,6 +617,13 @@ class JaxBoozerResidual(Optimizable):
     them through its own callbacks when the surface is re-solved.
     Shallow copies register with the same solved surface and field, with an
     independent private surface and empty objective caches.
+
+    Args:
+        boozer_surface (JaxBoozerSurface): Mutable BoozerLS solver; the objective owns a
+            separate copy of its solved geometry.
+        bs (JaxBiotSavart): Field with the solver's coils; evaluating this objective
+            leaves its evaluation points unchanged except for shared label callbacks
+            during re-solves.
     """
 
     def __init__(self, boozer_surface: JaxBoozerSurface, bs: JaxBiotSavart):
@@ -533,21 +651,53 @@ class JaxBoozerResidual(Optimizable):
         return copied
 
     def J(self):
+        """Return the cached objective value, computing it when needed.
+
+
+        Returns:
+            float: Cached scalar objective, recomputed through the surface solve when
+                invalidated; dimensionless for the non-QS ratio, native penalty units for
+                BoozerResidual.
+        """
         if self._J is None:
             self.compute()
         return self._J
 
     @derivative_dec
     def dJ(self):
+        """Return the total coil derivative through the surface solve.
+
+
+        Returns:
+            numpy.ndarray | Derivative: Total coil derivative including the surface-solve
+                adjoint. By default the decorator projects to shape (nfree,) in the
+                objective's free DOF order; partials=True returns Derivative.
+        """
         if self._dJ is None:
             self.compute()
         return self._dJ
 
     def recompute_bell(self, parent=None):
+        """Invalidate the cached computation after a parent changes.
+
+        Args:
+            parent (Optimizable | None): Parent notifying this objective of changed DOFs;
+                unused.
+
+        Returns:
+            None: Clears the cached value and derivative.
+        """
         self._J = None
         self._dJ = None
 
     def compute(self):
+        """Compute the objective and its direct-minus-adjoint coil derivative.
+
+
+        Returns:
+            None: Populates the objective value and total coil derivative caches, re-solving
+                the Boozer surface when required.
+        """
         booz_surf = self.boozer_surface
         if booz_surf.need_to_run_code:
             res = booz_surf.res

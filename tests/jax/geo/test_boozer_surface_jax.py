@@ -189,6 +189,7 @@ _EXACT_CASES = {
 
 @pytest.mark.parametrize("name", _EXACT_CASES)
 def test_exact_run_code_matches_native(name):
+    """Exact run_code solves match native surface state, residuals and result metadata."""
     stellsym, label, grid = _EXACT_CASES[name]
     native, jax_problem = _pair("exact", label, stellsym=stellsym, label_grid=grid, newton_tol=1e-10)
     native_res = native.boozer.run_code(_IOTA, G=native.G0)
@@ -265,6 +266,7 @@ def test_non_finite_solves_fail_as_natively():
 
 
 def test_exact_newton_takes_G_from_the_currents():
+    """Exact Newton seeds G from coil currents when no explicit initial G is supplied."""
     native, jax_problem = _pair("exact", optimize_G=False, newton_tol=1e-10)
     native_res = native.boozer.run_code(_IOTA)
     jax_res = jax_problem.boozer.run_code(_IOTA)
@@ -522,6 +524,7 @@ def test_penalty_residual_matches_native(optimize_G, weight_inv_modB):
 
 
 def test_need_to_run_code_caches_results_as_natively():
+    """Cached solves are reused and parent invalidation requests a fresh solve as natively."""
     jax_problem = _problem(True, "exact")
     boozer = jax_problem.boozer
     res = boozer.run_code(_IOTA, G=jax_problem.G0)
@@ -892,6 +895,7 @@ def test_new_values_reuse_the_compiled_programs():
 
 @pytest.mark.parametrize("boozer_type", ["exact", "ls"])
 def test_solves_make_no_implicit_transfers(boozer_type, parity_lane):
+    """Exact and penalty solves use explicit transfers under the runtime transfer guard."""
     native = _problem(False, boozer_type)
     with parity_default_device(parity_lane):
         jax_problem = _problem(True, boozer_type)
@@ -916,6 +920,7 @@ def test_solves_make_no_implicit_transfers(boozer_type, parity_lane):
 
 
 def test_boundary_refuses_unsupported_inputs():
+    """Solver construction rejects unsupported surface classes."""
     _, _, axis, nfp, bs = get_data("ncsx")
     field = JaxBiotSavart(bs.coils)
     rz = SurfaceRZFourier(mpol=2, ntor=2, nfp=nfp)

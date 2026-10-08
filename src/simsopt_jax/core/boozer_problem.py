@@ -442,6 +442,25 @@ def boozer_penalty_residual(
     ``r`` is the Boozer residual over the square root of its length, then
     ``sqrt(w) (label - target)`` and ``sqrt(w) z(0, 0)``; ``0.5 |r|^2`` is the
     penalty of :func:`boozer_penalty_constraints`.
+
+    Args:
+        problem (BoozerProblem): Surface, coil and label snapshot with native units and
+            DOF ordering.
+        x (jax.Array): Shape (nx,) vector [all surface DOFs in meters, dimensionless
+            iota, optional G in tesla meters]; nx = nsurface + 1 + int(optimize_G).
+        derivatives (int): Derivative order, 0 for values, 1 to add first derivatives,
+            or 2 to add second derivatives.
+        optimize_G (bool): Include G as the last decision variable; otherwise use mu0
+            times the sum of absolute coil currents.
+        weight_inv_modB (bool): Divide each point's Boozer residual by the field
+            magnitude in teslas.
+
+    Returns:
+        tuple[jax.Array, ...]: Residual shape (nr,), optionally Jacobian (nr, nx) and
+            Hessians (nr, nx, nx), where nr = 3 * npoints + 2. Boozer entries are
+            divided by sqrt(3 * npoints); the label and z entries are multiplied by
+            sqrt(constraint_weight). Squaring and halving its norm gives
+            boozer_penalty_constraints.
     """
     iota, G, points, constraints = _weighted_constraints(
         problem, x, derivatives=derivatives, optimize_G=optimize_G
