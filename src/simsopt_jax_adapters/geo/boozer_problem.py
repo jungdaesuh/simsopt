@@ -13,7 +13,7 @@ formulations of :mod:`simsopt_jax.core.boozer_problem` evaluate::
     from simsopt_jax_adapters.geo.boozer_problem import boozer_problem
 
     base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
-    field = JaxBiotSavart(bs.coils)
+    biotsavart = JaxBiotSavart(bs.coils)
     surface = SurfaceXYZTensorFourier(
         mpol=3, ntor=3, stellsym=True, nfp=nfp,
         quadpoints_phi=np.linspace(0, 1 / nfp, 12, endpoint=False),
@@ -21,7 +21,7 @@ formulations of :mod:`simsopt_jax.core.boozer_problem` evaluate::
     )
     surface.fit_to_curve(ma, 0.1, flip_theta=True)
     volume = Volume(surface)
-    problem = boozer_problem(field, surface, volume, volume.J(), constraint_weight=100.0)
+    problem = boozer_problem(biotsavart, surface, volume, volume.J(), constraint_weight=100.0)
 
     # As BoozerSurface.boozer_penalty_constraints_vectorized(x, derivatives=2,
     # constraint_weight=100.0) at x = [surface DOFs, iota], G from the currents:
@@ -66,22 +66,22 @@ _LABEL_KINDS: dict[type, LabelKind] = {
 
 
 def boozer_problem(
-    field: JaxBiotSavart,
+    biotsavart: JaxBiotSavart,
     surface: SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier,
     label: Volume | Area | AspectRatio | ToroidalFlux,
     targetlabel: float,
     constraint_weight: float | None = None,
 ) -> BoozerProblem:
-    """The Boozer problem of ``BoozerSurface(field, surface, label, targetlabel,
+    """The Boozer problem of ``BoozerSurface(biotsavart, surface, label, targetlabel,
     constraint_weight)``; ``constraint_weight`` is the penalty's weight.
 
     ``label`` must evaluate ``surface`` itself or a surface of the same class
     that shares its DOFs (native labels built with ``nphi``, ``ntheta`` or
-    ``range``); a ``ToroidalFlux`` label must use ``field``'s coils. Unlike
+    ``range``); a ``ToroidalFlux`` label must use ``biotsavart``'s coils. Unlike
     native ``BoozerSurface``, ``surface`` may also be a ``SurfaceRZFourier``.
     """
-    if not isinstance(field, JaxBiotSavart):
-        raise TypeError(f"boozer_problem needs a JaxBiotSavart field, got {type(field).__name__}.")
+    if not isinstance(biotsavart, JaxBiotSavart):
+        raise TypeError(f"boozer_problem needs a JaxBiotSavart field, got {type(biotsavart).__name__}.")
     kind = _LABEL_KINDS.get(type(label))
     if kind is None:
         raise TypeError(
@@ -94,18 +94,18 @@ def boozer_problem(
     ):
         raise ValueError("the label must evaluate the Boozer surface or a surface sharing its DOFs.")
     if kind == "toroidal_flux":
-        label_coils, coils = list(label.biotsavart.coils), list(field.coils)
+        label_coils, coils = list(label.biotsavart.coils), list(biotsavart.coils)
         if len(label_coils) != len(coils) or any(a is not b for a, b in zip(label_coils, coils)):
             raise ValueError("the ToroidalFlux label must use the field's coils.")
     return make_boozer_problem(
         surface=surface_spec_from_surface(surface),
-        coils=field.coil_set_spec(),
+        coils=biotsavart.coil_set_spec(),
         label=BoozerLabelSpec(
             surface=surface_spec_from_surface(label_surface),
             kind=kind,
-            phi_index=label.idx if kind == "toroidal_flux" else 0,
+            idx=label.idx if kind == "toroidal_flux" else 0,
         ),
-        target_label=targetlabel,
+        targetlabel=targetlabel,
         constraint_weight=constraint_weight,
     )
 
