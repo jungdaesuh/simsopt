@@ -124,12 +124,14 @@ def _assert_matches_native(name: str, native: Optimizable, adapter: Optimizable)
 
 @pytest.mark.parametrize("shared_dofs", [False, True], ids=["symmetric_copies", "shared_dofs_twin"])
 def test_force_objectives_match_native_values_gradients_and_partials(shared_dofs):
+    """Force objectives match native values, free gradients and fixed partials."""
     for name, native, adapter in _objective_pairs(shared_dofs=shared_dofs):
         assert adapter.dof_names == native.dof_names, name
         _assert_matches_native(name, native, adapter)
 
 
 def test_force_gradients_match_central_differences():
+    """Force objective directional gradients match independent central differences."""
     rng = np.random.default_rng(5)
     for name, _, adapter in _objective_pairs(shared_dofs=True):
         if name.startswith("NetFluxes(downsample"):
@@ -321,6 +323,7 @@ def test_degenerate_coils_give_the_native_nans():
     ids=["no_sources", "downsample_not_dividing", "downsample_zero", "unregularized", "quadrature_mismatch"],
 )
 def test_construction_rejects_what_native_rejects(build, message):
+    """Invalid source groups, strides and target regularizations are rejected like native."""
     targets, coils = _coils()
     for cls in (LpCurveForce, JaxLpCurveForce):
         with pytest.raises(ValueError, match=message):

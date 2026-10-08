@@ -55,6 +55,17 @@ def regularized_self_field(gamma, gammadash, gammadashdash, quadpoints, current,
 
     ``quadpoints`` is the curve parameter in ``[0, 1)`` and ``regularization``
     the cross-section term of ``regularization_circ``/``regularization_rect``.
+
+    Args:
+        gamma: Array of shape (n, 3), coil positions in m.
+        gammadash: Array of shape (n, 3), first parameter derivatives in m.
+        gammadashdash: Array of shape (n, 3), second parameter derivatives in m.
+        quadpoints: Array of shape (n,), unit-period parameter coordinates in [0, 1).
+        current: float scalar, current in A.
+        regularization: float scalar, cross-section regularization in m^2.
+
+    Returns:
+        Array of shape (n, 3): regularized self magnetic field in T.
     """
     phi = quadpoints * 2 * jnp.pi
     rc = gamma
@@ -154,6 +165,19 @@ def lp_force(
     The force on each target uses its regularized self field (quadrature
     parameter ``quadpoints`` of the first target, as native) and the field of
     the other targets and the sources.
+
+    Args:
+        targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
+        gammadashdashs: Array of shape (m, n, 3), target second parameter derivatives in m.
+        quadpoints: Array of shape (n,), first target parameter coordinates in [0, 1).
+        regularizations: Array of shape (m,), cross-section regularization in m^2 from regularization_circ/regularization_rect.
+        sources: tuple of coil-group tuples with array shapes (m, n, 3), (m, n, 3), (m,); quadrature counts may differ between groups.
+        p: float scalar, dimensionless exponent.
+        threshold: float scalar, density threshold in MN/m for force or MN for torque.
+        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
+
+    Returns:
+        Array: scalar native integral penalty.
     """
     targets = _sampled(targets, downsample)
     gammadashdashs = gammadashdashs[:, ::downsample]
@@ -180,7 +204,21 @@ def lp_torque(
     downsample: int,
 ):
     """Native ``lp_torque_pure``: the Lp norm of the torque per unit length (MN)^p,
-    about each target's arclength centroid."""
+    about each target's arclength centroid.
+
+    Args:
+        targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
+        gammadashdashs: Array of shape (m, n, 3), target second parameter derivatives in m.
+        quadpoints: Array of shape (n,), first target parameter coordinates in [0, 1).
+        regularizations: Array of shape (m,), cross-section regularization in m^2 from regularization_circ/regularization_rect.
+        sources: tuple of coil-group tuples with array shapes (m, n, 3), (m, n, 3), (m,); quadrature counts may differ between groups.
+        p: float scalar, dimensionless exponent.
+        threshold: float scalar, density threshold in MN/m for force or MN for torque.
+        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
+
+    Returns:
+        Array: scalar native integral penalty.
+    """
     targets = _sampled(targets, downsample)
     gammadashdashs = gammadashdashs[:, ::downsample]
     quadpoints = quadpoints[::downsample]
@@ -201,6 +239,14 @@ def squared_mean_force(targets: CoilGroup, sources: tuple[CoilGroup, ...], downs
     """Native ``squared_mean_force_pure``: ``sum_i |mean force per unit length_i|^2`` in (MN/m)^2.
 
     Only the mutual field enters; a coil's own field exerts no net force.
+
+    Args:
+        targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
+        sources: tuple of coil-group tuples with array shapes (m, n, 3), (m, n, 3), (m,); quadrature counts may differ between groups.
+        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
+
+    Returns:
+        Array: scalar native squared integrated force.
     """
     targets = _sampled(targets, downsample)
     sources = tuple(_sampled(group, downsample) for group in sources)
@@ -215,7 +261,16 @@ def squared_mean_force(targets: CoilGroup, sources: tuple[CoilGroup, ...], downs
 
 
 def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], downsample: int):
-    """Native ``squared_mean_torque``: ``sum_i |mean torque per unit length_i|^2`` in MN^2."""
+    """Native ``squared_mean_torque``: ``sum_i |mean torque per unit length_i|^2`` in MN^2.
+
+    Args:
+        targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
+        sources: tuple of coil-group tuples with array shapes (m, n, 3), (m, n, 3), (m,); quadrature counts may differ between groups.
+        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
+
+    Returns:
+        Array: scalar native squared integrated torque.
+    """
     targets = _sampled(targets, downsample)
     sources = tuple(_sampled(group, downsample) for group in sources)
     gammas, gammadashs, currents = targets
@@ -244,6 +299,15 @@ def coil_inductances(gammas, gammadashs, regularizations, downsample: int):
     Mutual terms use the unregularized kernel; the diagonal uses each coil's
     regularization (native evaluates both kernels on every pair and keeps the
     regularized diagonal; only the diagonal blocks are needed for it).
+
+    Args:
+        gammas: Array of shape (m, n, 3), coil positions in m.
+        gammadashs: Array of shape (m, n, 3), unit-period parameter derivatives in m.
+        regularizations: Array of shape (m,), cross-section regularization in m^2 from regularization_circ/regularization_rect.
+        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
+
+    Returns:
+        Array of shape (m, m): inductance matrix in H.
     """
     gammas = gammas[:, ::downsample]
     gammadashs = gammadashs[:, ::downsample]
@@ -259,7 +323,18 @@ def coil_inductances(gammas, gammadashs, regularizations, downsample: int):
 
 
 def b2energy(gammas, gammadashs, currents, regularizations, downsample: int):
-    """Native ``b2energy_pure``: the vacuum field energy ``(1/2) I^T L I`` in MJ."""
+    """Native ``b2energy_pure``: the vacuum field energy ``(1/2) I^T L I`` in MJ.
+
+    Args:
+        gammas: Array of shape (m, n, 3), coil positions in m.
+        gammadashs: Array of shape (m, n, 3), unit-period parameter derivatives in m.
+        currents: Array of shape (m,), coil currents in A.
+        regularizations: Array of shape (m,), cross-section regularization in m^2 from regularization_circ/regularization_rect.
+        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
+
+    Returns:
+        Array: scalar vacuum field energy in MJ.
+    """
     current_products = currents[:, None] * currents[None, :]
     inductances = coil_inductances(gammas, gammadashs, regularizations, downsample)
     return 0.5 * jnp.sum(current_products * inductances) / 1e6
@@ -270,6 +345,15 @@ def net_flux(target_gamma, target_gammadash, sources: CoilGroup, downsample: int
 
     ``A`` is the Biot-Savart vector potential of the sources at full
     quadrature, evaluated at the target's ``downsample``-strided points.
+
+    Args:
+        target_gamma: Array of shape (n, 3), target positions in m.
+        target_gammadash: Array of shape (n, 3), target parameter derivatives in m.
+        sources: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
+        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
+
+    Returns:
+        Array: scalar net external flux in Wb.
     """
     gammadash = target_gammadash[::downsample]
     vector_potential = biot_savart_A(target_gamma[::downsample], *sources)
