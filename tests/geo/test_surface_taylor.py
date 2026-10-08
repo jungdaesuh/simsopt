@@ -705,5 +705,57 @@ class SurfaceTaylorTests(unittest.TestCase):
                     self.subtest_surface_theta_derivative(surfacetype, stellsym)
 
 
+class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
+    """
+    Second derivatives of a SurfaceXYZTensorFourier with all dimensions clamped,
+    compared to central differences of the first derivatives, for odd and even nfp.
+    """
+    phi0 = 0.13
+    theta0 = 0.37
+    h = 1e-5
+
+    def get_clamped_surface(self, nfp, phis, thetas):
+        s = SurfaceXYZTensorFourier(
+            nfp=nfp, stellsym=False, mpol=2, ntor=2,
+            clamped_dims=[True, True, True],
+            quadpoints_phi=phis, quadpoints_theta=thetas)
+        rng = np.random.default_rng(3)
+        s.x = s.x + 0.05 * rng.standard_normal(len(s.x))
+        return s
+
+    def assert_central_difference(self, exact, fplus, fminus):
+        estimate = (fplus - fminus) / (2 * self.h)
+        err = np.linalg.norm(estimate - exact) / np.linalg.norm(exact)
+        self.assertLess(err, 1e-6, "Second derivative disagrees with central difference")
+
+    def test_clamped_phi2_derivative(self):
+        phis = np.asarray([self.phi0 - self.h, self.phi0, self.phi0 + self.h])
+        thetas = np.asarray([self.theta0])
+        for nfp in [1, 2, 3, 5]:
+            s = self.get_clamped_surface(nfp, phis, thetas)
+            with self.subTest(nfp=nfp, output="gammadash1dash1"):
+                d1 = s.gammadash1()
+                self.assert_central_difference(
+                    s.gammadash1dash1()[1, 0], d1[2, 0], d1[0, 0])
+            with self.subTest(nfp=nfp, output="dgammadash1dash1_by_dcoeff"):
+                dd1 = s.dgammadash1_by_dcoeff()
+                self.assert_central_difference(
+                    s.dgammadash1dash1_by_dcoeff()[1, 0], dd1[2, 0], dd1[0, 0])
+
+    def test_clamped_theta2_derivative(self):
+        phis = np.asarray([self.phi0])
+        thetas = np.asarray([self.theta0 - self.h, self.theta0, self.theta0 + self.h])
+        for nfp in [1, 2, 3, 5]:
+            s = self.get_clamped_surface(nfp, phis, thetas)
+            with self.subTest(nfp=nfp, output="gammadash2dash2"):
+                d2 = s.gammadash2()
+                self.assert_central_difference(
+                    s.gammadash2dash2()[0, 1], d2[0, 2], d2[0, 0])
+            with self.subTest(nfp=nfp, output="dgammadash2dash2_by_dcoeff"):
+                dd2 = s.dgammadash2_by_dcoeff()
+                self.assert_central_difference(
+                    s.dgammadash2dash2_by_dcoeff()[0, 1], dd2[0, 2], dd2[0, 0])
+
+
 if __name__ == "__main__":
     unittest.main()
