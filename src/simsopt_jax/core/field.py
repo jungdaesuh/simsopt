@@ -30,7 +30,7 @@ from .biotsavart import (
     group_coil_data,
 )
 from .curve_geometry import (
-    curve_gamma_and_dash_from_spec,
+    curve_gamma_and_gammadash_from_spec,
     curve_spec_with_dofs,
     optimizable_input_dofs_from_map_spec,
 )
@@ -197,7 +197,7 @@ def grouped_coil_set_spec_from_coil_specs(
         curve_id = id(coil_spec.curve)
         geometry = geometry_by_curve.get(curve_id)
         if geometry is None:
-            geometry = cast(tuple[jax.Array, jax.Array], curve_gamma_and_dash_from_spec(coil_spec.curve))
+            geometry = cast(tuple[jax.Array, jax.Array], curve_gamma_and_gammadash_from_spec(coil_spec.curve))
             geometry_by_curve[curve_id] = geometry
         gamma, gammadash = geometry
         gamma, gammadash, current = apply_coil_symmetry(

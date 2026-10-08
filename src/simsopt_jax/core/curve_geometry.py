@@ -50,8 +50,8 @@ from .specs import (
 )
 
 __all__ = [
-    "curve_gamma_and_dash_from_dofs",
-    "curve_gamma_and_dash_from_spec",
+    "curve_gamma_and_gammadash_from_dofs",
+    "curve_gamma_and_gammadash_from_spec",
     "curve_gamma_vjp_from_dofs",
     "curve_geometry_from_dofs",
     "curve_gammadash_vjp_from_dofs",
@@ -429,7 +429,7 @@ def _add_curve_perturbation(spec: CurvePerturbedSpec, *geometry_terms) -> tuple[
 
 
 def _curve_perturbed_gamma_and_dash_from_dofs(spec: CurvePerturbedSpec, dofs) -> tuple[jax.Array, ...]:
-    base_geometry = curve_gamma_and_dash_from_dofs(
+    base_geometry = curve_gamma_and_gammadash_from_dofs(
         spec.base_curve,
         _curve_perturbed_base_dofs(spec, dofs),
     )
@@ -474,7 +474,7 @@ def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
             quad_spec.rotation_map,
             dofs,
         )
-        gamma, gammadash = curve_gamma_and_dash_from_dofs(
+        gamma, gammadash = curve_gamma_and_gammadash_from_dofs(
             quad_spec.base_curve, base_dofs
         )
         if quad_spec.frame_kind == "frenet":
@@ -578,7 +578,7 @@ def curve_spec_with_dofs(
     return replace(spec, dofs=_as_runtime_array(dofs))
 
 
-def curve_gamma_and_dash_from_spec(spec: CurveSpec):
+def curve_gamma_and_gammadash_from_spec(spec: CurveSpec):
     """Evaluate position and tangent using the DOFs stored in the curve spec.
 
     Args:
@@ -589,10 +589,10 @@ def curve_gamma_and_dash_from_spec(spec: CurveSpec):
         tuple[jax.Array, ...]: Position and its first 1 normalized-parameter
             derivative(s), each shape (Q, 3), in meters.
     """
-    return curve_gamma_and_dash_from_dofs(spec, spec.dofs)
+    return curve_gamma_and_gammadash_from_dofs(spec, spec.dofs)
 
 
-def curve_gamma_and_dash_from_dofs(
+def curve_gamma_and_gammadash_from_dofs(
     spec: CurveSpec,
     dofs,
     *,
@@ -682,7 +682,7 @@ def curve_geometry_from_dofs(
 
 def _curve_geometry_term_from_dofs(spec: CurveSpec, dofs, term_index: int):
     if term_index < 2:
-        return curve_gamma_and_dash_from_dofs(spec, dofs)[term_index]
+        return curve_gamma_and_gammadash_from_dofs(spec, dofs)[term_index]
     if term_index == 2:
         return curve_geometry_from_dofs(spec, dofs)[2]
     return _curve_geometry_with_third_derivative_from_dofs(spec, dofs)[3]
@@ -818,7 +818,7 @@ def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
     dgd_jax = _as_runtime_array(dgd)
 
     def outputs(curve_x):
-        return curve_gamma_and_dash_from_dofs(spec, curve_x)
+        return curve_gamma_and_gammadash_from_dofs(spec, curve_x)
 
     _, pullback = jax.vjp(outputs, curve_dofs)
     (coeff_cotangent,) = pullback((dg_jax, dgd_jax))
