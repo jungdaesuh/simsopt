@@ -301,3 +301,15 @@ assert jnp.ones(2).device.platform == device
             env=environment,
             check=True,
         )
+
+    def test_curve_length_preserves_incremental_arclength_derivative(self):
+        """CurveLength retains its upstream dJ_dl callable and exact mean gradient."""
+        curve = create_equally_spaced_curves(
+            1, 1, False, R0=1.0, R1=0.5, order=2, numquadpoints=32,
+        )[0]
+        length = CurveLength(curve)
+        arclength = curve.incremental_arclength()
+        self.assertTrue(callable(length.dJ_dl))
+        self.assertTrue(jax.numpy.array_equal(
+            length.dJ_dl(arclength), jax.numpy.full_like(arclength, 1.0 / arclength.size),
+        ))
