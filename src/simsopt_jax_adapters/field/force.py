@@ -205,11 +205,11 @@ class _LpObjective(_CoilSetObjective):
 
 
 class JaxLpCurveForce(_LpObjective):
-    """JAX-backed mirror of :class:`~simsopt.field.force.LpCurveForce`.
+    """JAX-backed native LpCurveForce integral penalty.
 
-    ``J = (1/p) sum_i (1/n) sum_k max(|dF/dl| - threshold, 0)^p |gammadash|``
-    in (MN/m)^p, with the force per unit length on each regularized target
-    coil from its self field, the other targets and the sources.
+    J = (1/p) sum_i mean(max(|dF_i/dl| - threshold, 0)^p |gammadash_i|)
+    in (MN/m)^p m. Force density includes regularized self fields and mutual
+    fields. The integral has no p-th root or coil-length normalization.
 
     Args:
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
@@ -249,10 +249,11 @@ class JaxLpCurveForce(_LpObjective):
 
 
 class JaxLpCurveTorque(_LpObjective):
-    """JAX-backed mirror of :class:`~simsopt.field.force.LpCurveTorque`.
+    """JAX-backed native LpCurveTorque integral penalty.
 
-    As :class:`JaxLpCurveForce` for the torque per unit length (MN) about
-    each target coil's arclength centroid.
+    As JaxLpCurveForce for torque density in MN about each target arclength
+    centroid; the objective has units MN^p m, with no p-th root or length
+    normalization.
 
     Args:
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
@@ -305,10 +306,11 @@ class _SquaredMeanObjective(_CoilSetObjective):
 
 
 class JaxSquaredMeanForce(_SquaredMeanObjective):
-    """JAX-backed mirror of :class:`~simsopt.field.force.SquaredMeanForce`.
+    """JAX-backed native SquaredMeanForce, using integrated force.
 
-    ``J = sum_i |(1/L_i) int dF_i/dl dl|^2`` in (MN/m)^2 over the target
-    coils, from the other targets and the sources.
+    J = sum_i |integral dF_i/dl dl|^2 in MN^2. Only mutual fields contribute.
+    The native name denotes a quadrature mean of force_density * |gammadash|;
+    there is no division by coil length.
 
     Args:
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
@@ -343,10 +345,11 @@ class JaxSquaredMeanForce(_SquaredMeanObjective):
 
 
 class JaxSquaredMeanTorque(_SquaredMeanObjective):
-    """JAX-backed mirror of :class:`~simsopt.field.force.SquaredMeanTorque`.
+    """JAX-backed native SquaredMeanTorque, using integrated torque.
 
-    As :class:`JaxSquaredMeanForce` for the torque per unit length (MN) about
-    each target coil's arclength centroid.
+    J = sum_i |integral dT_i/dl dl|^2 in (MN m)^2, about each target
+    arclength centroid. Only mutual fields contribute; quadrature integrates
+    torque density without division by coil length.
 
     Args:
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.

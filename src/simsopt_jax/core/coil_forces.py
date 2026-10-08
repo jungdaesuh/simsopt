@@ -160,11 +160,11 @@ def lp_force(
     threshold,
     downsample: int,
 ):
-    """Native ``lp_force_pure``: the Lp norm of the force per unit length (MN/m)^p.
+    """Native lp_force_pure integral penalty in (MN/m)^p m.
 
-    The force on each target uses its regularized self field (quadrature
-    parameter ``quadpoints`` of the first target, as native) and the field of
-    the other targets and the sources.
+    Compute (1/p) sum_i mean(max(|dF_i/dl| - threshold, 0)^p |gammadash_i|),
+    including regularized self fields. There is no p-th root or coil-length
+    normalization; all derivatives use the unit-period curve parameter.
 
     Args:
         targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
@@ -177,7 +177,7 @@ def lp_force(
         downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
 
     Returns:
-        Array: scalar native integral penalty.
+        Array: scalar integral penalty in (MN/m)^p m.
     """
     targets = _sampled(targets, downsample)
     gammadashdashs = gammadashdashs[:, ::downsample]
@@ -203,8 +203,11 @@ def lp_torque(
     threshold,
     downsample: int,
 ):
-    """Native ``lp_torque_pure``: the Lp norm of the torque per unit length (MN)^p,
-    about each target's arclength centroid.
+    """Native lp_torque_pure integral penalty in MN^p m.
+
+    Compute the same thresholded integral as lp_force for torque density
+    about each target arclength centroid, in MN. There is no p-th root or
+    coil-length normalization.
 
     Args:
         targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
@@ -217,7 +220,7 @@ def lp_torque(
         downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
 
     Returns:
-        Array: scalar native integral penalty.
+        Array: scalar integral penalty in MN^p m.
     """
     targets = _sampled(targets, downsample)
     gammadashdashs = gammadashdashs[:, ::downsample]
@@ -236,9 +239,10 @@ def lp_torque(
 
 
 def squared_mean_force(targets: CoilGroup, sources: tuple[CoilGroup, ...], downsample: int):
-    """Native ``squared_mean_force_pure``: ``sum_i |mean force per unit length_i|^2`` in (MN/m)^2.
+    """Native squared_mean_force_pure: sum_i |integral dF_i/dl dl|^2 in MN^2.
 
-    Only the mutual field enters; a coil's own field exerts no net force.
+    Quadrature computes mean(force_density * |gammadash|), without division
+    by coil length. Only mutual fields enter.
 
     Args:
         targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
@@ -246,7 +250,7 @@ def squared_mean_force(targets: CoilGroup, sources: tuple[CoilGroup, ...], downs
         downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
 
     Returns:
-        Array: scalar native squared integrated force.
+        Array: scalar squared integrated force in MN^2.
     """
     targets = _sampled(targets, downsample)
     sources = tuple(_sampled(group, downsample) for group in sources)
@@ -261,7 +265,10 @@ def squared_mean_force(targets: CoilGroup, sources: tuple[CoilGroup, ...], downs
 
 
 def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], downsample: int):
-    """Native ``squared_mean_torque``: ``sum_i |mean torque per unit length_i|^2`` in MN^2.
+    """Native squared_mean_torque: sum_i |integral dT_i/dl dl|^2 in (MN m)^2.
+
+    Torque density is about each target arclength centroid. Quadrature
+    integrates it without dividing by coil length; only mutual fields enter.
 
     Args:
         targets: tuple of arrays (gamma, gammadash, currents), shapes (m, n, 3), (m, n, 3), (m,), in m, m per unit-period parameter, and A.
@@ -269,7 +276,7 @@ def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], down
         downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
 
     Returns:
-        Array: scalar native squared integrated torque.
+        Array: scalar squared integrated torque in (MN m)^2.
     """
     targets = _sampled(targets, downsample)
     sources = tuple(_sampled(group, downsample) for group in sources)
