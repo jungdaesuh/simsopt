@@ -57,15 +57,18 @@ assert jax.config.jax_enable_x64
 
 
 @pytest.mark.parametrize("x64_setting", ["false", "0"])
-def test_native_import_respects_explicit_x64_setting_in_fresh_process(x64_setting):
+def test_native_import_enables_x64_despite_explicit_disable_in_fresh_process(x64_setting):
     environment = _fresh_environment()
+    environment["JAX_PLATFORMS"] = "cpu"
     environment["JAX_ENABLE_X64"] = x64_setting
     code = '''
 import jax
+
+assert not jax.config.jax_enable_x64
 from simsopt import geo
 
 assert jax.default_backend() == "cpu"
-assert not jax.config.jax_enable_x64
+assert jax.config.jax_enable_x64
 '''
     subprocess.run([sys.executable, "-c", code], env=environment, check=True)
 
