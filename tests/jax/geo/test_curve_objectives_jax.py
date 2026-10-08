@@ -82,6 +82,7 @@ def _distance_child_environment():
 
 @pytest.mark.parametrize("kind", ["curve_curve", "curve_surface"])
 def test_shortest_distance_before_backend_configuration_keeps_jax_uninitialized(kind):
+    """Shortest-distance queries match native without initializing a JAX backend."""
     code = _DISTANCE_CHILD_SETUP + """
 assert not xla_bridge.backends_are_initialized()
 for _ in range(2):
@@ -100,6 +101,7 @@ np.testing.assert_allclose(adapter.dJ(), native.dJ(), rtol=1e-11, atol=1e-13)
 
 @pytest.mark.parametrize("kind", ["curve_curve", "curve_surface"])
 def test_distance_operand_cache_follows_default_device_scopes(kind):
+    """Changing default devices replaces operands while reusing host candidates."""
     code = _DISTANCE_CHILD_SETUP + """
 set_backend("jax", device="cpu", intent="parity")
 first, second = jax.devices("cpu")[:2]
@@ -237,12 +239,14 @@ def _assert_matches_native_including_nans(
 
 @pytest.mark.parametrize("shared_curve", [False, True], ids=["symmetric_copies", "shared_dofs_twin"])
 def test_penalties_match_native_values_gradients_and_partials(shared_curve):
+    """Geometry penalties match native values, free gradients and fixed partials."""
     for name, native, adapter in _all_objectives(shared_curve=shared_curve):
         assert adapter.dof_names == native.dof_names, name
         _assert_matches_native_including_nans(name, native, adapter, active=True)
 
 
 def test_penalty_gradients_match_central_differences():
+    """Geometry penalty gradients match independent central differences."""
     rng = np.random.default_rng(3)
     for name, _, adapter in _all_objectives(shared_curve=True):
         x0 = np.array(adapter.x, dtype=float)
@@ -259,12 +263,14 @@ def test_penalty_gradients_match_central_differences():
 
 
 def test_penalties_follow_dof_changes_like_native():
+    """Geometry penalties follow shared DOF changes like their native counterparts."""
     for name, native, adapter in _all_objectives():
         adapter.x = np.asarray(adapter.x) + 0.01
         _assert_matches_native_including_nans(name, native, adapter, active=True)
 
 
 def test_curve_surface_distance_depends_on_curves_only():
+    """Curve-surface distance exposes curve dependencies and excludes surface DOFs."""
     base, curves = _curves()
     surface = _surface()
     native = CurveSurfaceDistance(curves, surface, _CS_THRESHOLD)
@@ -317,6 +323,7 @@ def test_shortest_distances_match_native(threshold):
 
 
 def test_curve_curve_distance_follows_num_basecurves():
+    """The base-curve count selects the same curve pairs as native."""
     base, curves = _curves()
     native = CurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=1)
     adapter = JaxCurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=1)
@@ -331,6 +338,7 @@ def test_curve_curve_distance_follows_num_basecurves():
 
 @pytest.mark.parametrize("objective_index", [0, 1, 2], ids=["curve_curve", "downsampled", "curve_surface"])
 def test_distance_evaluations_share_one_native_candidate_search(monkeypatch, objective_index):
+    """Value, gradient and shortest-distance calls reuse one native search."""
     base, curves = _curves()
     name, native, adapter = _distance_objectives(curves, _surface(), len(base))[objective_index]
     searches = []
@@ -349,6 +357,7 @@ def test_distance_evaluations_share_one_native_candidate_search(monkeypatch, obj
 
 @pytest.mark.parametrize("change", ["free_dofs", "fixed_dofs", "threshold", "downsample", "base_count", "grid", "backend"])
 def test_curve_curve_snapshot_follows_geometry_parameters_and_placement(monkeypatch, change):
+    """Geometry, distance settings and placement changes invalidate curve operands."""
     base, curves = _curves()
     adapter = JaxCurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base))
     adapter.J()
@@ -388,6 +397,7 @@ def test_curve_curve_snapshot_follows_geometry_parameters_and_placement(monkeypa
 
 @pytest.mark.parametrize("change", ["surface_dofs", "surface_grid", "normal_only", "tangent_only", "threshold"])
 def test_curve_surface_snapshot_follows_surface_and_operand_changes(monkeypatch, change):
+    """Surface geometry and operand changes invalidate the curve-surface snapshot."""
     _, curves = _curves()
     surface = _surface()
     adapter = JaxCurveSurfaceDistance(curves, surface, _CS_THRESHOLD)

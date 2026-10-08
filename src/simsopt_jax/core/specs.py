@@ -1227,12 +1227,17 @@ def make_grouped_coil_set_spec(groups: Iterable[CoilGroupSpec | tuple[jax.Array,
     meta=("definition", "nphi", "ntheta"),
 )
 class FixedSurfaceFluxSpec:
-    """Immutable Stage-II flux contract on a fixed surface.
+    """Immutable fixed-surface flux operands; arrays are pytree leaves.
 
-    ``points`` is the ``(nphi * ntheta, 3)`` evaluation cloud, ``normal`` the
-    unnormalized ``(nphi, ntheta, 3)`` surface normal and ``target`` the
-    ``(nphi, ntheta)`` target normal field. ``definition`` selects the
-    ``integral_BdotN`` variant.
+    The grid dimensions and definition are static metadata.
+
+    Args:
+        points: Array of shape (nphi*ntheta, 3), flattened surface positions in m.
+        normal: Array of shape (nphi, ntheta, 3), unnormalized surface normals in m^2.
+        target: Array of shape (nphi, ntheta), target normal field in T; an empty array means zero.
+        definition: str, "quadratic flux", "normalized", or "local".
+        nphi: int, number of toroidal quadrature points.
+        ntheta: int, number of poloidal quadrature points.
     """
 
     points: jax.Array
@@ -1250,6 +1255,19 @@ def make_fixed_surface_flux_spec(
     target: object,
     definition: str,
 ) -> FixedSurfaceFluxSpec:
+    """Snapshot fixed-surface operands as float64 arrays on the active device.
+
+    Grid dimensions are inferred from normal.shape.
+
+    Args:
+        points: Array of shape (nphi*ntheta, 3), flattened surface positions in m.
+        normal: Array of shape (nphi, ntheta, 3), unnormalized surface normals in m^2.
+        target: Array of shape (nphi, ntheta), target normal field in T; an empty array means zero.
+        definition: str, "quadratic flux", "normalized", or "local".
+
+    Returns:
+        FixedSurfaceFluxSpec object: immutable device operands and grid metadata.
+    """
     normal_jax = _as_float64_array(normal)
     return FixedSurfaceFluxSpec(
         points=_as_float64_array(points),

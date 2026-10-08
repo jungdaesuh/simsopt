@@ -85,6 +85,7 @@ def _objectives(definition, target_kind="none", *, shared_dofs=False):
     ids=["zero_target", "array_target", "empty_target"],
 )
 def test_integral_bdotn_matches_cpp(definition, target_kind, empty):
+    """All flux definitions and target forms match the native C++ integral."""
     rng = np.random.default_rng(5)
     B = rng.standard_normal((6, 7, 3))
     normal = rng.standard_normal((6, 7, 3))
@@ -121,6 +122,7 @@ def test_integral_bdotn_singular_inputs_match_cpp(definition, case):
     ids=["symmetric_coils", "target_and_shared_dofs"],
 )
 def test_squared_flux_matches_native_value_gradient_and_partials(definition, target_kind, shared_dofs):
+    """Squared flux matches native values, free gradients and fixed partials."""
     _, native, adapter = _objectives(definition, target_kind, shared_dofs=shared_dofs)
     assert adapter.dof_names == native.dof_names
     np.testing.assert_allclose(adapter.J(), native.J(), rtol=1e-12, atol=1e-14)
@@ -137,6 +139,7 @@ def test_squared_flux_matches_native_value_gradient_and_partials(definition, tar
 
 @pytest.mark.parametrize("definition", _DEFINITIONS)
 def test_squared_flux_gradient_matches_central_differences(definition):
+    """Squared-flux gradients agree with independent central differences."""
     _, _, adapter = _objectives(definition, "array", shared_dofs=True)
     x0 = np.array(adapter.x, dtype=float)
     direction = np.random.default_rng(2).standard_normal(x0.shape) * np.maximum(np.abs(x0), 1.0)
@@ -150,6 +153,7 @@ def test_squared_flux_gradient_matches_central_differences(definition):
 
 
 def test_squared_flux_follows_dof_changes_and_sets_field_points():
+    """Construction sets surface evaluation points and values follow coil DOF changes."""
     surface, native, adapter = _objectives("quadratic flux")
     np.testing.assert_array_equal(
         adapter.field.get_points_cart(), surface.gamma().reshape((-1, 3))
@@ -160,6 +164,7 @@ def test_squared_flux_follows_dof_changes_and_sets_field_points():
 
 
 def test_target_and_definition_are_read_at_every_evaluation():
+    """Target and definition mutations are reflected in values, gradients and specs."""
     surface, native, adapter = _objectives("quadratic flux", "none", shared_dofs=True)
     adapter.J()
     adapter.dJ()
@@ -192,6 +197,7 @@ def test_squared_flux_makes_no_implicit_transfers():
 
 
 def test_squared_flux_rejects_surface_changes_after_construction():
+    """Changing captured surface DOFs rejects value, gradient and spec evaluation."""
     surface, _, adapter = _objectives("quadratic flux")
     surface.set_rc(1, 0, surface.get_rc(1, 0) * 1.01)
     for evaluate in (adapter.J, adapter.dJ, adapter.fixed_surface_flux_spec):
@@ -200,6 +206,7 @@ def test_squared_flux_rejects_surface_changes_after_construction():
 
 
 def test_squared_flux_rejects_unknown_definition():
+    """An unsupported flux definition raises ValueError at construction."""
     surface = _surface()
     with pytest.raises(ValueError, match="Unrecognized option"):
         JaxSquaredFlux(surface, JaxBiotSavart(_coils(surface)), definition="flux")

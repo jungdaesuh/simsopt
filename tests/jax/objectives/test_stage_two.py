@@ -149,6 +149,7 @@ def test_fused_objective_matches_native_composite(
     length_target, length_mode: Literal["max", "identity"],
     msc_mode: Literal["max", "identity"], shared_dofs,
 ):
+    """The fused value and gradient match the native composite with shared DOFs."""
     config = replace(
         _ACTIVE,
         length_target=length_target,
@@ -162,6 +163,7 @@ def test_fused_objective_matches_native_composite(
 
 
 def test_fused_diagnostics_match_native_terms():
+    """Flux, penalty, normal-field and length diagnostics match native quantities."""
     field, flux, native, problem = _problem(_ACTIVE)
     surface = flux.surface
     objective, squared_flux, penalty, max_normal_field, length = (
@@ -179,6 +181,7 @@ def test_fused_diagnostics_match_native_terms():
 
 
 def test_fused_gradient_matches_central_differences():
+    """The fused directional derivative agrees with central differences."""
     field, _, _, problem = _problem(_ACTIVE, shared_dofs=True)
     x0 = jnp.asarray(field.x)
     direction = jnp.asarray(np.random.default_rng(4).standard_normal(x0.shape))
@@ -194,6 +197,7 @@ def test_fused_gradient_matches_central_differences():
 
 @pytest.mark.parametrize("weight", [None, 0.0], ids=["term_removed", "zero_weight"])
 def test_removed_and_zero_weight_terms_match_native(weight):
+    """Absent and zero-weight terms preserve native composite values and gradients."""
     config = replace(_ACTIVE, curve_surface_weight=weight, curvature_weight=weight)
     field, _, native, problem = _problem(config)
     value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
@@ -207,6 +211,7 @@ def test_removed_and_zero_weight_terms_match_native(weight):
     ids=["smaller", "zero", "integer_zero", "integer", "float32"],
 )
 def test_rebuilt_problem_with_new_weights_reuses_the_compiled_program(length_weight):
+    """Changing numeric weights reuses compilation and preserves native parity."""
     field, flux, _, problem = _problem(_ACTIVE)
     traces = []
 
@@ -275,6 +280,7 @@ def test_distance_terms_of_a_far_degenerate_coil_have_finite_zero_gradients():
 
 
 def test_fused_program_compiles_and_runs_under_the_strict_transfer_guard():
+    """The fused value and gradient compile and run with explicit transfers only."""
     field, _, _, problem = _problem(_ACTIVE)
     value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
     x = field.x
@@ -287,6 +293,7 @@ def test_fused_program_compiles_and_runs_under_the_strict_transfer_guard():
 
 
 def test_problem_rejects_invalid_configurations():
+    """Invalid counts, nonfinite weights, modes and partial surface overrides are rejected."""
     field, flux, _, _ = _problem(_ACTIVE)
     flux_spec = flux.fixed_surface_flux_spec()
     invalid = (
@@ -303,6 +310,7 @@ def test_problem_rejects_invalid_configurations():
 
 
 def test_fused_problem_requires_one_quadrature_grid():
+    """Fused problem construction rejects unequal coil quadrature counts."""
     surface = _surface()
     _, coils = _coils(surface)
     odd = CurveXYZFourier(30, 3)

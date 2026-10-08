@@ -29,13 +29,18 @@ __all__ = [
 
 
 def distance_candidate_pure(points1, points2, minimum_distance):
-    """Whether two points of ``points1`` and ``points2`` are closer than ``d_min``.
+    """Test whether any sampled point pair is strictly closer than the threshold.
 
-    The final test of ``simsoptpp``'s candidate search, in its expression:
-    ``dx*dx + dy*dy + dz*dz < d_min*d_min`` with ``d = points1_i - points2_j``.
-    Where its compiler, or XLA, contracts these products into fused
-    multiply-adds, the last bit of the squared distance, and so a pair at
-    exactly the threshold, can be classified differently from the native build.
+    The squared-distance comparison mirrors the native candidate search; fused
+    multiply-add rounding can change classification exactly at the threshold.
+
+    Args:
+        points1: Array of shape (n, 3), positions in m.
+        points2: Array of shape (k, 3), positions in m.
+        minimum_distance: float scalar, distance threshold in m.
+
+    Returns:
+        Array: bool scalar candidate decision.
     """
     delta = points1[:, None, :] - points2[None, :, :]
     squared_distances = (
@@ -70,13 +75,28 @@ def _candidate_pair_penalty(points1, weights1, points2, weights2, minimum_distan
 
 @jax.jit
 def curve_length_from_incremental_arclength_pure(incremental_arclength):
-    """Return the curve length, the mean of the incremental arclengths."""
+    """Compute length by averaging the speed over a unit-period quadrature grid.
+
+    Args:
+        incremental_arclength: Array of shape (n,), speed in m per unit parameter.
+
+    Returns:
+        Array: scalar curve length in m.
+    """
     return jnp.mean(incremental_arclength)
 
 
 @jax.jit
 def kappa_pure(d1gamma, d2gamma):
-    """Return pointwise curvature for first and second curve derivatives."""
+    """Compute curvature as |gamma prime cross gamma double prime| / |gamma prime|^3.
+
+    Args:
+        d1gamma: Array of shape (n, 3), derivative in m with respect to the unit-period parameter.
+        d2gamma: Array of shape (n, 3), second parameter derivative in m.
+
+    Returns:
+        Array of shape (n,): curvature in 1/m.
+    """
     return (
         jnp.linalg.norm(jnp.cross(d1gamma, d2gamma), axis=1)
         / jnp.linalg.norm(d1gamma, axis=1) ** 3
@@ -85,7 +105,19 @@ def kappa_pure(d1gamma, d2gamma):
 
 @jax.jit
 def curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa):
-    """Return ``(1/p) mean(max(kappa - desired_kappa, 0)^p |gammadash|)`` (LpCurveCurvature)."""
+    """Compute (1/p) mean(max(kappa - desired_kappa, 0)^p |gammadash|).
+
+    This is the native integral penalty without a p-th root.
+
+    Args:
+        kappa: Array of shape (n,), curvature in 1/m.
+        gammadash: Array of shape (n, 3), derivative in m with respect to the unit-period parameter.
+        p: float scalar, dimensionless exponent.
+        desired_kappa: float scalar, curvature threshold in 1/m.
+
+    Returns:
+        Array: scalar penalty in m^(1-p).
+    """
     p_jax = jnp.asarray(p, dtype=kappa.dtype)
     desired_kappa_jax = jnp.asarray(desired_kappa, dtype=kappa.dtype)
     zero = jnp.asarray(0.0, dtype=kappa.dtype)
@@ -97,7 +129,15 @@ def curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa):
 
 @jax.jit
 def mean_squared_curvature_pure(kappa, gammadash):
-    """Return ``mean(kappa^2 |gammadash|) / mean(|gammadash|)`` (MeanSquaredCurvature)."""
+    """Compute mean(kappa^2 |gammadash|) / mean(|gammadash|).
+
+    Args:
+        kappa: Array of shape (n,), curvature in 1/m.
+        gammadash: Array of shape (n, 3), derivative in m with respect to the unit-period parameter.
+
+    Returns:
+        Array: scalar arclength-averaged squared curvature in 1/m^2.
+    """
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     return jnp.mean(kappa**2 * arc_length) / jnp.mean(arc_length)
 
@@ -110,11 +150,22 @@ def curve_curve_distance_penalty_pure(
     minimum_distance,
     candidate,
 ):
-    """Return one curve pair's CurveCurveDistance term.
+    """Evaluate one native curve-pair distance penalty.
 
-    ``sum(|gammadash1_i| |gammadash2_j| max(d_min - |gamma1_i - gamma2_j|, 0)^2)``
-    divided by the number of point pairs, for a candidate pair (``candidate``
-    true); else 0.
+    The term is mean(|gammadash1_i| |gammadash2_j|
+    max(minimum_distance - |gamma1_i - gamma2_j|, 0)^2) over all point pairs
+    of a candidate pair; otherwise it is zero.
+
+    Args:
+        gamma1: Array of shape (n, 3), positions in m.
+        gammadash1: Array of shape (n, 3), derivative in m with respect to the unit-period parameter.
+        gamma2: Array of shape (k, 3), second curve positions in m.
+        gammadash2: Array of shape (k, 3), second curve parameter derivative in m.
+        minimum_distance: float scalar, distance threshold in m.
+        candidate: bool scalar, native candidate-search decision; false gives zero value and gradient.
+
+    Returns:
+        Array: scalar penalty in m^4.
     """
     gamma1 = jnp.asarray(gamma1)
     gammadash1 = jnp.asarray(gammadash1)
@@ -135,11 +186,22 @@ def curve_surface_distance_penalty_pure(
     minimum_distance,
     candidate,
 ):
-    """Return one curve's CurveSurfaceDistance term.
+    """Evaluate one native curve-surface distance penalty.
 
-    ``mean(|gammadash_i| |n_j| max(d_min - |gamma_i - x_j|, 0)^2)`` over curve
-    points ``i`` and surface points ``x_j`` with (unnormalized) normals ``n_j``,
-    for a candidate curve (``candidate`` true); else 0.
+    The term is mean(|curve_gammadash_i| |surface_normal_j|
+    max(minimum_distance - |curve_gamma_i - surface_gamma_j|, 0)^2)
+    over all point pairs of a candidate curve; otherwise it is zero.
+
+    Args:
+        curve_gamma: Array of shape (n, 3), positions in m.
+        curve_gammadash: Array of shape (n, 3), derivative in m with respect to the unit-period parameter.
+        surface_gamma: Array of shape (k, 3), flattened surface positions in m.
+        surface_normal: Array of shape (k, 3), unnormalized surface normals in m^2.
+        minimum_distance: float scalar, distance threshold in m.
+        candidate: bool scalar, native candidate-search decision; false gives zero value and gradient.
+
+    Returns:
+        Array: scalar penalty in m^5.
     """
     curve_gamma = jnp.asarray(curve_gamma)
     curve_gammadash = jnp.asarray(curve_gammadash)
