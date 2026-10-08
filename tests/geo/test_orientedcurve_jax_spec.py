@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from jax_test_support import fixture_jax_runtime_guard  # noqa: F401
+from unittest_jax_support import JaxTestCase
 
-import jax
+import jax  # noqa: F401
+
+
 import numpy as np
 
 from simsopt_jax.core import (
@@ -14,7 +16,13 @@ from simsopt_jax.core import (
 )
 
 
-_DIRECT_KERNEL = {'rtol': 1e-10, 'atol': 1e-12, 'requires_same_state': True, 'requires_direct_cpp_oracle': True, 'vector_parity_required': True}
+_DIRECT_KERNEL = {
+    "rtol": 1e-10,
+    "atol": 1e-12,
+    "requires_same_state": True,
+    "requires_direct_cpp_oracle": True,
+    "vector_parity_required": True,
+}
 _RTOL = _DIRECT_KERNEL["rtol"]
 _ATOL = _DIRECT_KERNEL["atol"]
 
@@ -70,52 +78,56 @@ def _oriented_curve_numpy(dofs: np.ndarray, quadpoints: np.ndarray, order: int):
     return gamma @ rotation + xyz, gammadash @ rotation
 
 
-def test_oriented_curve_spec_matches_numpy_geometry_oracle():
-    """JIT evaluation of oriented Fourier position and tangent matches an independent
-    NumPy oracle."""
-    quadpoints = np.linspace(0.0, 1.0, 16, endpoint=False)
-    dofs = np.array(
-        [
-            1.2,
-            -0.1,
-            0.3,
-            0.2,
-            -0.15,
-            0.05,
-            0.1,
-            -0.04,
-            0.03,
-            0.2,
-            -0.05,
-            0.07,
-            0.09,
-            -0.11,
-            0.08,
-            0.13,
-            -0.02,
-            0.06,
-        ],
-        dtype=np.float64,
-    )
+class TestOrientedcurveJaxSpec(JaxTestCase):
+    def test_oriented_curve_spec_matches_numpy_geometry_oracle(self):
+        """JIT evaluation of oriented Fourier position and tangent matches an independent
+        NumPy oracle."""
+        quadpoints = np.linspace(0.0, 1.0, 16, endpoint=False)
+        dofs = np.array(
+            [
+                1.2,
+                -0.1,
+                0.3,
+                0.2,
+                -0.15,
+                0.05,
+                0.1,
+                -0.04,
+                0.03,
+                0.2,
+                -0.05,
+                0.07,
+                0.09,
+                -0.11,
+                0.08,
+                0.13,
+                -0.02,
+                0.06,
+            ],
+            dtype=np.float64,
+        )
 
-    spec = make_oriented_curve_xyzfourier_spec(
-        dofs=dofs,
-        quadpoints=quadpoints,
-        order=2,
-    )
-    assert isinstance(spec, OrientedCurveXYZFourierSpec)
-    gamma, gammadash = jax.jit(curve_gamma_and_gammadash_from_spec)(spec)
-    expected_gamma, expected_gammadash = _oriented_curve_numpy(dofs, quadpoints, 2)
+        spec = make_oriented_curve_xyzfourier_spec(
+            dofs=dofs,
+            quadpoints=quadpoints,
+            order=2,
+        )
+        self.assertTrue(
+            isinstance(spec, OrientedCurveXYZFourierSpec),
+            "isinstance(spec, OrientedCurveXYZFourierSpec)",
+        )
+        gamma, gammadash = jax.jit(curve_gamma_and_gammadash_from_spec)(spec)
+        expected_gamma, expected_gammadash = _oriented_curve_numpy(dofs, quadpoints, 2)
 
-    np.testing.assert_allclose(
-        np.asarray(gamma),
-        expected_gamma,
-        rtol=_RTOL,
-        atol=_ATOL,
-    )
-    np.testing.assert_allclose(
-        np.asarray(gammadash),
-        expected_gammadash,
-        rtol=_RTOL,
-        atol=_ATOL,
-    )
+        np.testing.assert_allclose(
+            np.asarray(gamma),
+            expected_gamma,
+            rtol=_RTOL,
+            atol=_ATOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(gammadash),
+            expected_gammadash,
+            rtol=_RTOL,
+            atol=_ATOL,
+        )

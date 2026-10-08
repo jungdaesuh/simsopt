@@ -1,23 +1,46 @@
-"""JAX test runtime for the JAX-dependent test modules.
-
-Importing this module pins XLA's CUDA autotuners in ``XLA_FLAGS`` and forces
-``jax_enable_x64`` for the whole process. A test module opts in by making
-``from jax_test_support import fixture_jax_runtime_guard`` its first import,
-which also applies the per-test backend-state guard to that module alone.
-Fixtures are exported as ``fixture_<name>`` (pytest's ``name=`` convention), so
-a test that requests ``parity_lane`` does not shadow the import.
-"""
+"""Shared runtime isolation and logging for upstream-discovered JAX tests."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
+from collections.abc import Iterator
+from unittest import TestCase, SkipTest
+import logging
 import os
 import sys
 import gc
 
-import jax
 import numpy as np
-import pytest
+
+JAX_IMPORT_ERROR: str | None = None
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+except ImportError as error:
+    JAX_IMPORT_ERROR = str(error)
+
+
+class JaxTestCase(TestCase):
+    """Isolate ordinary methods and each parameterized subtest's runtime state.
+
+    Use ``with self.subTest(...), self.case() as patches`` for each product row.
+    Run each row in a case helper so its locals are released before cleanup.
+    The returned ExitStack owns patches and temporary resources inside isolation.
+    """
+
+    if JAX_IMPORT_ERROR is not None:
+        raise SkipTest(JAX_IMPORT_ERROR)
+
+    def setUp(self) -> None:
+        self.patches = self.enterContext(self.case())
+
+    @contextmanager
+    def case(self) -> Iterator[ExitStack]:
+        """Yield a resource stack that unwinds before restoring JAX runtime state."""
+        with ExitStack() as patches:
+            patches.enter_context(jax_runtime_isolation())
+            yield patches
+
 
 from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
 
@@ -31,7 +54,7 @@ apply_cuda_xla_flag_pins()
 def _force_x64(jax_module) -> None:
     jax_module.config.update("jax_enable_x64", True)
     if jax_module.config.jax_enable_x64 is not True:
-        raise RuntimeError("tests/jax/jax_test_support.py requires jax_enable_x64=True")
+        raise RuntimeError("unittest_jax_support.py requires jax_enable_x64=True")
 
 
 _force_x64(jax)
@@ -131,31 +154,22 @@ def _restore_backend_runtime_env(snapshot: dict[str, str | None]) -> None:
             os.environ[name] = value
 
 
-@pytest.fixture(autouse=True, name="jax_runtime_guard")
-def fixture_jax_runtime_guard():
-    """Restore the backend env, the JAX config and the simsopt_jax caches per test.
-
-    pytest orders a module's own autouse fixtures by attribute name, so each of
-    them requests ``jax_runtime_guard`` to run inside it.
-    """
-    env_snapshot = {name: os.environ.get(name) for name in _BACKEND_RUNTIME_ENV_VARS}
-    jax_config_snapshot = _snapshot_loaded_jax_runtime_config()
-    _invalidate_loaded_backend_state()
-    try:
-        yield
-    finally:
-        _restore_backend_runtime_env(env_snapshot)
-        _restore_loaded_jax_runtime_config(jax_config_snapshot)
+@contextmanager
+def jax_runtime_isolation():
+    """Restore environment, JAX configuration and kernel caches around one case."""
+    with ExitStack() as cleanup:
+        env_snapshot = {
+            name: os.environ.get(name) for name in _BACKEND_RUNTIME_ENV_VARS
+        }
+        jax_config_snapshot = _snapshot_loaded_jax_runtime_config()
+        # LIFO cleanup restores state before clearing compiled executables.
+        cleanup.callback(gc.collect)
+        cleanup.callback(jax.clear_caches)
+        cleanup.callback(_invalidate_loaded_backend_state)
+        cleanup.callback(_restore_loaded_jax_runtime_config, jax_config_snapshot)
+        cleanup.callback(_restore_backend_runtime_env, env_snapshot)
         _invalidate_loaded_backend_state()
-        # Bound JAX's XLA executable cache within a long-lived single process:
-        # the invalidations above clear simsopt_jax's caches but not JAX's, which
-        # otherwise grows unbounded across a module's tests until a native
-        # allocation fails (std::bad_alloc -> abort). Clearing per test keeps peak
-        # RSS bounded to ~one test's working set.
-        _jax_mod = sys.modules.get("jax")
-        if _jax_mod is not None:
-            _jax_mod.clear_caches()
-            gc.collect()
+        yield
 
 
 def parity_seed(seed: int = 0) -> int:
@@ -173,9 +187,9 @@ def _parity_device_for_lane(jax_module, lane: str):
         if device.platform == lane:
             return device
     if lane == "gpu":
-        pytest.skip("CUDA GPU not available")
+        raise SkipTest("CUDA GPU not available")
     if lane == "cpu":
-        pytest.skip("CPU JAX backend not available")
+        raise SkipTest("CPU JAX backend not available")
 
 
 @contextmanager
@@ -203,8 +217,29 @@ def host_array(value, *, dtype=None):
     return np.asarray(host_materialize(value), dtype=dtype)
 
 
-@pytest.fixture(
-    params=("cpu", "gpu"), ids=("cpu_parity", "gpu_parity"), name="parity_lane"
-)
-def fixture_parity_lane(request):
-    return request.param
+class CompilationLog(logging.Handler):
+    """Collect JAX compilation records, including phases with no records."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    def clear(self) -> None:
+        self.records.clear()
+
+
+@contextmanager
+def compilation_logs() -> Iterator[CompilationLog]:
+    """Capture DEBUG records and restore the logger and handler on every exit."""
+    logger = logging.getLogger("jax._src.compiler")
+    handler = CompilationLog()
+    with ExitStack() as cleanup:
+        cleanup.callback(logger.setLevel, logger.level)
+        cleanup.callback(logger.removeHandler, handler)
+        cleanup.callback(handler.close)
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+        yield handler
