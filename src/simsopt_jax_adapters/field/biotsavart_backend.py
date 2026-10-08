@@ -279,11 +279,9 @@ class BiotSavartFieldPullback:
 
 def _set_biot_savart_points(field, points):
     # Field values are cached per point set, so the field owns its points: host
-    # inputs are mutable, and a CPU JAX array can alias a caller's NumPy buffer.
+    # inputs are mutable, and placement snapshots them at the shared boundary.
     if isinstance(points, jax.Array):
         points = jnp.array(points, copy=True)
-    else:
-        points = np.array(points, copy=True, order="C")
     field._points_jax = _as_jax_float64(points)
     field._points_cyl_jax = None
     field._invalidate_point_outputs()

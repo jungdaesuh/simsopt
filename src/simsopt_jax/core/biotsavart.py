@@ -19,6 +19,7 @@ from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 
 from ._device_scalars import device_one as _device_one
@@ -715,7 +716,8 @@ def _apply_forward_kernel(
 ):
     """Apply one cached field kernel under the canonical forward trace scope."""
 
-    return _get_kernel(integrand_key, diff_mode)(points, gammas, gammadashs, currents)
+    inputs = snapshot_host_tree((points, gammas, gammadashs, currents))
+    return _get_kernel(integrand_key, diff_mode)(*inputs)
 
 
 def biot_savart_B(points, gammas, gammadashs, currents):
@@ -846,7 +848,8 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
     changes rebuild the compiled closure in the same process, matching the
     cache invalidation behavior of the forward ``biot_savart_B`` kernels.
     """
-    return _get_B_vjp_kernel()(points, v, gammas, gammadashs, currents)
+    inputs = snapshot_host_tree((points, v, gammas, gammadashs, currents))
+    return _get_B_vjp_kernel()(*inputs)
 
 
 # ── Grouped coil utilities ───────────────────────────────────────────

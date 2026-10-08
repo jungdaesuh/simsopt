@@ -1,8 +1,9 @@
 """Explicit host materialization and scoped transfer guards for JAX fields.
 
 Adapters materialize values through host_array, host_value or host_tree;
-backend.dtypes owns device placement. The scope helpers permit or disallow
-implicit transfers without changing the surrounding guard.
+snapshot_host_tree owns host input buffers before backend.dtypes places them.
+The scope helpers permit or disallow implicit transfers without changing the
+surrounding guard.
 """
 
 from __future__ import annotations
@@ -70,20 +71,30 @@ def block_until_ready(value: _TreeT) -> _TreeT:
     return jax.block_until_ready(value)
 
 
-def host_tree(value, *, dtype=None):
-    materialized = host_value(value)
+def snapshot_host_tree(value: _TreeT, *, dtype=None) -> _TreeT:
+    """Own NumPy leaves synchronously before asynchronous JAX consumption.
+
+    Device arrays and tracers pass through unchanged. A private contiguous
+    NumPy copy prevents both CPU buffer aliasing and delayed transfer reads.
+    """
+    if isinstance(value, (jax.Array, jax_core.Tracer)):
+        return value
 
     def _hostify_leaf(leaf):
         if isinstance(leaf, jax_core.Tracer):
             return leaf
         if isinstance(leaf, np.ndarray):
             leaf_dtype = leaf.dtype if dtype is None else dtype
-            return np.array(leaf, dtype=leaf_dtype, copy=True)
+            return np.array(leaf, dtype=leaf_dtype, copy=True, order="C")
         if dtype is not None and (isinstance(leaf, np.generic) or np.isscalar(leaf)):
             return np.asarray(leaf, dtype=dtype)
         return leaf
 
-    return jax.tree.map(_hostify_leaf, materialized)
+    return jax.tree.map(_hostify_leaf, value)
+
+
+def host_tree(value, *, dtype=None):
+    return snapshot_host_tree(host_value(value), dtype=dtype)
 
 
 def host_tree_after_ready(value, *, dtype=None):
