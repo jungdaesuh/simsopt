@@ -7,8 +7,6 @@ from .config import parameters
 
 if "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
     jax.config.update("jax_platform_name", "cpu")
-if "JAX_ENABLE_X64" not in os.environ:
-    jax.config.update("jax_enable_x64", True)
 
 
 def native_jax_device():
