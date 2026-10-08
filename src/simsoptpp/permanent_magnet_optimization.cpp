@@ -309,7 +309,7 @@ std::tuple<Array, Array, Array, Array> MwPGP_algorithm(Array& A_obj, Array& b_ob
 
 	// check if converged
 	x_sum = 0;
-#pragma omp parallel for
+#pragma omp parallel for reduction(+: x_sum)
         for (int i = 0; i < N; ++i) {
             for (int ii = 0; ii < 3; ++ii) {
                 x_sum += abs(x_k1(i, ii) - x_k_prev(i, ii));

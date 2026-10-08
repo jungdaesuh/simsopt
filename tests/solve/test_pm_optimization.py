@@ -51,6 +51,40 @@ class Testing(unittest.TestCase):
             assert dipoles.shape == (ndipoles, 3)
             assert m_hist.shape == (ndipoles, 3, 21)
 
+    def test_MwPGP_repeatable_convergence(self):
+        """Repeated solves must make the same convergence decision."""
+        rng = np.random.default_rng(20261008)
+        ndipoles = 64
+        nquad = 96
+        A = np.ascontiguousarray(rng.normal(size=(nquad, 3 * ndipoles)) / np.sqrt(nquad))
+        b = rng.normal(size=nquad)
+        ATb = np.ascontiguousarray((A.T @ b).reshape(ndipoles, 3))
+        m0 = np.zeros((ndipoles, 3))
+        m_maxima = np.full(ndipoles, 100.0)
+        reg_l2 = 0.2
+        alpha = 1.0 / (np.linalg.norm(A, ord=2) ** 2 + 2.0 * reg_l2)
+        # Near convergence, losing partial sums can move the stopping step.
+        # Repeats sample worker scheduling while keeping all inputs unchanged.
+        first = None
+        for run in range(100):
+            objective_history, _, _, dipoles = sopp.MwPGP_algorithm(
+                A_obj=A, b_obj=b, ATb=ATb, m_proxy=m0, m0=m0, m_maxima=m_maxima,
+                alpha=alpha, nu=1e100, epsilon=0.01, max_iter=20,
+                reg_l0=0.0, reg_l1=0.0, reg_l2=reg_l2, verbose=True,
+            )
+            # The native API zero-pads its history; compare the populated length.
+            objective_history = objective_history[objective_history != 0.0]
+            if first is None:
+                first = objective_history, dipoles
+            else:
+                with self.subTest(run=run):
+                    self.assertEqual(len(objective_history), len(first[0]))
+                    # Unit-scale inputs and a well-conditioned regularized Hessian
+                    # keep reduction-order roundoff below 1e-12; rtol=0 excludes
+                    # the much larger changes caused by a different stopping step.
+                    np.testing.assert_allclose(objective_history, first[0], rtol=0, atol=1e-12)
+                    np.testing.assert_allclose(dipoles, first[1], rtol=0, atol=1e-12)
+
     def test_algorithms(self):
         """ 
             Test the relax and split algorithm for solving
