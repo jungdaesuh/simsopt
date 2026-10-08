@@ -675,14 +675,14 @@ class JaxBiotSavart(Optimizable):
             self._field_outputs[grouped_field] = value
         return value
 
-    def B(self):
+    def B(self) -> jax.Array:
         """Magnetic field B at the evaluation points.
 
         Returns:
             jax.Array: Magnetic field in tesla, shape (P, 3), Cartesian component
                 last.
         """
-        return self._field_output(grouped_biot_savart_B_from_spec)
+        return cast(jax.Array, self._field_output(grouped_biot_savart_B_from_spec))
 
     def A(self):
         """Vector potential A at the evaluation points.
