@@ -79,6 +79,21 @@ def boozer_problem(
     that shares its DOFs (native labels built with ``nphi``, ``ntheta`` or
     ``range``); a ``ToroidalFlux`` label must use ``biotsavart``'s coils. Unlike
     native ``BoozerSurface``, ``surface`` may also be a ``SurfaceRZFourier``.
+
+    Args:
+        biotsavart (JaxBiotSavart): Field using the same coils as a ToroidalFlux label.
+        surface (SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier): Native
+            surface to snapshot.
+        label (Volume | Area | AspectRatio | ToroidalFlux): Label on this surface or one
+            of the same class sharing its DOFs.
+        targetlabel (float): Target label in cubic meters (volume), square meters
+            (area), webers (toroidal flux), or dimensionless (aspect ratio).
+        constraint_weight (float | None): Native penalty coefficient for the squared
+            label and z constraints; None for an exact problem.
+
+    Returns:
+        BoozerProblem: Immutable device snapshot object; rebuild when coils, fixed values,
+            label grid, target, or weight change.
     """
     if not isinstance(biotsavart, JaxBiotSavart):
         raise TypeError(f"boozer_problem needs a JaxBiotSavart field, got {type(biotsavart).__name__}.")
@@ -116,6 +131,14 @@ def boozer_exact_residual_rows(surface: SurfaceXYZTensorFourier) -> jax.Array:
     ``get_stellsym_mask()`` per component, without the x residual at ``(0, 0)``
     under stellarator symmetry. Raises where native does: for other surface
     classes, and for stellarator-symmetric grids ``get_stellsym_mask()`` rejects.
+
+    Args:
+        surface (SurfaceXYZTensorFourier): Native surface whose stellarator-symmetry
+            mask selects the equations.
+
+    Returns:
+        jax.Array: Shape (nrows,) int32 indices of flattened residual entries; omits the
+            x equation at (0, 0) under stellarator symmetry.
     """
     if not isinstance(surface, SurfaceXYZTensorFourier):
         raise RuntimeError(
