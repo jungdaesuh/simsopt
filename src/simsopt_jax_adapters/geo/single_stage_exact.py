@@ -6,19 +6,19 @@ state into evaluate and keep the returned state in the caller's optimizer
 closure; independent closures/copies can share the same frozen object::
 
     evaluator = JaxExactSingleStage.from_boozer_surface(
-        boozer_surface, field, base_curves,
+        boozer_surface, biotsavart, base_curves,
         iota_target=iota_target, major_radius_target=radius_target,
         length_target=length_target,
     )
     state = evaluator.initial_state
 
-    def fun(parameters):
+    def fun(dofs):
         global state
-        evaluation = evaluator.evaluate(parameters, state)
+        evaluation = evaluator.evaluate(dofs, state)
         state = evaluation.state
         return evaluation.value, evaluation.gradient
 
-    result = minimize(fun, host_array(evaluator.initial_parameters), jac=True,
+    result = minimize(fun, host_array(evaluator.initial_dofs), jac=True,
                       method="BFGS")
 
 Numeric problem settings may be replaced through dataclasses.replace; they
@@ -75,24 +75,27 @@ class ExactSingleStageEvaluation:
     terms: NDArray[np.float64]
 
 
-@pytree_dataclass(data=("problem", "initial_state", "initial_parameters"))
+@pytree_dataclass(data=("problem", "initial_state", "initial_dofs"))
 class JaxExactSingleStage:
-    """Frozen exact boozerQA snapshot with explicit state in/out.
+    """Frozen exact boozerQA snapshot evaluator with explicit state in/out.
+
+    This evaluator is not an Optimizable and does not track native dependencies.
+    Rebuild it after structural or fixed-value changes.
 
     Construction captures a solved surface, coil layout, label and targets.
-    evaluate(parameters, state) returns the value/gradient and next state;
+    evaluate(dofs, state) returns the value/gradient and next state;
     no native object or hidden warm-start/cache is mutated.
     """
 
     problem: ExactSingleStageProblem
     initial_state: ExactSingleStageState
-    initial_parameters: jax.Array
+    initial_dofs: jax.Array
 
     @classmethod
     def from_boozer_surface(
         cls,
         boozer_surface: BoozerSurface | JaxBoozerSurface,
-        field: JaxBiotSavart,
+        biotsavart: JaxBiotSavart,
         length_curves: Sequence[Curve],
         *,
         iota_target: float,
@@ -105,7 +108,7 @@ class JaxExactSingleStage:
     ) -> JaxExactSingleStage:
         """Snapshot a solved exact surface and its field's free DOF layout.
 
-        length_curves must occur directly in field.coils (not unlisted curves).
+        length_curves must occur directly in biotsavart.coils (not unlisted curves).
         Targets have native QuadraticPenalty semantics and unit weights.
         Infinite targets retain native inf values and nonfinite gradients;
         only nonfinite component adjoints cause the native ValueError.
@@ -117,7 +120,7 @@ class JaxExactSingleStage:
             raise ValueError("the initial exact BoozerSurface solve must have succeeded.")
         if boozer_surface.res["G"] is None:
             raise ValueError("JaxExactSingleStage requires G as an explicit inner variable.")
-        coils = tuple(field.coils)
+        coils = tuple(biotsavart.coils)
         surface_coils = tuple(boozer_surface.biotsavart.coils)
         if len(coils) != len(surface_coils) or any(a is not b for a, b in zip(coils, surface_coils)):
             raise ValueError("the evaluator field must use the BoozerSurface's coils.")
@@ -127,9 +130,9 @@ class JaxExactSingleStage:
         for curve in length_curves:
             matches = [index for index, coil in enumerate(coils) if coil.curve is curve]
             if not matches:
-                raise ValueError("length_curves must occur directly in field.coils.")
+                raise ValueError("length_curves must occur directly in biotsavart.coils.")
             length_indices.append(matches[0])
-        problem = boozer_problem(field, surface, boozer_surface.label, boozer_surface.targetlabel)
+        problem = boozer_problem(biotsavart, surface, boozer_surface.label, boozer_surface.targetlabel)
         reference = commit_in_place(problem.targetlabel)
         auxiliary = SurfaceXYZTensorFourier(
             mpol=surface.mpol, ntor=surface.ntor, stellsym=surface.stellsym, nfp=surface.nfp,
@@ -140,7 +143,7 @@ class JaxExactSingleStage:
         # Commit all inputs like the warm-start outputs to avoid a second
         # executable when the first evaluation's state is fed back.
         problem = jax.tree.map(commit_in_place, problem)
-        extraction = jax.tree.map(commit_in_place, field.coil_dof_extraction_spec())
+        extraction = jax.tree.map(commit_in_place, biotsavart.coil_dof_extraction_spec())
         nonqs_surface = jax.tree.map(commit_in_place, surface_spec_from_surface(auxiliary))
         initial_x = np.concatenate((
             surface.get_dofs(), [boozer_surface.res["iota"], boozer_surface.res["G"]],
@@ -162,21 +165,21 @@ class JaxExactSingleStage:
             initial_state=ExactSingleStageState(
                 explicit_device_array(initial_x, dtype=np.float64, reference=reference),
             ),
-            initial_parameters=explicit_device_array(field.x, dtype=np.float64, reference=reference),
+            initial_dofs=explicit_device_array(biotsavart.x, dtype=np.float64, reference=reference),
         )
 
     def evaluate(
-        self, parameters: NDArray[np.float64] | jax.Array, state: ExactSingleStageState,
+        self, dofs: NDArray[np.float64] | jax.Array, state: ExactSingleStageState,
     ) -> ExactSingleStageEvaluation:
         """One fused dispatch and explicit host read, with native solve errors.
 
         The caller owns state. A raised error returns no state, so retrying
         with the same state is safe. No compilation cache/session is owned here.
         """
-        parameters = explicit_device_array(parameters, dtype=np.float64, reference=state.x)
-        if parameters.shape != self.initial_parameters.shape:
-            raise ValueError(f"expected coil DOFs of shape {self.initial_parameters.shape}, got {parameters.shape}.")
-        result = exact_single_stage_evaluate(self.problem, parameters, state)
+        dofs = explicit_device_array(dofs, dtype=np.float64, reference=state.x)
+        if dofs.shape != self.initial_dofs.shape:
+            raise ValueError(f"expected coil DOFs of shape {self.initial_dofs.shape}, got {dofs.shape}.")
+        result = exact_single_stage_evaluate(self.problem, dofs, state)
         value, gradient, success, iterations, norm, singular, finite, radius_singular, terms = host_value((
             result.value, result.gradient, result.success, result.iterations,
             result.norm, result.singular, result.adjoint_finite, result.radius_singular, result.terms,

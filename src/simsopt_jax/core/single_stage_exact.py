@@ -149,20 +149,20 @@ def _major_radius(surface: SurfaceSpec) -> tuple[jax.Array, jax.Array]:
 
 
 def _length_penalty(
-    problem: ExactSingleStageProblem, parameters: jax.Array,
+    problem: ExactSingleStageProblem, dofs: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    total_length = jnp.zeros((), parameters.dtype)
+    total_length = jnp.zeros((), dofs.dtype)
     for index in problem.length_indices:
         coil = problem.extraction.coils[index]
-        dofs = optimizable_input_dofs_from_map_spec(coil.curve_map, parameters)
-        total_length = total_length + curve_length_from_dofs(coil.curve, dofs)
+        curve_dofs = optimizable_input_dofs_from_map_spec(coil.curve_map, dofs)
+        total_length = total_length + curve_length_from_dofs(coil.curve, curve_dofs)
     return 0.5 * jnp.maximum(total_length - problem.targets[2], 0)**2, total_length
 
 
 @jax.jit
 def exact_single_stage_evaluate(
     problem: ExactSingleStageProblem,
-    parameters: jax.Array,
+    dofs: jax.Array,
     state: ExactSingleStageState,
 ) -> ExactSingleStageResult:
     """Solve from state, evaluate boozerQA with a shared adjoint factorization.
@@ -173,10 +173,10 @@ def exact_single_stage_evaluate(
     Finite penalty weights share one coil VJP; nonfinite weights are applied
     after component coil VJPs, preserving native's inf/NaN propagation.
     """
-    def reconstruct(parameters: jax.Array) -> GroupedCoilSetSpec:
-        return coil_set_spec_from_dof_extraction_spec(problem.extraction, parameters)
+    def reconstruct(dofs: jax.Array) -> GroupedCoilSetSpec:
+        return coil_set_spec_from_dof_extraction_spec(problem.extraction, dofs)
 
-    coils, coil_pullback = jax.vjp(reconstruct, parameters)
+    coils, coil_pullback = jax.vjp(reconstruct, dofs)
     boozer = replace(problem.boozer, coils=coils)
     solved = boozer_exact_newton(boozer, state.x, problem.residual_rows, problem.tol, problem.maxiter)
     nonqs_surface = surface_spec_with_dofs(problem.nonqs_surface, solved.x[:-2])
@@ -221,7 +221,7 @@ def exact_single_stage_evaluate(
     gradient = jax.lax.cond(jnp.all(jnp.isfinite(multipliers)), finite_gradient, nonfinite_gradient)
     (length_penalty, total_length), length_gradient = jax.value_and_grad(
         _length_penalty, argnums=1, has_aux=True,
-    )(problem, parameters)
+    )(problem, dofs)
     success = solved.norm <= problem.tol
     return ExactSingleStageResult(
         value=jnp.where(success, value + length_penalty, 1e3),

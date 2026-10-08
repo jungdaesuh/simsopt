@@ -79,7 +79,7 @@ def _problem(*, dropin=False, quasi_poloidal=False, active_penalties=False):
         major_radius_target=radius_target, length_target=length_target,
         quasi_poloidal=quasi_poloidal,
     )
-    np.testing.assert_array_equal(host_array(evaluator.initial_parameters), objective.x)
+    np.testing.assert_array_equal(host_array(evaluator.initial_dofs), objective.x)
     return evaluator, boozer, objective, currents
 
 
@@ -252,10 +252,10 @@ def test_value_gradient_and_solved_state_match_composition(dropin, quasi_poloida
         dropin=dropin, quasi_poloidal=quasi_poloidal, active_penalties=active_penalties,
     )
     state = evaluator.initial_state
-    parameters = host_array(evaluator.initial_parameters)
-    direction = parity_rng(13).uniform(size=parameters.size)
+    dofs = host_array(evaluator.initial_dofs)
+    direction = parity_rng(13).uniform(size=dofs.size)
     for scale in (0, 1e-4, -1e-4):
-        x = parameters + scale * direction
+        x = dofs + scale * direction
         result = evaluator.evaluate(x, state)
         objective.x = x
         expected_value = objective.J()
@@ -328,15 +328,15 @@ def test_value_gradient_and_solved_state_match_composition(dropin, quasi_poloida
 
 def test_gradient_matches_finite_differences_through_exact_solves():
     evaluator, _, _, _ = _problem(active_penalties=True)
-    parameters = host_array(evaluator.initial_parameters)
-    direction = parity_rng(11).standard_normal(parameters.size) * np.maximum(np.abs(parameters), 1)
-    initial = evaluator.evaluate(parameters, evaluator.initial_state)
+    dofs = host_array(evaluator.initial_dofs)
+    direction = parity_rng(11).standard_normal(dofs.size) * np.maximum(np.abs(dofs), 1)
+    initial = evaluator.evaluate(dofs, evaluator.initial_state)
     step = 1e-6
-    plus = evaluator.evaluate(parameters + step * direction, initial.state)
-    minus = evaluator.evaluate(parameters - step * direction, initial.state)
+    plus = evaluator.evaluate(dofs + step * direction, initial.state)
+    minus = evaluator.evaluate(dofs - step * direction, initial.state)
     assert plus.success and minus.success, "finite-difference exact solves must converge"
-    plus2 = evaluator.evaluate(parameters + 2 * step * direction, initial.state)
-    minus2 = evaluator.evaluate(parameters - 2 * step * direction, initial.state)
+    plus2 = evaluator.evaluate(dofs + 2 * step * direction, initial.state)
+    minus2 = evaluator.evaluate(dofs - 2 * step * direction, initial.state)
     assert plus2.success and minus2.success
     central = (8 * (plus.value - minus.value) - (plus2.value - minus2.value)) / (12 * step)
     adjoint = initial.gradient @ direction
@@ -345,12 +345,12 @@ def test_gradient_matches_finite_differences_through_exact_solves():
 
 def test_failed_newton_returns_failed_gradient_and_restores_only_state():
     evaluator, boozer, objective, _ = _problem(active_penalties=True)
-    parameters = host_array(evaluator.initial_parameters)
+    dofs = host_array(evaluator.initial_dofs)
     saved = host_array(evaluator.initial_state.x)
-    direction = parity_rng(3).uniform(size=parameters.size)
+    direction = parity_rng(3).uniform(size=dofs.size)
     problem = replace(evaluator.problem, maxiter=explicit_device_array(1, dtype=np.float64, reference=evaluator.problem.maxiter))
     evaluator = replace(evaluator, problem=problem)
-    x = parameters + 1e-4 * direction
+    x = dofs + 1e-4 * direction
     result = evaluator.evaluate(x, evaluator.initial_state)
     boozer.options["newton_maxiter"] = 1
     objective.x = x
@@ -367,16 +367,16 @@ def test_failed_newton_returns_failed_gradient_and_restores_only_state():
 
 def test_state_branches_and_copies_are_independent_and_immutable():
     evaluator, _, objective, currents = _problem()
-    parameters = host_array(evaluator.initial_parameters)
+    dofs = host_array(evaluator.initial_dofs)
     seed = evaluator.initial_state
     saved = host_array(seed.x)
     cloned = copy(evaluator)
-    direction = parity_rng(7).uniform(size=parameters.size)
-    first = evaluator.evaluate(parameters + 1e-4 * direction, seed)
-    cloned.evaluate(parameters - 1e-4 * direction, seed)
-    objective.x = parameters - 1e-4 * direction
+    direction = parity_rng(7).uniform(size=dofs.size)
+    first = evaluator.evaluate(dofs + 1e-4 * direction, seed)
+    cloned.evaluate(dofs - 1e-4 * direction, seed)
+    objective.x = dofs - 1e-4 * direction
     currents[0].local_full_x = 1.01 * np.asarray(currents[0].local_full_x, dtype=np.float64)
-    repeated = cloned.evaluate(parameters + 1e-4 * direction, seed)
+    repeated = cloned.evaluate(dofs + 1e-4 * direction, seed)
     np.testing.assert_array_equal(repeated.gradient, first.gradient)
     np.testing.assert_array_equal(host_array(seed.x), saved)
     with pytest.raises(FrozenInstanceError):
@@ -387,9 +387,9 @@ def test_state_branches_and_copies_are_independent_and_immutable():
 
 def test_new_values_and_numeric_settings_do_not_recompile():
     evaluator, _, _, _ = _problem()
-    parameters = host_array(evaluator.initial_parameters)
-    initial = evaluator.evaluate(parameters, evaluator.initial_state)
-    direction = parity_rng(5).uniform(size=parameters.size)
+    dofs = host_array(evaluator.initial_dofs)
+    initial = evaluator.evaluate(dofs, evaluator.initial_state)
+    direction = parity_rng(5).uniform(size=dofs.size)
     targets = evaluator.problem.targets + explicit_device_array([0.001, 0.002, -0.01], dtype=np.float64, reference=evaluator.problem.targets)
     problem = replace(
         evaluator.problem, targets=targets,
@@ -398,8 +398,8 @@ def test_new_values_and_numeric_settings_do_not_recompile():
     )
     changed = replace(evaluator, problem=problem)
     with jax_compilations() as compilations:
-        next_result = changed.evaluate(parameters + 1e-4 * direction, initial.state)
-        changed.evaluate(parameters - 1e-4 * direction, next_result.state)
+        next_result = changed.evaluate(dofs + 1e-4 * direction, initial.state)
+        changed.evaluate(dofs - 1e-4 * direction, next_result.state)
     assert not compilations, "numeric settings, new free DOFs and returned state must reuse the executable"
     assert next_result.value != initial.value, "replacement targets must take effect"
 
@@ -407,8 +407,8 @@ def test_new_values_and_numeric_settings_do_not_recompile():
 def test_evaluation_makes_no_implicit_transfers(parity_lane):
     with parity_default_device(parity_lane), disallow_host_transfers():
         evaluator, _, objective, _ = _problem(active_penalties=True)
-        result = evaluator.evaluate(host_array(evaluator.initial_parameters), evaluator.initial_state)
-        next_result = evaluator.evaluate(evaluator.initial_parameters, result.state)
+        result = evaluator.evaluate(host_array(evaluator.initial_dofs), evaluator.initial_state)
+        next_result = evaluator.evaluate(evaluator.initial_dofs, result.state)
     assert {device.platform for device in next_result.state.x.devices()} == {parity_lane}
     assert_matches_native(result.value, objective.J(), "transfer-guard objective")
     assert_matches_native(result.gradient, objective.dJ(), "transfer-guard gradient")
@@ -424,26 +424,26 @@ def test_short_host_lbfgsb_matches_native_composition():
     for fused in (False, True):
         evaluator, _, objective, _ = _problem(active_penalties=True)
         state = evaluator.initial_state
-        initial_parameters = host_array(evaluator.initial_parameters)
+        initial_dofs = host_array(evaluator.initial_dofs)
         evaluations = []
 
-        def fun(parameters):
+        def fun(dofs):
             nonlocal state
             if fused:
-                evaluation = evaluator.evaluate(parameters, state)
+                evaluation = evaluator.evaluate(dofs, state)
                 state = evaluation.state
                 value, gradient = evaluation.value, evaluation.gradient
             else:
-                objective.x = parameters
+                objective.x = dofs
                 value, gradient = objective.J(), objective.dJ()
             evaluations.append((value, gradient))
             return value, gradient
 
-        def scaled_fun(parameters):
-            value, gradient = fun(initial_parameters + 1e-3 * parameters)
+        def scaled_fun(dofs):
+            value, gradient = fun(initial_dofs + 1e-3 * dofs)
             return value, 1e-3 * gradient
 
-        result = minimize(scaled_fun, np.zeros_like(initial_parameters), jac=True, method="L-BFGS-B", options={"maxiter": 3}, tol=1e-15)
+        result = minimize(scaled_fun, np.zeros_like(initial_dofs), jac=True, method="L-BFGS-B", options={"maxiter": 3}, tol=1e-15)
         runs.append((result, evaluations))
     (native, native_evals), (fused_result, fused_evals) = runs
     assert native.nit == fused_result.nit == 3 and native.nfev == fused_result.nfev
@@ -464,11 +464,11 @@ def test_native_bfgs_trials_match_composition_at_the_same_coil_state():
     state = evaluator.initial_state
     evaluations = []
 
-    def fun(parameters):
+    def fun(dofs):
         nonlocal state
-        result = evaluator.evaluate(parameters, state)
+        result = evaluator.evaluate(dofs, state)
         state = result.state
-        objective.x = parameters
+        objective.x = dofs
         expected_value, expected_gradient = objective.J(), objective.dJ()
         assert result.success and boozer.res["success"], "BFGS trial exact solves must succeed"
         assert_matches_native(result.value, expected_value, "same-coil BFGS value", 1e-10)
@@ -476,22 +476,22 @@ def test_native_bfgs_trials_match_composition_at_the_same_coil_state():
         evaluations.append(result.value)
         return result.value, result.gradient
 
-    result = minimize(fun, host_array(evaluator.initial_parameters), jac=True, method="BFGS", options={"maxiter": 3}, tol=1e-15)
+    result = minimize(fun, host_array(evaluator.initial_dofs), jac=True, method="BFGS", options={"maxiter": 3}, tol=1e-15)
     assert result.nit == 3 and result.nfev == len(evaluations)
 
 
 def test_zero_field_keeps_native_nonfinite_adjoint_error():
     evaluator, boozer, _, _ = _problem()
-    parameters = host_array(evaluator.initial_parameters)
+    dofs = host_array(evaluator.initial_dofs)
     # The free current entries can be identified independently from the
     # native graph; the first current is fixed and changed via a new snapshot.
     for coil in boozer.biotsavart.coils:
         coil.current.local_full_x = np.zeros_like(coil.current.local_full_x)
     field = JaxBiotSavart(boozer.biotsavart.coils)
     evaluator = replace(evaluator, problem=replace(evaluator.problem, extraction=field.coil_dof_extraction_spec()))
-    parameters = np.asarray(field.x, dtype=np.float64)
+    dofs = np.asarray(field.x, dtype=np.float64)
     with pytest.raises(ValueError, match="array must not contain infs or NaNs"):
-        evaluator.evaluate(parameters, evaluator.initial_state)
+        evaluator.evaluate(dofs, evaluator.initial_state)
 
 
 @pytest.mark.parametrize("component", [Iotas, MajorRadius], ids=["iota", "radius"])
@@ -513,7 +513,7 @@ def test_infinite_penalty_target_keeps_native_value_and_gradient(component, targ
     with np.errstate(invalid="ignore"):
         expected_value = objective.J()
         expected_gradient = np.asarray(objective.dJ(), dtype=np.float64)
-    result = evaluator.evaluate(evaluator.initial_parameters, evaluator.initial_state)
+    result = evaluator.evaluate(evaluator.initial_dofs, evaluator.initial_state)
     assert result.success and result.value == expected_value == np.inf
     assert np.any(np.isinf(expected_gradient)), "native penalty must exercise infinite gradient entries"
     np.testing.assert_array_equal(np.isnan(result.gradient), np.isnan(expected_gradient))
@@ -529,16 +529,16 @@ def test_device_result_exposes_exactly_singular_newton():
     seed = host_array(evaluator.initial_state.x)
     seed[:-2] = 0
     state = ExactSingleStageState(explicit_device_array(seed, dtype=np.float64, reference=evaluator.initial_state.x))
-    result = exact_single_stage_evaluate(evaluator.problem, evaluator.initial_parameters, state)
+    result = exact_single_stage_evaluate(evaluator.problem, evaluator.initial_dofs, state)
     assert bool(host_value(result.singular)), "collapsed surface must expose the singular solve"
     with pytest.raises(np.linalg.LinAlgError, match="Singular matrix"):
-        evaluator.evaluate(evaluator.initial_parameters, state)
+        evaluator.evaluate(evaluator.initial_dofs, state)
 
 
 def test_invalid_free_layout_and_failed_seed_are_rejected():
     evaluator, boozer, _, _ = _problem()
     with pytest.raises(ValueError, match="expected coil DOFs of shape"):
-        evaluator.evaluate(evaluator.initial_parameters[:-1], evaluator.initial_state)
+        evaluator.evaluate(evaluator.initial_dofs[:-1], evaluator.initial_state)
     boozer.res["success"] = False
     with pytest.raises(ValueError, match="initial exact BoozerSurface solve must have succeeded"):
         JaxExactSingleStage.from_boozer_surface(
