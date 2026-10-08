@@ -15,6 +15,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.runtime.host_boundary import snapshot_host_tree
+
 from ._device_scalars import staged_like
 
 __all__ = [
@@ -167,6 +169,9 @@ def curve_curve_distance_penalty_pure(
     Returns:
         Array: scalar penalty in m^4.
     """
+    gamma1, gammadash1, gamma2, gammadash2, minimum_distance, candidate = snapshot_host_tree(
+        (gamma1, gammadash1, gamma2, gammadash2, minimum_distance, candidate)
+    )
     gamma1 = jnp.asarray(gamma1)
     gammadash1 = jnp.asarray(gammadash1)
     gamma2 = jnp.asarray(gamma2, dtype=gamma1.dtype)
@@ -203,6 +208,9 @@ def curve_surface_distance_penalty_pure(
     Returns:
         Array: scalar penalty in m^5.
     """
+    curve_gamma, curve_gammadash, surface_gamma, surface_normal, minimum_distance, candidate = snapshot_host_tree(
+        (curve_gamma, curve_gammadash, surface_gamma, surface_normal, minimum_distance, candidate)
+    )
     curve_gamma = jnp.asarray(curve_gamma)
     curve_gammadash = jnp.asarray(curve_gammadash)
     surface_gamma = jnp.asarray(surface_gamma, dtype=curve_gamma.dtype)
