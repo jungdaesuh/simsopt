@@ -189,6 +189,7 @@ def _compilations() -> Iterator[list[str]]:
 @pytest.mark.parametrize("weight_inv_modB", [False, True])
 @pytest.mark.parametrize("optimize_G", [False, True])
 def test_least_squares_kernel_matches_simsoptpp(optimize_G, weight_inv_modB):
+    """Boozer least-squares values and derivatives agree with simsoptpp for both G and weighting modes."""
     rng = parity_rng(1)
     nphi, ntheta, nsurface = 3, 4, 5
     shape = (nphi, ntheta)
@@ -250,6 +251,7 @@ _RESIDUAL_CASES = {
 
 @pytest.mark.parametrize("name", _RESIDUAL_CASES)
 def test_surface_residual_matches_native(name):
+    """Boozer residuals, Jacobians and Hessians agree with native formulations."""
     case = _RESIDUAL_CASES[name]
     setup = _setup(case.surface, case.stellsym, case.label, case.clamped)
     problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target, 1.0)
@@ -437,6 +439,7 @@ def _singular_section_surface() -> SurfaceXYZFourier:
 
 
 def test_aspect_ratio_label_matches_native_and_stays_finite_where_native_raises():
+    """The aspect-ratio label matches native regular values and remains finite at a singular map."""
     setup = _setup("xyz", True, "aspect_ratio")
     problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
     res = boozer_exact_constraints(problem, _place(_decision(setup.surface, True, (0.0, 0.0)), problem))
@@ -457,6 +460,7 @@ def test_aspect_ratio_label_matches_native_and_stays_finite_where_native_raises(
 
 
 def test_hessians_match_central_differences_of_native_derivatives():
+    """Penalty and residual Hessians agree with central differences of native derivatives."""
     setup = _setup("xyz", False, "toroidal_flux")
     native_boozer = _native_boozer(setup, 5.0)
     problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target, 5.0)
@@ -570,6 +574,7 @@ def test_new_values_reuse_the_compiled_programs():
 
 @pytest.mark.parametrize("stellsym", [True, False], ids=["stellsym", "nonsym"])
 def test_formulations_make_no_implicit_transfers(stellsym, parity_lane):
+    """Boozer formulations accept placed inputs without implicit host/device transfers."""
     setup = _setup("tensor", stellsym, "toroidal_flux")
     x, xl = _decision(setup.surface, True), _decision(setup.surface, True, (0.2, 0.1))
     for weight in (None, 4.0):
@@ -625,6 +630,7 @@ def test_zero_field_gives_the_native_values(weight_inv_modB):
 
 
 def test_problem_boundary_refuses_unsupported_inputs():
+    """The Boozer snapshot boundary rejects incompatible surfaces, fields and labels."""
     setup = _setup("xyz", True, "volume")
     with pytest.raises(TypeError, match="JaxBiotSavart"):
         boozer_problem(setup.bs, setup.surface, setup.label, setup.target)
