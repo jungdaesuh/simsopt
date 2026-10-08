@@ -27,6 +27,10 @@ def disallow_host_transfers() -> Iterator[None]:
     always pass, and on CPU -- verified on jax 0.10.0, where no copy actually
     happens -- implicit device-to-host (``np.sum(x)``, ``x.tolist()``) passes
     too.
+
+    Returns:
+        contextlib.AbstractContextManager[None] object: Scoped transfer guard
+            that restores the surrounding setting on exit.
     """
 
     with jax.transfer_guard("disallow"):
@@ -41,6 +45,10 @@ def allow_host_transfers() -> Iterator[None]:
     strict guard may be active: lowering a program that closes over device
     arrays reads them back, which the strict guard would refuse. The counterpart
     of :func:`disallow_host_transfers`.
+
+    Returns:
+        contextlib.AbstractContextManager[None] object: Scoped transfer guard
+            that restores the surrounding setting on exit.
     """
 
     with jax.transfer_guard("allow"):
@@ -48,7 +56,16 @@ def allow_host_transfers() -> Iterator[None]:
 
 
 def host_value(value: _TreeT) -> _TreeT:
-    """Materialize a JAX value or pytree while preserving its Python structure."""
+    """Materialize a JAX value or pytree while preserving its Python structure.
+
+    Args:
+        value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
+            container structure.
+
+    Returns:
+        pytree object: Same structure with JAX leaves materialized as host
+            values of matching shapes and dtypes.
+    """
     return jax.device_get(value)
 
 
@@ -57,7 +74,17 @@ def host_array(
     *,
     dtype: jax.typing.DTypeLike | None = None,
 ) -> np.ndarray:
-    """Materialize ``value`` to a writeable NumPy array at an explicit D2H boundary."""
+    """Materialize ``value`` to a writeable NumPy array at an explicit D2H boundary.
+
+    Args:
+        value (array-like): Value of any shape to materialize on the host.
+        dtype (dtype-like or None): Host conversion dtype; None preserves the
+            materialized dtype.
+
+    Returns:
+        numpy.ndarray: Writable host array with the input shape; already
+            writable NumPy storage may be reused.
+    """
     array = np.asarray(host_value(value))
     if dtype is not None:
         array = np.asarray(array, dtype=dtype)
@@ -67,7 +94,16 @@ def host_array(
 
 
 def block_until_ready(value: _TreeT) -> _TreeT:
-    """Wait for every JAX leaf and return the same pytree structure and values."""
+    """Wait for every JAX leaf and return the same pytree structure and values.
+
+    Args:
+        value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
+            container structure.
+
+    Returns:
+        pytree object: Same structure and values after all asynchronous JAX
+            leaves are ready.
+    """
     return jax.block_until_ready(value)
 
 
@@ -76,6 +112,18 @@ def snapshot_host_tree(value: _TreeT, *, dtype=None) -> _TreeT:
 
     Device arrays and tracers pass through unchanged. A private contiguous
     NumPy copy prevents both CPU buffer aliasing and delayed transfer reads.
+
+    Args:
+        value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
+            container structure.
+        dtype (dtype-like or None): Optional dtype for host NumPy leaves and host
+            scalars; None preserves dtypes. Device arrays and tracers are not coerced by
+            snapshotting.
+
+    Returns:
+        pytree object: Same structure with private C-contiguous copies of
+            NumPy array leaves, preserving each leaf shape. Device arrays and
+            tracers remain unchanged.
     """
     if isinstance(value, (jax.Array, jax_core.Tracer)):
         return value
@@ -94,9 +142,34 @@ def snapshot_host_tree(value: _TreeT, *, dtype=None) -> _TreeT:
 
 
 def host_tree(value, *, dtype=None):
+    """Materialize a pytree on the host and snapshot its NumPy storage.
+
+    Args:
+        value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
+            container structure.
+        dtype (dtype-like or None): Optional dtype for host NumPy leaves and host
+            scalars; None preserves dtypes. Device arrays and tracers are not coerced by
+            snapshotting.
+
+    Returns:
+        pytree: Host leaves with the same shape per leaf and privately owned
+            NumPy array buffers.
+    """
     return snapshot_host_tree(host_value(value), dtype=dtype)
 
 
 def host_tree_after_ready(value, *, dtype=None):
-    """Wait for a pytree, then materialize its array leaves on the host."""
+    """Wait for a pytree, then materialize its array leaves on the host.
+
+    Args:
+        value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
+            container structure.
+        dtype (dtype-like or None): Optional dtype for host NumPy leaves and host
+            scalars; None preserves dtypes. Device arrays and tracers are not coerced by
+            snapshotting.
+
+    Returns:
+        pytree object: Ready host leaves with the same shape per leaf and
+            privately owned NumPy array buffers.
+    """
     return host_tree(block_until_ready(value), dtype=dtype)

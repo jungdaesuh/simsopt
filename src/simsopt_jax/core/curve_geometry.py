@@ -149,6 +149,14 @@ def curve_spec_from_curve(curve) -> CurveSpec:
     rotation/reflection placement is a wrapper transform with no owned DOFs.
     JAX coil paths should carry that placement through ``CoilSymmetrySpec``;
     standalone rotated-curve geometry remains a documented CPU-only wrapper.
+
+    Args:
+        curve (object): Curve exposing a compatible to_spec() method; RotatedCurve must
+            instead use a base spec with coil symmetry.
+
+    Returns:
+        CurveSpec object: Immutable JAX geometry payload produced by the
+            curve.
     """
     to_spec = getattr(curve, "to_spec", None)
     if callable(to_spec):
@@ -328,6 +336,21 @@ def optimizable_input_dofs_from_map_spec(
     *,
     use_compute_dtype: bool = False,
 ):
+    """Reconstruct one optimizable input vector from its owner DOFs.
+
+    Args:
+        map_spec (OptimizableDofMapSpec): Template of shape (D_full,) and half-open
+            owner-to-target copy ranges.
+        owner_dofs (array-like): Flat owner DOF vector, shape (D,), matching the
+            extraction map; units depend on the owning geometry or current.
+        use_compute_dtype (bool): Select compute rather than runtime precision when
+            converting DOFs; defaults to False.
+
+    Returns:
+        jax.Array: Mapped full vector of shape (D_full,) for full mode,
+            otherwise the requested local slice of shape (input_end -
+            input_start,).
+    """
     return _mapped_input_dofs(
         map_spec,
         owner_dofs,
@@ -536,12 +559,36 @@ def curve_spec_with_dofs(
     *,
     use_compute_dtype: bool = False,
 ):
+    """Replace a curve spec coefficient vector without mutating the original.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        use_compute_dtype (bool): Select compute rather than runtime precision when
+            converting DOFs; defaults to False.
+
+    Returns:
+        CurveSpec object: New frozen payload with converted replacement DOFs;
+            other fields retain their original values.
+    """
     if use_compute_dtype:
         return replace(spec, dofs=_as_compute_array(dofs))
     return replace(spec, dofs=_as_runtime_array(dofs))
 
 
 def curve_gamma_and_dash_from_spec(spec: CurveSpec):
+    """Evaluate position and tangent using the DOFs stored in the curve spec.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+
+    Returns:
+        tuple[jax.Array, ...]: Position and its first 1 normalized-parameter
+            derivative(s), each shape (Q, 3), in meters.
+    """
     return curve_gamma_and_dash_from_dofs(spec, spec.dofs)
 
 
@@ -551,7 +598,20 @@ def curve_gamma_and_dash_from_dofs(
     *,
     use_compute_dtype: bool = False,
 ) -> tuple[jax.Array, ...]:
-    """Return (gamma, gammadash) from a single kernel build and JVP call."""
+    """Return (gamma, gammadash) from a single kernel build and JVP call.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        use_compute_dtype (bool): Select compute rather than runtime precision when
+            converting DOFs; defaults to False.
+
+    Returns:
+        tuple[jax.Array, ...]: Position and its first 1 normalized-parameter
+            derivative(s), each shape (Q, 3), in meters.
+    """
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
         spec = cast(CurvePerturbedSpec, spec)
@@ -582,7 +642,20 @@ def curve_geometry_from_dofs(
     *,
     use_compute_dtype: bool = False,
 ) -> tuple[jax.Array, ...]:
-    """Return (gamma, gammadash, gammadashdash) from a single kernel build."""
+    """Return (gamma, gammadash, gammadashdash) from a single kernel build.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        use_compute_dtype (bool): Select compute rather than runtime precision when
+            converting DOFs; defaults to False.
+
+    Returns:
+        tuple[jax.Array, ...]: Position and its first 2 normalized-parameter
+            derivative(s), each shape (Q, 3), in meters.
+    """
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
         spec = cast(CurvePerturbedSpec, spec)
@@ -634,6 +707,20 @@ def _curve_geometry_term_vjp_from_dofs(
 
 
 def curve_gamma_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    """Pull back the curve position to its coefficient vector.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        cotangent (array-like): Cotangent of the position, shape (Q, 3); units follow
+            the contracted scalar objective.
+
+    Returns:
+        jax.Array: Coefficient cotangent, shape (D,), in the input DOF
+            ordering; quadrature nodes are held fixed.
+    """
     return _curve_geometry_term_vjp_from_dofs(
         spec,
         dofs,
@@ -643,6 +730,20 @@ def curve_gamma_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
 
 
 def curve_gammadash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    """Pull back the curve first parameter derivative to its coefficient vector.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        cotangent (array-like): Cotangent of the first parameter derivative, shape (Q,
+            3); units follow the contracted scalar objective.
+
+    Returns:
+        jax.Array: Coefficient cotangent, shape (D,), in the input DOF
+            ordering; quadrature nodes are held fixed.
+    """
     return _curve_geometry_term_vjp_from_dofs(
         spec,
         dofs,
@@ -652,6 +753,20 @@ def curve_gammadash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
 
 
 def curve_gammadashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    """Pull back the curve second parameter derivative to its coefficient vector.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        cotangent (array-like): Cotangent of the second parameter derivative, shape (Q,
+            3); units follow the contracted scalar objective.
+
+    Returns:
+        jax.Array: Coefficient cotangent, shape (D,), in the input DOF
+            ordering; quadrature nodes are held fixed.
+    """
     return _curve_geometry_term_vjp_from_dofs(
         spec,
         dofs,
@@ -661,6 +776,20 @@ def curve_gammadashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
 
 
 def curve_gammadashdashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
+    """Pull back the curve third parameter derivative to its coefficient vector.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        cotangent (array-like): Cotangent of the third parameter derivative, shape (Q,
+            3); units follow the contracted scalar objective.
+
+    Returns:
+        jax.Array: Coefficient cotangent, shape (D,), in the input DOF
+            ordering; quadrature nodes are held fixed.
+    """
     return _curve_geometry_term_vjp_from_dofs(
         spec,
         dofs,
@@ -670,7 +799,20 @@ def curve_gammadashdashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
 
 
 def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
-    """Return the coefficient cotangent of ``(gamma, gammadash)`` for one curve spec."""
+    """Return the coefficient cotangent of ``(gamma, gammadash)`` for one curve spec.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry, quadrature nodes and static
+            parameters.
+        dofs (array-like): Flat curve DOFs, shape (D,), in the coefficient ordering
+            required by the spec.
+        dg (array-like): Position cotangent, shape (Q, 3).
+        dgd (array-like): First parameter-derivative cotangent, shape (Q, 3).
+
+    Returns:
+        jax.Array: Cotangent of sum(dg*gamma + dgd*gammadash), shape (D,), in
+            input DOF order; units depend on the contracted objective.
+    """
     curve_dofs = _as_runtime_array(dofs)
     dg_jax = _as_runtime_array(dg)
     dgd_jax = _as_runtime_array(dgd)

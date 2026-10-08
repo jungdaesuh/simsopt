@@ -271,6 +271,13 @@ class BiotSavartFieldPullback:
     ``d_coil_arrays`` mirrors the grouped field-input structure:
     one ``(d_gammas, d_gammadashs, d_currents)`` tuple per quadrature group.
     ``coil_indices`` maps each group row back to the public coil list.
+
+    Args:
+        d_coil_arrays (tuple[tuple[jax.Array, jax.Array, jax.Array], ...]): Per-group
+            (d_gammas, d_gammadashs, d_currents) cotangent arrays of shapes (C, Q, 3),
+            (C, Q, 3), (C,); units are contracted-objective units per meter or ampere.
+        coil_indices (tuple[tuple[int, ...], ...]): Original public coil indices for
+            each group, matching its cotangent row order.
     """
 
     d_coil_arrays: tuple[tuple[jax.Array, jax.Array, jax.Array], ...]
@@ -627,11 +634,16 @@ class JaxBiotSavart(Optimizable):
     notification (any DOF setter or resample) or set_points invalidates them.
 
     Args:
-        coils: native simsopt.field.Coil objects.
+        coils (Sequence[Coil]): Native simsopt coil graph; geometry is in meters and
+            physical currents in amperes.
     """
 
     def clear_points(self) -> None:
-        """Clear mutable point buffers without changing source geometry."""
+        """Clear mutable point buffers without changing source geometry.
+
+        Returns:
+            None: Mutable point state is cleared.
+        """
         self._points_jax = None
         self._points_cyl_jax = None
         self._invalidate_point_outputs()
@@ -664,84 +676,207 @@ class JaxBiotSavart(Optimizable):
         return value
 
     def B(self):
-        """Magnetic field B at the evaluation points."""
+        """Magnetic field B at the evaluation points.
+
+        Returns:
+            jax.Array: Magnetic field in tesla, shape (P, 3), Cartesian component
+                last.
+        """
         return self._field_output(grouped_biot_savart_B_from_spec)
 
     def A(self):
-        """Vector potential A at the evaluation points."""
+        """Vector potential A at the evaluation points.
+
+        Returns:
+            jax.Array: Vector potential in tesla meters, shape (P, 3), Cartesian
+                component last.
+        """
         return self._field_output(grouped_biot_savart_A_from_spec)
 
     def dA_by_dX(self):
-        """Spatial Jacobian dA/dX at the evaluation points."""
+        """Spatial Jacobian dA/dX at the evaluation points.
+
+        Returns:
+            jax.Array: Shape (P, 3, 3), in tesla; result[p, j, l] = partial_j A_l
+                at point p.
+        """
         return self._field_output(grouped_biot_savart_dA_by_dX_from_spec)
 
     def d2A_by_dXdX(self):
-        """Spatial Hessian d2A/dXdX at the evaluation points."""
+        """Spatial Hessian d2A/dXdX at the evaluation points.
+
+        Returns:
+            jax.Array: Shape (P, 3, 3, 3), in tesla per meter; result[p, i, j, l]
+                = partial_i partial_j A_l.
+        """
         return self._field_output(grouped_biot_savart_d2A_by_dXdX_from_spec)
 
     def dB_by_dX(self):
-        """Spatial Jacobian dB/dX at the evaluation points."""
+        """Spatial Jacobian dB/dX at the evaluation points.
+
+        Returns:
+            jax.Array: Shape (P, 3, 3), in tesla per meter; result[p, j, l] =
+                partial_j B_l at point p.
+        """
         return self._field_output(grouped_biot_savart_dB_by_dX_from_spec)
 
     def d2B_by_dXdX(self):
-        """Spatial Hessian d2B/dXdX at the evaluation points."""
+        """Spatial Hessian d2B/dXdX at the evaluation points.
+
+        Returns:
+            jax.Array: Shape (P, 3, 3, 3), in tesla per meter squared; result[p,
+                i, j, l] = partial_i partial_j B_l.
+        """
         return self._field_output(grouped_biot_savart_d2B_by_dXdX_from_spec)
 
     def B_and_dB(self):
-        """Combined B and dB/dX."""
+        """Combined B and dB/dX.
+
+        Returns:
+            tuple[jax.Array, jax.Array]: B of shape (P, 3) in tesla and its
+                Jacobian of shape (P, 3, 3) in tesla per meter, with derivative
+                direction before field component.
+        """
         return self._field_output(grouped_biot_savart_B_and_dB_from_spec)
 
     def AbsB(self):
-        """Magnetic-field magnitude at the evaluation points."""
+        """Magnetic-field magnitude at the evaluation points.
+
+        Returns:
+            jax.Array: Magnetic-field magnitude in tesla, shape (P, 1).
+        """
         return jnp.linalg.norm(self.B(), axis=1)[:, None]
 
     def GradAbsB(self):
-        """Cartesian gradient of ``|B|`` at the evaluation points."""
+        """Cartesian gradient of ``|B|`` at the evaluation points.
+
+        Returns:
+            jax.Array: Cartesian gradient of field magnitude, shape (P, 3), in
+                tesla per meter; zero field retains the division singularity.
+        """
         return _grad_absB_from_B_and_dB(*self.B_and_dB())
 
     def B_cyl(self):
-        """Magnetic field components in the cylindrical basis."""
+        """Magnetic field components in the cylindrical basis.
+
+        Returns:
+            jax.Array: Components (B_R, B_phi, B_Z), shape (P, 3), in tesla, in
+                the local orthonormal cylindrical basis.
+        """
         return _cart_vectors_to_cyl(
             self.B(),
             _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
         )
 
     def A_cyl(self):
-        """Vector potential components in the cylindrical basis."""
+        """Vector potential components in the cylindrical basis.
+
+        Returns:
+            jax.Array: Components (A_R, A_phi, A_Z), shape (P, 3), in tesla
+                meters, in the local orthonormal cylindrical basis.
+        """
         return _cart_vectors_to_cyl(
             self.A(),
             _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
         )
 
     def GradAbsB_cyl(self):
-        """``GradAbsB`` components in the cylindrical basis."""
+        """``GradAbsB`` components in the cylindrical basis.
+
+        Returns:
+            jax.Array: Components (partial_R |B|, (1/R)*partial_phi |B|, partial_Z
+                |B|), shape (P, 3), in tesla per meter.
+        """
         return _cart_vectors_to_cyl(
             self.GradAbsB(),
             _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
         )
 
     def dB_by_dcoilcurrents(self, compute_derivatives=0):
-        """Per-coil B at unit current."""
+        """Per-coil B at unit current.
+
+        Args:
+            compute_derivatives (int): Native compatibility argument, ignored; the
+                method name determines the spatial derivative order.
+
+        Returns:
+            list[jax.Array]: One unit-physical-current B per public coil, each
+                shape (P, 3), in tesla per ampere; derivative axes precede the field
+                component. Current-expression scaling is not included.
+        """
         return self._per_coil_unit_current_derivative(biot_savart_B)
 
     def d2B_by_dXdcoilcurrents(self, compute_derivatives=1):
-        """Per-coil ``dB/dX`` at unit current."""
+        """Per-coil ``dB/dX`` at unit current.
+
+        Args:
+            compute_derivatives (int): Native compatibility argument, ignored; the
+                method name determines the spatial derivative order.
+
+        Returns:
+            list[jax.Array]: One unit-physical-current dB_by_dX per public coil,
+                each shape (P, 3, 3), in tesla per meter per ampere; derivative axes
+                precede the field component. Current-expression scaling is not
+                included.
+        """
         return self._per_coil_unit_current_derivative(biot_savart_dB_by_dX)
 
     def d3B_by_dXdXdcoilcurrents(self, compute_derivatives=2):
-        """Per-coil ``d2B/dXdX`` at unit current."""
+        """Per-coil ``d2B/dXdX`` at unit current.
+
+        Args:
+            compute_derivatives (int): Native compatibility argument, ignored; the
+                method name determines the spatial derivative order.
+
+        Returns:
+            list[jax.Array]: One unit-physical-current d2B_by_dXdX per public
+                coil, each shape (P, 3, 3, 3), in tesla per meter squared per ampere;
+                derivative axes precede the field component. Current-expression
+                scaling is not included.
+        """
         return self._per_coil_unit_current_derivative(biot_savart_d2B_by_dXdX)
 
     def dA_by_dcoilcurrents(self, compute_derivatives=0):
-        """Per-coil A at unit current."""
+        """Per-coil A at unit current.
+
+        Args:
+            compute_derivatives (int): Native compatibility argument, ignored; the
+                method name determines the spatial derivative order.
+
+        Returns:
+            list[jax.Array]: One unit-physical-current A per public coil, each
+                shape (P, 3), in tesla meters per ampere; derivative axes precede the
+                field component. Current-expression scaling is not included.
+        """
         return self._per_coil_unit_current_derivative(biot_savart_A)
 
     def d2A_by_dXdcoilcurrents(self, compute_derivatives=1):
-        """Per-coil ``dA/dX`` at unit current."""
+        """Per-coil ``dA/dX`` at unit current.
+
+        Args:
+            compute_derivatives (int): Native compatibility argument, ignored; the
+                method name determines the spatial derivative order.
+
+        Returns:
+            list[jax.Array]: One unit-physical-current dA_by_dX per public coil,
+                each shape (P, 3, 3), in tesla per ampere; derivative axes precede the
+                field component. Current-expression scaling is not included.
+        """
         return self._per_coil_unit_current_derivative(biot_savart_dA_by_dX)
 
     def d3A_by_dXdXdcoilcurrents(self, compute_derivatives=2):
-        """Per-coil ``d2A/dXdX`` at unit current."""
+        """Per-coil ``d2A/dXdX`` at unit current.
+
+        Args:
+            compute_derivatives (int): Native compatibility argument, ignored; the
+                method name determines the spatial derivative order.
+
+        Returns:
+            list[jax.Array]: One unit-physical-current d2A_by_dXdX per public
+                coil, each shape (P, 3, 3, 3), in tesla per meter per ampere;
+                derivative axes precede the field component. Current-expression
+                scaling is not included.
+        """
         return self._per_coil_unit_current_derivative(biot_savart_d2A_by_dXdX)
 
 
@@ -763,6 +898,16 @@ class JaxBiotSavart(Optimizable):
     __rmul__ = _unsupported_field_arithmetic
 
     def as_dict(self, serial_objs_dict=None) -> dict:
+        """Serialize the coil graph and current evaluation points.
+
+        Args:
+            serial_objs_dict (dict or None): Shared GSON serialization registry passed
+                to Optimizable.as_dict.
+
+        Returns:
+            dict: Serialized coil graph and Cartesian points, including None when
+                points have been cleared.
+        """
         serialized = super().as_dict(serial_objs_dict=serial_objs_dict)
         serialized["points"] = (
             None if self._points_jax is None else self.get_points_cart()
@@ -785,6 +930,17 @@ class JaxBiotSavart(Optimizable):
 
     @classmethod
     def from_dict(cls, d, serial_objs_dict, recon_objs):
+        """Reconstruct a field and its points from a GSON payload.
+
+        Args:
+            d (dict): Decoded GSON field payload containing coils and optional points.
+            serial_objs_dict (dict): Serialized-object registry used by GSONDecoder.
+            recon_objs (dict): Registry of objects already reconstructed by GSONDecoder.
+
+        Returns:
+            JaxBiotSavart object: Reconstructed field with its serialized
+                evaluation points restored.
+        """
         decoder = GSONDecoder()
         coils = decoder.process_decoded(d["coils"], serial_objs_dict, recon_objs)
         field = cls(coils)
@@ -815,6 +971,12 @@ class JaxBiotSavart(Optimizable):
         )
 
     def update_free_dof_size_indices(self) -> None:
+        """Refresh free-DOF layout and invalidate its captured extraction contract.
+
+        Returns:
+            None: Free-DOF indices, extraction contracts and layout version are
+                updated.
+        """
         super().update_free_dof_size_indices()
         self._local_free_positions_by_opt.clear()
         if self._free_dof_layout_ready:
@@ -870,7 +1032,15 @@ class JaxBiotSavart(Optimizable):
         self._field_outputs_key = None
 
     def recompute_bell(self, parent=None):
-        """Drop the cached coil state and field values on simsopt's recompute notification."""
+        """Drop the cached coil state and field values on simsopt's recompute notification.
+
+        Args:
+            parent (Optimizable or None): Dependency that triggered the recompute
+                notification; recompute_bell does not inspect it.
+
+        Returns:
+            None: Mutable recompute/cache state is updated.
+        """
         self._drop_coil_state()
 
     def _device_contract(self, device) -> _DeviceCoilContract:
@@ -911,6 +1081,15 @@ class JaxBiotSavart(Optimizable):
         return state
 
     def set_recompute_flag(self, parent=None):
+        """Mark dependent field state stale and defer fixed-DOF refresh until the next read.
+
+        Args:
+            parent (Optimizable or None): Dependency that triggered the recompute
+                notification; recompute_bell does not inspect it.
+
+        Returns:
+            None: Mutable recompute/cache state is updated.
+        """
         if (
             parent is not None
             and self._free_dof_layout_ready
@@ -937,10 +1116,25 @@ class JaxBiotSavart(Optimizable):
 
     @property
     def x(self):
+        """Return the global free coil/current DOF vector.
+
+        Returns:
+            numpy.ndarray: Global free owner DOFs, shape (self.dof_size,), in
+                Optimizable lineage order; units depend on the owner.
+        """
         return cast(Callable[[Optimizable], np.ndarray], Optimizable.x.fget)(self)
 
     @x.setter
     def x(self, coil_dofs):
+        """Set the global free coil/current DOF vector.
+
+        Args:
+            coil_dofs (array-like): Global free owner DOFs, shape (self.dof_size,), in
+                Optimizable lineage order.
+
+        Returns:
+            None: Native owner DOFs and the dependent field state are updated.
+        """
         self._set_global_coil_dofs(
             Optimizable.x.fset,
             coil_dofs,
@@ -949,10 +1143,26 @@ class JaxBiotSavart(Optimizable):
 
     @property
     def full_x(self):
+        """Return the global full, including fixed coil/current DOF vector.
+
+        Returns:
+            numpy.ndarray: Global full, including fixed owner DOFs, shape
+                (self.full_dof_size,), in Optimizable lineage order; units depend on
+                the owner.
+        """
         return cast(Callable[[Optimizable], np.ndarray], Optimizable.full_x.fget)(self)
 
     @full_x.setter
     def full_x(self, coil_dofs):
+        """Set the global full, including fixed coil/current DOF vector.
+
+        Args:
+            coil_dofs (array-like): Global full, including fixed owner DOFs, shape
+                (self.full_dof_size,), in Optimizable lineage order.
+
+        Returns:
+            None: Native owner DOFs and the dependent field state are updated.
+        """
         self._set_global_coil_dofs(
             Optimizable.full_x.fset,
             coil_dofs,
@@ -1078,7 +1288,12 @@ class JaxBiotSavart(Optimizable):
         self._owner_partial_width = width
 
     def coil_dof_extraction_spec(self):
-        """Return the cached immutable owner-DOF reconstruction contract."""
+        """Return the cached immutable owner-DOF reconstruction contract.
+
+        Returns:
+            CoilSetDofExtractionSpec object: Cached reconstruction contract,
+                refreshed when captured fixed DOFs, samples or layout change.
+        """
         # Direct sample replacement can bypass the native curve notification.
         previous_spec = self._coil_dof_extraction_spec
         self._refresh_captured_coil_state(check_fixed=self._fixed_dofs_maybe_changed)
@@ -1088,7 +1303,12 @@ class JaxBiotSavart(Optimizable):
 
     @property
     def dof_layout_version(self) -> int:
-        """Return the monotonic free/fixed DOF-layout version."""
+        """Return the monotonic free/fixed DOF-layout version.
+
+        Returns:
+            int: Monotonic version incremented when the free/fixed layout is
+                rebuilt.
+        """
         return self._dof_layout_version
 
     def _local_full_dofs_from_free_vector(self, opt, coil_dofs):
@@ -1180,7 +1400,17 @@ class JaxBiotSavart(Optimizable):
         return coil_dofs
 
     def coil_specs_from_dofs(self, coil_dofs):
-        """Build immutable per-coil specs from an explicit flat DOF vector."""
+        """Build immutable per-coil specs from an explicit flat DOF vector.
+
+        Args:
+            coil_dofs (array-like): Global free coil/current DOFs, shape
+                (self.dof_size,), in self.x order; units depend on the corresponding
+                owner.
+
+        Returns:
+            tuple[CoilSpec, ...]: Reconstructed immutable payloads in public coil
+                order.
+        """
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
         return coil_specs_from_dof_extraction_spec(
             self.coil_dof_extraction_spec(),
@@ -1188,13 +1418,33 @@ class JaxBiotSavart(Optimizable):
         )
 
     def grouped_coil_arrays_from_dofs(self, coil_dofs):
-        """Build grouped coil arrays from an explicit flat DOF vector."""
+        """Build grouped coil arrays from an explicit flat DOF vector.
+
+        Args:
+            coil_dofs (array-like): Global free coil/current DOFs, shape
+                (self.dof_size,), in self.x order; units depend on the corresponding
+                owner.
+
+        Returns:
+            list[tuple]: Geometry/tangent/current triples with shapes (C, Q, 3),
+                (C, Q, 3), (C,), grouped by quadrature count.
+        """
         return list(
             grouped_field_inputs_from_spec(self.coil_set_spec_from_dofs(coil_dofs))
         )
 
     def coil_set_spec_from_dofs(self, coil_dofs):
-        """Build an immutable grouped coil spec from an explicit flat DOF vector."""
+        """Build an immutable grouped coil spec from an explicit flat DOF vector.
+
+        Args:
+            coil_dofs (array-like): Global free coil/current DOFs, shape
+                (self.dof_size,), in self.x order; units depend on the corresponding
+                owner.
+
+        Returns:
+            GroupedCoilSetSpec object: Immutable sampled geometry and currents
+                grouped by quadrature count.
+        """
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
         return coil_set_spec_from_dof_extraction_spec(
             self.coil_dof_extraction_spec(), coil_dofs,
@@ -1202,6 +1452,12 @@ class JaxBiotSavart(Optimizable):
 
     @property
     def coils(self):
+        """Return the native source coils in public order.
+
+        Returns:
+            Sequence[Coil]: Stored public native coil sequence, retaining its
+                object identities.
+        """
         return self._coils
 
     def set_points(self, points):
@@ -1211,34 +1467,92 @@ class JaxBiotSavart(Optimizable):
         without a host round-trip. Mutates the cached point buffer on this
         instance, so callers should not share one ``JaxBiotSavart`` across
         concurrent evaluation threads.
+
+        Args:
+            points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+
+        Returns:
+            JaxBiotSavart object: This instance after replacing owned point
+                buffers and invalidating cached point outputs.
         """
         return _set_biot_savart_points(self, points)
 
     def set_points_cart(self, points):
+        """Set evaluation points and invalidate cached field outputs.
+
+        Args:
+            points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+
+        Returns:
+            JaxBiotSavart object: This instance after replacing owned point
+                buffers and invalidating cached point outputs.
+        """
         return self.set_points(points)
 
     def set_points_cyl(self, points_cyl):
+        """Set evaluation points and invalidate cached field outputs.
+
+        Args:
+            points_cyl (array-like): Cylindrical (R, phi, Z) coordinates, shape (P, 3),
+                with lengths in meters and phi in radians; angles are reduced using
+                fmod(phi, 2*pi).
+
+        Returns:
+            JaxBiotSavart object: This instance after replacing owned point
+                buffers and invalidating cached point outputs.
+        """
         return _set_biot_savart_points_cyl(self, points_cyl)
 
     def get_points_cart_ref(self):
-        """Return the current JAX point buffer for point-preserving callers."""
+        """Return the current JAX point buffer for point-preserving callers.
+
+        Returns:
+            jax.Array or None: Stored Cartesian point buffer, shape (P, 3), in
+                meters, or None after clearing points.
+        """
         return self._points_jax
 
     def get_points_cart(self):
+        """Materialize the current Cartesian evaluation points on the host.
+
+        Returns:
+            numpy.ndarray: Writable Cartesian coordinates, shape (P, 3), in
+                meters, materialized at the explicit host boundary.
+        """
         return host_array(self._points_jax, dtype=np.float64)
 
     def get_points_cyl(self):
+        """Materialize the current cylindrical evaluation points on the host.
+
+        Returns:
+            numpy.ndarray: Writable (R, phi, Z) coordinates, shape (P, 3), with
+                lengths in meters and angle in radians. Cartesian-derived phi is in
+                [0, 2*pi); explicitly set angles retain signed fmod values.
+        """
         return _get_biot_savart_points_cyl(self)
 
     def set_points_from_spec(self, field_eval_spec):
         """Set evaluation points from an immutable field-evaluation spec.
 
         This still mutates the receiving ``JaxBiotSavart`` instance.
+
+        Args:
+            field_eval_spec (FieldEvalSpec): Immutable Cartesian point cloud of shape
+                (P, 3), in meters.
+
+        Returns:
+            JaxBiotSavart object: This instance after replacing owned point
+                buffers and invalidating cached point outputs.
         """
         return _set_biot_savart_points(self, field_eval_spec.points)
 
     def field_eval_spec(self):
-        """Build the immutable field-evaluation spec for the current points."""
+        """Build the immutable field-evaluation spec for the current points.
+
+        Returns:
+            FieldEvalSpec object: Runtime-precision Cartesian point payload of
+                shape (P, 3), in meters.
+        """
         return make_field_eval_spec(self._points_jax)
 
 
@@ -1247,11 +1561,21 @@ class JaxBiotSavart(Optimizable):
 
         Reconstructed from the live free-DOF vector with the cached explicit
         extraction contract, once per coil-DOF state.
+
+        Returns:
+            GroupedCoilSetSpec object: Cached sampled geometry and physical
+                currents for the current owner DOFs.
         """
         return self._coil_evaluation_state().coil_set_spec
 
     def coil_specs(self):
-        """Build immutable per-coil specs from the live coil graph."""
+        """Build immutable per-coil specs from the live coil graph.
+
+        Returns:
+            tuple[CoilSpec, ...]: Immutable per-coil payloads reconstructed from
+                the current free DOFs, with each coefficient leaf matching its curve
+                spec shape.
+        """
         return self.coil_specs_from_dofs(_as_jax_float64(self.x))
 
     # ------------------------------------------------------------------
@@ -1260,11 +1584,20 @@ class JaxBiotSavart(Optimizable):
 
 
     def B_pullback_native(self, v):
-        r"""Return the native grouped cotangents for ``B``.
+        """Return the native grouped cotangents for ``B``.
 
         This is the JAX-native pullback boundary. It returns cotangents with
         respect to grouped coil geometry/current arrays, without projecting
         them into SIMSOPT's public :class:`Derivative` object graph.
+
+        Args:
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
+
+        Returns:
+            BiotSavartFieldPullback object: Grouped geometry/tangent/current
+                cotangents with leaf shapes (C, Q, 3), (C, Q, 3), (C,) and static
+                public coil indices.
         """
         points = self._points_jax
         v_jax = _as_jax_float64(v)
@@ -1291,7 +1624,7 @@ class JaxBiotSavart(Optimizable):
         )
 
     def B_vjp(self, v) -> Derivative:
-        r"""Vector-Jacobian product of B w.r.t. coil DOFs.
+        """Vector-Jacobian product of B w.r.t. coil DOFs.
 
         Given a cotangent vector ``v`` (typically ``dJ/dB``), returns
         a :class:`Derivative` mapping every coil DOF, including fixed DOFs, to its
@@ -1302,10 +1635,13 @@ class JaxBiotSavart(Optimizable):
         curve specs. Unsupported curves are rejected explicitly.
 
         Args:
-            v: (npoints, 3) cotangent, same shape as ``B()``.
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
 
         Returns:
-            :class:`Derivative` (sum over all coils).
+            Derivative object: Full owner partials, including fixed DOFs, after
+                projecting geometry and current cotangents; free/fixed filtering
+                occurs when the Derivative is called.
         """
         return self._pullback_to_derivative(self.B_pullback_native(v))
 
@@ -1330,43 +1666,123 @@ class JaxBiotSavart(Optimizable):
         )
 
     def A_pullback_native(self, v):
-        r"""Return native grouped cotangents for ``A``."""
+        """Return native grouped cotangents for ``A``.
+
+        Args:
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
+
+        Returns:
+            BiotSavartFieldPullback object: Grouped geometry/tangent/current
+                cotangents with leaf shapes (C, Q, 3), (C, Q, 3), (C,) and static
+                public coil indices.
+        """
         return self._field_pullback_native(grouped_biot_savart_A_from_inputs, v)
 
     def dA_by_dX_pullback_native(self, vgrad):
-        r"""Return native grouped cotangents for ``dA/dX``."""
+        """Return native grouped cotangents for ``dA/dX``.
+
+        Args:
+            vgrad (array-like): Spatial-Jacobian cotangent, shape (P, 3, 3), with
+                derivative direction before field component; units follow the scalar
+                objective.
+
+        Returns:
+            BiotSavartFieldPullback object: Grouped geometry/tangent/current
+                cotangents with leaf shapes (C, Q, 3), (C, Q, 3), (C,) and static
+                public coil indices.
+        """
         return self._field_pullback_native(
             grouped_biot_savart_dA_by_dX_from_inputs,
             vgrad,
         )
 
     def dB_by_dX_pullback_native(self, vgrad):
-        r"""Return native grouped cotangents for ``dB/dX``."""
+        """Return native grouped cotangents for ``dB/dX``.
+
+        Args:
+            vgrad (array-like): Spatial-Jacobian cotangent, shape (P, 3, 3), with
+                derivative direction before field component; units follow the scalar
+                objective.
+
+        Returns:
+            BiotSavartFieldPullback object: Grouped geometry/tangent/current
+                cotangents with leaf shapes (C, Q, 3), (C, Q, 3), (C,) and static
+                public coil indices.
+        """
         return self._field_pullback_native(
             grouped_biot_savart_dB_by_dX_from_inputs,
             vgrad,
         )
 
     def A_and_dA_pullback_native(self, v, vgrad):
-        r"""Return separate native grouped cotangents for ``A`` and ``dA/dX``."""
+        """Return separate native grouped cotangents for ``A`` and ``dA/dX``.
+
+        Args:
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
+            vgrad (array-like): Spatial-Jacobian cotangent, shape (P, 3, 3), with
+                derivative direction before field component; units follow the scalar
+                objective.
+
+        Returns:
+            tuple[BiotSavartFieldPullback, BiotSavartFieldPullback]: Separate
+                value and spatial-Jacobian grouped cotangents, in that order;
+                contributions are not added.
+        """
         return (
             self.A_pullback_native(v),
             self.dA_by_dX_pullback_native(vgrad),
         )
 
     def B_and_dB_pullback_native(self, v, vgrad):
-        r"""Return separate native grouped cotangents for ``B`` and ``dB/dX``."""
+        """Return separate native grouped cotangents for ``B`` and ``dB/dX``.
+
+        Args:
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
+            vgrad (array-like): Spatial-Jacobian cotangent, shape (P, 3, 3), with
+                derivative direction before field component; units follow the scalar
+                objective.
+
+        Returns:
+            tuple[BiotSavartFieldPullback, BiotSavartFieldPullback]: Separate
+                value and spatial-Jacobian grouped cotangents, in that order;
+                contributions are not added.
+        """
         return (
             self.B_pullback_native(v),
             self.dB_by_dX_pullback_native(vgrad),
         )
 
     def A_vjp(self, v):
-        r"""Vector-Jacobian product of A w.r.t. coil DOFs."""
+        """Vector-Jacobian product of A w.r.t. coil DOFs.
+
+        Args:
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
+
+        Returns:
+            Derivative object: Full owner partials, including fixed DOFs, after
+                projecting geometry and current cotangents; free/fixed filtering
+                occurs when the Derivative is called.
+        """
         return self._pullback_to_derivative(self.A_pullback_native(v))
 
     def A_and_dA_vjp(self, v, vgrad):
-        r"""Separate vector-Jacobian products for A and dA/dX."""
+        """Separate vector-Jacobian products for A and dA/dX.
+
+        Args:
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
+            vgrad (array-like): Spatial-Jacobian cotangent, shape (P, 3, 3), with
+                derivative direction before field component; units follow the scalar
+                objective.
+
+        Returns:
+            tuple[Derivative, Derivative]: Separate value and spatial-Jacobian
+                owner partials, including fixed DOFs; contributions are not added.
+        """
         a_pullback, da_pullback = self.A_and_dA_pullback_native(v, vgrad)
         return (
             self._pullback_to_derivative(a_pullback),
@@ -1374,7 +1790,19 @@ class JaxBiotSavart(Optimizable):
         )
 
     def B_and_dB_vjp(self, v, vgrad):
-        r"""Separate vector-Jacobian products for B and dB/dX."""
+        """Separate vector-Jacobian products for B and dB/dX.
+
+        Args:
+            v (array-like): Field-value cotangent, shape (P, 3), contracting the output
+                as sum(v * F); units follow the scalar objective.
+            vgrad (array-like): Spatial-Jacobian cotangent, shape (P, 3, 3), with
+                derivative direction before field component; units follow the scalar
+                objective.
+
+        Returns:
+            tuple[Derivative, Derivative]: Separate value and spatial-Jacobian
+                owner partials, including fixed DOFs; contributions are not added.
+        """
         b_pullback, db_pullback = self.B_and_dB_pullback_native(v, vgrad)
         return (
             self._pullback_to_derivative(b_pullback),
@@ -1439,7 +1867,22 @@ class JaxBiotSavart(Optimizable):
         *,
         coil_dofs=None,
     ):
-        """Project grouped coil cotangents to the flat free-DOF gradient."""
+        """Project grouped coil cotangents to the flat free-DOF gradient.
+
+        Args:
+            d_coil_arrays (Sequence[tuple]): Per-group (d_gammas, d_gammadashs,
+                d_currents) cotangent arrays of shapes (C, Q, 3), (C, Q, 3), (C,); units
+                are contracted-objective units per meter or ampere.
+            coil_indices (Sequence[Sequence[int]]): Original public coil indices for
+                each group, matching its cotangent row order.
+            coil_dofs (array-like or None): Global free coil/current DOFs, shape
+                (self.dof_size,), in self.x order; units depend on the corresponding
+                owner. None snapshots the current self.x.
+
+        Returns:
+            jax.Array: Flat free-DOF gradient, shape (self.dof_size,), in self.x
+                order, in objective units per corresponding DOF unit.
+        """
         if coil_dofs is None:
             coil_dofs = self.x.copy()
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
@@ -1472,13 +1915,15 @@ class JaxBiotSavart(Optimizable):
         Free/fixed filtering belongs to ``Derivative.__call__``.
 
         Args:
-            d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``
-                cotangent tuples, one per quadrature group.
-            coil_indices: list of index lists, one per group, mapping
-                local position to global coil index.
+            d_coil_arrays (Sequence[tuple]): Per-group (d_gammas, d_gammadashs,
+                d_currents) cotangent arrays of shapes (C, Q, 3), (C, Q, 3), (C,); units
+                are contracted-objective units per meter or ampere.
+            coil_indices (Sequence[Sequence[int]]): Original public coil indices for
+                each group, matching its cotangent row order.
 
         Returns:
-            :class:`Derivative` over all coil DOFs.
+            Derivative object: Full owner partials, including fixed DOFs,
+                materialized on the host; free/fixed filtering occurs when called.
         """
         self.coil_dof_extraction_spec()
         coil_dofs = self._normalize_explicit_coil_dofs(self.x)
