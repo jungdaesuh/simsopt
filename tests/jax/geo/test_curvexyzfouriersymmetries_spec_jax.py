@@ -451,6 +451,8 @@ def test_spec_geometry_runs_under_strict_transfer_guard() -> None:
 
 
 def test_static_slice_and_update_grad_run_under_strict_transfer_guard() -> None:
+    """Compiled static slices and updates have exact values and gradients under a
+    strict transfer guard."""
     values_host = np.linspace(-2.0, 3.0, num=6, dtype=np.float64)
     replacement_host = np.array([10.0, 20.0, 30.0], dtype=np.float64)
     values = jax.device_put(jnp.asarray(values_host))

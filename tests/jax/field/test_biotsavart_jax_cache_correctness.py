@@ -33,6 +33,8 @@ def _coils(*, perturbed=False):
 
 
 def test_warmed_full_owner_projection_host_boundaries(monkeypatch):
+    """Warmed owner projection matches native gradients with one free-vector
+    placement and one packed host read."""
     _, coils = _coils()
     field = backend.JaxBiotSavart(coils)
     field.set_points(_POINTS)
@@ -77,6 +79,8 @@ def test_warmed_full_owner_projection_host_boundaries(monkeypatch):
 
 
 def test_packed_projection_preserves_distinct_owners_with_shared_dofs():
+    """Packed projection retains independent writable native partials for distinct
+    owners sharing DOFs."""
     curves, _ = _coils()
     curve = curves[0]
     shared = CurveXYZFourier(curve.quadpoints, curve.order, dofs=curve.dofs)
@@ -102,6 +106,8 @@ def test_packed_projection_preserves_distinct_owners_with_shared_dofs():
 
 @pytest.mark.parametrize("fixed", ["partial", "full"])
 def test_packed_projection_preserves_fixed_nested_curve_partials(fixed):
+    """Packed projection preserves native partials for partially or fully fixed
+    nested curve owners."""
     curves, coils = _coils(perturbed=True)
     if fixed == "partial":
         curves[0].curve.fix(2)
@@ -132,6 +138,8 @@ class _CountedSample(np.ndarray):
 
 
 def test_unchanged_perturbation_evaluations_do_not_copy_samples(monkeypatch):
+    """Repeated unchanged perturbed-field evaluations reuse results without copying
+    samples or reading fingerprints."""
     curves, coils = _coils(perturbed=True)
     curve = curves[0]
     curve.sample._sample = [sample.view(_CountedSample) for sample in curve.sample._sample]

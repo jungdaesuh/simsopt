@@ -71,6 +71,7 @@ def test_field_kernel_tuning_uses_static_gpu_tiling_without_probes(
 
 
 def test_field_kernel_tuning_applies_environment_overrides(monkeypatch):
+    """Environment overrides determine the coil, quadrature and point tile sizes."""
     monkeypatch.setenv("SIMSOPT_JAX_COIL_CHUNK_SIZE", "8")
     monkeypatch.setenv("SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE", "32")
     monkeypatch.setenv("SIMSOPT_JAX_POINT_CHUNK_SIZE", "128")

@@ -33,6 +33,8 @@ def _gamma(k: int) -> float:
 
 
 def test_device_one_has_a_zero_cotangent() -> None:
+    """Multiplying by device_one leaves the reference gradient equal to that of the
+    original objective."""
     reference = jnp.asarray([1.0e5, -3.0, 2.5e-7])
     cotangent = jax.grad(lambda r: device_one(r) * jnp.sum(r * r))(reference)
     np.testing.assert_array_equal(np.asarray(cotangent), 2.0 * np.asarray(reference))

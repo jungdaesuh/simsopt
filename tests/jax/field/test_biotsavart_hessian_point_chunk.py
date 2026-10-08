@@ -26,6 +26,8 @@ jax.config.update("jax_enable_x64", True)
     [(0, 0), (1, 1), (7, 1), (8, 1), (128, 16), (2048, 256), (4096, 512)],
 )
 def test_hessian_point_chunk_size_is_one_eighth_and_keeps_disabled(tuned, expected):
+    """Hessian tiles use one eighth of positive point tuning, floored at one, while
+    zero disables tiling."""
     assert biotsavart_core.hessian_point_chunk_size(tuned) == expected
 
 
@@ -51,6 +53,8 @@ def _coil_set(rng):
 
 
 def test_d2B_kernel_tiled_over_points_matches_untiled(monkeypatch):
+    """Point-tiled Hessians match dense results, and value/Jacobian kernels retain
+    their original tile size."""
     rng = np.random.default_rng(7)
     gammas, gammadashs, currents = _coil_set(rng)
     points = jnp.asarray(rng.uniform(-0.4, 0.4, size=(37, 3)))

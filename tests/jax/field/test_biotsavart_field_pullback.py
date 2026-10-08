@@ -12,6 +12,8 @@ from simsopt_jax_adapters.field import biotsavart_backend as _backend
 
 
 def test_native_pullback_preserves_leaf_order_and_static_coil_indices():
+    """Grouped pullbacks retain leaf order and static coil indices through flattening
+    and JIT."""
     arrays = tuple(jnp.asarray([value], dtype=jnp.float64) for value in range(1, 7))
     pullback = _backend.BiotSavartFieldPullback(
         d_coil_arrays=((arrays[0], arrays[1], arrays[2]), (arrays[3], arrays[4], arrays[5])),

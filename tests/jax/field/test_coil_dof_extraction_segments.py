@@ -49,6 +49,8 @@ def _owner_start(bs_jax, opt) -> int:
 
 
 def test_segments_from_free_positions_merge_runs_and_split_at_fixed_dofs():
+    """Extraction segments merge contiguous free positions and split correctly at
+    fixed DOFs, including empty input."""
     assert _owner_segments_from_free_positions(5, [0, 1, 2]) == ((5, 8, 0, 3),)
     assert _owner_segments_from_free_positions(2, [0, 1, 2, 4, 5, 6, 7]) == (
         (2, 5, 0, 3),
@@ -63,6 +65,8 @@ def test_segments_from_free_positions_merge_runs_and_split_at_fixed_dofs():
 
 
 def test_extraction_spec_carries_one_segment_per_run(coil_graph):
+    """Curve and current extraction maps contain one copy segment per contiguous
+    free-DOF run."""
     curves, currents, bs_jax, _oracle = coil_graph
     spec = bs_jax.coil_dof_extraction_spec()
 
@@ -83,6 +87,8 @@ def test_extraction_spec_carries_one_segment_per_run(coil_graph):
 
 
 def test_coil_specs_from_dofs_match_the_optimizable_setter_bitwise(coil_graph):
+    """Compiled reconstruction matches native DOF setters bitwise under the strict
+    transfer guard."""
     curves, currents, bs_jax, oracle = coil_graph
     spec = bs_jax.coil_dof_extraction_spec()
     rng = np.random.default_rng(20260914)
@@ -118,6 +124,7 @@ def _lowered_extraction_text(bs_jax) -> str:
 
 
 def test_fully_free_extraction_lowers_without_selector_matmuls():
+    """Fully free DOF reconstruction lowers without selector matrix multiplications."""
     curves = [CurveXYZFourier(_NQUAD, _ORDER) for _ in range(2)]
     currents = [Current(1.0e4), Current(2.0e4)]
     bs_jax = JaxBiotSavart([Coil(c, i) for c, i in zip(curves, currents)])
@@ -137,6 +144,8 @@ def test_partially_fixed_extraction_lowers_one_placement_matmul_per_run(coil_gra
 
 
 def test_gradient_through_the_mapping_matches_the_manual_cotangent(coil_graph):
+    """Autodiff and manual extraction-map cotangents match the native setter-derived
+    selection gradient bitwise."""
     curves, _currents, bs_jax, oracle = coil_graph
     spec = bs_jax.coil_dof_extraction_spec()
     rng = np.random.default_rng(7)

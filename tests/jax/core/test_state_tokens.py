@@ -4,6 +4,8 @@ from simsopt_jax.core.state_tokens import make_state_token_factory
 
 
 def test_state_token_factories_are_independent_monotonic_sequences():
+    """State-token factories advance independently through monotonic integer
+    sequences."""
     first = make_state_token_factory()
     second = make_state_token_factory()
 

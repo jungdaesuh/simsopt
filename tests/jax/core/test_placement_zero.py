@@ -33,6 +33,8 @@ def _placed(values) -> jax.Array:
 
 @pytest.mark.parametrize("reference", REFERENCES)
 def test_placement_zero_is_an_exact_zero_on_the_reference_device(reference) -> None:
+    """placement_zero is bitwise positive zero with the reference dtype and device
+    under a strict guard."""
     placed = _placed(reference)
     with jax.transfer_guard("disallow"):
         zero = placement_zero(placed)
@@ -45,6 +47,8 @@ def test_placement_zero_is_an_exact_zero_on_the_reference_device(reference) -> N
 @pytest.mark.parametrize("reference", REFERENCES)
 @pytest.mark.parametrize("seed", SEEDS)
 def test_placement_zero_tangent_is_exactly_zero(reference, seed) -> None:
+    """placement_zero produces a bitwise zero tangent on the reference device for
+    every tested seed."""
     placed = _placed(reference)
     tangent = _placed((seed, 1.0))
     with jax.transfer_guard("disallow"):
@@ -57,6 +61,8 @@ def test_placement_zero_tangent_is_exactly_zero(reference, seed) -> None:
 @pytest.mark.parametrize("reference", REFERENCES)
 @pytest.mark.parametrize("seed", SEEDS)
 def test_placement_zero_cotangent_is_exactly_zero(reference, seed) -> None:
+    """placement_zero sends bitwise positive-zero cotangents to every reference
+    entry."""
     placed = _placed(reference)
     cotangent = _placed(seed)
     with jax.transfer_guard("disallow"):

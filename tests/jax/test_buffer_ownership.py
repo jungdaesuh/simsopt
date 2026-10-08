@@ -60,6 +60,8 @@ def _assert_pending(result):
     as_compute_array,
 ])
 def test_placement_snapshots_numpy_before_dispatch(place, misaligned):
+    """Placement snapshots aligned and misaligned NumPy inputs before caller
+    mutation."""
     set_backend("jax", device="cpu", intent="parity")
     source = _host_array((5_000_000,), misaligned=misaligned)
     expected = source.copy()
@@ -69,6 +71,8 @@ def test_placement_snapshots_numpy_before_dispatch(place, misaligned):
 
 
 def test_snapshot_preserves_device_arrays_and_tracers():
+    """Snapshotting preserves JAX array identity and traced values while supporting
+    mixed host/device pytrees."""
     device = jnp.arange(16, dtype=jnp.float64)
     assert snapshot_host_tree(device) is device
     tree = snapshot_host_tree({"device": device, "host": np.arange(16)})
@@ -83,6 +87,8 @@ def test_snapshot_preserves_device_arrays_and_tracers():
     runtime_device_put,
 ])
 def test_mixed_device_host_sequence_snapshots_numpy(convert, execution_gate):
+    """Mixed host/device sequence conversion snapshots NumPy leaves before deferred
+    execution reads them."""
     source = _host_array((65536,))
     expected = source.copy()
     zeros = jnp.zeros(source.shape)
@@ -148,6 +154,8 @@ _SPEC_FACTORIES = [
 
 @pytest.mark.parametrize("factory", [factory for _, factory in _SPEC_FACTORIES], ids=[name for name, _ in _SPEC_FACTORIES])
 def test_spec_factories_own_numpy_leaves(factory):
+    """Spec factories retain owned NumPy snapshots after every caller input is
+    mutated."""
     source = _SpecInputs()
     result = factory(source)
     expected = jax.tree.map(lambda leaf: np.array(leaf, copy=True), result)
@@ -160,6 +168,8 @@ def test_spec_factories_own_numpy_leaves(factory):
     lambda points: CurveXYZFourierSymmetries(points, order=1, nfp=1, stellsym=False),
 ], ids=["helical", "symmetries"])
 def test_adapter_curve_capture_owns_native_coefficients(native_curve):
+    """Adapter curve capture owns snapshots of native coefficients and quadrature
+    nodes."""
     quadpoints = _host_array((65536,))
     quadpoints[:] -= 1.0
     curve = native_curve(quadpoints)
@@ -187,6 +197,8 @@ def execution_gate():
 
 @pytest.mark.parametrize("misaligned", [False, True])
 def test_cylindrical_points_own_numpy_before_conversion(execution_gate, monkeypatch, misaligned):
+    """Cylindrical setters snapshot caller coordinates before deferred conversion to
+    Cartesian points."""
     gate = execution_gate
     source = _host_array((1_666_667, 3), misaligned=misaligned)
     saved = source.copy()
@@ -220,6 +232,8 @@ _FORWARD_KERNELS = [
 @pytest.mark.parametrize("kernel", _FORWARD_KERNELS, ids=[kernel.__name__ for kernel in _FORWARD_KERNELS])
 @pytest.mark.parametrize("pending_input", ["points", "gamma"])
 def test_raw_forward_kernel_owns_numpy_inputs(kernel, pending_input, execution_gate):
+    """Raw forward kernels snapshot NumPy inputs before deferred device execution and
+    caller mutation."""
     gate = execution_gate
     inputs = list(_kernel_inputs())
     expected = jax.tree.map(lambda x: np.array(x, copy=True), jax.block_until_ready(kernel(*inputs)))
@@ -236,6 +250,8 @@ def test_raw_forward_kernel_owns_numpy_inputs(kernel, pending_input, execution_g
 
 @pytest.mark.parametrize("kernel", [kernels.biot_savart_B_vjp, group_biot_savart_B_vjp], ids=["raw", "grouped"])
 def test_raw_pullback_owns_numpy_inputs(kernel, execution_gate):
+    """Raw pullbacks snapshot geometry, current and cotangent NumPy inputs before
+    deferred execution."""
     gate = execution_gate
     points, gamma, dash, current = _kernel_inputs()
     cotangent = _host_array(points.shape)
@@ -256,6 +272,8 @@ def _field():
 
 @pytest.mark.parametrize("entry", ["_normalize_explicit_coil_dofs", "coil_specs_from_dofs", "grouped_coil_arrays_from_dofs", "coil_set_spec_from_dofs"])
 def test_explicit_dofs_are_owned(entry, execution_gate, monkeypatch):
+    """Explicit-DOF reconstruction retains owned snapshots despite caller mutation
+    during deferred execution."""
     field = _field()
     source = _host_array(field.x.shape)
     source[:] = field.x
@@ -279,6 +297,8 @@ def test_explicit_dofs_are_owned(entry, execution_gate, monkeypatch):
     ("dB_by_dX_pullback_native", (32, 3, 3)), ("dA_by_dX_pullback_native", (32, 3, 3)),
 ])
 def test_adapter_pullback_owns_numpy_cotangent(entry, shape, execution_gate):
+    """Adapter pullbacks snapshot caller cotangents before deferred execution reads
+    them."""
     field = _field()
     call = getattr(field, entry)
     source = _host_array(shape)
@@ -295,6 +315,8 @@ def test_adapter_pullback_owns_numpy_cotangent(entry, shape, execution_gate):
 @pytest.mark.parametrize("stacked", [False, True])
 @pytest.mark.parametrize("use_compute_dtype", [False, True])
 def test_group_coil_data_owns_numpy_inputs(stacked, use_compute_dtype, execution_gate, monkeypatch):
+    """Grouping stacked or per-coil data owns NumPy snapshots in runtime and compute
+    precision."""
     _, gamma, dash, current = _kernel_inputs()
     inputs = (gamma, dash, current) if stacked else ([gamma[0]], [dash[0]], [current[0:1].reshape(())])
     expected = jax.tree.map(lambda x: np.array(x, copy=True), jax.block_until_ready(kernels.group_coil_data(*inputs, use_compute_dtype=use_compute_dtype)))

@@ -173,6 +173,7 @@ class TestBiotSavartJaxCppParity:
         )
 
     def test_dB_by_dX_parity_ncsx(self):
+        """The JAX spatial field Jacobian matches the native NCSX reference."""
         bs, points_np, gammas_np, gds_np, currents_np = (
             _ncsx_biotsavart_parity_fixture()
         )
@@ -385,6 +386,8 @@ class TestBiotSavartJaxCppCoilCurrentParity:
 
     def test_per_coil_unit_field_vectorizes_within_quadrature_group(self):
 
+        """Unit-current fields vectorize per quadrature group and return values in
+        public coil order."""
         points = jnp.asarray([[0.0, 0.0, 0.0], [0.25, -0.5, 1.0]], dtype=jnp.float64)
         group0_gammas = jnp.arange(18, dtype=jnp.float64).reshape(2, 3, 3)
         group0_gammadashs = group0_gammas + 0.5
@@ -574,6 +577,8 @@ class TestJaxBiotSavartCoilStateToken:
 
     def test_biotsavart_extraction_spec_changes_only_for_captured_dof_contract(self):
 
+        """Free-DOF changes reuse extraction specs; layout or captured fixed-DOF
+        changes replace them."""
         coils = self._make_two_basic_coils()
         field = JaxBiotSavart(list(coils))
         curve = coils[0].curve

@@ -54,6 +54,8 @@ def test_reference_placement_is_the_bare_device_of_a_committed_array():
 
 
 def test_runtime_device_put_tree_can_preserve_arrays_and_place_host_leaves():
+    """Preserving placement retains JAX leaf identity and places host leaves without
+    changing structure or dtype."""
     array = jax.device_put(np.ones(3, dtype=np.float64), jax.local_devices()[0])
     value = {"device": array, "host": (np.asarray(2.0, dtype=np.float32), None)}
 
@@ -68,6 +70,8 @@ def test_runtime_device_put_tree_can_preserve_arrays_and_place_host_leaves():
 
 
 def test_staged_like_tracer_does_not_embed_a_runtime_device_put(monkeypatch):
+    """Scalar staging under JIT computes the expected sum without explicit device
+    placement."""
     def unexpected_explicit_placement(*args, **kwargs):
         raise AssertionError("traced literals must remain uncommitted")
 
@@ -87,6 +91,7 @@ def test_staged_like_tracer_does_not_embed_a_runtime_device_put(monkeypatch):
 
 
 def test_staged_like_tracer_preserves_explicit_integer_dtype():
+    """Scalar staging under JIT preserves a requested int32 dtype."""
     @jax.jit
     def staged_integer(reference):
         return staged_like(reference, 1, dtype=jnp.int32)

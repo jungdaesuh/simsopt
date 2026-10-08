@@ -180,6 +180,8 @@ def repository_inspections() -> list[ConventionVisitor]:
 
 
 def test_registration_and_record_convention(repository_inspections):
+    """Repository pytree and record violations match the explicitly pending
+    occurrence inventory."""
     actual = Counter(
         violation
         for visitor in repository_inspections
@@ -193,6 +195,8 @@ def test_registration_and_record_convention(repository_inspections):
 
 
 def test_pending_has_no_stale_entries(repository_inspections):
+    """Pending convention exceptions still occur and cannot authorize
+    register_dataclass."""
     actual = Counter(
         violation
         for visitor in repository_inspections
@@ -209,6 +213,8 @@ def test_pending_has_no_stale_entries(repository_inspections):
 @pytest.mark.parametrize("identifier", sorted(REGISTRATION_NAMES | NAMEDTUPLE_NAMES))
 @pytest.mark.parametrize("form", ("name", "attribute", "import", "getattr"))
 def test_guard_rejects_every_prohibited_reference(identifier, form):
+    """The guard detects prohibited record and registration references in every
+    tested syntactic form."""
     sources = {
         "name": f"{identifier}(Payload)",
         "attribute": f"trees.{identifier}(Payload)",
@@ -317,12 +323,16 @@ def test_guard_rejects_every_prohibited_reference(identifier, form):
     ),
 )
 def test_guard_attributes_prohibited_references(source, expected):
+    """The guard attributes prohibited references to the expected owner, kind and
+    identifier."""
     assert violations_in_source("example.py", source) == [
         ("example.py", owner, kind, name) for owner, kind, name in expected
     ]
 
 
 def test_guard_does_not_infer_aliases_for_shadowed_function_parameters():
+    """An unrelated shadowing function parameter is not treated as a prohibited
+    registration alias."""
     assert not violations_in_source(
         "example.py", "def unrelated(register): register(Payload)"
     )
@@ -330,6 +340,8 @@ def test_guard_does_not_infer_aliases_for_shadowed_function_parameters():
 
 @pytest.mark.parametrize("registration_name", sorted(REGISTRATION_NAMES))
 def test_guard_permits_registration_only_in_helper(registration_name):
+    """The central helper may register pytrees but still rejects NamedTuple
+    declarations and aliases."""
     source = f"import jax\njax.tree_util.{registration_name}(Payload)"
     assert not violations_in_source("src/simsopt_jax/pytree.py", source)
     source = "import typing\nclass Payload(typing.NamedTuple): pass"
@@ -344,6 +356,7 @@ def test_guard_permits_registration_only_in_helper(registration_name):
 
 
 def test_pending_counts_missing_occurrences_as_stale():
+    """Removing one repeated prohibited occurrence leaves a stale pending exception."""
     original = "class Payload(NamedTuple):\n    alias = NamedTuple"
     expected = Counter(violations_in_source("example.py", original))
     missing = Counter(violations_in_source("example.py", "class Payload(NamedTuple): pass"))
@@ -354,6 +367,8 @@ def test_pending_counts_missing_occurrences_as_stale():
 
 
 def test_pending_cannot_authorize_a_different_registration_api():
+    """Replacing a pending registration API creates both unexpected and stale
+    convention violations."""
     path = "src/simsopt_jax/core/field.py"
     source = "@jax.tree_util.register_pytree_node_class\nclass Payload: pass"
     expected = Counter(violations_in_source(path, source))
@@ -380,16 +395,20 @@ def test_pending_cannot_authorize_a_different_registration_api():
     ),
 )
 def test_guard_rejects_prohibited_import_aliases(source, name):
+    """Prohibited import aliases are rejected even inside the central pytree helper."""
     assert ("example.py", "<module>", "alias", name) in violations_in_source("example.py", source)
     assert ("src/simsopt_jax/pytree.py", "<module>", "alias", name) in violations_in_source("src/simsopt_jax/pytree.py", source)
 
 
 @pytest.mark.parametrize("source", ("import typing as t", "import dataclasses as dc", "from jax import tree_util as trees", "from other import field as f"))
 def test_guard_permits_module_and_unrelated_import_aliases(source):
+    """Unrelated and module import aliases do not trigger prohibited-record
+    violations."""
     assert not violations_in_source("example.py", source)
 
 
 def test_pending_cannot_hide_replaced_namedtuple_import_alias():
+    """Replacing a pending NamedTuple import with an alias creates a new violation."""
     path = "src/simsopt_jax/core/_device_scalars.py"
     source = (
         "from typing import NamedTuple\n"
@@ -406,6 +425,8 @@ def test_pending_cannot_hide_replaced_namedtuple_import_alias():
 
 
 def test_pending_cannot_hide_registration_target_inside_exempt_class():
+    """Registering another target inside a pending class creates an unexpected target
+    violation."""
     path = "src/simsopt_jax/core/field.py"
     target = "_FieldPullbackInputs"
     marker = f"@jax.tree_util.register_pytree_node_class\n@dataclass(frozen=True, slots=True)\nclass {target}:"
@@ -433,16 +454,20 @@ def test_pending_cannot_hide_registration_target_inside_exempt_class():
     ids=("aliased_helper", "aliased_field", "named_mapping", "dict_constructor", "inherited_declaration", "function_literal", "qualified_dict_constructor", "method_literal"),
 )
 def test_guard_rejects_static_metadata_without_matching_declarations(source):
+    """Static metadata without matching declarations triggers the convention guard."""
     violations = violations_in_source("example.py", source)
     assert any(kind == "static-metadata" and name == "static" for _, _, kind, name in violations)
 
 
 @pytest.mark.parametrize("source", ("META = {'description': 'value'}", "META = dict(description='value')", "field(metadata=META)"))
 def test_guard_permits_metadata_without_static_keys(source):
+    """Metadata lacking static keys is accepted by the convention guard."""
     assert not violations_in_source("example.py", source)
 
 
 def test_plain_class_is_frozen_and_round_trips_in_data_order():
+    """The dataclass helper freezes plain classes and reconstructs fields in declared
+    leaf order."""
     @pytree_dataclass(data=("second", "first"), meta=("mode",))
     class Payload:
         first: int
@@ -459,6 +484,7 @@ def test_plain_class_is_frozen_and_round_trips_in_data_order():
 
 
 def test_mutable_dataclass_is_rejected():
+    """The dataclass helper rejects an existing mutable dataclass."""
     @dataclass
     class Mutable:
         value: int
@@ -476,6 +502,7 @@ def test_mutable_dataclass_is_rejected():
     ),
 )
 def test_invalid_partition_is_rejected(data, meta, message):
+    """Invalid data/meta partitions fail without changing the pytree registry."""
     class Payload:
         value: int
         mode: str
@@ -487,6 +514,8 @@ def test_invalid_partition_is_rejected(data, meta, message):
 
 
 def test_existing_dataclass_options_and_constructor_are_preserved():
+    """Registration retains frozen-dataclass options and reconstructs through its
+    custom constructor."""
     @dataclass(frozen=True, init=False, eq=False)
     class Payload:
         value: int
@@ -504,6 +533,8 @@ def test_existing_dataclass_options_and_constructor_are_preserved():
 
 
 def test_registry_returns_immutable_snapshot():
+    """The registry returns immutable snapshots that do not change after later
+    registration."""
     before = registered_pytree_classes()
 
     @pytree_dataclass(data=("value",))
@@ -523,6 +554,8 @@ def test_registry_returns_immutable_snapshot():
     ),
 )
 def test_duplicate_partition_names_are_rejected_without_registering(data, meta, partition):
+    """Duplicate partition names fail before registration and leave the payload
+    opaque to JAX."""
     class Payload:
         value: int
         mode: str
@@ -536,6 +569,8 @@ def test_duplicate_partition_names_are_rejected_without_registering(data, meta, 
 
 
 def test_undecorated_subclass_is_frozen_and_all_fields_round_trip():
+    """The dataclass helper freezes inherited and new fields and reconstructs in
+    declared data order."""
     @dataclass(frozen=True)
     class Base:
         value: int
@@ -556,6 +591,7 @@ def test_undecorated_subclass_is_frozen_and_all_fields_round_trip():
 
 
 def test_undecorated_subclass_cannot_omit_its_new_fields():
+    """Subclass registration rejects a partition that omits newly declared fields."""
     @dataclass(frozen=True)
     class Base:
         value: int
@@ -570,6 +606,8 @@ def test_undecorated_subclass_cannot_omit_its_new_fields():
 
 
 def test_custom_node_preserves_sealed_constructor_and_ordered_reconstruction():
+    """Custom-node registration preserves sealed construction and leaf order through
+    reconstruction, JIT and gradients."""
     before = registered_pytree_classes()
 
     @dataclass(frozen=True, slots=True, init=False)
@@ -616,6 +654,8 @@ def test_custom_node_preserves_sealed_constructor_and_ordered_reconstruction():
 
 
 def test_custom_node_rejects_mutable_dataclass_without_registering():
+    """Custom-node registration rejects mutable dataclasses without altering the
+    registry."""
     @dataclass
     class Mutable:
         value: int
@@ -636,6 +676,8 @@ def test_custom_node_rejects_mutable_dataclass_without_registering():
 
 
 def test_custom_node_freezes_undecorated_subclass_and_keeps_custom_leaf_order():
+    """Custom-node registration freezes subclasses while preserving their custom
+    flatten/unflatten order."""
     @dataclass(frozen=True)
     class Base:
         first: int
@@ -661,6 +703,8 @@ def test_custom_node_freezes_undecorated_subclass_and_keeps_custom_leaf_order():
 
 
 def test_dataclass_reconstruction_calls_post_init():
+    """Dataclass pytree reconstruction invokes post-init for the reconstructed field
+    values."""
     constructed = []
 
     @pytree_dataclass(data=("value",))

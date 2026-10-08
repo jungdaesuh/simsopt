@@ -72,6 +72,8 @@ def _count_coil_state_builds(monkeypatch):
 
 
 def test_evaluations_at_one_dof_state_build_coil_state_once(monkeypatch):
+    """Unchanged evaluations reuse coil state and field outputs, rebuilding once
+    after a free-DOF change."""
     curves = _base_curves()
     field, native = _fields(coils_via_symmetries(curves, [Current(1e5) for _ in curves], 2, True))
     builds = _count_coil_state_builds(monkeypatch)
@@ -113,6 +115,8 @@ def test_evaluations_at_one_dof_state_build_coil_state_once(monkeypatch):
     ],
 )
 def test_per_current_outputs_reuse_arrays_and_follow_every_state_change(method_name, kernel):
+    """Per-current outputs return independent lists, reuse array identities and
+    refresh after every tested state change."""
     curves = _base_curves()
     currents = [Current(1e5), Current(-3e4)]
     field, _native = _fields([Coil(curve, current) for curve, current in zip(curves, currents)])
@@ -152,6 +156,8 @@ def test_per_current_outputs_reuse_arrays_and_follow_every_state_change(method_n
 
 @pytest.mark.parametrize("setter", ["cart", "jax", "cyl", "spec", "clear"])
 def test_point_changes_release_cached_outputs_and_preserve_coil_geometry(setter):
+    """Every point setter releases obsolete field arrays while retaining cached coil
+    geometry."""
     field, _native = _fields([Coil(curve, Current(1e5)) for curve in _base_curves()])
     spec = field.coil_set_spec()
     field.B()
@@ -177,6 +183,8 @@ def test_point_changes_release_cached_outputs_and_preserve_coil_geometry(setter)
 
 
 def test_field_and_parent_dof_changes_refresh_the_field():
+    """Field and parent DOF setters refresh JAX field outputs to match native
+    evaluation."""
     curves = _base_curves()
     field, native = _fields(coils_via_symmetries(curves, [Current(1e5) for _ in curves], 2, True))
     _assert_field_matches_native(field, native)
@@ -192,6 +200,8 @@ def test_field_and_parent_dof_changes_refresh_the_field():
 
 
 def test_current_change_refreshes_the_field():
+    """Changing a source current refreshes JAX field outputs to match native
+    evaluation."""
     curves = _base_curves()
     currents = [Current(1e5), Current(-3e4)]
     field, native = _fields([Coil(curve, current) for curve, current in zip(curves, currents)])
@@ -202,6 +212,8 @@ def test_current_change_refreshes_the_field():
 
 
 def test_fixed_dof_change_refreshes_the_field():
+    """Fixing and then changing a captured DOF refreshes the field to match native
+    evaluation."""
     curves = _base_curves()
     field, native = _fields([Coil(curve, Current(1e5)) for curve in curves])
     _assert_field_matches_native(field, native)
@@ -213,6 +225,7 @@ def test_fixed_dof_change_refreshes_the_field():
 
 
 def test_set_points_refreshes_the_field():
+    """Replacing evaluation points refreshes the JAX field to match the native field."""
     curves = _base_curves()
     field, native = _fields([Coil(curve, Current(1e5)) for curve in curves])
     _assert_field_matches_native(field, native)
@@ -224,6 +237,8 @@ def test_set_points_refreshes_the_field():
 
 
 def test_shared_dofs_refresh_every_coil_that_reads_them():
+    """Changing shared curve DOFs refreshes all affected coil contributions to match
+    native evaluation."""
     curve = _base_curves(1)[0]
     shared = CurveXYZFourier(curve.quadpoints, curve.order, dofs=curve.dofs)
     field, native = _fields([Coil(curve, Current(1e5)), Coil(shared, Current(-4e4))])
@@ -235,6 +250,8 @@ def test_shared_dofs_refresh_every_coil_that_reads_them():
 
 
 def test_current_sum_term_change_refreshes_the_field():
+    """Changing a term in a composed current refreshes field outputs to match native
+    evaluation."""
     curves = _base_curves()
     first, second = Current(1e5), Current(2e4)
     field, native = _fields([Coil(curves[0], first + second), Coil(curves[1], -2.5 * (first - second))])
@@ -245,6 +262,8 @@ def test_current_sum_term_change_refreshes_the_field():
 
 
 def test_resample_refreshes_the_field():
+    """Notified and direct sample replacements refresh cached perturbed geometry and
+    field values."""
     base = _base_curves(1)[0]
     sampler = GaussianSampler(base.quadpoints, 1e-3, 0.2, n_derivs=1)
     sample = PerturbationSample(sampler, randomgen=np.random.default_rng(2024))
@@ -268,6 +287,8 @@ def test_resample_refreshes_the_field():
 
 
 def test_backend_reconfiguration_rebuilds_the_coil_state(monkeypatch):
+    """Backend invalidation rebuilds cached coil state once while retaining native
+    field agreement."""
     curves = _base_curves()
     field, native = _fields([Coil(curve, Current(1e5)) for curve in curves])
     builds = _count_coil_state_builds(monkeypatch)
