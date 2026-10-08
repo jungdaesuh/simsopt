@@ -19,6 +19,10 @@ def native_jax_device():
     transfer implicitly in their coefficient VJP; this guarantee does not
     extend to those paths. With CUDA alone (``JAX_PLATFORMS=cuda``), the length
     kernels use the default device through the same explicit transfers.
+
+    Returns:
+        jax.Device object: First CPU device when CPU is enabled, otherwise the
+            first default device.
     """
     platforms = jax.config.jax_platforms
     if platforms and "cpu" not in platforms.split(","):

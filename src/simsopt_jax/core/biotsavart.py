@@ -322,6 +322,14 @@ def hessian_point_chunk_size(point_chunk_size: int) -> int:
     ``0`` (tiling disabled) is preserved so audit policies that pin every
     chunk to the dense layout keep their contract; any positive size is
     divided by ``_HESSIAN_POINT_CHUNK_DIVISOR`` and floored at one point.
+
+    Args:
+        point_chunk_size (int): Point tile size for field values; nonpositive sizes
+            disable tiling.
+
+    Returns:
+        int: Zero when tiling is disabled; otherwise the value tile divided by
+            the Hessian divisor and floored at one.
     """
     if point_chunk_size <= 0:
         return 0
@@ -695,6 +703,9 @@ def invalidate_kernel_cache() -> None:
 
     Call after overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``)
     to ensure the next ``biot_savart_*`` call rebuilds with the new config.
+
+    Returns:
+        None: Cached forward and pullback kernel factories are cleared.
     """
     _make_kernel.cache_clear()
     _make_B_vjp_kernel.cache_clear()
@@ -721,6 +732,21 @@ def _apply_forward_kernel(
 
 
 def biot_savart_B(points, gammas, gammadashs, currents):
+    """Evaluate the Biot-Savart B kernel for one rectangular coil group.
+
+    Uniform quadrature averages over Q samples of the normalized curve parameter, using mu0/(4*pi) = 1e-7. Evaluation on a filament retains the physical singularity.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        jax.Array: Magnetic field in tesla, shape (P, 3), Cartesian component
+            last.
+    """
     return _apply_forward_kernel(
         _Integrand.B,
         _DiffMode.VALUE,
@@ -734,12 +760,18 @@ def biot_savart_B(points, gammas, gammadashs, currents):
 def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
     """First spatial gradient of the Biot-Savart magnetic field.
 
-    Returns
-    -------
-    dB : jax.Array
-        Shape ``(n_points, 3, 3)``. Axis convention:
-        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
-        direction; axis 2 is the B-field component.
+    Uniform quadrature averages over Q samples of the normalized curve parameter, using mu0/(4*pi) = 1e-7. Evaluation on a filament retains the physical singularity.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3), in tesla per meter; result[p, j, l] =
+            partial_j B_l at point p.
     """
     return _apply_forward_kernel(
         _Integrand.B,
@@ -760,6 +792,19 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
     The pre-reduction integrand is large: for example, ``P_chunk=512``,
     ``C=16``, ``Q=128`` materializes roughly 226 MB (216 MiB) of Hessian
     intermediates before quadrature reduction.
+
+    Uniform quadrature averages over Q samples of the normalized curve parameter, using mu0/(4*pi) = 1e-7. Evaluation on a filament retains the physical singularity.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3, 3), in tesla per meter squared; result[p,
+            i, j, l] = partial_i partial_j B_l.
     """
     return _apply_forward_kernel(
         _Integrand.B,
@@ -774,14 +819,19 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
     """Return ``(B, dB_by_dX)`` for the Biot-Savart field.
 
-    Returns
-    -------
-    B : jax.Array
-        Shape ``(n_points, 3)``.
-    dB : jax.Array
-        Shape ``(n_points, 3, 3)``. Axis convention:
-        ``dB[p, j, l] = ∂_j B_l(x_p)``. Axis 1 is the spatial derivative
-        direction; axis 2 is the B-field component.
+    Uniform quadrature averages over Q samples of the normalized curve parameter, using mu0/(4*pi) = 1e-7. Evaluation on a filament retains the physical singularity.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        tuple[jax.Array, jax.Array]: B of shape (P, 3) in tesla and its
+            Jacobian of shape (P, 3, 3) in tesla per meter, with derivative
+            direction before field component.
     """
     return _apply_forward_kernel(
         _Integrand.B,
@@ -794,6 +844,21 @@ def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
 
 
 def biot_savart_A(points, gammas, gammadashs, currents):
+    """Evaluate the Biot-Savart A kernel for one rectangular coil group.
+
+    Uniform quadrature averages over Q samples of the normalized curve parameter, using mu0/(4*pi) = 1e-7. Evaluation on a filament retains the physical singularity.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        jax.Array: Vector potential in tesla meters, shape (P, 3), Cartesian
+            component last.
+    """
     return _apply_forward_kernel(
         _Integrand.A,
         _DiffMode.VALUE,
@@ -807,12 +872,18 @@ def biot_savart_A(points, gammas, gammadashs, currents):
 def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
     """First spatial gradient of the Biot-Savart vector potential.
 
-    Returns
-    -------
-    dA : jax.Array
-        Shape ``(n_points, 3, 3)``. Axis convention:
-        ``dA[p, j, l] = ∂_j A_l(x_p)``. Axis 1 is the spatial derivative
-        direction; axis 2 is the A-field component.
+    Uniform quadrature averages over Q samples of the normalized curve parameter, using mu0/(4*pi) = 1e-7. Evaluation on a filament retains the physical singularity.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3), in tesla; result[p, j, l] = partial_j A_l
+            at point p.
     """
     return _apply_forward_kernel(
         _Integrand.A,
@@ -825,6 +896,21 @@ def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
 
 
 def biot_savart_d2A_by_dXdX(points, gammas, gammadashs, currents):
+    """Evaluate the Biot-Savart d2A_by_dXdX kernel for one rectangular coil group.
+
+    Uniform quadrature averages over Q samples of the normalized curve parameter, using mu0/(4*pi) = 1e-7. Evaluation on a filament retains the physical singularity.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3, 3), in tesla per meter; result[p, i, j, l]
+            = partial_i partial_j A_l.
+    """
     return _apply_forward_kernel(
         _Integrand.A,
         _DiffMode.HESSIAN,
@@ -847,6 +933,21 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
     Uses a dedicated tuning-keyed kernel factory so backend mode and chunking
     changes rebuild the compiled closure in the same process, matching the
     cache invalidation behavior of the forward ``biot_savart_B`` kernels.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        v (array-like): B cotangent, shape (P, 3), contracting the output as sum(v * B);
+            units depend on the scalar objective.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        tuple[jax.Array, jax.Array, jax.Array]: Cotangents for positions,
+            tangents and currents, shapes (C, Q, 3), (C, Q, 3), (C,). Units are
+            those of the contracted scalar per meter or per ampere; points are
+            held fixed.
     """
     inputs = snapshot_host_tree((points, v, gammas, gammadashs, currents))
     return _get_B_vjp_kernel()(*inputs)
@@ -870,6 +971,23 @@ def group_coil_data(
     *,
     use_compute_dtype: bool = True,
 ):
+    """Batch coils by quadrature count while preserving original index mappings.
+
+    Args:
+        gammas_list (Sequence[array-like]): Per-coil positions, each shape (Q_i, 3), in
+            meters; a rectangular array of shape (C, Q, 3) is also accepted.
+        gammadashs_list (Sequence[array-like]): Matching parameter derivatives, each
+            shape (Q_i, 3), in meters.
+        currents_list (Sequence[scalar]): Matching coil currents in amperes, each scalar
+            shape ().
+        use_compute_dtype (bool): Convert groups to compute precision when True
+            (default), runtime precision otherwise.
+
+    Returns:
+        list[tuple]: One (gammas, gammadashs, currents, indices) tuple per
+            quadrature count, with shapes (C_g, Q_g, 3), (C_g, Q_g, 3), (C_g,) and
+            original index lists. Groups are ordered by their first coil index.
+    """
     gamma_entries = _coil_entry_sequence(gammas_list)
     gammadash_entries = _coil_entry_sequence(gammadashs_list)
     current_entries = _coil_entry_sequence(currents_list)

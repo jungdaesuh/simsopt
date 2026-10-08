@@ -120,7 +120,23 @@ def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, ker
 
 
 def group_biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
-    """Return the ``B`` pullback for one coil group in the points' dtype."""
+    """Return the ``B`` pullback for one coil group in the points' dtype.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        v (array-like): B cotangent, shape (P, 3), contracting the output as sum(v * B);
+            units depend on the scalar objective.
+        gammas (array-like): Coil positions, shape (C, Q, 3), in meters.
+        gammadashs (array-like): Coil derivatives with respect to the normalized
+            parameter, shape (C, Q, 3), in meters.
+        currents (array-like): Coil currents, shape (C,), in amperes.
+
+    Returns:
+        tuple[jax.Array, jax.Array, jax.Array]: Cotangents for positions,
+            tangents and currents, shapes (C, Q, 3), (C, Q, 3), (C,). Units are
+            those of the contracted scalar per meter or per ampere; points are
+            held fixed.
+    """
     compute_points, gammas, gammadashs, currents = _compute_group_inputs(
         points,
         gammas,
@@ -136,6 +152,20 @@ def grouped_coil_set_spec_from_lists(
     gammadashs_list: object,
     currents_list: object,
 ) -> GroupedCoilSetSpec:
+    """Build immutable grouped field inputs from per-coil sampled data.
+
+    Args:
+        gammas_list (Sequence[array-like]): Per-coil positions, each shape (Q_i, 3), in
+            meters; a rectangular array of shape (C, Q, 3) is also accepted.
+        gammadashs_list (Sequence[array-like]): Matching parameter derivatives, each
+            shape (Q_i, 3), in meters.
+        currents_list (Sequence[scalar]): Matching coil currents in amperes, each scalar
+            shape ().
+
+    Returns:
+        GroupedCoilSetSpec object: Runtime-precision batches grouped by
+            quadrature count with original coil indices.
+    """
     return make_grouped_coil_set_spec(
         group_coil_data(
             gammas_list,
@@ -149,6 +179,16 @@ def grouped_coil_set_spec_from_lists(
 def grouped_coil_set_spec_from_coil_specs(
     coil_specs: tuple[CoilSpec, ...] | list[CoilSpec],
 ) -> GroupedCoilSetSpec:
+    """Sample coil specs and group their transformed geometry and currents.
+
+    Args:
+        coil_specs (tuple[CoilSpec, ...] or list[CoilSpec]): Immutable coil payloads in
+            public coil order.
+
+    Returns:
+        GroupedCoilSetSpec object: Sampled geometry and currents after
+            symmetry transforms, grouped by quadrature count.
+    """
     gammas = []
     gammadashs = []
     currents = []
@@ -234,6 +274,20 @@ def coil_specs_from_dof_extraction_spec(
     *,
     use_compute_dtype: bool = False,
 ) -> tuple[CoilSpec, ...]:
+    """Reconstruct immutable coil inputs from an explicit owner DOF vector.
+
+    Args:
+        extraction_spec (CoilSetDofExtractionSpec): Frozen owner-to-curve/current
+            reconstruction contracts.
+        owner_dofs (array-like): Flat owner DOF vector, shape (D,), matching the
+            extraction map; units depend on the owning geometry or current.
+        use_compute_dtype (bool): Select compute rather than runtime precision when
+            converting DOFs; defaults to False.
+
+    Returns:
+        tuple[CoilSpec, ...]: Per-coil immutable payloads in public coil
+            order, sharing reconstructed curves when their source keys match.
+    """
     if use_compute_dtype:
         owner_dofs = _as_compute_array(owner_dofs)
     else:
@@ -272,6 +326,20 @@ def coil_set_spec_from_dof_extraction_spec(
     *,
     use_compute_dtype: bool = False,
 ) -> GroupedCoilSetSpec:
+    """Reconstruct immutable coil inputs from an explicit owner DOF vector.
+
+    Args:
+        extraction_spec (CoilSetDofExtractionSpec): Frozen owner-to-curve/current
+            reconstruction contracts.
+        owner_dofs (array-like): Flat owner DOF vector, shape (D,), matching the
+            extraction map; units depend on the owning geometry or current.
+        use_compute_dtype (bool): Select compute rather than runtime precision when
+            converting DOFs; defaults to False.
+
+    Returns:
+        GroupedCoilSetSpec object: Reconstructed geometry and currents grouped
+            by quadrature count with original coil indices.
+    """
     return grouped_coil_set_spec_from_coil_specs(
         coil_specs_from_dof_extraction_spec(
             extraction_spec,
@@ -282,6 +350,17 @@ def coil_set_spec_from_dof_extraction_spec(
 
 
 def grouped_coil_set_spec_from_inputs(coil_arrays: Iterable[tuple[jax.Array, jax.Array, jax.Array]]) -> GroupedCoilSetSpec:
+    """Wrap pregrouped geometry and currents in immutable coil specs.
+
+    Args:
+        coil_arrays (Iterable[tuple]): Groups of (gammas, gammadashs, currents) arrays
+            with shapes (C, Q, 3), (C, Q, 3), (C,); Q may differ between groups.
+            Positions and tangents are in meters; currents are in amperes.
+
+    Returns:
+        GroupedCoilSetSpec object: Immutable groups with sequential coil
+            indices assigned in input group/row order.
+    """
     groups = []
     coil_offset = 0
     for gammas, gammadashs, currents in coil_arrays:
@@ -301,24 +380,84 @@ def grouped_coil_set_spec_from_inputs(coil_arrays: Iterable[tuple[jax.Array, jax
 def grouped_field_inputs_from_spec(
     coil_spec: GroupedCoilSetSpec,
 ) -> tuple[tuple[object, object, object], ...]:
+    """Extract grouped sampled field data from an immutable coil spec.
+
+    Args:
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        tuple[tuple]: One geometry/tangent/current array triple per group,
+            shapes (C, Q, 3), (C, Q, 3), (C,).
+    """
     return coil_spec.field_inputs()
 
 
 def grouped_field_data_from_spec(
     coil_spec: GroupedCoilSetSpec,
 ) -> tuple[tuple[object, object, object, list[int]], ...]:
+    """Extract grouped sampled field data from an immutable coil spec.
+
+    Args:
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        tuple[tuple]: One geometry/tangent/current triple of shapes (C, Q, 3),
+            (C, Q, 3), (C,) followed by an original index list per group.
+    """
     return coil_spec.as_grouped_data()
 
 
 def grouped_biot_savart_B_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
+    """Evaluate total B over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        jax.Array: Magnetic field in tesla, shape (P, 3), Cartesian component
+            last.
+    """
     return _accumulate_grouped_field(points, coil_spec, biot_savart_B)
 
 
 def grouped_biot_savart_A_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
+    """Evaluate total A over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        jax.Array: Vector potential in tesla meters, shape (P, 3), Cartesian
+            component last.
+    """
     return _accumulate_grouped_field(points, coil_spec, biot_savart_A)
 
 
 def grouped_biot_savart_A_from_inputs(points: object, coil_arrays: Iterable[tuple[jax.Array, jax.Array, jax.Array]]):
+    """Evaluate total A over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_arrays (Iterable[tuple]): Groups of (gammas, gammadashs, currents) arrays
+            with shapes (C, Q, 3), (C, Q, 3), (C,); Q may differ between groups.
+            Positions and tangents are in meters; currents are in amperes.
+
+    Returns:
+        jax.Array: Vector potential in tesla meters, shape (P, 3), Cartesian
+            component last.
+    """
     return grouped_biot_savart_A_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
@@ -329,10 +468,37 @@ def grouped_biot_savart_dA_by_dX_from_spec(
     points: object,
     coil_spec: GroupedCoilSetSpec,
 ):
+    """Evaluate total dA_by_dX over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3), in tesla; result[p, j, l] = partial_j A_l
+            at point p.
+    """
     return _accumulate_grouped_field(points, coil_spec, biot_savart_dA_by_dX)
 
 
 def grouped_biot_savart_dA_by_dX_from_inputs(points: object, coil_arrays: Iterable[tuple[jax.Array, jax.Array, jax.Array]]):
+    """Evaluate total dA_by_dX over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_arrays (Iterable[tuple]): Groups of (gammas, gammadashs, currents) arrays
+            with shapes (C, Q, 3), (C, Q, 3), (C,); Q may differ between groups.
+            Positions and tangents are in meters; currents are in amperes.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3), in tesla; result[p, j, l] = partial_j A_l
+            at point p.
+    """
     return grouped_biot_savart_dA_by_dX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
@@ -343,6 +509,19 @@ def grouped_biot_savart_d2A_by_dXdX_from_spec(
     points: object,
     coil_spec: GroupedCoilSetSpec,
 ):
+    """Evaluate total d2A_by_dXdX over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3, 3), in tesla per meter; result[p, i, j, l]
+            = partial_i partial_j A_l.
+    """
     return _accumulate_grouped_field(points, coil_spec, biot_savart_d2A_by_dXdX)
 
 
@@ -350,6 +529,19 @@ def grouped_biot_savart_d2B_by_dXdX_from_spec(
     points: object,
     coil_spec: GroupedCoilSetSpec,
 ):
+    """Evaluate total d2B_by_dXdX over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3, 3), in tesla per meter squared; result[p,
+            i, j, l] = partial_i partial_j B_l.
+    """
     return _accumulate_grouped_field(points, coil_spec, biot_savart_d2B_by_dXdX)
 
 
@@ -357,10 +549,37 @@ def grouped_biot_savart_dB_by_dX_from_spec(
     points: object,
     coil_spec: GroupedCoilSetSpec,
 ):
+    """Evaluate total dB_by_dX over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3), in tesla per meter; result[p, j, l] =
+            partial_j B_l at point p.
+    """
     return _accumulate_grouped_field(points, coil_spec, biot_savart_dB_by_dX)
 
 
 def grouped_biot_savart_dB_by_dX_from_inputs(points: object, coil_arrays: Iterable[tuple[jax.Array, jax.Array, jax.Array]]):
+    """Evaluate total dB_by_dX over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_arrays (Iterable[tuple]): Groups of (gammas, gammadashs, currents) arrays
+            with shapes (C, Q, 3), (C, Q, 3), (C,); Q may differ between groups.
+            Positions and tangents are in meters; currents are in amperes.
+
+    Returns:
+        jax.Array: Shape (P, 3, 3), in tesla per meter; result[p, j, l] =
+            partial_j B_l at point p.
+    """
     return grouped_biot_savart_dB_by_dX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
@@ -371,5 +590,19 @@ def grouped_biot_savart_B_and_dB_from_spec(
     points: object,
     coil_spec: GroupedCoilSetSpec,
 ):
+    """Evaluate total B_and_dB over all quadrature groups.
+
+    Groups contribute additively; an empty coil set returns zeros of the matching output shape. Spatial derivative axes precede the field component.
+
+    Args:
+        points (array-like): Cartesian evaluation points, shape (P, 3), in meters.
+        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
+            quadrature count.
+
+    Returns:
+        tuple[jax.Array, jax.Array]: B of shape (P, 3) in tesla and its
+            Jacobian of shape (P, 3, 3) in tesla per meter, with derivative
+            direction before field component.
+    """
     B, dB = _accumulate_grouped_field(points, coil_spec, biot_savart_B_and_dB)
     return B, dB

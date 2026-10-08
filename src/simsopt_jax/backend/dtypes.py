@@ -169,16 +169,34 @@ def _np_dtype_from_name(name: str, *, source: str) -> np.dtype:
 
 
 def runtime_jnp_dtype():
+    """Return the policy dtype for runtime floating arrays.
+
+    Returns:
+        type: JAX floating scalar type selected by runtime policy, currently
+            jnp.float64.
+    """
     dtype_name = get_backend_policy().runtime_dtype
     return _jnp_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
 
 
 def compute_jnp_dtype():
+    """Return the policy dtype for kernel arithmetic.
+
+    Returns:
+        type: JAX floating scalar type selected by compute policy, currently
+            jnp.float64.
+    """
     dtype_name = get_compute_dtype()
     return _jnp_dtype_from_name(dtype_name, source="BackendPolicy.compute_dtype")
 
 
 def runtime_np_dtype() -> np.dtype:
+    """Return the NumPy dtype matching runtime policy.
+
+    Returns:
+        numpy.dtype: Host representation of the runtime floating dtype,
+            currently float64.
+    """
     dtype_name = get_backend_policy().runtime_dtype
     return _np_dtype_from_name(dtype_name, source="BackendPolicy.runtime_dtype")
 
@@ -295,7 +313,21 @@ def _device_put(
 
 
 def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Array:
-    """Snapshot host values, then place them using runtime policy for float dtypes."""
+    """Snapshot host values, then place them using runtime policy for float dtypes.
+
+    Args:
+        value (array-like): Host or JAX value of any shape; NumPy inputs are snapshotted
+            before device consumption.
+        dtype (dtype-like or None): Optional requested dtype; None infers it. Floating
+            types are coerced to runtime precision by runtime placement.
+        target (jax.Device, jax.sharding.Sharding or None): Explicit placement; omit to
+            use runtime/default-device policy. Mutually exclusive with device.
+        device (jax.Device or None): Explicit device, mutually exclusive with target.
+
+    Returns:
+        jax.Array: Same shape as value, with runtime floating precision and
+            resolved placement.
+    """
     return _device_put(
         value,
         dtype=dtype,
@@ -316,6 +348,19 @@ def runtime_device_put_tree(
 
     With no explicit target, ``preserve_placement`` keeps existing JAX arrays
     unchanged and applies runtime placement only to host leaves.
+
+    Args:
+        value (pytree): Dynamic array leaves of any shape; host NumPy leaves are copied
+            before placement.
+        target (jax.Device, jax.sharding.Sharding or None): Explicit placement; omit to
+            use runtime/default-device policy. Mutually exclusive with device.
+        device (jax.Device or None): Explicit device, mutually exclusive with target.
+        preserve_placement (bool): With no explicit placement, keep existing JAX leaves
+            unchanged and place only host leaves.
+
+    Returns:
+        pytree object: Same structure and leaf shapes/dtypes, with dynamic
+            leaves placed on devices.
     """
     placement = _device_put_target(target, device)
     value = snapshot_host_tree(value)
@@ -357,6 +402,18 @@ def _compute_device_put(value, *, dtype, target=None, device=None) -> jax.Array:
 
 
 def as_jax_array(value, *, dtype) -> jax.Array:
+    """Convert host or JAX values using the shared dtype and placement boundary.
+
+    Args:
+        value (array-like): Host or JAX value of any shape; NumPy inputs are snapshotted
+            before device consumption.
+        dtype (dtype-like): Conversion dtype for JAX values; host floating values use
+            runtime float policy.
+
+    Returns:
+        jax.Array: Converted value with the same shape. Existing JAX placement
+            is retained by conversion.
+    """
     if _has_jax_array_value(value):
         return jnp.asarray(snapshot_host_tree(value), dtype=dtype)
     if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
@@ -365,20 +422,61 @@ def as_jax_array(value, *, dtype) -> jax.Array:
 
 
 def as_jax_float64(value) -> jax.Array:
+    """Convert to runtime floating precision through the shared boundary.
+
+    Args:
+        value (array-like): Host or JAX value of any shape; NumPy inputs are snapshotted
+            before device consumption.
+
+    Returns:
+        jax.Array: Same shape as value in runtime floating precision,
+            currently float64.
+    """
     return as_runtime_array(value)
 
 
 def as_jax_int32(value) -> jax.Array:
+    """Convert host or JAX values to signed 32-bit integers.
+
+    Args:
+        value (array-like): Host or JAX value of any shape; NumPy inputs are snapshotted
+            before device consumption.
+
+    Returns:
+        jax.Array: Same shape as value with int32 entries.
+    """
     return as_jax_array(value, dtype=jnp.int32)
 
 
 def as_runtime_array(value, *, dtype=None):
-    """Convert to a JAX array in the runtime dtype (policy placement for host values)."""
+    """Convert to a JAX array in the runtime dtype (policy placement for host values).
+
+    Args:
+        value (array-like): Host or JAX value of any shape; NumPy inputs are snapshotted
+            before device consumption.
+        dtype (dtype-like or None): float32 or float64 for JAX values; None selects
+            runtime precision. Host floating values use runtime policy.
+
+    Returns:
+        jax.Array: Same shape as value, using requested or policy precision;
+            JAX values retain their placement.
+    """
     return as_jax_array(value, dtype=_resolve_jnp_dtype(dtype, source="dtype"))
 
 
 def as_compute_array(value, *, dtype=None) -> jax.Array:
-    """Convert to a JAX array in the compute dtype (policy placement for host values)."""
+    """Convert to a JAX array in the compute dtype (policy placement for host values).
+
+    Args:
+        value (array-like): Host or JAX value of any shape; NumPy inputs are snapshotted
+            before device consumption.
+        dtype (dtype-like or None): float32 or float64 conversion precision; None
+            selects compute policy.
+
+    Returns:
+        jax.Array: Same shape as value, using requested or policy precision;
+            JAX values retain their placement.
+    """
     resolved_dtype = (
         compute_jnp_dtype()
         if dtype is None
@@ -396,6 +494,13 @@ def commit_in_place(array: jax.Array) -> jax.Array:
     committed and uncommitted arguments separately, and a step's outputs are
     committed whenever an input is, so the first input is committed up front
     to compile the executable every later call reuses.
+
+    Args:
+        array (jax.Array): Concrete single-device array of any shape and dtype.
+
+    Returns:
+        jax.Array: Same values, shape and dtype, committed to the original
+            device.
     """
     return _device_put_preserving_dtype(
         array,
@@ -412,7 +517,23 @@ def explicit_device_array(
     target=None,
     device=None,
 ) -> jax.Array:
-    """Place an exact-dtype array using one explicit or reference placement."""
+    """Place an exact-dtype array using one explicit or reference placement.
+
+    Args:
+        value (array-like): Host or JAX value of any shape; NumPy inputs are snapshotted
+            before device consumption.
+        dtype (dtype-like): Exact requested dtype, without runtime floating coercion.
+        reference (jax.Array, sequence or None): Reference arrays of any shape; use the
+            first committed concrete placement, ignoring tracers and uncommitted leaves.
+            Mutually exclusive with target/device.
+        target (jax.Device, jax.sharding.Sharding or None): Explicit placement; omit to
+            use runtime/default-device policy. Mutually exclusive with device.
+        device (jax.Device or None): Explicit device, mutually exclusive with target.
+
+    Returns:
+        jax.Array: Same shape as value in the exact dtype at the resolved
+            placement.
+    """
     if reference is not None and (target is not None or device is not None):
         raise TypeError(
             "explicit_device_array accepts reference or explicit target/device, not both."
