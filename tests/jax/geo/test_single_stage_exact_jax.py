@@ -327,6 +327,7 @@ def test_value_gradient_and_solved_state_match_composition(dropin, quasi_poloida
 
 
 def test_gradient_matches_finite_differences_through_exact_solves():
+    """The fused outer gradient agrees with finite differences through exact surface solves."""
     evaluator, _, _, _ = _problem(active_penalties=True)
     dofs = host_array(evaluator.initial_dofs)
     direction = parity_rng(11).standard_normal(dofs.size) * np.maximum(np.abs(dofs), 1)
@@ -344,6 +345,7 @@ def test_gradient_matches_finite_differences_through_exact_solves():
 
 
 def test_failed_newton_returns_failed_gradient_and_restores_only_state():
+    """Failed Newton returns the failed-iterate gradient while preserving the successful warm start."""
     evaluator, boozer, objective, _ = _problem(active_penalties=True)
     dofs = host_array(evaluator.initial_dofs)
     saved = host_array(evaluator.initial_state.x)
@@ -366,6 +368,7 @@ def test_failed_newton_returns_failed_gradient_and_restores_only_state():
 
 
 def test_state_branches_and_copies_are_independent_and_immutable():
+    """Copied evaluators and branched warm starts remain immutable and independent."""
     evaluator, _, objective, currents = _problem()
     dofs = host_array(evaluator.initial_dofs)
     seed = evaluator.initial_state
@@ -386,6 +389,7 @@ def test_state_branches_and_copies_are_independent_and_immutable():
 
 
 def test_new_values_and_numeric_settings_do_not_recompile():
+    """New free DOFs and numeric settings reuse the fused executable."""
     evaluator, _, _, _ = _problem()
     dofs = host_array(evaluator.initial_dofs)
     initial = evaluator.evaluate(dofs, evaluator.initial_state)
@@ -405,6 +409,7 @@ def test_new_values_and_numeric_settings_do_not_recompile():
 
 
 def test_evaluation_makes_no_implicit_transfers(parity_lane):
+    """Evaluation uses explicit host/device transfers under the runtime transfer guard."""
     with parity_default_device(parity_lane), disallow_host_transfers():
         evaluator, _, objective, _ = _problem(active_penalties=True)
         result = evaluator.evaluate(host_array(evaluator.initial_dofs), evaluator.initial_state)
@@ -481,6 +486,7 @@ def test_native_bfgs_trials_match_composition_at_the_same_coil_state():
 
 
 def test_zero_field_keeps_native_nonfinite_adjoint_error():
+    """A zero field raises the native nonfinite-component adjoint error."""
     evaluator, boozer, _, _ = _problem()
     dofs = host_array(evaluator.initial_dofs)
     # The free current entries can be identified independently from the
@@ -524,6 +530,7 @@ def test_infinite_penalty_target_keeps_native_value_and_gradient(component, targ
 
 
 def test_device_result_exposes_exactly_singular_newton():
+    """The pure device result exposes a singular Newton step and its failed iterate."""
     evaluator, _, _, _ = _problem()
     # A collapsed surface produces a finite rank-deficient Newton matrix.
     seed = host_array(evaluator.initial_state.x)
@@ -536,6 +543,7 @@ def test_device_result_exposes_exactly_singular_newton():
 
 
 def test_invalid_free_layout_and_failed_seed_are_rejected():
+    """Construction rejects unsupported length curves, failed seeds and non-exact surfaces."""
     evaluator, boozer, _, _ = _problem()
     with pytest.raises(ValueError, match="expected coil DOFs of shape"):
         evaluator.evaluate(evaluator.initial_dofs[:-1], evaluator.initial_state)
@@ -549,6 +557,7 @@ def test_invalid_free_layout_and_failed_seed_are_rejected():
 
 def test_radius_absolute_value_uses_native_sign_derivative_at_zero():
     # Native dmajor_radius_by_dcoeff uses np.sign(volume), including sign(0).
+    """The radius absolute value uses native sign(0)=0 in its derivative."""
     values = explicit_device_array([-np.inf, -2.0, -0.0, 0.0, 2.0, np.inf, np.nan], dtype=np.float64)
     magnitude, derivative = jax.jit(jax.vmap(jax.value_and_grad(_absolute)))(values)
     np.testing.assert_array_equal(host_array(magnitude), np.abs(host_array(values)))

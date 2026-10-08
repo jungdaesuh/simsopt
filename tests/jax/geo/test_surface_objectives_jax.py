@@ -240,6 +240,7 @@ _JAX_SURFACE_CASES = {
 
 @pytest.mark.parametrize("name", _JAX_SURFACE_CASES)
 def test_objective_matches_native_on_the_jax_surface(name):
+    """The non-QS objective agrees with native when both use a JAX surface solve."""
     boozer_type, label, stellsym, kwargs = _JAX_SURFACE_CASES[name]
     problem = _problem(True, boozer_type, label, stellsym=stellsym)
     expected, objective = _native_objective(problem, **kwargs), _jax_objective(problem, **kwargs)
@@ -492,6 +493,7 @@ def test_new_values_reuse_the_compiled_programs():
 
 
 def test_evaluation_makes_no_implicit_transfers(parity_lane):
+    """Evaluation uses explicit host/device transfers under the runtime transfer guard."""
     native = _problem(False)
     with parity_default_device(parity_lane):
         jax_problem = _problem(True)
@@ -509,6 +511,7 @@ def test_evaluation_makes_no_implicit_transfers(parity_lane):
 
 
 def test_boundary_refuses_unsupported_inputs():
+    """Ratio construction rejects unsupported surfaces and fields."""
     _, _, axis, nfp, bs = get_data("ncsx")
     xyz = SurfaceXYZFourier(mpol=2, ntor=2, nfp=nfp, quadpoints_phi=np.linspace(0, 1 / nfp, 6, endpoint=False),
                             quadpoints_theta=np.linspace(0, 1, 7, endpoint=False))

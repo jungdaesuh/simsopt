@@ -63,6 +63,20 @@ class ExactSingleStageEvaluation:
 
     The gradient is evaluated at solved_x even on failure, while state keeps
     the incoming successful state. Pass value/gradient to minimize(jac=True).
+
+    Args:
+        value (float): Objective value, or 1e3 on failed convergence.
+        gradient (numpy.ndarray): Float64 shape (nfree,) outer free coil DOF gradient at
+            solved_x, also on failure.
+        state (ExactSingleStageState): Caller-owned warm start for the inner exact
+            solve. Returned next warm start; unchanged on failed convergence.
+        solved_x (jax.Array): Shape (nsurface + 2,) final inner [surface DOFs, iota, G],
+            including a failed iterate.
+        success (bool): Whether the inner residual meets the tolerance.
+        iterations (int): Completed inner Newton step count.
+        norm (float): Native exact-solve stopping residual norm.
+        terms (numpy.ndarray): Shape (4,) raw [dimensionless non-QS ratio, dimensionless
+            iota, major radius in meters, selected total length in meters].
     """
 
     value: float
@@ -85,6 +99,15 @@ class JaxExactSingleStage:
     Construction captures a solved surface, coil layout, label and targets.
     evaluate(dofs, state) returns the value/gradient and next state;
     no native object or hidden warm-start/cache is mutated.
+
+    Args:
+        problem (ExactSingleStageProblem): Frozen geometry, coil layout, labels and
+            numeric targets.
+        initial_state (ExactSingleStageState): Caller-owned warm start for the inner
+            exact solve. Captured successful seed.
+        initial_dofs (jax.Array): Shape (nfree,) free coil DOFs in the extraction
+            snapshot's native order, including geometry coefficients and current DOFs.
+            Captured initial values.
     """
 
     problem: ExactSingleStageProblem
@@ -110,9 +133,32 @@ class JaxExactSingleStage:
 
         length_curves must occur directly in biotsavart.coils (not unlisted curves).
         Targets have native QuadraticPenalty semantics and unit weights.
+        Iota and major radius use equality penalties; length contributes
+        ``0.5 * max(total_length - length_target, 0)**2``.
         Infinite targets retain native inf values and nonfinite gradients;
         only nonfinite component adjoints cause the native ValueError.
         The inner vector includes G; current-derived G is not this route.
+
+        Args:
+            boozer_surface (BoozerSurface | JaxBoozerSurface): Successfully solved exact
+                tensor surface with explicit G and geometry shape (nphi, ntheta, 3).
+            biotsavart (JaxBiotSavart): Field using exactly the solved surface's coil
+                objects.
+            length_curves (Sequence[Curve]): Selected curves occurring directly in
+                biotsavart.coils; not restricted to base curves.
+            iota_target (float): Dimensionless rotational-transform target.
+            major_radius_target (float): Major-radius target in meters.
+            length_target (float): Upper bound on total selected curve length in meters.
+            sDIM (int): Half of each auxiliary non-QS grid dimension; grid spans one field
+                period.
+            quasi_poloidal (bool): Average over theta when true, otherwise over phi.
+            tol (float): Inner exact-solve residual tolerance in native units.
+            maxiter (float): Inner Newton iteration cap, which may be infinite.
+
+        Returns:
+            JaxExactSingleStage: Frozen snapshot evaluator object with explicit state in/out,
+                rather than an Optimizable dependency graph. Rebuild after structural or
+                fixed-value changes; construction does not mutate native objects.
         """
         if boozer_surface.boozer_type != "exact":
             raise ValueError("JaxExactSingleStage requires an exact BoozerSurface.")
@@ -175,6 +221,17 @@ class JaxExactSingleStage:
 
         The caller owns state. A raised error returns no state, so retrying
         with the same state is safe. No compilation cache/session is owned here.
+
+        Args:
+            dofs (numpy.ndarray | jax.Array): Float64 shape (nfree,) outer free coil DOFs in
+                the captured native order.
+            state (ExactSingleStageState): Caller-owned warm start for the inner exact
+                solve.
+
+        Returns:
+            ExactSingleStageEvaluation: Host value/gradient and solve facts, with device-
+                resident next state. Singular matrices and nonfinite component adjoints
+                raise native errors; no hidden state or native object is changed.
         """
         dofs = explicit_device_array(dofs, dtype=np.float64, reference=state.x)
         if dofs.shape != self.initial_dofs.shape:

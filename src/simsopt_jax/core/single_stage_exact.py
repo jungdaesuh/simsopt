@@ -57,6 +57,24 @@ class ExactSingleStageProblem:
     mappings belong to PR3. Rebuild the snapshot when that layout, fixed values
     or structural grids change; free values and numeric settings are traced.
     G is always an explicit inner variable, as in native boozerQA.
+
+    Args:
+        boozer (BoozerProblem): Surface, coil and label snapshot with native units and
+            DOF ordering. Exact formulation with explicit G.
+        extraction (CoilSetDofExtractionSpec): Fixed-value templates and maps from the
+            outer free coil DOF vector of shape (nfree,).
+        nonqs_surface (SurfaceSpec): Immutable surface coefficients and quadrature grid;
+            all native DOFs are included. Auxiliary grid for the non-QS objective.
+        residual_rows (jax.Array): Shape (nrows,) integer indices of the flattened
+            Boozer residual, in native mask order.
+        targets (jax.Array): Shape (3,) targets [dimensionless iota, major radius in
+            meters, total selected curve length in meters].
+        tol (jax.Array): Scalar shape () stopping tolerance in the norm's units.
+        maxiter (jax.Array): Scalar shape () float64 iteration cap, which may be
+            infinite.
+        length_indices (tuple[int, ...]): Original coil indices selecting length terms;
+            each occurrence contributes once.
+        axis (int): Non-QS averaging axis, 0 for phi or 1 for theta.
     """
 
     boozer: BoozerProblem
@@ -76,6 +94,11 @@ class ExactSingleStageState:
 
     JAX arrays are immutable. Keeping this state to retry or branch an outer
     evaluation is safe; neither the evaluator nor another state owns a cache.
+
+    Args:
+        x (jax.Array): Shape (nsurface + 2,) last successful [all surface DOFs in
+            meters, dimensionless iota, G in tesla meters]; caller-owned immutable warm
+            start.
     """
 
     x: jax.Array
@@ -94,6 +117,28 @@ class ExactSingleStageResult:
     adapter raises native singular/nonfinite-adjoint errors; pure callers must
     inspect these flags. ``state`` is restored on failure, ``solved_x`` is not.
     The gradient on failure is not the derivative of the constant 1e3 penalty.
+
+    Args:
+        value (jax.Array): Scalar shape () sum of the non-QS ratio and unit-weight
+            native quadratic penalties, or 1e3 on failed convergence.
+        gradient (jax.Array): Shape (nfree,) outer free coil DOF gradient; evaluated at
+            solved_x even on failed convergence.
+        state (ExactSingleStageState): Next warm start; retains the incoming state on
+            failed convergence.
+        solved_x (jax.Array): Shape (nsurface + 2,) final inner [surface DOFs, iota, G],
+            including a failed iterate.
+        success (jax.Array): Scalar shape () bool indicating the stopping residual norm
+            is within tol.
+        iterations (jax.Array): Scalar shape () completed int32 inner step count.
+        norm (jax.Array): Scalar shape () native exact-solve stopping residual norm.
+        singular (jax.Array): Scalar shape () bool indicating an exactly singular finite
+            Newton matrix.
+        adjoint_finite (jax.Array): Scalar shape () bool indicating finite inner
+            Jacobian, adjoint right-hand sides and adjoints.
+        radius_singular (jax.Array): Scalar shape () bool indicating a singular
+            cylindrical map in the major-radius calculation.
+        terms (jax.Array): Shape (4,) raw [dimensionless non-QS ratio, dimensionless
+            iota, major radius in meters, selected total length in meters].
     """
 
     value: jax.Array
@@ -172,6 +217,22 @@ def exact_single_stage_evaluate(
     Callers place all arguments on a single device before calling.
     Finite penalty weights share one coil VJP; nonfinite weights are applied
     after component coil VJPs, preserving native's inf/NaN propagation.
+
+    Successful values add the non-QS ratio to half the squared iota and
+    major-radius target errors, plus ``0.5 * max(total_length - length_target, 0)**2``.
+
+    Args:
+        problem (ExactSingleStageProblem): Immutable problem snapshot with an explicit
+            inner G variable.
+        dofs (jax.Array): Shape (nfree,) free coil DOFs in the extraction snapshot's
+            native order, including geometry coefficients and current DOFs.
+        state (ExactSingleStageState): Caller-owned warm start for the inner exact
+            solve.
+
+    Returns:
+        ExactSingleStageResult: Device result object with value/gradient, solve facts and next warm start.
+            Failed convergence returns value 1e3 and the gradient at the failed iterate,
+            while preserving the incoming state.
     """
     def reconstruct(dofs: jax.Array) -> GroupedCoilSetSpec:
         return coil_set_spec_from_dof_extraction_spec(problem.extraction, dofs)

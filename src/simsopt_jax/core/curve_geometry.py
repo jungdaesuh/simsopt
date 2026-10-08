@@ -576,6 +576,15 @@ def curve_length_from_dofs(spec: CurveSpec, dofs: jax.Array) -> jax.Array:
     summation orders can differ by a few ulps of length; a nearly active
     quadratic length penalty propagates that scalar round-off to its gradient.
     Zero tangents retain the undefined norm derivative, as natively.
+
+    Args:
+        spec (CurveSpec): Immutable curve layout and quadrature grid in turns.
+        dofs (jax.Array): Shape (ndofs,) full native curve coefficients, including fixed
+            DOFs; position coefficients are in meters.
+
+    Returns:
+        jax.Array: Scalar shape () mean tangent magnitude in meters, using the native
+            full-turn quadrature convention.
     """
     _, tangent = curve_gamma_and_gammadash_from_dofs(spec, dofs)
     x, y, z = tangent[..., 0], tangent[..., 1], tangent[..., 2]

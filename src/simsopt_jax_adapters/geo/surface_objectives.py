@@ -54,6 +54,15 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
     they were, and ``bs`` is a parent alongside ``boozer_surface``: coils
     that only ``bs`` holds are part of ``x`` and ``dJ`` and invalidate ``J``
     when they change.
+
+    Args:
+        boozer_surface (JaxBoozerSurface | BoozerSurface): Mutable tensor-surface solver
+            with geometry shape (nphi, ntheta, 3); its solve/adjoint supplies implicit
+            coil dependence.
+        bs (JaxBiotSavart): Field for the ratio; also a parent so its exclusive coils
+            enter x and invalidate caches.
+        sDIM (int): Half of each auxiliary grid dimension; grid spans one field period.
+        quasi_poloidal (bool): Average over theta when true, otherwise over phi.
     """
 
     def __init__(
@@ -85,21 +94,53 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
         self.recompute_bell()
 
     def recompute_bell(self, parent=None):
+        """Invalidate the cached computation after a parent changes.
+
+        Args:
+            parent (Optimizable | None): Parent notifying this objective of changed DOFs;
+                unused.
+
+        Returns:
+            None: Clears the cached value and derivative.
+        """
         self._J = None
         self._dJ = None
 
     def J(self):
+        """Return the cached objective value, computing it when needed.
+
+
+        Returns:
+            float: Cached scalar objective, recomputed through the surface solve when
+                invalidated; dimensionless for the non-QS ratio, native penalty units for
+                BoozerResidual.
+        """
         if self._J is None:
             self.compute()
         return self._J
 
     @derivative_dec
     def dJ(self):
+        """Return the total coil derivative through the surface solve.
+
+
+        Returns:
+            numpy.ndarray | Derivative: Total coil derivative including the surface-solve
+                adjoint. By default the decorator projects to shape (nfree,) in the
+                objective's free DOF order; partials=True returns Derivative.
+        """
         if self._dJ is None:
             self.compute()
         return self._dJ
 
     def compute(self):
+        """Compute the objective and its direct-minus-adjoint coil derivative.
+
+
+        Returns:
+            None: Populates the objective value and total coil derivative caches, re-solving
+                the Boozer surface when required.
+        """
         booz_surf = self.boozer_surface
         if booz_surf.need_to_run_code:
             res = booz_surf.res

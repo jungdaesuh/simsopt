@@ -51,7 +51,22 @@ def non_quasi_symmetric_ratio(
     coils, its gradient over the surface DOFs (the field following the
     points) and the coil-spec cotangent of its field (the points held). New
     coefficient and coil values reuse the compiled program; ``axis`` selects
-    one."""
+    one.
+
+    Args:
+        surface (SurfaceSpec): Immutable surface coefficients and quadrature grid; all
+            native DOFs are included.
+        coils (GroupedCoilSetSpec): Grouped coil geometry in meters and currents in
+            amperes.
+        axis (int): Average field magnitude over phi (0, quasi-axisymmetric) or theta
+            (1, quasi-poloidal).
+
+    Returns:
+        tuple[jax.Array, jax.Array, GroupedCoilSetSpec]: Dimensionless ratio scalar
+            shape (), gradient over all native surface DOFs of shape (nsurface,), and
+            coil cotangents with matching leaf shapes. Ratio is mean(dS * B_nonQS^2) /
+            mean(dS * B_QS^2), with dS-weighted B_QS.
+    """
 
     def ratio(dofs: jax.Array, coils: GroupedCoilSetSpec) -> jax.Array:
         return _ratio(surface_spec_with_dofs(surface, dofs), coils, axis)
