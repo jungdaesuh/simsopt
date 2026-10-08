@@ -273,6 +273,7 @@ def _assert_every_kernel_native(
 
 @pytest.mark.parametrize("case", _CASES)
 def test_every_kernel_matches_native(case, parity_lane):
+    """Surface values, coefficient derivatives and VJPs agree with the native geometry."""
     surface = _surface(case)
     cotangent = _cotangent(surface, seed=1)
     with parity_default_device(parity_lane):
@@ -286,6 +287,7 @@ def test_every_kernel_matches_native(case, parity_lane):
     ["rz-nonsym-nfp2-half-period", "xyz-stellsym-nfp3-field-period", "tensor-nonsym-nfp2-half-period"],
 )
 def test_coefficient_derivatives_match_central_differences_of_native_values(case):
+    """Surface coefficient derivatives agree with central differences of native quantities."""
     surface = _surface(case)
     spec = surface_spec_from_surface(surface)
     dofs = surface.get_dofs()
@@ -314,6 +316,7 @@ def test_clamped_second_derivatives_are_derivatives_of_native_first_derivatives(
     # Each second derivative, and its coefficient Jacobian, against central
     # differences in the quadrature points of the native first derivative and of
     # its native coefficient Jacobian, evaluated on shifted grids.
+    """Clamped second derivatives follow native first derivatives despite native integer truncation."""
     surface = _surface(case)
     spec = surface_spec_from_surface(surface)
     quadpoints_phi = np.asarray(surface.quadpoints_phi)
@@ -345,6 +348,7 @@ def test_clamped_second_derivatives_are_derivatives_of_native_first_derivatives(
 
 @pytest.mark.parametrize("case", ["rz-stellsym-nfp3-field-period", "tensor-stellsym-nfp3-field-period"])
 def test_free_dof_gradients_match_native_objectives_with_fixed_and_shared_dofs(case):
+    """Free DOF projections agree with native area, volume and VJPs for fixed/shared DOFs."""
     surface = _surface(case)
     names = list(surface.local_full_dof_names)
     fixed = (str(names[0]), str(names[-1]))
@@ -389,6 +393,7 @@ def test_free_dof_gradients_match_native_objectives_with_fixed_and_shared_dofs(c
     ["rz-nonsym-nfp2-half-period", "xyz-nonsym-nfp2-half-period", "tensor-clamped-stellsym-nfp3-field-period"],
 )
 def test_new_dofs_reuse_the_programs_without_implicit_transfers(case, parity_lane):
+    """New coefficient values preserve snapshots and reuse kernels without implicit transfers."""
     surface = _surface(case)
     surface.fix(str(list(surface.local_full_dof_names)[3]))
     cotangent = _cotangent(surface, seed=4)
@@ -416,6 +421,7 @@ def test_new_dofs_reuse_the_programs_without_implicit_transfers(case, parity_lan
     ["rz-axisymmetric-ntor0", "xyz-nonsym-nfp2-half-period", "tensor-clamped-stellsym-nfp3-field-period"],
 )
 def test_spec_dofs_follow_the_native_get_and_set_dofs(case):
+    """Spec DOF extraction and replacement preserve the full native coefficient layout."""
     surface = _surface(case)
     spec = surface_spec_from_surface(surface)
     np.testing.assert_array_equal(host_array(surface_get_dofs(spec)), surface.get_dofs())
@@ -450,6 +456,7 @@ def _write_entries_outside_the_dofs(surface: _NativeSurface) -> None:
     ["rz-stellsym-nfp3-field-period", "xyz-stellsym-nfp3-field-period", "tensor-stellsym-nfp3-field-period"],
 )
 def test_coefficient_entries_outside_the_dofs_enter_the_geometry_as_natively(case):
+    """Non-DOF coefficients affect or skip geometry exactly as in the native surface."""
     surface = _surface(case)
     unmodified_gamma = _native(surface, "gamma")
     _write_entries_outside_the_dofs(surface)
@@ -487,6 +494,7 @@ def _singular_surface(singularity: str) -> SurfaceRZFourier:
 
 @pytest.mark.parametrize("singularity", ["cusp", "underflow"])
 def test_singular_normals_give_the_native_non_finite_values(singularity):
+    """Singular normals retain native finite values and nonfinite patterns within documented limits."""
     surface = _singular_surface(singularity)
     spec = surface_spec_from_surface(surface)
     assert not np.isfinite(_native(surface, "unitnormal")).all()
@@ -530,5 +538,6 @@ class _SurfaceXYZTensorFourierSubclass(SurfaceXYZTensorFourier):
     ids=["SurfaceGarabedian", "SurfaceRZFourier-subclass", "SurfaceXYZTensorFourier-subclass", "curve"],
 )
 def test_specs_refuse_other_classes(make_object):
+    """Snapshot conversion rejects unsupported geometry classes and subclasses."""
     with pytest.raises(TypeError, match="supports SurfaceRZFourier, SurfaceXYZFourier"):
         surface_spec_from_surface(make_object())
