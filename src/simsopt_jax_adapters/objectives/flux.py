@@ -45,25 +45,16 @@ _squared_flux_value_and_coil_cotangents = jax.jit(
 
 
 class JaxSquaredFlux(Optimizable):
-    r"""JAX-backed mirror of :class:`~simsopt.objectives.SquaredFlux`.
+    """JAX-backed native SquaredFlux for a fixed surface.
 
-    Same definitions, constructor and ``Derivative`` as the native objective
-    for a :class:`JaxBiotSavart` field. The flux integral and its gradient with
-    respect to the coil geometry and currents run as one jitted program; the
-    field projects that gradient onto the coil DOFs. Like the native objective,
-    construction sets the field's evaluation points to the surface points.
-
-    As in the native objective, ``target`` and ``definition`` are plain
-    attributes read at every evaluation. The surface must stay fixed: its
-    points and normals are captured at construction, and evaluating after its
-    DOFs change raises ``RuntimeError``. :meth:`fixed_surface_flux_spec`
-    returns the current contract for the fused Stage-II objective.
+    Construction sets field points and captures surface geometry. Surface DOF
+    changes require rebuilding; target and definition are read each time.
 
     Args:
-        surface: the fixed :class:`~simsopt.geo.Surface`.
-        field: a :class:`JaxBiotSavart` field.
-        target: optional ``(nphi, ntheta)`` target normal field (default 0).
-        definition: ``"quadratic flux"``, ``"normalized"`` or ``"local"``.
+        surface: Surface object, fixed quadrature geometry in m.
+        field: JaxBiotSavart object, coil magnetic field in T.
+        target: Array of shape (nphi, ntheta) or None, normal field target in T; None means zero.
+        definition: str, "quadratic flux", "normalized", or "local".
     """
 
     def __init__(self, surface, field: JaxBiotSavart, target=None, definition="quadratic flux"):
@@ -97,8 +88,11 @@ class JaxSquaredFlux(Optimizable):
             )
 
     def fixed_surface_flux_spec(self) -> FixedSurfaceFluxSpec:
-        """Return the immutable contract of the captured surface and the current
-        ``target`` and ``definition``."""
+        """Capture the current target and definition with the fixed surface geometry.
+
+        Returns:
+            FixedSurfaceFluxSpec object: immutable device operands; changed surface DOFs raise RuntimeError.
+        """
         self._raise_if_surface_changed()
         return make_fixed_surface_flux_spec(
             points=self._surface_points,
@@ -108,6 +102,11 @@ class JaxSquaredFlux(Optimizable):
         )
 
     def J(self):
+        """Evaluate the flux integral for the current coil DOFs.
+
+        Returns:
+            float: objective in T^2 m^2 (quadratic flux), dimensionless (normalized), or m^2 (local).
+        """
         value = _squared_flux_value(
             self.fixed_surface_flux_spec(),
             self.field.coil_set_spec().field_inputs(),
@@ -116,6 +115,13 @@ class JaxSquaredFlux(Optimizable):
 
     @derivative_dec
     def dJ(self):
+        """Project coil cotangents onto native DOFs, including shared DOFs.
+
+        partials=True retains fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are flux objective units per native DOF unit.
+        """
         flux_spec = self.fixed_surface_flux_spec()
         coil_set_spec = self.field.coil_set_spec()
         _, coil_cotangents = _squared_flux_value_and_coil_cotangents(
