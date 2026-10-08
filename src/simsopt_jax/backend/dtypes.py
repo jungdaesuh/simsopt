@@ -7,8 +7,8 @@ Ownership split:
   optionally on a reference array's device), ``as_runtime_array`` /
   ``as_compute_array`` (runtime / compute dtype policy). Do not reimplement
   ``device_put`` with ad-hoc float coercion.
-* ``simsopt_jax.runtime.host_boundary`` — **host materialization** (D2H):
-  ``host_array`` / ``host_tree`` and ready variants.
+* ``simsopt_jax.runtime.host_boundary`` — **host ownership and materialization**:
+  ``snapshot_host_tree`` before placement; ``host_array`` / ``host_tree`` (D2H).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from simsopt_jax.backend.runtime import (
     get_compute_dtype,
     get_runtime_jax_device,
 )
+from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 __all__ = [
     "as_compute_array",
@@ -282,18 +283,19 @@ def _device_put(
         preserve_float_dtype=preserve_float_dtype,
     )
     if _has_jax_array_value(value):
-        array = jnp.asarray(value, dtype=resolved_dtype)
+        array = jnp.asarray(snapshot_host_tree(value), dtype=resolved_dtype)
     elif resolved_dtype is None:
         array = np.asarray(value)
     else:
         array = np.asarray(value, dtype=resolved_dtype)
+    array = snapshot_host_tree(array)
     if placement is None:
         return _unplaced_device_put(array)
     return jax.device_put(array, placement)
 
 
 def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Array:
-    """Place host values on a JAX device using runtime policy for float dtypes."""
+    """Snapshot host values, then place them using runtime policy for float dtypes."""
     return _device_put(
         value,
         dtype=dtype,
@@ -316,6 +318,7 @@ def runtime_device_put_tree(
     unchanged and applies runtime placement only to host leaves.
     """
     placement = _device_put_target(target, device)
+    value = snapshot_host_tree(value)
     if placement is None:
         if preserve_placement:
             return jax.tree.map(
@@ -355,7 +358,7 @@ def _compute_device_put(value, *, dtype, target=None, device=None) -> jax.Array:
 
 def as_jax_array(value, *, dtype) -> jax.Array:
     if _has_jax_array_value(value):
-        return jnp.asarray(value, dtype=dtype)
+        return jnp.asarray(snapshot_host_tree(value), dtype=dtype)
     if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
         return runtime_device_put(value, dtype=dtype)
     return jnp.asarray(value, dtype=dtype)
@@ -382,7 +385,7 @@ def as_compute_array(value, *, dtype=None) -> jax.Array:
         else _resolve_jnp_dtype(dtype, source="dtype")
     )
     if _has_jax_array_value(value):
-        return jnp.asarray(value, dtype=resolved_dtype)
+        return jnp.asarray(snapshot_host_tree(value), dtype=resolved_dtype)
     return _compute_device_put(value, dtype=resolved_dtype)
 
 
