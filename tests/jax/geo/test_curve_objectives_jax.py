@@ -9,8 +9,11 @@ import sys
 from typing import cast
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from core.test_buffer_ownership import _host_array
+from jax_test_support import fixture_execution_gate  # noqa: F401
 
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
@@ -26,6 +29,10 @@ from simsopt.geo import (
     create_equally_spaced_curves,
 )
 from simsopt_jax.backend import set_backend
+from simsopt_jax.core.curve_kernels import (
+    curve_curve_distance_penalty_pure,
+    curve_surface_distance_penalty_pure,
+)
 from simsopt_jax_adapters.geo import (
     JaxCurveCurveDistance,
     JaxCurveLength,
@@ -38,6 +45,33 @@ from simsopt_jax_adapters.geo import (
 _CC_THRESHOLD = 0.6
 _CS_THRESHOLD = 0.4
 _CURVATURE_THRESHOLD = 1.0
+
+
+@pytest.mark.parametrize("kernel", [
+    curve_curve_distance_penalty_pure, curve_surface_distance_penalty_pure,
+], ids=["curve_curve", "curve_surface"])
+@pytest.mark.parametrize("operand_index", range(4), ids=["positions1", "weights1", "positions2", "weights2"])
+@pytest.mark.parametrize("misaligned", [False, True])
+def test_distance_kernels_snapshot_numpy_before_pending_evaluation(kernel, operand_index, misaligned, execution_gate):  # noqa: F811
+    """Mutating each caller-owned geometry array cannot change a queued distance penalty."""
+    host_inputs = [
+        _host_array((32, 3), misaligned=misaligned) for _ in range(4)
+    ]
+    host_inputs[2] += 0.2
+    inputs: list[np.ndarray | jax.Array] = list(host_inputs)
+    expected = np.asarray(kernel(*inputs, 0.5, True)).copy()
+    assert expected > 0
+    gate_index = 1 if operand_index == 0 else 0
+    gate = execution_gate
+    for index in range(4):
+        if index != operand_index:
+            inputs[index] = jnp.asarray(inputs[index])
+    gate(inputs[gate_index]).block_until_ready()
+    inputs[gate_index] = gate(inputs[gate_index])
+    result = kernel(*inputs, 0.5, True)
+    assert not result.is_ready(), "distance evaluation finished before caller mutation"
+    host_inputs[operand_index][:] = -7.0
+    np.testing.assert_array_equal(result.block_until_ready(), expected)
 
 _DISTANCE_CHILD_SETUP = """
 import sys
