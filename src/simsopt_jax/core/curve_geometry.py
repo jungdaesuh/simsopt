@@ -487,6 +487,13 @@ def curve_filament_frame_from_dofs(spec: CurveFilamentSpec, dofs) -> tuple[jax.A
     normal_dash, binormal_dash)`` of the filament's base curve; the filament
     is ``gamma + dn * normal + db * binormal`` and its tangent
     ``gammadash + dn * normal_dash + db * binormal_dash``.
+
+    Args:
+        spec: CurveFilamentSpec object, base curve, DOF maps, rotation and frame convention.
+        dofs: Array of shape (ndofs,), filament full DOFs in the spec mapping order.
+
+    Returns:
+        tuple of arrays of shape (nquadpoints, 3): base gamma, first and second parameter derivatives in m, unit normal and binormal, and their unit-period parameter derivatives.
     """
     base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
     alpha, alphadash = _rotation_alpha_and_dash_from_dofs(

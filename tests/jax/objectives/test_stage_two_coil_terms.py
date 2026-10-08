@@ -228,6 +228,7 @@ def _force_problem(config, *, perturb=True, shared_dofs=False):
          "squared_mean_torque", "vacuum_energy", "vacuum_energy_downsample"],
 )
 def test_each_coil_term_matches_its_native_objective(term, settings):
+    """Each enabled fused coil term matches its native value and DOF gradient."""
     config = StageTwoObjectiveConfig(num_basecurves=_NCOILS, **{term: 1.0}, **settings)
     _, coils, field, _, problem = _force_problem(config)
     (native,) = [objective for weight, objective in _coil_terms(config, coils) if weight is not None]
@@ -240,6 +241,7 @@ def test_each_coil_term_matches_its_native_objective(term, settings):
 
 @pytest.mark.parametrize("shared_dofs", [False, True], ids=["symmetric", "shared_dofs"])
 def test_fused_force_objective_matches_native_composite(shared_dofs):
+    """Combined fused force terms match the native composite value and gradient."""
     surface, coils, field, _, problem = _force_problem(_ALL_FORCE_TERMS, shared_dofs=shared_dofs)
     native = _native_force_composite(surface, coils, _ALL_FORCE_TERMS)
     value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
@@ -371,6 +373,7 @@ def test_fused_finite_build_matches_native_composite(frame, rotation_order):
 
 
 def test_fused_coil_terms_match_central_differences():
+    """Fused coil-term directional gradients match independent central differences."""
     rng = np.random.default_rng(31)
     _, _, force_field, _, force_problem = _force_problem(_ALL_FORCE_TERMS, shared_dofs=True)
     (finite_build_field, _, _, _, finite_build_problem), _ = _finite_build_problem()
@@ -429,6 +432,7 @@ def test_rebuilt_problems_with_new_coil_term_settings_reuse_the_compiled_program
 
 
 def test_problem_rejects_invalid_coil_terms_and_packs():
+    """Invalid coil-term settings and inconsistent filament packs are rejected."""
     _, _, field, flux, _ = _force_problem(_ALL_FORCE_TERMS)
     flux_spec = flux.fixed_surface_flux_spec()
     regularizations = [coil.regularization for coil in field.coils]
@@ -466,6 +470,7 @@ def test_problem_rejects_invalid_coil_terms_and_packs():
 
 
 def test_fused_coil_term_programs_run_under_the_strict_transfer_guard():
+    """Fused coil terms compile and run with explicit transfers only."""
     value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
     _, _, force_field, _, force_problem = _force_problem(_ALL_FORCE_TERMS)
     (finite_build_field, _, _, _, finite_build_problem), _ = _finite_build_problem()
