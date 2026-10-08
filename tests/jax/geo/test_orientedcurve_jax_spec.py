@@ -9,7 +9,7 @@ import numpy as np
 
 from simsopt_jax.core import (
     OrientedCurveXYZFourierSpec,
-    curve_gamma_and_dash_from_spec,
+    curve_gamma_and_gammadash_from_spec,
     make_oriented_curve_xyzfourier_spec,
 )
 
@@ -104,7 +104,7 @@ def test_oriented_curve_spec_matches_numpy_geometry_oracle():
         order=2,
     )
     assert isinstance(spec, OrientedCurveXYZFourierSpec)
-    gamma, gammadash = jax.jit(curve_gamma_and_dash_from_spec)(spec)
+    gamma, gammadash = jax.jit(curve_gamma_and_gammadash_from_spec)(spec)
     expected_gamma, expected_gammadash = _oriented_curve_numpy(dofs, quadpoints, 2)
 
     np.testing.assert_allclose(

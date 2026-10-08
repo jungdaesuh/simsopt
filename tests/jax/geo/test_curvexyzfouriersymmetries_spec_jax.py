@@ -28,7 +28,7 @@ from simsopt_jax.backend import invalidate_backend_cache
 from simsopt_jax.core.curve_geometry import (
     _slice_1d_static,
     _update_1d_static,
-    curve_gamma_and_dash_from_dofs,
+    curve_gamma_and_gammadash_from_dofs,
     curve_geometry_from_dofs,
     curve_pullback_from_dofs,
 )
@@ -353,7 +353,7 @@ def test_curve_pullback_shape(stellsym: bool) -> None:
     )
     spec = _curve_spec(curve)
 
-    gamma_jax, gammadash_jax = curve_gamma_and_dash_from_dofs(spec, spec.dofs)
+    gamma_jax, gammadash_jax = curve_gamma_and_gammadash_from_dofs(spec, spec.dofs)
     cotangent_g = jnp.ones_like(gamma_jax)
     cotangent_gd = jnp.ones_like(gammadash_jax)
 
