@@ -91,6 +91,7 @@ def _run(name: str, x: jax.Array):
 
 @pytest.mark.parametrize("name", _CASES)
 def test_loop_stops_at_a_singular_second_step_and_keeps_its_iterate(name, parity_lane, monkeypatch):
+    """Every device solver stops on a singular second step and retains its last completed iterate."""
     formulations, reached, second_matrix = _CASES[name]
     with pytest.raises(np.linalg.LinAlgError, match="Singular matrix"):
         np.linalg.solve(second_matrix, np.ones(2))

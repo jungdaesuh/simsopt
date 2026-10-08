@@ -133,6 +133,14 @@ def boozer_exact_residual_mask(surface: SurfaceXYZTensorFourier) -> np.ndarray:
     the x residual at ``(0, 0)`` under stellarator symmetry. Raises where native
     does: for other surface classes, and for stellarator-symmetric grids
     ``get_stellsym_mask()`` rejects.
+
+    Args:
+        surface (SurfaceXYZTensorFourier): Native surface with a supported exact-solve
+            quadrature grid.
+
+    Returns:
+        numpy.ndarray: Boolean shape (3 * nphi * ntheta,) native exact residual mask,
+            excluding the x equation at (0, 0) under stellarator symmetry.
     """
     if not isinstance(surface, SurfaceXYZTensorFourier):
         raise RuntimeError(
@@ -150,6 +158,17 @@ def boozer_exact_residual_rows(
     """The indices of :func:`boozer_exact_residual_mask` as an int32 device
     array, the rows :func:`~simsopt_jax.core.boozer_problem.boozer_exact_residual`
     takes, placed like ``reference`` (such as a problem's ``targetlabel``)
-    or, without one, where the runtime places new arrays."""
+    or, without one, where the runtime places new arrays.
+
+    Args:
+        surface (SurfaceXYZTensorFourier): Native surface with a supported exact-solve
+            quadrature grid.
+        reference (jax.Array | None): Optional device-placement reference, with
+            arbitrary shape; None uses the active device.
+
+    Returns:
+        jax.Array: Shape (nrows,) int32 flattened residual indices in native mask order,
+            placed like reference when supplied.
+    """
     rows = np.flatnonzero(boozer_exact_residual_mask(surface))
     return explicit_device_array(rows, dtype=np.int32, reference=reference)
