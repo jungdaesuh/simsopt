@@ -183,3 +183,55 @@ def test_new_seeds_reuse_compiled_hessian_vjp(monkeypatch):
     assert kernel._cache_size() == compiled_count
     for actual, original in zip(jax.tree.leaves(second.d_coil_arrays), jax.tree.leaves(first.d_coil_arrays), strict=True):
         np.testing.assert_allclose(actual, -2 * original, rtol=1e-13, atol=1e-14)
+
+
+def _host_input(shape: tuple[int, ...], *, misaligned: bool) -> np.ndarray:
+    """Exercise CPU host-buffer aliasing and delayed copies with known alignment."""
+    size = int(np.prod(shape))
+    storage = np.empty(size + 9, dtype=np.float64)
+    offset = (-storage.ctypes.data % 64) // storage.itemsize + int(misaligned)
+    array = storage[offset:offset + size].reshape(shape)
+    array[:] = np.arange(size).reshape(shape) / size + 1.0
+    return array
+
+
+@pytest.fixture
+def _execution_gate():
+    """Queue CPU work so a warmed Hessian pullback remains pending at mutation."""
+    matrix = jnp.ones((4096, 4096), dtype=jnp.float32)
+
+    @jax.jit
+    def gate(value, matrix):
+        product = jax.lax.fori_loop(0, 4, lambda _, x: (x @ matrix) / 4096, matrix)
+        return jnp.where(product[0, 0] > 0, value, -value)
+
+    return lambda value: gate(value, matrix)
+
+
+@pytest.mark.parametrize("misaligned", [False, True], ids=["aligned", "misaligned"])
+@pytest.mark.parametrize("pending_input", ["points", "seed"])
+def test_hessian_vjp_owns_numpy_inputs(monkeypatch, _execution_gate, misaligned, pending_input):
+    """Caller mutation after dispatch cannot alter pending Hessian cotangents."""
+    set_backend("jax", device="cpu", intent="parity")
+    _set_reverse_tile(monkeypatch, 4)
+    sources = [
+        _host_input(shape, misaligned=misaligned)
+        for shape in ((13, 3), (13, 3, 3, 3), (1, 12, 3), (1, 12, 3), (1,))
+    ]
+    sources[0] *= 0.2
+    expected = jax.tree.map(
+        lambda value: np.array(value, copy=True),
+        jax.block_until_ready(core.biot_savart_d2B_by_dXdX_vjp(*sources)),
+    )
+    index = 0 if pending_input == "points" else 1
+    device_input = jnp.asarray(sources[index].copy())
+    _execution_gate(device_input).block_until_ready()
+    inputs = list(sources)
+    inputs[index] = _execution_gate(device_input)
+    result = core.biot_savart_d2B_by_dXdX_vjp(*inputs)
+    assert any(not leaf.is_ready() for leaf in jax.tree.leaves(result)), "pullback completed before mutation"
+    for source in sources:
+        source[:] = -7.0
+    jax.block_until_ready(result)
+    for observed, saved in zip(jax.tree.leaves(result), jax.tree.leaves(expected), strict=True):
+        np.testing.assert_array_equal(observed, saved)

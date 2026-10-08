@@ -895,13 +895,12 @@ def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents)
             For an objective in U, geometry cotangents have units U/m and current
             cotangents have units U/A.
     """
+    inputs = snapshot_host_tree((points, vgradgrad, gammas, gammadashs, currents))
     tuning = get_field_kernel_tuning()
     return _make_d2B_vjp_kernel(
         tuning.coil_chunk_size, tuning.quadrature_block_size,
         tuning.hessian_vjp_point_chunk_size,
-    )(
-        points, vgradgrad, gammas, gammadashs, currents,
-    )
+    )(*inputs)
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
