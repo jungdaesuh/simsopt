@@ -7,18 +7,14 @@ Validates against:
 3. C++ reference from the installed simsoptpp extension.
 """
 
+from unittest_jax_support import JaxTestCase
 
-from jax_test_support import (
-    fixture_jax_runtime_guard,  # noqa: F401
-)
+import jax  # noqa: F401
 
 
 import numpy as np
 from typing import cast
 from simsopt._core.derivative import Derivative
-
-
-import jax
 
 
 import jax.numpy as jnp
@@ -34,8 +30,6 @@ from simsopt_jax_adapters.field.biotsavart_backend import (
 from simsopt_jax_adapters.field.biotsavart_backend import (
     _per_coil_unit_field,
 )
-
-
 
 
 from simsopt_jax.core.specs import CoilGroupSpec, GroupedCoilSetSpec
@@ -56,10 +50,26 @@ biot_savart_A = core_biotsavart.biot_savart_A
 biot_savart_dA_by_dX = core_biotsavart.biot_savart_dA_by_dX
 
 
-_DIRECT_KERNEL_TOLS = {'rtol': 1e-10, 'atol': 1e-12, 'requires_same_state': True, 'requires_direct_cpp_oracle': True, 'vector_parity_required': True}
+_DIRECT_KERNEL_TOLS = {
+    "rtol": 1e-10,
+    "atol": 1e-12,
+    "requires_same_state": True,
+    "requires_direct_cpp_oracle": True,
+    "vector_parity_required": True,
+}
 
 
-_DERIVATIVE_HEAVY_TOLS = {'scalar_value_rtol': 1e-10, 'scalar_value_atol': 1e-12, 'first_derivative_rtol': 1e-08, 'first_derivative_atol': 1e-10, 'second_derivative_rtol': 1e-06, 'second_derivative_atol': 1e-08, 'requires_same_input': True, 'requires_direct_cpp_oracle': True, 'fd_validation_secondary': True}
+_DERIVATIVE_HEAVY_TOLS = {
+    "scalar_value_rtol": 1e-10,
+    "scalar_value_atol": 1e-12,
+    "first_derivative_rtol": 1e-08,
+    "first_derivative_atol": 1e-10,
+    "second_derivative_rtol": 1e-06,
+    "second_derivative_atol": 1e-08,
+    "requires_same_input": True,
+    "requires_direct_cpp_oracle": True,
+    "fd_validation_secondary": True,
+}
 
 
 def _ncsx_biotsavart_parity_fixture():
@@ -126,9 +136,8 @@ def _assert_cylindrical_accessors_match_cpu(jax_field, cpu_field):
     )
 
 
-class TestBiotSavartJaxCppParity:
+class TestBiotSavartJaxCppParity(JaxTestCase):
     """Compare against the installed C++ simsoptpp kernel."""
-
 
     def test_B_parity_ncsx(self):
         """Native Biot-Savart parity on identical coils, points and cotangents."""
@@ -223,9 +232,18 @@ class TestBiotSavartJaxCppParity:
         bs.set_points_cyl(points_cyl)
 
         bs_jax = JaxBiotSavart(list(bs._coils))
-        assert bs_jax.set_points_cyl(points_cyl) is bs_jax
-        assert bs_jax.set_points_cart(points_np) is bs_jax
-        assert bs_jax.set_points_cyl(points_cyl) is bs_jax
+        self.assertTrue(
+            bs_jax.set_points_cyl(points_cyl) is bs_jax,
+            "bs_jax.set_points_cyl(points_cyl) is bs_jax",
+        )
+        self.assertTrue(
+            bs_jax.set_points_cart(points_np) is bs_jax,
+            "bs_jax.set_points_cart(points_np) is bs_jax",
+        )
+        self.assertTrue(
+            bs_jax.set_points_cyl(points_cyl) is bs_jax,
+            "bs_jax.set_points_cyl(points_cyl) is bs_jax",
+        )
 
         _assert_cylindrical_accessors_match_cpu(bs_jax, bs)
 
@@ -270,7 +288,6 @@ class TestBiotSavartJaxCppParity:
         bs_jax.set_points_cart(points_cart)
 
         _assert_cylindrical_points_match_cpu(bs_jax, bs)
-
 
     def test_B_vjp_parity_ncsx(self):
         """Native Biot-Savart parity on identical coils, points and cotangents."""
@@ -348,9 +365,9 @@ class TestBiotSavartJaxCppParity:
             atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
         )
 
-class TestBiotSavartJaxCppCoilCurrentParity:
-    """Per-coil field and spatial derivative parity against native Biot-Savart."""
 
+class TestBiotSavartJaxCppCoilCurrentParity(JaxTestCase):
+    """Per-coil field and spatial derivative parity against native Biot-Savart."""
 
     @staticmethod
     def _assert_coil_current_list_parity(cache_method, list_method, *, rtol, atol):
@@ -385,7 +402,6 @@ class TestBiotSavartJaxCppCoilCurrentParity:
         )
 
     def test_per_coil_unit_field_vectorizes_within_quadrature_group(self):
-
         """Unit-current fields vectorize per quadrature group and return values in
         public coil order."""
         points = jnp.asarray([[0.0, 0.0, 0.0], [0.25, -0.5, 1.0]], dtype=jnp.float64)
@@ -418,9 +434,11 @@ class TestBiotSavartJaxCppCoilCurrentParity:
 
         results = _per_coil_unit_field(points, coil_set_spec, kernel)
 
-        assert len(calls) == 2
-        assert calls == [(1, 3, 3), (1, 3, 3)]
-        assert len(results) == 3
+        self.assertTrue(len(calls) == 2, "len(calls) == 2")
+        self.assertTrue(
+            calls == [(1, 3, 3), (1, 3, 3)], "calls == [(1, 3, 3), (1, 3, 3)]"
+        )
+        self.assertTrue(len(results) == 3, "len(results) == 3")
         np.testing.assert_allclose(
             np.asarray(results[0]),
             np.broadcast_to(
@@ -495,7 +513,7 @@ class TestBiotSavartJaxCppCoilCurrentParity:
         )
 
 
-class TestJaxBiotSavartCoilStateToken:
+class TestJaxBiotSavartCoilStateToken(JaxTestCase):
     """Traceable runtime cache invalidation is keyed to coil DOF state."""
 
     @staticmethod
@@ -545,7 +563,6 @@ class TestJaxBiotSavartCoilStateToken:
                 atol=0.0,
             )
 
-
     def test_live_coil_set_spec_matches_explicit_dofs_and_native_coils(self):
         """The cached live spec is the explicit-DOF reconstruction of the native coils."""
         coils = self._make_two_basic_coils()
@@ -568,15 +585,19 @@ class TestJaxBiotSavartCoilStateToken:
                 live_entries, explicit_entries, native_entries, strict=True
             ):
                 np.testing.assert_allclose(
-                    cast(jax.Array, actual), cast(jax.Array, from_dofs),
-                    rtol=1e-14, atol=1e-15,
+                    cast(jax.Array, actual),
+                    cast(jax.Array, from_dofs),
+                    rtol=1e-14,
+                    atol=1e-15,
                 )
                 np.testing.assert_allclose(
-                    cast(jax.Array, actual), expected, rtol=1e-13, atol=1e-14,
+                    cast(jax.Array, actual),
+                    expected,
+                    rtol=1e-13,
+                    atol=1e-14,
                 )
 
     def test_biotsavart_extraction_spec_changes_only_for_captured_dof_contract(self):
-
         """Free-DOF changes reuse extraction specs; layout or captured fixed-DOF
         changes replace them."""
         coils = self._make_two_basic_coils()
@@ -586,11 +607,19 @@ class TestJaxBiotSavartCoilStateToken:
         initial_value = float(curve.local_full_x[0])
 
         curve.set(0, initial_value + 1.0e-3)
-        assert field.coil_dof_extraction_spec() is initial_spec
+        self.assertTrue(
+            field.coil_dof_extraction_spec() is initial_spec,
+            "field.coil_dof_extraction_spec() is initial_spec",
+        )
 
         curve.fix(0)
         fixed_spec = field.coil_dof_extraction_spec()
-        assert fixed_spec is not initial_spec
+        self.assertTrue(
+            fixed_spec is not initial_spec, "fixed_spec is not initial_spec"
+        )
 
         curve.set(0, initial_value + 2.0e-3)
-        assert field.coil_dof_extraction_spec() is not fixed_spec
+        self.assertTrue(
+            field.coil_dof_extraction_spec() is not fixed_spec,
+            "field.coil_dof_extraction_spec() is not fixed_spec",
+        )
