@@ -25,6 +25,7 @@ from .biotsavart import (
     biot_savart_B_vjp,
     biot_savart_d2A_by_dXdX,
     biot_savart_d2B_by_dXdX,
+    biot_savart_d2B_by_dXdX_vjp,
     biot_savart_dA_by_dX,
     biot_savart_dB_by_dX,
     group_coil_data,
@@ -49,6 +50,7 @@ __all__ = [
     "coil_set_spec_from_dof_extraction_spec",
     "coil_specs_from_dof_extraction_spec",
     "group_biot_savart_B_vjp",
+    "group_biot_savart_d2B_by_dXdX_vjp",
     "grouped_coil_set_spec_from_coil_specs",
     "grouped_biot_savart_A_from_inputs",
     "grouped_biot_savart_A_from_spec",
@@ -56,6 +58,7 @@ __all__ = [
     "grouped_biot_savart_B_from_spec",
     "grouped_biot_savart_d2A_by_dXdX_from_spec",
     "grouped_biot_savart_d2B_by_dXdX_from_spec",
+    "grouped_biot_savart_d2B_by_dXdX_from_inputs",
     "grouped_biot_savart_dA_by_dX_from_inputs",
     "grouped_biot_savart_dA_by_dX_from_spec",
     "grouped_biot_savart_dB_by_dX_from_inputs",
@@ -145,6 +148,17 @@ def group_biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
     )
     compute_v = _as_compute_array(v, dtype=compute_points.dtype)
     return biot_savart_B_vjp(compute_points, compute_v, gammas, gammadashs, currents)
+
+
+def group_biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents):
+    """Return the tiled Hessian pullback for one group in the points' dtype."""
+    compute_points, gammas, gammadashs, currents = _compute_group_inputs(
+        points, gammas, gammadashs, currents,
+    )
+    return biot_savart_d2B_by_dXdX_vjp(
+        compute_points, _as_compute_array(vgradgrad, dtype=compute_points.dtype),
+        gammas, gammadashs, currents,
+    )
 
 
 def grouped_coil_set_spec_from_lists(
@@ -543,6 +557,14 @@ def grouped_biot_savart_d2B_by_dXdX_from_spec(
             i, j, l] = partial_i partial_j B_l.
     """
     return _accumulate_grouped_field(points, coil_spec, biot_savart_d2B_by_dXdX)
+
+
+def grouped_biot_savart_d2B_by_dXdX_from_inputs(points: object, coil_arrays: Iterable[tuple[jax.Array, jax.Array, jax.Array]]):
+    """Evaluate the native-layout Hessian from grouped geometry/current arrays."""
+    return grouped_biot_savart_d2B_by_dXdX_from_spec(
+        points,
+        grouped_coil_set_spec_from_inputs(coil_arrays),
+    )
 
 
 def grouped_biot_savart_dB_by_dX_from_spec(

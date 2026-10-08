@@ -46,6 +46,7 @@ from simsopt_jax.core.biotsavart import (
 from simsopt_jax.core.field import (
     coil_set_spec_from_dof_extraction_spec,
     group_biot_savart_B_vjp,
+    group_biot_savart_d2B_by_dXdX_vjp,
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
     grouped_biot_savart_B_and_dB_from_spec,
@@ -1582,11 +1583,15 @@ class JaxBiotSavart(Optimizable):
                 cotangents with leaf shapes (C, Q, 3), (C, Q, 3), (C,) and static
                 public coil indices.
         """
+        return self._group_pullback_native(group_biot_savart_B_vjp, v)
+
+    def _group_pullback_native(self, group_pullback, v):
+        """Evaluate a coil-array pullback without flattening shared owner DOFs."""
         points = self._points_jax
         v_jax = _as_jax_float64(v)
         coil_set_spec = self.coil_set_spec()
         d_coil_arrays = tuple(
-            group_biot_savart_B_vjp(
+            group_pullback(
                 points,
                 v_jax,
                 group.gammas,
@@ -1698,6 +1703,14 @@ class JaxBiotSavart(Optimizable):
             vgrad,
         )
 
+    def d2B_by_dXdX_pullback_native(self, vgradgrad) -> BiotSavartFieldPullback:
+        r"""Native grouped cotangents of ``d2B/dXdX``, accumulated per point tile.
+
+        ``vgradgrad`` has shape ``(npoints, 3, 3, 3)`` in the same index order
+        as ``d2B_by_dXdX()``; it need not be symmetric.
+        """
+        return self._group_pullback_native(group_biot_savart_d2B_by_dXdX_vjp, vgradgrad)
+
     def A_and_dA_pullback_native(self, v, vgrad):
         """Return separate native grouped cotangents for ``A`` and ``dA/dX``.
 
@@ -1790,6 +1803,19 @@ class JaxBiotSavart(Optimizable):
         return (
             self._pullback_to_derivative(b_pullback),
             self._pullback_to_derivative(db_pullback),
+        )
+
+    def B_and_dB_and_d2B_vjp(self, v, vgrad, vgradgrad) -> tuple[Derivative, Derivative, Derivative]:
+        r"""Separate coil-DOF VJPs of ``B``, ``dB/dX`` and ``d2B/dXdX``.
+
+        Seeds have the respective field shapes, including ``(npoints, 3, 3, 3)``
+        for the Hessian. Each Derivative retains fixed and shared DOF owners.
+        """
+        b_derivative, db_derivative = self.B_and_dB_vjp(v, vgrad)
+        return (
+            b_derivative,
+            db_derivative,
+            self._pullback_to_derivative(self.d2B_by_dXdX_pullback_native(vgradgrad)),
         )
 
     def _add_single_coil_cotangent_to_dofs_gradient(
