@@ -41,6 +41,14 @@ def surface_spec_from_surface(
     ``SurfaceXYZTensorFourier`` themselves are supported: other surface
     classes, and subclasses that may override their geometry, raise
     ``TypeError``.
+
+    Args:
+        surface (SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier): Native
+            surface of exactly one of these classes; subclasses are unsupported.
+
+    Returns:
+        SurfaceSpec: Immutable device snapshot object of all coefficient arrays in meters and
+            the quadrature grid in turns. Rebuild after native state changes.
     """
     if type(surface) not in _SPECS:
         raise TypeError(
