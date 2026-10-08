@@ -142,7 +142,7 @@ def _decision(surface: _NativeSurface, optimize_G: bool, multipliers=()) -> np.n
 
 
 def _place(values: np.ndarray, problem: BoozerProblem) -> jax.Array:
-    return explicit_device_array(values, dtype=np.float64, reference=problem.target_label)
+    return explicit_device_array(values, dtype=np.float64, reference=problem.targetlabel)
 
 
 def _assert_native(actual, expected, name: str, rtol: float = _RTOL) -> None:
@@ -600,7 +600,7 @@ def test_formulations_make_no_implicit_transfers(stellsym, parity_lane):
                 "penalty",
             )
         devices = {device for leaf in jax.tree.leaves(results) for device in leaf.devices()}
-        assert devices == problem.target_label.devices()
+        assert devices == problem.targetlabel.devices()
 
 
 @pytest.mark.parametrize("weight_inv_modB", [False, True])
@@ -650,4 +650,4 @@ def test_problem_boundary_refuses_unsupported_inputs():
     with pytest.raises(RuntimeError, match="SurfaceXYZTensorFourier"):
         boozer_exact_residual(exact, _place(_decision(setup.surface, True), exact), tensor_rows)
     with pytest.raises(ValueError, match="decision vector"):
-        boozer_penalty_constraints(replace(exact, constraint_weight=exact.target_label), x, optimize_G=True)
+        boozer_penalty_constraints(replace(exact, constraint_weight=exact.targetlabel), x, optimize_G=True)

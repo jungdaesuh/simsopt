@@ -77,13 +77,13 @@ __all__ = [
 LabelKind = Literal["volume", "area", "aspect_ratio", "toroidal_flux"]
 
 
-@pytree_dataclass(data=("surface",), meta=("kind", "phi_index"))
+@pytree_dataclass(data=("surface",), meta=("kind", "idx"))
 class BoozerLabelSpec:
     """A native label (``Volume``, ``Area``, ``AspectRatio``, ``ToroidalFlux``).
 
     ``surface`` is the spec of the label's own surface, whose quadrature grid
     may differ from the Boozer surface's but whose DOFs are the Boozer
-    surface's. ``phi_index`` is ``ToroidalFlux.idx`` (``0`` otherwise).
+    surface's. ``idx`` is ``ToroidalFlux.idx`` (``0`` otherwise).
     ``aspect_ratio`` evaluates the mean cross-sectional area in the closed form
     native uses for its derivatives, so it agrees with native wherever native's
     value (``det``/``inv`` of the cylindrical map) is defined and stays finite
@@ -92,7 +92,7 @@ class BoozerLabelSpec:
 
     surface: SurfaceSpec
     kind: LabelKind
-    phi_index: int
+    idx: int
 
 
 @pytree_dataclass(
@@ -100,7 +100,7 @@ class BoozerLabelSpec:
         "surface",
         "coils",
         "label",
-        "target_label",
+        "targetlabel",
         "constraint_weight",
     )
 )
@@ -109,7 +109,7 @@ class BoozerProblem:
 
     ``surface`` and ``coils`` are the Boozer surface's spec (its DOF values are
     replaced by those of ``x``) and the field's grouped coils, which also give
-    a ``ToroidalFlux`` label its field. ``target_label`` is a float64 scalar.
+    a ``ToroidalFlux`` label its field. ``targetlabel`` is a float64 scalar.
     ``constraint_weight`` is the float64 penalty weight, which only the
     penalty formulation reads (``None`` if the problem has none, as a native
     BoozerExact ``BoozerSurface``).
@@ -118,7 +118,7 @@ class BoozerProblem:
     surface: SurfaceSpec
     coils: GroupedCoilSetSpec
     label: BoozerLabelSpec
-    target_label: jax.Array
+    targetlabel: jax.Array
     constraint_weight: jax.Array | None
 
 
@@ -127,7 +127,7 @@ def make_boozer_problem(
     surface: SurfaceSpec,
     coils: GroupedCoilSetSpec,
     label: BoozerLabelSpec,
-    target_label: float,
+    targetlabel: float,
     constraint_weight: float | None,
 ) -> BoozerProblem:
     """A :class:`BoozerProblem` with its numbers placed as device operands."""
@@ -135,7 +135,7 @@ def make_boozer_problem(
         surface=surface,
         coils=coils,
         label=label,
-        target_label=as_jax_float64(np.float64(target_label)),
+        targetlabel=as_jax_float64(np.float64(targetlabel)),
         constraint_weight=(
             None if constraint_weight is None else as_jax_float64(np.float64(constraint_weight))
         ),
@@ -226,10 +226,10 @@ def _label_value(label: BoozerLabelSpec, coils: GroupedCoilSetSpec, surface_dofs
         return surface_area(spec)
     if label.kind == "aspect_ratio":
         return _aspect_ratio(spec)
-    # ToroidalFlux: the line integral of A along gamma(phi_index, :).
+    # ToroidalFlux: the line integral of A along gamma(idx, :).
     gamma = surface_gamma(spec)
-    potential = grouped_biot_savart_A_from_spec(gamma[label.phi_index], coils)
-    return jnp.sum(potential * surface_gammadash2(spec)[label.phi_index]) / gamma.shape[1]
+    potential = grouped_biot_savart_A_from_spec(gamma[label.idx], coils)
+    return jnp.sum(potential * surface_gammadash2(spec)[label.idx]) / gamma.shape[1]
 
 
 def _label_derivatives(
@@ -310,7 +310,7 @@ def boozer_penalty_constraints(
     boozer = tuple(term / nresiduals for term in boozer)
     label = _label_derivatives(problem, surface_dofs, derivatives)
     sqrt_weight = jnp.sqrt(problem.constraint_weight)
-    label_residual = sqrt_weight * (label[0] - problem.target_label)
+    label_residual = sqrt_weight * (label[0] - problem.targetlabel)
     z_residual = sqrt_weight * z[0]
     value = boozer[0] + 0.5 * label_residual**2 + 0.5 * z_residual**2
     if derivatives == 0:
@@ -359,7 +359,7 @@ def boozer_exact_constraints(
     nx = xl.shape[0] - 2
     dlabel, dz = _pad(label[1], nx), _pad(z[1], nx)
     stationarity = boozer[1] - multipliers[0] * dlabel - multipliers[1] * dz
-    res = jnp.concatenate((stationarity, jnp.stack((label[0] - problem.target_label, z[0]))))
+    res = jnp.concatenate((stationarity, jnp.stack((label[0] - problem.targetlabel, z[0]))))
     if derivatives == 0:
         return res
     hessian = boozer[2] - multipliers[0] * _pad_square(label[2], nx)
@@ -394,7 +394,7 @@ def boozer_exact_residual(
     label = _label_derivatives(problem, surface_dofs, derivatives)
     axis = not problem.surface.stellsym
     b = jnp.concatenate(
-        (boozer[0][residual_rows], jnp.stack((label[0] - problem.target_label, z[0]))[: 1 + axis])
+        (boozer[0][residual_rows], jnp.stack((label[0] - problem.targetlabel, z[0]))[: 1 + axis])
     )
     if derivatives == 0:
         return b
