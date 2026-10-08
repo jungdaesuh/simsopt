@@ -39,7 +39,7 @@ _QA_INPUT = Path(__file__).resolve().parents[2] / "test_files" / "input.Landrema
 _NCOILS = 3
 # Thresholds that make every penalty active at the perturbed test state.
 _ACTIVE = StageTwoObjectiveConfig(
-    num_base_curves=_NCOILS,
+    num_basecurves=_NCOILS,
     length_weight=1e-3,
     curve_curve_minimum_distance=0.6,
     curve_curve_weight=10.0,
@@ -98,7 +98,7 @@ def _native_composite(
             else QuadraticPenalty(total_length, config.length_target, config.length_target_mode)
         )),
         (config.curve_curve_weight, CurveCurveDistance(
-            curves, config.curve_curve_minimum_distance, num_basecurves=config.num_base_curves
+            curves, config.curve_curve_minimum_distance, num_basecurves=config.num_basecurves
         )),
         (config.curve_surface_weight, CurveSurfaceDistance(
             curves, surface, config.curve_surface_minimum_distance
@@ -259,7 +259,7 @@ def test_distance_terms_of_a_far_degenerate_coil_have_finite_zero_gradients():
     gamma = jnp.asarray(np.stack((ring, 1.02 * ring, np.full_like(ring, 50.0))))
     gammadash = jnp.asarray(np.stack((ring_dash, 1.02 * ring_dash, np.zeros_like(ring))))
     config = StageTwoObjectiveConfig(
-        num_base_curves=3,
+        num_basecurves=3,
         curve_curve_minimum_distance=0.1,
         curve_curve_weight=1.0,
         curve_surface_minimum_distance=0.2,
@@ -297,8 +297,8 @@ def test_problem_rejects_invalid_configurations():
     field, flux, _, _ = _problem(_ACTIVE)
     flux_spec = flux.fixed_surface_flux_spec()
     invalid = (
-        (replace(_ACTIVE, num_base_curves=0), "num_base_curves must be a positive integer"),
-        (replace(_ACTIVE, num_base_curves=len(field.coils) + 1), "num_base_curves exceeds"),
+        (replace(_ACTIVE, num_basecurves=0), "num_basecurves must be a positive integer"),
+        (replace(_ACTIVE, num_basecurves=len(field.coils) + 1), "num_basecurves exceeds"),
         (replace(_ACTIVE, curvature_weight=float("nan")), "curvature_weight must be finite"),
         (replace(_ACTIVE, length_target_mode="min"), "length_target_mode must be"),
     )
@@ -330,7 +330,7 @@ def test_small_stage_two_run_follows_the_native_trajectory():
     grow chaotically, so the comparison stops at 20 iterations.
     """
     config = StageTwoObjectiveConfig(
-        num_base_curves=_NCOILS,
+        num_basecurves=_NCOILS,
         length_weight=1e-6,
         curve_curve_minimum_distance=0.1,
         curve_curve_weight=1000.0,

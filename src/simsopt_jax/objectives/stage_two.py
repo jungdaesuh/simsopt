@@ -79,7 +79,7 @@ class StageTwoObjectiveConfig:
     are static. Weight units set the units of the resulting weighted sum.
 
     Args:
-        num_base_curves: int, positive count of leading base curves; other coils participate in distances.
+        num_basecurves: int, positive count of leading base curves; other coils participate in distances.
         length_weight: float or None, multiplier of total base length; None omits the term.
         length_target: float or None, target total length in m; None selects a linear length term.
         length_target_mode: str, "max" clips excess below zero; "identity" keeps signed excess.
@@ -94,7 +94,7 @@ class StageTwoObjectiveConfig:
         mean_squared_curvature_weight: float or None, multiplier of half the squared excess in 1/m^4.
     """
 
-    num_base_curves: int
+    num_basecurves: int
     length_weight: float | None = None
     length_target: float | None = None
     length_target_mode: Literal["max", "identity"] = "max"
@@ -135,7 +135,7 @@ _STAGE_TWO_NUMERIC_FIELDS = (
 @pytree_dataclass(
     data=_STAGE_TWO_NUMERIC_FIELDS,
     meta=(
-        "num_base_curves",
+        "num_basecurves",
         "length_target_mode",
         "mean_squared_curvature_target_mode",
     ),
@@ -167,11 +167,11 @@ def prepare_stage_two_config(
         _PreparedStageTwoConfig object: validated config with float64 scalar device operands.
     """
     if (
-        not isinstance(config.num_base_curves, Integral)
-        or isinstance(config.num_base_curves, bool)
-        or config.num_base_curves <= 0
+        not isinstance(config.num_basecurves, Integral)
+        or isinstance(config.num_basecurves, bool)
+        or config.num_basecurves <= 0
     ):
-        raise ValueError("num_base_curves must be a positive integer.")
+        raise ValueError("num_basecurves must be a positive integer.")
     for name in ("length_target_mode", "mean_squared_curvature_target_mode"):
         if getattr(config, name) not in ("max", "identity"):
             raise ValueError(f"{name} must be 'max' or 'identity'.")
@@ -188,8 +188,8 @@ def prepare_stage_two_config(
         if value is None or not isfinite(value):
             raise ValueError(f"{name} must be finite.")
     if extraction is not None:
-        if config.num_base_curves > len(extraction.coils):
-            raise ValueError("num_base_curves exceeds the available coils.")
+        if config.num_basecurves > len(extraction.coils):
+            raise ValueError("num_basecurves exceeds the available coils.")
         shapes = {coil.curve.quadpoints.shape for coil in extraction.coils}
         if len(shapes) != 1 or not next(iter(shapes))[0]:
             raise ValueError("Stage-II coils require matching nonempty quadrature grids.")
@@ -211,7 +211,7 @@ def prepare_stage_two_config(
 
     return runtime_device_put_tree(
         _PreparedStageTwoConfig(
-            num_base_curves=int(config.num_base_curves),
+            num_basecurves=int(config.num_basecurves),
             length_weight=optional("length_weight"),
             length_target=optional("length_target"),
             length_target_mode=config.length_target_mode,
@@ -247,10 +247,10 @@ def _length_penalty(
 def _curve_curve_penalty(
     gamma: jax.Array,
     gammadash: jax.Array,
-    num_base_curves: int,
+    num_basecurves: int,
     minimum_distance: float | jax.Array,
 ) -> jax.Array:
-    """Sum the CurveCurveDistance terms of the pairs ``(i, j)``, ``j < min(i, num_base_curves)``.
+    """Sum the CurveCurveDistance terms of the pairs ``(i, j)``, ``j < min(i, num_basecurves)``.
 
     Pairs are formed from contiguous slices rather than gathered: a gather's
     gradient is a scatter-add, which deterministic GPU execution serializes.
@@ -266,17 +266,17 @@ def _curve_curve_penalty(
     against_curves = jax.vmap(pair, in_axes=(None, None, 0, 0))
     total = placement_zero(gamma)
     num_curves = int(gamma.shape[0])
-    for index in range(1, min(num_base_curves, num_curves)):
+    for index in range(1, min(num_basecurves, num_curves)):
         total = total + jnp.sum(
             against_curves(gamma[index], gammadash[index], gamma[:index], gammadash[:index])
         )
-    if num_curves > num_base_curves:
+    if num_curves > num_basecurves:
         total = total + jnp.sum(
             jax.vmap(against_curves, in_axes=(0, 0, None, None))(
-                gamma[num_base_curves:],
-                gammadash[num_base_curves:],
-                gamma[:num_base_curves],
-                gammadash[:num_base_curves],
+                gamma[num_basecurves:],
+                gammadash[num_basecurves:],
+                gamma[:num_basecurves],
+                gammadash[:num_basecurves],
             )
         )
     return total
@@ -305,8 +305,8 @@ def stage_two_geometric_penalty(
     """
     if not isinstance(config, _PreparedStageTwoConfig):
         config = prepare_stage_two_config(config)
-    base_gammadash = gammadash[: config.num_base_curves]
-    base_gammadashdash = gammadashdash[: config.num_base_curves]
+    base_gammadash = gammadash[: config.num_basecurves]
+    base_gammadashdash = gammadashdash[: config.num_basecurves]
     base_speed = jnp.linalg.norm(base_gammadash, axis=2)
     result = placement_zero(gamma)
 
@@ -345,7 +345,7 @@ def stage_two_geometric_penalty(
         result = result + config.curve_curve_weight * _curve_curve_penalty(
             gamma,
             gammadash,
-            config.num_base_curves,
+            config.num_basecurves,
             config.curve_curve_minimum_distance,
         )
 
@@ -513,7 +513,7 @@ def fused_stage_two_values(
         problem.config,
     )
     base_speed = jnp.linalg.norm(
-        gammadash[: problem.config.num_base_curves],
+        gammadash[: problem.config.num_basecurves],
         axis=2,
     )
     total_curve_length = jnp.sum(jnp.mean(base_speed, axis=1))
