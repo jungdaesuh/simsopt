@@ -50,6 +50,8 @@ def _cotangent(quantity):
 @pytest.mark.parametrize("quantity", _FIELDS)
 @pytest.mark.parametrize("scale", [1.0, -2.5])
 def test_affine_current_vjps_match_native_and_finite_difference(quantity, scale):
+    """Affine-current fields, owner partials and flat gradients agree with native and
+    finite-difference references."""
     curves = _curves()
     for curve in curves:
         curve.fix_all()
@@ -90,6 +92,8 @@ def test_affine_current_vjps_match_native_and_finite_difference(quantity, scale)
 @pytest.mark.parametrize("quantity", _FIELDS)
 @pytest.mark.parametrize("fixed", ["partial", "curve", "all"])
 def test_derivative_retains_fixed_partials(quantity, fixed):
+    """Field VJPs retain native partials for fixed owners while exposing the correct
+    free gradient."""
     curve = _curves()[0]
     current = Current(1e5)
     curve.fix(0)
@@ -115,6 +119,8 @@ def test_derivative_retains_fixed_partials(quantity, fixed):
 
 @pytest.mark.parametrize("replicas", [False, True])
 def test_resampling_updates_captured_geometry_and_pullbacks(replicas):
+    """Resampling perturbed curves refreshes field values and VJPs, including
+    symmetry replicas."""
     curve = _curves()[0]
     sampler = GaussianSampler(curve.quadpoints, 1e-3, 0.2, n_derivs=1)
     sample = PerturbationSample(sampler, randomgen=np.random.default_rng(713))
@@ -136,6 +142,8 @@ def test_resampling_updates_captured_geometry_and_pullbacks(replicas):
 
 
 def test_cartesian_points_are_owned_snapshots():
+    """Mutating caller-owned Cartesian points leaves the adapter points and cached
+    field equal to native snapshots."""
     storage = np.empty(_POINTS.size + 8, dtype=np.float64)
     offset = (-storage.ctypes.data % 64) // storage.itemsize
     points = storage[offset:offset + _POINTS.size].reshape(_POINTS.shape)
@@ -153,6 +161,8 @@ def test_cartesian_points_are_owned_snapshots():
 
 @pytest.mark.parametrize("coordinates", ["cart", "cyl"])
 def test_serialization_preserves_points_and_field(tmp_path, coordinates):
+    """GSON reconstruction and JSON loading preserve evaluation points and field
+    values in either coordinate convention."""
     coils = [Coil(_curves()[0], Current(1e5))]
     native, adapter = BiotSavart(coils), JaxBiotSavart(coils)
     for field in (native, adapter):
@@ -172,6 +182,8 @@ def test_serialization_preserves_points_and_field(tmp_path, coordinates):
 
 @pytest.mark.parametrize("stellsym", [False, True])
 def test_native_symmetry_curve_converts_for_fields_and_vjps(stellsym):
+    """Native symmetry Fourier curves yield matching JAX fields and VJPs with or
+    without stellarator symmetry."""
     curve = CurveXYZFourierSymmetries(64, 2, nfp=3, stellsym=stellsym, ntor=2)
     dofs = np.random.default_rng(1729).normal(0.0, 0.03, curve.local_full_dof_size)
     dofs[0] = 1.0
@@ -195,6 +207,8 @@ def test_native_symmetry_curve_converts_for_fields_and_vjps(stellsym):
 def test_composed_curves_match_native_fields_owner_vjps_and_finite_difference(
     quantity, fixed, wrapper,
 ):
+    """Nested perturbed and filament curves match native fields, owner partials and
+    directional finite differences."""
     curve = create_equally_spaced_curves(
         1, 1, stellsym=False, R0=1.0, R1=0.25, order=1, numquadpoints=24,
     )[0]

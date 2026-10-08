@@ -217,6 +217,8 @@ def _census_violations(
 
 
 def test_only_owner_functions_call_jax_transfer_primitives() -> None:
+    """Only the declared boundary owners call JAX transfer primitives, and every
+    declared owner still uses one."""
     unadmitted, stale = _census_violations(
         _tree_transfer_calls(REPO_ROOT), _TRANSFER_OWNER_FUNCTIONS
     )
@@ -228,6 +230,8 @@ def test_only_owner_functions_call_jax_transfer_primitives() -> None:
 
 
 def test_census_rejects_a_stray_transfer_outside_an_owner() -> None:
+    """The transfer census reports a stray primitive call outside the declared owner
+    set."""
     calls = _transfer_calls(
         "import jax\n\n"
         "def owner(value):\n"
@@ -246,6 +250,8 @@ def test_census_rejects_a_stray_transfer_outside_an_owner() -> None:
 
 
 def test_census_reports_an_owner_that_no_longer_calls_a_primitive() -> None:
+    """The transfer census reports stale owners that no longer call a transfer
+    primitive."""
     calls = _transfer_calls(
         "import jax\n\ndef owner(value):\n    return value\n",
         "src/simsopt_jax/module.py",
@@ -257,6 +263,8 @@ def test_census_reports_an_owner_that_no_longer_calls_a_primitive() -> None:
 
 
 def test_census_resolves_jax_aliases_and_qualifies_nested_scopes() -> None:
+    """The census resolves JAX import aliases and attributes transfers to qualified
+    nested scopes."""
     calls = _transfer_calls(
         "import jax as jx\n"
         "from jax import device_get as fetch\n"
@@ -289,6 +297,8 @@ def test_census_resolves_jax_aliases_and_qualifies_nested_scopes() -> None:
 
 
 def test_tree_census_scans_both_roots(tmp_path: Path) -> None:
+    """The transfer census scans both JAX package roots and excludes the native
+    package."""
     stray = "import jax\n\ndef stray(value):\n    return jax.device_get(value)\n"
     for root in _SCANNED_ROOTS:
         (tmp_path / root / "sub").mkdir(parents=True)
@@ -303,6 +313,8 @@ def test_tree_census_scans_both_roots(tmp_path: Path) -> None:
 
 
 def test_allow_host_transfers_lifts_the_strict_guard_for_its_block_only() -> None:
+    """A permissive transfer scope allows host arithmetic and restores the
+    surrounding strict guard."""
     device_array = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
     host_values = np.asarray([3.0, 4.0], dtype=np.float64)
 
@@ -318,6 +330,8 @@ def test_allow_host_transfers_lifts_the_strict_guard_for_its_block_only() -> Non
 
 
 def test_placement_owners_place_host_values_under_the_strict_guard() -> None:
+    """Explicit placement owners accept host inputs and preserve reference placement
+    under a strict guard."""
     tree = {
         "float": np.asarray([1.0, 2.0], dtype=np.float32),
         "integer": (np.asarray(3, dtype=np.int16),),
@@ -339,6 +353,8 @@ def test_placement_owners_place_host_values_under_the_strict_guard() -> None:
 
 
 def test_host_readers_return_writeable_host_copies_under_the_strict_guard() -> None:
+    """Host readers materialize writable arrays with the requested dtype under a
+    strict transfer guard."""
     value = {
         "vector": jnp.asarray([1.0, 2.0], dtype=jnp.float64),
         "scalar": (jnp.asarray(3, dtype=jnp.int32),),
@@ -358,6 +374,8 @@ def test_host_readers_return_writeable_host_copies_under_the_strict_guard() -> N
 
 
 def test_runtime_device_put_tree_preserves_structure_and_exact_leaf_dtypes() -> None:
+    """Tree placement preserves container structure and exact floating and integer
+    leaf dtypes."""
     value = {
         "float": np.asarray([1.0, 2.0], dtype=np.float32),
         "integer": (np.asarray(3, dtype=np.int16),),
@@ -371,6 +389,8 @@ def test_runtime_device_put_tree_preserves_structure_and_exact_leaf_dtypes() -> 
 
 
 def test_readiness_and_host_tree_preserve_pytree_structure() -> None:
+    """Readiness and host materialization preserve pytree structure, values and
+    writable host storage."""
     value = {
         "vector": jnp.asarray([1.0, 2.0], dtype=jnp.float64),
         "scalar": (jnp.asarray(3, dtype=jnp.int32),),

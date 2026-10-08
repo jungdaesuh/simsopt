@@ -11,6 +11,8 @@ from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
 
 
 def test_coil_specs_preserve_fixed_total_current_expression() -> None:
+    """Reconstruction preserves a fixed total-current constraint and opposite term
+    derivatives."""
     curves = create_equally_spaced_curves(
         2,
         1,
@@ -48,6 +50,8 @@ def test_coil_specs_preserve_fixed_total_current_expression() -> None:
 
 
 def test_coil_set_spec_preserves_scaled_current_optimizer_coordinates() -> None:
+    """Scaled physical currents retain optimizer coordinates and the corresponding
+    Jacobian scale."""
     curve = create_equally_spaced_curves(
         1,
         1,
@@ -73,6 +77,7 @@ def test_coil_set_spec_preserves_scaled_current_optimizer_coordinates() -> None:
 
 
 def test_coil_specs_reuse_geometry_for_symmetry_replicas() -> None:
+    """Symmetry replicas share one reconstructed immutable curve payload."""
     curve = create_equally_spaced_curves(
         1,
         2,

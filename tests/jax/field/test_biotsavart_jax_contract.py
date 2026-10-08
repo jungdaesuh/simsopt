@@ -17,6 +17,8 @@ from simsopt_jax_adapters.field import JaxBiotSavart
 
 @pytest.mark.parametrize("operation", ["left_scale", "right_scale", "add", "reverse_add"])
 def test_native_field_arithmetic_is_rejected(operation):
+    """Adapter field sums and scalar multiplication reject unsupported native
+    arithmetic with TypeError."""
     field = JaxBiotSavart([])
     with pytest.raises(TypeError, match="simsopt.field.BiotSavart"):
         if operation == "left_scale":
@@ -31,6 +33,8 @@ def test_native_field_arithmetic_is_rejected(operation):
 
 @pytest.mark.parametrize("debug", [False, True])
 def test_explicit_runtime_initialization_in_fresh_process(tmp_path, debug):
+    """Explicit backend setup applies diagnostics, precision, cache and tiling
+    settings before CPU field evaluation."""
     code = '''
 import os
 import jax
@@ -98,6 +102,8 @@ def test_default_backend_allows_implicit_transfers(monkeypatch, device, intent):
 
 
 def test_gpu_allocation_settings_can_be_applied_after_import_in_fresh_process():
+    """GPU allocator settings can be installed after importing JAX without
+    initializing its devices."""
     code = '''
 import os
 import jax
@@ -116,6 +122,7 @@ assert not _jax_backends_initialized()
 
 @pytest.mark.parametrize("operation", ["native_left", "native_right", "sum_wrapper", "scale_wrapper"])
 def test_native_field_wrappers_reject_adapter_dependencies(operation):
+    """Native field sum and multiplication wrappers reject JAX adapter dependencies."""
     field, native = JaxBiotSavart([]), BiotSavart([])
     with pytest.raises(TypeError, match="simsopt.field.BiotSavart"):
         if operation == "native_left":

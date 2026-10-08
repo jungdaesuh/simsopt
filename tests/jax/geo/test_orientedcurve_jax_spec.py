@@ -71,6 +71,8 @@ def _oriented_curve_numpy(dofs: np.ndarray, quadpoints: np.ndarray, order: int):
 
 
 def test_oriented_curve_spec_matches_numpy_geometry_oracle():
+    """JIT evaluation of oriented Fourier position and tangent matches an independent
+    NumPy oracle."""
     quadpoints = np.linspace(0.0, 1.0, 16, endpoint=False)
     dofs = np.array(
         [

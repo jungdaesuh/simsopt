@@ -217,6 +217,7 @@ def _assert_dof_round_trip(curve, *, seed: int) -> None:
 
 
 def test_curve_helical_pure_kernel_matches_native_position():
+    """Helical pure JAX positions match native curve evaluation."""
     curve = _make_helical_curve(seed=101)
     _assert_pure_kernel_gamma_matches_native(
         curve,
@@ -230,11 +231,13 @@ def test_curve_helical_pure_kernel_matches_native_position():
 
 
 def test_curve_helical_position_and_derivatives_match_native():
+    """Helical spec positions and parameter derivatives match native geometry."""
     curve = _make_helical_curve(seed=102)
     _assert_spec_geometry_matches_native(curve, _helical_spec(curve))
 
 
 def test_curve_helical_dof_round_trip_matches_native():
+    """Helical native DOF setters round-trip to matching immutable spec geometry."""
     curve = _make_helical_curve(seed=103)
     _assert_dof_round_trip(curve, seed=203)
 
@@ -245,6 +248,7 @@ def test_curve_helical_dof_round_trip_matches_native():
 
 
 def test_curve_planarfourier_pure_kernel_matches_native_position():
+    """Planar Fourier pure JAX positions match native curve evaluation."""
     curve = _make_planar_curve(seed=111)
     _assert_pure_kernel_gamma_matches_native(
         curve, curveplanarfourier_pure, curve.order
@@ -252,16 +256,21 @@ def test_curve_planarfourier_pure_kernel_matches_native_position():
 
 
 def test_curve_planarfourier_position_and_derivatives_match_native():
+    """Planar Fourier spec positions and parameter derivatives match native geometry."""
     curve = _make_planar_curve(seed=112)
     _assert_spec_geometry_matches_native(curve, _planar_spec(curve))
 
 
 def test_curve_planarfourier_dof_round_trip_matches_native():
+    """Planar Fourier native DOF setters round-trip to matching immutable spec
+    geometry."""
     curve = _make_planar_curve(seed=113)
     _assert_dof_round_trip(curve, seed=213)
 
 
 def test_curve_planarfourier_small_quaternion_matches_native():
+    """Planar Fourier geometry with a very small quaternion matches native normalized
+    rotation."""
     curve = _make_planar_curve(seed=114)
     dofs = np.array(curve.get_dofs(), copy=True)
     q_start = 2 * curve.order + 1
@@ -280,6 +289,7 @@ def test_curve_planarfourier_small_quaternion_matches_native():
 
 @pytest.mark.parametrize("stellsym", [True, False], ids=["stellsym", "non_stellsym"])
 def test_curve_rzfourier_pure_kernel_matches_native_position(stellsym):
+    """RZ Fourier pure JAX positions match native curve evaluation."""
     curve = _make_rzfourier_curve(seed=121 if stellsym else 122, stellsym=stellsym)
     _assert_pure_kernel_gamma_matches_native(
         curve, curverzfourier_pure, curve.order, curve.nfp, curve.stellsym
@@ -288,11 +298,13 @@ def test_curve_rzfourier_pure_kernel_matches_native_position(stellsym):
 
 @pytest.mark.parametrize("stellsym", [True, False], ids=["stellsym", "non_stellsym"])
 def test_curve_rzfourier_position_and_derivatives_match_native(stellsym):
+    """RZ Fourier spec positions and parameter derivatives match native geometry."""
     curve = _make_rzfourier_curve(seed=123 if stellsym else 124, stellsym=stellsym)
     _assert_spec_geometry_matches_native(curve, _rzfourier_spec(curve))
 
 
 @pytest.mark.parametrize("stellsym", [True, False], ids=["stellsym", "non_stellsym"])
 def test_curve_rzfourier_dof_round_trip_matches_native(stellsym):
+    """RZ Fourier native DOF setters round-trip to matching immutable spec geometry."""
     curve = _make_rzfourier_curve(seed=125 if stellsym else 126, stellsym=stellsym)
     _assert_dof_round_trip(curve, seed=225 if stellsym else 226)

@@ -20,6 +20,7 @@ from simsopt_jax.core.curve_xyz_fourier import _constant_row
 
 
 def test_radius_squared_preserves_zero_singularity():
+    """Squared radius remains exactly zero at a coincident point."""
     diff = jnp.zeros((1, 3), dtype=jnp.float64)
 
     radius_squared = _radius_squared(diff)
@@ -28,6 +29,7 @@ def test_radius_squared_preserves_zero_singularity():
 
 
 def test_biotsavart_point_singularity_gradient_is_nonfinite():
+    """Differentiating the singular point kernel produces a nonfinite gradient."""
     def singular_kernel(x):
         diff = jnp.reshape(x, (1, 3))
         r2 = _radius_squared(diff)[0]
@@ -39,6 +41,8 @@ def test_biotsavart_point_singularity_gradient_is_nonfinite():
 
 
 def test_biot_savart_public_kernels_preserve_point_singularity():
+    """Public vector-potential, field and field-gradient kernels retain filament
+    singularities."""
     points = jnp.asarray([[0.0, 0.0, 0.0]], dtype=jnp.float64)
     gammas = jnp.asarray([[[0.0, 0.0, 0.0]]], dtype=jnp.float64)
     gammadashs = jnp.asarray([[[1.0, 0.0, 0.0]]], dtype=jnp.float64)

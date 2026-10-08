@@ -19,6 +19,8 @@ def _fresh_environment():
 
 @pytest.mark.parametrize("selector", ["set_backend", "environment"])
 def test_removed_float32_mode_is_rejected_in_fresh_process(selector):
+    """Removed float32 backend modes are rejected through both explicit and
+    environment selection."""
     environment = _fresh_environment()
     environment["JAX_PLATFORMS"] = "cpu"
     if selector == "environment":
@@ -40,6 +42,8 @@ assert "jax_cpu_float32_smoke" not in str(error.value).split("Accepted:", 1)[1]
 
 @pytest.mark.parametrize("platform_variable", [None, "JAX_PLATFORMS", "JAX_PLATFORM_NAME"])
 def test_native_import_preserves_platform_selection_in_fresh_process(platform_variable):
+    """Importing native geometry respects explicit CPU platform selection and enables
+    double precision."""
     environment = _fresh_environment()
     if platform_variable is not None:
         environment[platform_variable] = "cpu"
@@ -58,6 +62,8 @@ assert jax.config.jax_enable_x64
 
 @pytest.mark.parametrize("x64_setting", ["false", "0"])
 def test_native_import_enables_x64_despite_explicit_disable_in_fresh_process(x64_setting):
+    """Importing native geometry restores double precision even when the environment
+    explicitly disables it."""
     environment = _fresh_environment()
     environment["JAX_PLATFORMS"] = "cpu"
     environment["JAX_ENABLE_X64"] = x64_setting
@@ -74,6 +80,8 @@ assert jax.config.jax_enable_x64
 
 
 def test_native_jax_curve_constructed_before_parity_backend_in_fresh_process(tmp_path):
+    """A helical curve constructed before backend setup still yields finite float64
+    length and field values."""
     environment = _fresh_environment()
     environment.update(
         SIMSOPT_BACKEND_MODE="jax_cpu_parity",
