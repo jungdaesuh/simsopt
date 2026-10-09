@@ -174,10 +174,10 @@ class JaxExactSingleStage:
         assert type(surface) is SurfaceXYZTensorFourier
         length_indices = []
         for curve in length_curves:
-            matches = [index for index, coil in enumerate(coils) if coil.curve is curve]
-            if not matches:
+            index = next((index for index, coil in enumerate(coils) if coil.curve is curve), None)
+            if index is None:
                 raise ValueError("length_curves must occur directly in biotsavart.coils.")
-            length_indices.append(matches[0])
+            length_indices.append(index)
         problem = boozer_problem(biotsavart, surface, boozer_surface.label, boozer_surface.targetlabel)
         reference = commit_in_place(problem.targetlabel)
         auxiliary = SurfaceXYZTensorFourier(
