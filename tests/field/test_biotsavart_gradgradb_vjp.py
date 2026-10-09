@@ -10,6 +10,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from core.test_buffer_ownership import (
+    _host_array as _host_input,
+    make_execution_gate as _make_execution_gate,
+)
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
 from simsopt.configs import get_ncsx_data
@@ -88,28 +92,6 @@ def _set_reverse_tile(patches: ExitStack, tile: int) -> None:
     core.invalidate_kernel_cache()
 
 
-def _host_input(shape: tuple[int, ...], *, misaligned: bool) -> np.ndarray:
-    """Exercise CPU host-buffer aliasing and delayed copies with known alignment."""
-    size = int(np.prod(shape))
-    storage = np.empty(size + 9, dtype=np.float64)
-    offset = -storage.ctypes.data % 64 // storage.itemsize + int(misaligned)
-    array = storage[offset : offset + size].reshape(shape)
-    array[:] = np.arange(size).reshape(shape) / size + 1.0
-    return array
-
-
-def _make_execution_gate():
-    """Queue CPU work so a warmed Hessian pullback remains pending at mutation."""
-    matrix = jnp.ones((4096, 4096), dtype=jnp.float32)
-
-    @jax.jit
-    def gate(value, matrix):
-        product = jax.lax.fori_loop(0, 4, lambda _, x: x @ matrix / 4096, matrix)
-        return jnp.where(product[0, 0] > 0, value, -value)
-
-    return lambda value: gate(value, matrix)
-
-
 class TestBiotsavartGradgradbVjp(JaxTestCase):
     def test_gradgradb_vjp_contracted_hessian_shrinking_steps(self):
         """Contracted Hessian VJPs converge for curve DOFs and stay linear in current."""
@@ -133,7 +115,6 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         for owner in [*curves, *currents]:
             original = cast(np.ndarray, owner.local_full_x).copy()
             patches.callback(setattr, owner, "local_full_x", original)
-            baseline = np.sum(native.d2B_by_dXdX() * seeds[2])
             if isinstance(owner, Current):
                 # Relative current perturbations avoid subtracting nearly equal
                 # multi-coil fields when the current is of order 1e5 amperes.
@@ -157,6 +138,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
                     )
             else:
                 # Extend the native B/dB VJP forward stencil to contracted d2B.
+                baseline = np.sum(native.d2B_by_dXdX() * seeds[2])
                 direction = 1e-2 * np.random.RandomState(1).rand(original.size)
                 analytic = np.asarray(partials.data[owner]) @ direction
                 error = 1e6
