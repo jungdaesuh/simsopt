@@ -308,21 +308,13 @@ def _get_biot_savart_points_cyl(field):
     return host_array(_cart_points_to_cyl(field._points_jax), dtype=np.float64)
 
 
-def _supports_native_curve_geometry(curve):
-    return supports_adapter_curve_spec(curve)
-
-
 def _require_native_curve_geometry(curve):
-    if not _supports_native_curve_geometry(curve):
+    if not supports_adapter_curve_spec(curve):
         raise TypeError(
             "JaxBiotSavart coil cotangent projection requires immutable JAX "
             f"curve specs; unsupported type {type(curve).__name__}. "
             "Provide a native curve spec."
         )
-
-
-def _curve_dof_mode(curve):
-    return adapter_curve_dof_mode(curve)
 
 
 def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
@@ -1200,7 +1192,7 @@ class JaxBiotSavart(Optimizable):
                 curve=curve_spec_from_adapter_curve(curve),
                 curve_map=self._free_vector_dof_map_spec(
                     curve,
-                    full_graph=_curve_dof_mode(curve) == "full",
+                    full_graph=adapter_curve_dof_mode(curve) == "full",
                 ),
                 current_map=self._free_vector_dof_map_spec(
                     current,
@@ -1258,7 +1250,7 @@ class JaxBiotSavart(Optimizable):
         projection_coils = []
         for coil, spec in zip(self._coils, extraction_spec.coils, strict=True):
             curve, _rotation, current, _scale = _unwrap_coil_curve_and_current(coil)
-            full_graph = _curve_dof_mode(curve) == "full"
+            full_graph = adapter_curve_dof_mode(curve) == "full"
             owner_spec = (
                 replace(
                     spec,
@@ -1332,21 +1324,12 @@ class JaxBiotSavart(Optimizable):
         """Rebuild one Optimizable graph's full DOF vector from ``coil_dofs``."""
         full_x = _as_jax_float64(opt.full_x)
         for dep_opt, (start, end) in opt._full_dof_indices.items():
-            dep_full_x = _as_jax_float64(dep_opt.local_full_x)
-            if dep_opt.local_dof_size > 0:
-                dep_start, dep_end = self._coil_dof_indices[dep_opt]
-                free_positions = self._local_free_positions(dep_opt)
-                dep_slice = _slice_1d(coil_dofs, dep_start, dep_end)
-                dep_full_x = _scatter_free_values(
-                    dep_full_x,
-                    free_positions,
-                    dep_slice,
-                )
+            dep_full_x = self._local_full_dofs_from_free_vector(dep_opt, coil_dofs)
             full_x = _update_1d(full_x, start, dep_full_x)
         return full_x
 
     def _curve_dofs_from_free_vector(self, curve, coil_dofs):
-        if _curve_dof_mode(curve) == "full":
+        if adapter_curve_dof_mode(curve) == "full":
             return self._full_dofs_from_free_vector(curve, coil_dofs)
         return self._local_full_dofs_from_free_vector(curve, coil_dofs)
 
@@ -1832,7 +1815,7 @@ class JaxBiotSavart(Optimizable):
             dg,
             dgd,
         )
-        if _curve_dof_mode(curve) == "full":
+        if adapter_curve_dof_mode(curve) == "full":
             dofs_gradient = _add_full_curve_cotangent_to_dofs_gradient(
                 dofs_gradient,
                 curve,

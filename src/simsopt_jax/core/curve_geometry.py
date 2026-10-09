@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from simsopt_jax.backend.dtypes import explicit_device_array
+from simsopt_jax.backend.dtypes import _has_jax_array_value, explicit_device_array
 
 
 from .curve_helical import curve_helical_pure
@@ -64,7 +64,7 @@ __all__ = [
 
 
 def _runtime_scalar(value: float, *, reference=None) -> jax.Array:
-    return _as_explicit_runtime_array(value, reference=reference)
+    return _as_explicit_array(value, reference=reference)
 
 
 def _ones_like_runtime(array: jax.Array) -> jax.Array:
@@ -75,40 +75,16 @@ def _zeros_like_runtime(array: jax.Array) -> jax.Array:
     return jnp.broadcast_to(_runtime_scalar(0.0, reference=array), array.shape)
 
 
-def _as_explicit_runtime_array(value, *, reference=None) -> jax.Array:
-    if reference is not None:
-        return _as_runtime_array(value)
-    if isinstance(value, jax.Array) or hasattr(value, "aval"):
-        return _as_runtime_array(value)
-    if isinstance(value, (list, tuple)):
-        leaves = jax.tree.leaves(value)
-        if any(isinstance(leaf, jax.Array) or hasattr(leaf, "aval") for leaf in leaves):
-            return _as_runtime_array(value)
-    raise TypeError(
-        "curve_geometry pure helpers require JAX/spec-backed arrays; "
-        "materialize an immutable spec or explicit device array first."
-    )
-
-
-def _as_explicit_compute_array(value, *, reference=None) -> jax.Array:
-    if reference is not None:
-        return _as_compute_array(value)
-    if isinstance(value, jax.Array) or hasattr(value, "aval"):
-        return _as_compute_array(value)
-    if isinstance(value, (list, tuple)):
-        leaves = jax.tree.leaves(value)
-        if any(isinstance(leaf, jax.Array) or hasattr(leaf, "aval") for leaf in leaves):
-            return _as_compute_array(value)
-    raise TypeError(
-        "curve_geometry compute helpers require JAX/spec-backed arrays; "
-        "materialize an immutable spec or explicit device array first."
-    )
-
-
-def _as_explicit_array(value, *, reference=None, use_compute_dtype: bool = False):
-    if use_compute_dtype:
-        return _as_explicit_compute_array(value, reference=reference)
-    return _as_explicit_runtime_array(value, reference=reference)
+def _as_explicit_array(value, *, reference=None, use_compute_dtype: bool = False) -> jax.Array:
+    """Admit spec-backed values, then apply the selected shared dtype policy."""
+    if reference is None and not _has_jax_array_value(value):
+        helper_kind = "compute" if use_compute_dtype else "pure"
+        raise TypeError(
+            f"curve_geometry {helper_kind} helpers require JAX/spec-backed arrays; "
+            "materialize an immutable spec or explicit device array first."
+        )
+    convert = _as_compute_array if use_compute_dtype else _as_runtime_array
+    return convert(value)
 
 
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
@@ -248,7 +224,7 @@ def _curve_gamma_kernel(
 
 
 def _curve_quadpoints(spec: CurveSpec, *, reference):
-    quadpoints = _as_explicit_runtime_array(spec.quadpoints, reference=reference)
+    quadpoints = _as_explicit_array(spec.quadpoints, reference=reference)
     return quadpoints, _ones_like_runtime(quadpoints)
 
 
@@ -363,7 +339,7 @@ def _rotation_alpha_and_dash_from_dofs(
     rotation_map: OptimizableDofMapSpec,
     owner_dofs,
 ):
-    quadpoints = _as_explicit_runtime_array(
+    quadpoints = _as_explicit_array(
         rotation_spec.quadpoints, reference=owner_dofs
     )
     if isinstance(rotation_spec, ZeroRotationSpec):
@@ -445,7 +421,7 @@ def _curve_perturbed_geometry_from_dofs(spec: CurvePerturbedSpec, dofs) -> tuple
 
 
 def _curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
-    quadpoints_jax = _as_explicit_runtime_array(quadpoints, reference=spec.dofs)
+    quadpoints_jax = _as_explicit_array(quadpoints, reference=spec.dofs)
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
         spec = cast(CurvePerturbedSpec, spec)
