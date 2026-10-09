@@ -532,9 +532,12 @@ class JaxBoozerSurface(Optimizable):
         the label and, without stellarator symmetry, ``z(0, 0)``.
 
         Args:
-            tol (float): Threshold for the Euclidean norm of residual entries selected
-                by the native exact mask. At ``maxiter``, success uses the norm checked
-                before the last Newton step.
+            tol (float): Threshold for the Euclidean norm of the full Newton system
+                vector: Boozer residual entries selected by the native exact mask,
+                followed by ``label - targetlabel`` and, without stellarator symmetry,
+                ``z(0, 0)``. If a positive ``maxiter`` cap is reached after a Newton
+                step, success uses the norm checked before the last step. With
+                ``maxiter=0``, the returned stopping norm is the initial ``1e6`` sentinel.
             maxiter (int | float): Native iteration or evaluation cap for the selected
                 solver.
             iota (float): Initial dimensionless rotational transform.
