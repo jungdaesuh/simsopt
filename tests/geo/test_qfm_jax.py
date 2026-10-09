@@ -803,22 +803,24 @@ class TestQfmJax(JaxTestCase):
 
     def _case_gradients_taylor(self, label_class, stellsym):
         native, port = _pair(stellsym=stellsym, label_class=label_class, cloned=True)
+        native.targetlabel = port.targetlabel = 0.1
         x = np.array(native.surface.x, copy=True)
-        direction = np.random.default_rng(11).normal(size=x.shape)
-        direction /= np.linalg.norm(direction)
+        # Native QFM Taylor tests use this target and unnormalized seeded direction.
+        direction = np.random.RandomState(1).uniform(size=x.shape) - 0.5
         for name in (
             "qfm_objective",
             "qfm_label_constraint",
             "qfm_penalty_constraints",
         ):
-            _, gradient = getattr(port, name)(x, derivatives=1)
+            options = {"constraint_weight": 11.1232} if name == "qfm_penalty_constraints" else {}
+            _, gradient = getattr(port, name)(x, derivatives=1, **options)
             analytic = gradient @ direction
-            base = getattr(native, name)(x, derivatives=0)
+            base = getattr(native, name)(x, derivatives=0, **options)
             previous_error = 1e9
             powers = range(7, 17) if name == "qfm_label_constraint" else range(13, 20)
             for step in np.power(2.0, -np.asarray(list(powers))):
                 difference = (
-                    getattr(native, name)(x + step * direction, derivatives=0) - base
+                    getattr(native, name)(x + step * direction, derivatives=0, **options) - base
                 ) / step
                 error = np.linalg.norm(difference - analytic) / np.linalg.norm(analytic)
                 self.assertLess(error, 0.6 * previous_error, name)
