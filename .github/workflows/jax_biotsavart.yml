@@ -42,7 +42,7 @@ jobs:
           python -c "import simsopt_jax_adapters.field"
           python examples/2_Intermediate/stage_two_optimization.py
           python examples/2_Intermediate/stage_two_optimization.py --use-jax
-          python examples/2_Intermediate/stage_two_optimization_jax.py
+          python examples/2_Intermediate/stage_two_optimization.py --use-jax --fused
       - name: Check shipped Python code
         run: |
           ruff check src/simsopt_jax src/simsopt_jax_adapters tests/unittest_jax_support.py \
@@ -76,6 +76,5 @@ jobs:
             examples/2_Intermediate/stage_two_optimization.py \
             tests/geo/test_curve_objectives_jax.py \
             tests/objectives/test_squared_flux_jax.py \
-            tests/objectives/test_stage_two.py \
-            examples/2_Intermediate/stage_two_optimization_jax.py
+            tests/objectives/test_stage_two.py
           pyright --pythonpath "$(command -v python)"
