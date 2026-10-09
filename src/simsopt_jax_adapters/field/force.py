@@ -434,8 +434,8 @@ class JaxNetFluxes(Optimizable):
 
     ``J = (1/n) sum_k A(gamma_k) . gammadash_k`` in Wb: the flux through the
     target coil of the sources' vector potential ``A``, at the target's
-    ``downsample``-strided points. As native, ``dJ`` is the gradient of the
-    flux at full target resolution (``downsample=1``), and the sources are the
+    ``downsample``-strided points. ``dJ`` differentiates this same sampled
+    flux; source quadrature remains full resolution. The sources are the
     ``source_coils`` at construction (native builds a ``BiotSavart`` from
     them): reassigning the attribute changes neither value nor derivative.
     The sources are captured at construction for both the value and the
@@ -487,7 +487,7 @@ class JaxNetFluxes(Optimizable):
             Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
         """
         dgamma, dgammadash, dsources = host_tree(
-            _net_flux_grad(*self._operands(), downsample=1), dtype=np.float64
+            _net_flux_grad(*self._operands(), downsample=self.downsample), dtype=np.float64
         )
         curve = self.target_coil.curve
         return (

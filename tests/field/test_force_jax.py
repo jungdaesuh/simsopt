@@ -232,8 +232,6 @@ class TestForceJax(JaxTestCase):
         """Force objective directional gradients match independent central differences."""
         rng = np.random.default_rng(5)
         for name, _, adapter in _objective_pairs(shared_dofs=True):
-            if name.startswith("NetFluxes(downsample"):
-                continue  # native differentiates the full-resolution flux, see below
             x0 = np.array(adapter.x, dtype=float)
             direction = rng.standard_normal(x0.shape) * np.maximum(np.abs(x0), 1.0)
             step = 1e-7
@@ -255,15 +253,37 @@ class TestForceJax(JaxTestCase):
             native.downsample = adapter.downsample = 2 * adapter.downsample
             _assert_matches_native(f"{name}, downsample changed", native, adapter)
 
-    def test_net_fluxes_gradient_is_the_full_resolution_gradient_like_native(self):
-        """Native NetFluxes evaluates J at the downsampled points but dJ at all points."""
+    def test_net_fluxes_gradient_differentiates_the_sampled_flux_like_native(self):
+        """NetFluxes differentiates J on the same sampled target quadrature grid."""
         _, coils = _coils()
         target, sources = coils[1], coils[:4 * _NCOILS]
         native = NetFluxes(target, sources, downsample=4)
         downsampled = JaxNetFluxes(target, sources, downsample=4)
         full = JaxNetFluxes(target, sources)
         self.assertTrue(abs(downsampled.J() - full.J()) > 1e-6 * abs(full.J()), 'abs(downsampled.J() - full.J()) > 1e-6 * abs(full.J())')
-        np.testing.assert_allclose(downsampled.dJ(), full.dJ(), rtol=1e-14, atol=0.0)
+        sampled_curve = CurveXYZFourier(
+            np.asarray(target.curve.quadpoints)[::4], target.curve.order, dofs=target.curve.dofs
+        )
+        sampled = NetFluxes(
+            Coil(sampled_curve, target.current), [coil for coil in sources if coil is not target]
+        )
+        sampled_jax = JaxNetFluxes(sampled.target_coil, sampled.source_coils)
+        # Same-JAX quadrature equivalence retains the strict inherited tolerance;
+        # independent native parity uses this module's cross-native contract.
+        expected = np.asarray(_partials(sampled_jax)(downsampled))
+        np.testing.assert_allclose(downsampled.dJ(), expected, rtol=1e-14, atol=0.0)
+        x0 = np.asarray(downsampled.x).copy()
+        direction = np.random.default_rng(19).standard_normal(x0.shape) * np.maximum(np.abs(x0), 1.0)
+        step = 1e-7
+        downsampled.x = x0 + step * direction
+        plus = downsampled.J()
+        downsampled.x = x0 - step * direction
+        minus = downsampled.J()
+        downsampled.x = x0
+        np.testing.assert_allclose(
+            downsampled.dJ() @ direction, (plus - minus) / (2 * step), rtol=1e-6
+        )
+        _assert_matches_native("NetFluxes(explicit sampled target)", sampled, sampled_jax)
         _assert_matches_native("NetFluxes(downsample=4)", native, downsampled)
 
     def test_coil_lists_follow_native_after_reassignment(self):
