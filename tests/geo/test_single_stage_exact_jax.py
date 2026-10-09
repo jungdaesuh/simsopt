@@ -5,7 +5,52 @@ are independent anchors. Default 1e-13/40 Newton settings are never relaxed.
 Finite differences use their truncation tolerance, not a relaxed parity gate.
 """
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    from simsopt.configs import get_data
+    from simsopt._core.derivative import Derivative
+    from simsopt.field import BiotSavart
+    from simsopt.geo import (
+        BoozerSurface,
+        CurveLength,
+        Iotas,
+        MajorRadius,
+        NonQuasiSymmetricRatio,
+        SurfaceXYZTensorFourier,
+        Volume,
+        boozer_surface_residual,
+    )
+    from simsopt.objectives import QuadraticPenalty
+    from simsopt_jax.backend.dtypes import explicit_device_array
+    from simsopt_jax.core.single_stage_exact import (
+        ExactSingleStageState,
+        _absolute,
+        exact_single_stage_evaluate,
+    )
+    from simsopt_jax.core.surface_fourier_series import surface_spec_with_dofs
+    from simsopt_jax.core.surface_geometry import (
+        surface_gamma,
+        surface_gammadash1,
+        surface_gammadash2,
+        surface_volume,
+    )
+    from simsopt_jax.runtime.host_boundary import (
+        disallow_host_transfers,
+        host_array,
+        host_value,
+    )
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
+    from simsopt_jax_adapters.geo.single_stage_exact import JaxExactSingleStage
+    from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 from unittest_jax_support import (
     assert_matches_native,
@@ -21,46 +66,9 @@ from typing import cast
 
 import numpy as np
 from numpy.typing import DTypeLike
-import jax
 from scipy.optimize import minimize
 from scipy.linalg import lu
 
-from simsopt.configs import get_data
-from simsopt._core.derivative import Derivative
-from simsopt.field import BiotSavart
-from simsopt.geo import (
-    BoozerSurface,
-    CurveLength,
-    Iotas,
-    MajorRadius,
-    NonQuasiSymmetricRatio,
-    SurfaceXYZTensorFourier,
-    Volume,
-    boozer_surface_residual,
-)
-from simsopt.objectives import QuadraticPenalty
-from simsopt_jax.backend.dtypes import explicit_device_array
-from simsopt_jax.core.single_stage_exact import (
-    ExactSingleStageState,
-    _absolute,
-    exact_single_stage_evaluate,
-)
-from simsopt_jax.core.surface_fourier_series import surface_spec_with_dofs
-from simsopt_jax.core.surface_geometry import (
-    surface_gamma,
-    surface_gammadash1,
-    surface_gammadash2,
-    surface_volume,
-)
-from simsopt_jax.runtime.host_boundary import (
-    disallow_host_transfers,
-    host_array,
-    host_value,
-)
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
-from simsopt_jax_adapters.geo.single_stage_exact import JaxExactSingleStage
-from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
 
 
 def _problem(*, dropin=False, quasi_poloidal=False, active_penalties=False):

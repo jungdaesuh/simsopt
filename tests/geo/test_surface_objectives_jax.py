@@ -25,7 +25,40 @@ Values and gradients agree to 1e-12 of the largest native entry (measured
 worst 4e-14).
 """
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    from simsopt._core.derivative import Derivative
+    from simsopt.configs import get_data
+    from simsopt.field.biotsavart import BiotSavart
+    from simsopt.field.coil import Coil, Current
+    from simsopt.geo.boozersurface import BoozerSurface
+    from simsopt.geo.curveobjectives import CurveLength
+    from simsopt.geo.curvexyzfourier import CurveXYZFourier
+    from simsopt.geo.surfaceobjectives import (
+        Area,
+        Iotas,
+        MajorRadius,
+        NonQuasiSymmetricRatio,
+        ToroidalFlux,
+        Volume,
+    )
+    from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+    from simsopt.objectives import QuadraticPenalty
+    from simsopt_jax.core.quasisymmetry import non_quasi_symmetric_ratio
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_tree
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
+    from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
+    from simsopt_jax_adapters.geo.surface_specs import surface_spec_from_surface
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 
 from unittest_jax_support import (
@@ -39,34 +72,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
-import jax
 import numpy as np
 from scipy.optimize import minimize
 
-from simsopt._core.derivative import Derivative
-from simsopt.configs import get_data
-from simsopt.field.biotsavart import BiotSavart
-from simsopt.field.coil import Coil, Current
-from simsopt.geo.boozersurface import BoozerSurface
-from simsopt.geo.curveobjectives import CurveLength
-from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt.geo.surfaceobjectives import (
-    Area,
-    Iotas,
-    MajorRadius,
-    NonQuasiSymmetricRatio,
-    ToroidalFlux,
-    Volume,
-)
-from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
-from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-from simsopt.objectives import QuadraticPenalty
-from simsopt_jax.core.quasisymmetry import non_quasi_symmetric_ratio
-from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_tree
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
-from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
-from simsopt_jax_adapters.geo.surface_specs import surface_spec_from_surface
 
 _IOTA = -0.406
 _RTOL = 1e-12
