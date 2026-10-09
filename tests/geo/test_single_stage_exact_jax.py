@@ -70,7 +70,6 @@ from scipy.optimize import minimize
 from scipy.linalg import lu
 
 
-
 def _problem(*, dropin=False, quasi_poloidal=False, active_penalties=False):
     curves, currents, axis, nfp, bs = get_data("ncsx")
     surface = SurfaceXYZTensorFourier(
