@@ -1,10 +1,10 @@
-"""Shared runtime isolation and logging for upstream-discovered JAX tests."""
+"""Shared optional-JAX gating, runtime isolation and logging for unittest."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager, ExitStack
 from collections.abc import Iterator
-from unittest import TestCase, SkipTest
+from unittest import TestCase, SkipTest, skipIf
 import logging
 import os
 import sys
@@ -19,17 +19,21 @@ try:
 except ImportError as error:
     JAX_IMPORT_ERROR = str(error)
 
+try:
+    from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
+
+@skipIf(JAX_IMPORT_ERROR is not None, JAX_IMPORT_ERROR or "")
 class JaxTestCase(TestCase):
-    """Isolate ordinary methods and each parameterized subtest's runtime state.
+    """Skip unsupported JAX; isolate methods and each parameterized subtest.
 
     Use ``with self.subTest(...), self.case() as patches`` for each product row.
     Run each row in a case helper so its locals are released before cleanup.
     The returned ExitStack owns patches and temporary resources inside isolation.
     """
-
-    if JAX_IMPORT_ERROR is not None:
-        raise SkipTest(JAX_IMPORT_ERROR)
 
     def setUp(self) -> None:
         self.patches = self.enterContext(self.case())
@@ -42,22 +46,19 @@ class JaxTestCase(TestCase):
             yield patches
 
 
-from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
-
-# XLA reads ``XLA_FLAGS`` when it initializes a backend, and a JAX test module
-# probes devices (lane availability) at collection, before any test installs a
-# backend config, so the CUDA autotuner pins must already be in the environment
-# here; both are inert on the CPU backend.
-apply_cuda_xla_flag_pins()
-
-
 def _force_x64(jax_module) -> None:
     jax_module.config.update("jax_enable_x64", True)
     if jax_module.config.jax_enable_x64 is not True:
         raise RuntimeError("unittest_jax_support.py requires jax_enable_x64=True")
 
 
-_force_x64(jax)
+# XLA reads ``XLA_FLAGS`` when it initializes a backend, and a JAX test module
+# probes devices (lane availability) at collection, before any test installs a
+# backend config, so the CUDA autotuner pins must already be in the environment
+# here; both are inert on the CPU backend.
+if JAX_IMPORT_ERROR is None:
+    apply_cuda_xla_flag_pins()
+    _force_x64(jax)
 
 _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",

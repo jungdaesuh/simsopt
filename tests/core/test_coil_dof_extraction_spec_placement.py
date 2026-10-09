@@ -6,21 +6,26 @@ call patterns without changing the immutable spec constructors.
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
+    from simsopt_jax.core.specs import (
+        CoilDofExtractionSpec,
+        host_resident_spec,
+        make_coil_dof_extraction_spec,
+        make_coil_set_dof_extraction_spec,
+        make_curve_xyzfourier_spec,
+        make_optimizable_dof_map_spec,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 import numpy as np
-from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
-from simsopt_jax.core.specs import (
-    CoilDofExtractionSpec,
-    host_resident_spec,
-    make_coil_dof_extraction_spec,
-    make_coil_set_dof_extraction_spec,
-    make_curve_xyzfourier_spec,
-    make_optimizable_dof_map_spec,
-)
 
 CURVE_DOF_COUNT = 9
 OWNER_DOFS = np.asarray(

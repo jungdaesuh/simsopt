@@ -7,9 +7,23 @@ Validates against:
 3. C++ reference from the installed simsoptpp extension.
 """
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax_adapters.field.biotsavart_backend import (
+        JaxBiotSavart,
+    )
+    from simsopt_jax_adapters.field.biotsavart_backend import (
+        _per_coil_unit_field,
+    )
+    from simsopt_jax.core.specs import CoilGroupSpec, GroupedCoilSetSpec
+    from simsopt_jax.core import biotsavart as core_biotsavart
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 import numpy as np
@@ -17,37 +31,17 @@ from typing import cast
 from simsopt._core.derivative import Derivative
 
 
-import jax.numpy as jnp
-
-
 from simsopt.configs import get_data
 from simsopt.field import BiotSavart, coils_via_symmetries
 from simsopt.field.coil import Coil, Current
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt_jax_adapters.field.biotsavart_backend import (
-    JaxBiotSavart,
-)
-from simsopt_jax_adapters.field.biotsavart_backend import (
-    _per_coil_unit_field,
-)
 
 
-from simsopt_jax.core.specs import CoilGroupSpec, GroupedCoilSetSpec
-
-
-from simsopt_jax.core import biotsavart as core_biotsavart
-
-
-biot_savart_B = core_biotsavart.biot_savart_B
-
-
-biot_savart_dB_by_dX = core_biotsavart.biot_savart_dB_by_dX
-
-
-biot_savart_A = core_biotsavart.biot_savart_A
-
-
-biot_savart_dA_by_dX = core_biotsavart.biot_savart_dA_by_dX
+if JAX_IMPORT_ERROR is None:
+    biot_savart_B = core_biotsavart.biot_savart_B
+    biot_savart_dB_by_dX = core_biotsavart.biot_savart_dB_by_dX
+    biot_savart_A = core_biotsavart.biot_savart_A
+    biot_savart_dA_by_dX = core_biotsavart.biot_savart_dA_by_dX
 
 
 _DIRECT_KERNEL_TOLS = {

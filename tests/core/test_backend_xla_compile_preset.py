@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax.backend.runtime import (
+        BackendConfig,
+        _CPU_OPT_PRESET_FAST_COMPILE,
+        _XLA_FLAGS_ENV,
+        _apply_cpu_compile_preset_env,
+        _config_from_mode,
+        _policy_from_config,
+        _xla_flags_with_cpu_compile_preset,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 
 
 import os
-
-
-from simsopt_jax.backend.runtime import (
-    BackendConfig,
-    _CPU_OPT_PRESET_FAST_COMPILE,
-    _XLA_FLAGS_ENV,
-    _apply_cpu_compile_preset_env,
-    _config_from_mode,
-    _policy_from_config,
-    _xla_flags_with_cpu_compile_preset,
-)
 
 
 # ---------------------------------------------------------------------------

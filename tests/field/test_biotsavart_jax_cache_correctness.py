@@ -1,8 +1,14 @@
 """Cache and host-boundary regressions for the BiotSavart correctness follow-up."""
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax_adapters.field import biotsavart_backend as backend
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 
 
@@ -19,7 +25,6 @@ from simsopt.geo.curveperturbed import (
     PerturbationSample,
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt_jax_adapters.field import biotsavart_backend as backend
 
 
 _POINTS = np.array([[0.8, 0.1, 0.2], [1.1, -0.2, -0.1]])

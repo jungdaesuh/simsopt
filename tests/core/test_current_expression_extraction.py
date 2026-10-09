@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
-import jax.numpy as jnp
 import numpy as np
 from simsopt.field import Coil, Current, coils_via_symmetries
 from simsopt.geo import create_equally_spaced_curves
-from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
 
 
 class TestCurrentExpressionExtraction(JaxTestCase):

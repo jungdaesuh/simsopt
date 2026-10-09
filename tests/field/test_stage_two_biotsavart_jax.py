@@ -1,6 +1,6 @@
 """Reduced stage-II smoke coverage for native objectives with the JAX field."""
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
 import numpy as np
 from scipy.optimize import minimize
@@ -8,8 +8,14 @@ from scipy.optimize import minimize
 from simsopt.field import Current, coils_via_symmetries
 from simsopt.geo import CurveLength, SurfaceRZFourier, create_equally_spaced_curves
 from simsopt.objectives import SquaredFlux
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax.backend import set_backend
+
+try:
+    import simsopt_jax  # noqa: F401
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax.backend import set_backend
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 class TestStageTwoBiotsavartJax(JaxTestCase):

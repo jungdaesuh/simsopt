@@ -9,9 +9,23 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import simsopt_jax.backend.runtime as runtime_module
+    from simsopt_jax.backend.runtime import (
+        BackendPolicy,
+        FieldKernelTuning,
+        _config_from_mode,
+        _policy_from_config,
+        get_field_kernel_tuning,
+        get_runtime_jax_device,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 import os
 
@@ -19,17 +33,6 @@ import os
 import subprocess
 import sys
 import types
-
-
-import simsopt_jax.backend.runtime as runtime_module
-from simsopt_jax.backend.runtime import (
-    BackendPolicy,
-    FieldKernelTuning,
-    _config_from_mode,
-    _policy_from_config,
-    get_field_kernel_tuning,
-    get_runtime_jax_device,
-)
 
 
 def _policy_for_mode(mode: str) -> BackendPolicy:

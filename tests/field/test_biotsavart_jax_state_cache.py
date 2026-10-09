@@ -6,9 +6,17 @@ its recompute mechanism (DOF setters, fix/unfix, resample) and every point or
 backend change must retire that state; native BiotSavart is the oracle.
 """
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.backend import invalidate_backend_cache
+    from simsopt_jax_adapters.field import biotsavart_backend as backend
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 
 
@@ -16,7 +24,6 @@ import copy
 from typing import cast
 import weakref
 
-import jax.numpy as jnp
 import numpy as np
 
 from simsopt._core.derivative import Derivative
@@ -28,8 +35,6 @@ from simsopt.geo.curveperturbed import (
     PerturbationSample,
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
-from simsopt_jax.backend import invalidate_backend_cache
-from simsopt_jax_adapters.field import biotsavart_backend as backend
 
 
 _POINTS = np.array([[0.8, 0.1, 0.2], [1.1, -0.2, -0.1], [0.9, 0.3, -0.05]])
