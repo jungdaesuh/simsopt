@@ -76,6 +76,7 @@ def _assert_pair(actual, expected):
 @pytest.mark.parametrize("label_class", _LABELS)
 @pytest.mark.parametrize("cloned", [False, True])
 def test_values_gradients_and_own_label_grid_match_native(surface_class, stellsym, label_class, cloned):
+    """QFM values and full gradients match native on every supported surface and label grid."""
     native, port = _pair(surface_class, stellsym, label_class, cloned)
     x = np.array(native.surface.x, copy=True)
     x += np.random.default_rng(13).normal(0, 1e-4, x.shape)
@@ -96,6 +97,7 @@ def test_values_gradients_and_own_label_grid_match_native(surface_class, stellsy
 @pytest.mark.parametrize("label_class", _LABELS)
 @pytest.mark.parametrize("stellsym", [True, False])
 def test_gradients_are_central_differences_of_native_values(label_class, stellsym):
+    """All QFM gradients match centered differences of native values for both symmetries."""
     native, port = _pair(stellsym=stellsym, label_class=label_class, cloned=True)
     x = np.array(native.surface.x, copy=True)
     direction = np.random.default_rng(11).normal(size=x.shape)
@@ -110,6 +112,7 @@ def test_gradients_are_central_differences_of_native_values(label_class, stellsy
 @pytest.mark.parametrize("method", ["LBFGS", "SLSQP"])
 @pytest.mark.parametrize("stellsym", [True, False])
 def test_solves_from_the_same_start_match_native(method, stellsym):
+    """Penalty and squared-equality solves match native state and optimizer results from identical starts."""
     native, port = _pair(stellsym=stellsym)
     if method == "SLSQP":
         # Upstream initializes exact minimization with a penalty solve. A cold
@@ -131,6 +134,7 @@ def test_solves_from_the_same_start_match_native(method, stellsym):
 
 @pytest.mark.parametrize("method", ["LBFGS", "SLSQP"])
 def test_iteration_limit_and_squared_constraint_failure_match_native(method):
+    """Capped solves and feasible squared-equality failures retain native status and final surface."""
     native, port = _pair()
     if method == "SLSQP":
         # This perturbation makes native and compiled Volume differ by ulps;
@@ -155,6 +159,7 @@ def test_iteration_limit_and_squared_constraint_failure_match_native(method):
 @pytest.mark.parametrize("jax_label_field", [False, True])
 @pytest.mark.parametrize("changed_state", ["copied_index", "external_points"])
 def test_flux_gradient_uses_the_current_label_field_points(jax_label_field, changed_state):
+    """Flux derivatives use the live independent field points after index copies or external edits."""
     native, port = _pair(label_class=ToroidalFlux)
     if jax_label_field:
         port.label = ToroidalFlux(port.surface, JaxBiotSavart(port.label.biotsavart.coils), idx=-1)
@@ -186,6 +191,7 @@ def test_flux_gradient_uses_the_current_label_field_points(jax_label_field, chan
 
 
 def test_jax_flux_feasible_start_preserves_label_arithmetic_and_status():
+    """A JAX flux label preserves native feasible-start arithmetic and SLSQP status."""
     native, port = _pair(label_class=ToroidalFlux)
     for current in {owner for coil in native.biotsavart.coils for owner in coil.current.unique_dof_lineage}:
         current.local_full_x *= 2
@@ -218,6 +224,7 @@ def test_jax_flux_feasible_start_preserves_label_arithmetic_and_status():
 @pytest.mark.parametrize("method", ["qfm_label_constraint", "qfm_penalty_constraints"])
 @pytest.mark.parametrize("label_class", [Volume, Area])
 def test_python_float_target_overflow_matches_native(method, derivatives, label_class):
+    """Python-float target overflow raises the same error before every native derivative path."""
     native, port = _pair(label_class=label_class)
     for solver in (native, port):
         solver.targetlabel = 1e200
@@ -228,6 +235,7 @@ def test_python_float_target_overflow_matches_native(method, derivatives, label_
 @pytest.mark.parametrize("derivatives", [0, 1])
 @pytest.mark.parametrize("method", ["qfm_label_constraint", "qfm_penalty_constraints"])
 def test_numpy_float_target_keeps_native_nonfinite_results(method, derivatives):
+    """NumPy targets retain native nonfinite scalar and derivative results."""
     native, port = _pair(label_class=Area)
     # Perturbed Area has nonzero gradient components. Volume is invariant to
     # theta-independent vertical displacements even after DOF perturbation.
@@ -247,6 +255,7 @@ def test_numpy_float_target_keeps_native_nonfinite_results(method, derivatives):
 
 @pytest.mark.parametrize("method", ["J", "dJ_by_dsurfacecoefficients"])
 def test_shared_flux_field_with_short_point_buffer_raises_native_value_error(method):
+    """Shared flux fields with incompatible QFM points raise the native reshape error."""
     native, port = _pair()
     labels = [ToroidalFlux(solver.surface, solver.biotsavart) for solver in (native, port)]
     for solver, label in zip((native, port), labels, strict=True):
@@ -259,6 +268,7 @@ def test_shared_flux_field_with_short_point_buffer_raises_native_value_error(met
 @pytest.mark.parametrize("derivatives", [0, 1])
 @pytest.mark.parametrize("method", ["qfm_label_constraint", "qfm_penalty_constraints"])
 def test_independent_jax_flux_incompatible_points_raise_native_type_error(point_count, derivatives, method):
+    """Independent JAX flux point counts preserve the native broadcasting error."""
     native, port = _pair()
     for solver in (native, port):
         # Separate surface and field prevent the QFM callback from refreshing
@@ -304,6 +314,7 @@ def _evaluate(port):
 
 
 def test_new_values_and_full_solves_have_no_implicit_transfers_or_recompiles(parity_lane):
+    """Changed inputs and capped solves reuse compiled programs under the explicit-transfer guard."""
     with parity_default_device(parity_lane):
         native, port = _pair(label_class=ToroidalFlux)
         _evaluate(port)
@@ -330,6 +341,7 @@ def test_new_values_and_full_solves_have_no_implicit_transfers_or_recompiles(par
 
 
 def test_public_label_target_and_copy_are_live():
+    """Public label/target edits and shallow copies are read afresh by each evaluation."""
     native, port = _pair()
     copied = copy(port)
     for solver in (port, copied):
@@ -345,6 +357,7 @@ def test_public_label_target_and_copy_are_live():
 
 
 def test_residual_field_replacement_is_live_on_a_shallow_copy():
+    """Replacing a copied residual field changes values and gradients without stale snapshots."""
     native, port = _pair()
     copied = copy(port)
     _, _, _, _, replacement = get_data("ncsx")
@@ -358,6 +371,7 @@ def test_residual_field_replacement_is_live_on_a_shallow_copy():
 
 
 def test_fixed_dofs_keep_native_full_gradient_contract():
+    """Fixed surface DOFs preserve the native full-coefficient gradient contract."""
     native, port = _pair()
     for solver in (native, port):
         solver.surface.fix(solver.surface.local_dof_names[0])
@@ -368,6 +382,7 @@ def test_fixed_dofs_keep_native_full_gradient_contract():
 
 
 def test_external_field_points_follow_native_evaluation_boundary():
+    """Externally set field points are used until native parent invalidation refreshes them."""
     native, port = _pair()
     points = native.surface.gamma().reshape(-1, 3) + [0.01, 0.02, 0.03]
     for solver in (native, port):
@@ -377,6 +392,7 @@ def test_external_field_points_follow_native_evaluation_boundary():
 
 
 def test_jax_flux_label_uses_explicit_host_boundary(parity_lane):
+    """JAX flux labels preserve native values under explicit host materialization."""
     with parity_default_device(parity_lane):
         native, port = _pair(label_class=ToroidalFlux, cloned=True)
         port.label = ToroidalFlux(
@@ -397,6 +413,7 @@ def test_jax_flux_label_uses_explicit_host_boundary(parity_lane):
 
 @pytest.mark.parametrize("condition", ["zero_field", "zero_normal", "nan", "inf"])
 def test_nonfinite_residuals_are_not_sanitized(condition):
+    """Zero fields/normals, NaNs and infinities retain native nonfinite residual behavior."""
     native, port = _pair()
     if condition == "zero_field":
         for coil in native.biotsavart.coils:
@@ -414,6 +431,7 @@ def test_nonfinite_residuals_are_not_sanitized(condition):
 
 @pytest.mark.parametrize("targetlabel,constraint_weight", [(np.inf, 0.), (np.nan, 0.), (0., np.inf), (0., np.nan)])
 def test_nonfinite_numeric_operands_match_native(targetlabel, constraint_weight):
+    """Nonfinite target and penalty coefficients preserve native values and gradients."""
     native, port = _pair()
     native.targetlabel = port.targetlabel = targetlabel
     with np.errstate(all="ignore"):
@@ -426,6 +444,7 @@ def test_nonfinite_numeric_operands_match_native(targetlabel, constraint_weight)
 
 @pytest.mark.parametrize("constraint_weight", [np.inf, np.nan])
 def test_nonfinite_weight_at_exact_label_feasibility_keeps_native_nans(constraint_weight):
+    """A nonfinite coefficient times an exactly feasible label retains native NaNs."""
     native, port = _pair()
     native.targetlabel = port.targetlabel = native.label.J()
     with np.errstate(all="ignore"):
@@ -437,6 +456,7 @@ def test_nonfinite_weight_at_exact_label_feasibility_keeps_native_nans(constrain
 
 
 def test_invalid_derivative_method_and_flux_index_match_native():
+    """Invalid orders, method names and flux indices raise native exception classes."""
     native, port = _pair(label_class=ToroidalFlux)
     for solver in (native, port):
         with pytest.raises(AssertionError):
@@ -449,6 +469,7 @@ def test_invalid_derivative_method_and_flux_index_match_native():
 
 
 def test_backend_settings_rebuild_enclosing_qfm_programs(monkeypatch):
+    """Changing field tuning clears the enclosing compiled QFM programs."""
     set_backend("jax", device="cpu", intent="fast")
     _, port = _pair()
     old_tuning = get_field_kernel_tuning()
@@ -461,6 +482,7 @@ def test_backend_settings_rebuild_enclosing_qfm_programs(monkeypatch):
 
 
 def test_solver_exception_keeps_last_callback_surface(monkeypatch):
+    """A callback exception leaves the mutable surface at its last native callback iterate."""
     native, port = _pair()
     starts = [np.array(solver.surface.x, copy=True) for solver in (native, port)]
     visited = []
