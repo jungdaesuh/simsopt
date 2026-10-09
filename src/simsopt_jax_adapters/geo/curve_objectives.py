@@ -230,7 +230,7 @@ class JaxLpCurveCurvature(Optimizable):
     Args:
         curve: Curve object, geometry in m parameterized over [0, 1).
         p: float, dimensionless exponent.
-        threshold: float, curvature threshold in 1/m.
+        threshold: float, curvature threshold in 1/m; default 0.0.
     """
 
     def __init__(self, curve, p, threshold=0.0):
@@ -452,8 +452,8 @@ class JaxCurveCurveDistance(Optimizable):
     Args:
         curves: list of Curve objects, all curves including symmetry copies.
         minimum_distance: float, separation threshold in m.
-        num_basecurves: int or None, leading base-curve count; None or zero selects all curves as native does.
-        downsample: int, quadrature stride for both candidate search and penalty.
+        num_basecurves: int or None, leading base-curve count; default None. None or zero selects all curves as native does.
+        downsample: int, quadrature stride for both candidate search and penalty; default 1.
     """
 
     def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):

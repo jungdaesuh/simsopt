@@ -56,8 +56,8 @@ class JaxSquaredFlux(Optimizable):
     Args:
         surface: Surface object, fixed quadrature geometry in m.
         field: JaxBiotSavart object, coil magnetic field in T.
-        target: Array of shape (nphi, ntheta) or None, normal field target in T; None means zero.
-        definition: str, "quadratic flux", "normalized", or "local".
+        target: Array of shape (nphi, ntheta) or None, normal field target in T; default None means zero.
+        definition: str, "quadratic flux", "normalized", or "local"; default "quadratic flux".
     """
 
     def __init__(self, surface, field: JaxBiotSavart, target=None, definition="quadratic flux"):
