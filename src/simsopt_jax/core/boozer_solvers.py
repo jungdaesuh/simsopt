@@ -305,7 +305,12 @@ def boozer_penalty_newton(
         shifted = hessian + jnp.where(diagonal, stab, stab * 0)
         factors, singular = _lu(shifted)
         dx = lu_solve(factors, gradient)
-        dx = jnp.where(norm < _REFINE_BELOW, dx + lu_solve(factors, gradient - shifted @ dx), dx)
+        dx = lax.cond(
+            norm < _REFINE_BELOW,
+            lambda dx: dx + lu_solve(factors, gradient - shifted @ dx),
+            lambda dx: dx,
+            dx,
+        )
         x, iterations = _advance(x, dx, iterations, singular)
         gradient, hessian = derivatives(x)
         return x, gradient, hessian, iterations, jnp.linalg.norm(gradient), singular
