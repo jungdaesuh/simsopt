@@ -46,6 +46,9 @@ class JaxTestCase(TestCase):
             yield patches
 
 
+from simsopt_jax.backend.dtypes import explicit_device_array
+
+
 def _force_x64(jax_module) -> None:
     jax_module.config.update("jax_enable_x64", True)
     if jax_module.config.jax_enable_x64 is not True:
@@ -244,3 +247,24 @@ def compilation_logs() -> Iterator[CompilationLog]:
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
         yield handler
+
+
+def place_float64(values, reference: jax.Array) -> jax.Array:
+    """``values`` as a float64 array placed like ``reference``."""
+    return explicit_device_array(values, dtype=np.float64, reference=reference)
+
+
+@contextmanager
+def jax_compilations() -> Iterator[list[str]]:
+    """Names of the JAX trace, lowering and compile events inside the block."""
+    events: list[str] = []
+
+    def record(event: str, duration_secs: float, **kwargs: str | int) -> None:
+        if event.startswith("/jax/core/compile/"):
+            events.append(event)
+
+    jax.monitoring.register_event_duration_secs_listener(record)
+    try:
+        yield events
+    finally:
+        jax.monitoring.unregister_event_duration_listener(record)

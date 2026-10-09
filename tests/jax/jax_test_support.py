@@ -6,6 +6,8 @@ from unittest_jax_support import (
     host_array as host_array,
     host_materialize as host_materialize,
     jax_runtime_isolation,
+    place_float64 as place_float64,
+    jax_compilations as jax_compilations,
     parity_default_device as parity_default_device,
     parity_rng as parity_rng,
     parity_seed as parity_seed,
