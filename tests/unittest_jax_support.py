@@ -287,5 +287,3 @@ def assert_matches_native(
     np.testing.assert_allclose(
         actual, expected, rtol=0.0, atol=rtol * reference, err_msg=f"{name} differs from native"
     )
-
-
