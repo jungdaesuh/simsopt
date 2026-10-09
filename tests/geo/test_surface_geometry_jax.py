@@ -338,12 +338,14 @@ def _singular_surface(singularity: str) -> SurfaceRZFourier:
     return surface
 
 
-class _SurfaceRZFourierSubclass(SurfaceRZFourier):
-    pass
+if JAX_IMPORT_ERROR is None:
+    class _SurfaceRZFourierSubclass(SurfaceRZFourier):
+        pass
 
 
-class _SurfaceXYZTensorFourierSubclass(SurfaceXYZTensorFourier):
-    pass
+if JAX_IMPORT_ERROR is None:
+    class _SurfaceXYZTensorFourierSubclass(SurfaceXYZTensorFourier):
+        pass
 
 
 class TestSurfaceGeometryJax(JaxTestCase):
