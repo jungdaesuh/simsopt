@@ -1,6 +1,31 @@
 """Native 9e027eac3 QFM values, callbacks, optimizer and state contracts."""
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    from simsopt.configs import get_data
+    from simsopt.field import BiotSavart, coils_via_symmetries
+    from simsopt.geo import (
+        RotatedCurve,
+        SurfaceRZFourier,
+        SurfaceXYZFourier,
+        SurfaceXYZTensorFourier,
+    )
+    from simsopt.geo.qfmsurface import QfmSurface
+    from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
+    from simsopt_jax.backend import get_field_kernel_tuning, set_backend
+    from simsopt_jax.backend.dtypes import explicit_device_array
+    from simsopt_jax.core.qfm import qfm_label, qfm_residual
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_array
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.geo.qfm import JaxQfmSurface
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 import os
 
@@ -10,28 +35,13 @@ from contextlib import ExitStack, contextmanager
 from copy import copy
 from typing import Iterator, cast
 
-import jax
 import numpy as np
 
-from simsopt.configs import get_data
-from simsopt.field import BiotSavart, coils_via_symmetries
-from simsopt.geo import (
-    RotatedCurve,
-    SurfaceRZFourier,
-    SurfaceXYZFourier,
-    SurfaceXYZTensorFourier,
-)
-from simsopt.geo.qfmsurface import QfmSurface
-from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
-from simsopt_jax.backend import get_field_kernel_tuning, set_backend
-from simsopt_jax.backend.dtypes import explicit_device_array
-from simsopt_jax.core.qfm import qfm_label, qfm_residual
-from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_array
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.geo.qfm import JaxQfmSurface
 
-_SURFACES = [SurfaceRZFourier, SurfaceXYZFourier, SurfaceXYZTensorFourier]
-_LABELS = [Volume, Area, ToroidalFlux]
+if JAX_IMPORT_ERROR is None:
+    _SURFACES = [SurfaceRZFourier, SurfaceXYZFourier, SurfaceXYZTensorFourier]
+if JAX_IMPORT_ERROR is None:
+    _LABELS = [Volume, Area, ToroidalFlux]
 
 
 def _pair(
