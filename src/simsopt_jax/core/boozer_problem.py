@@ -280,12 +280,11 @@ def _label_derivatives(
 
 
 def _pad(vector: jax.Array, size: int) -> jax.Array:
-    return jnp.zeros(size, vector.dtype).at[: vector.shape[0]].set(vector)
+    return jnp.pad(vector, (0, size - vector.shape[0]))
 
 
 def _pad_square(matrix: jax.Array, size: int) -> jax.Array:
-    n = matrix.shape[0]
-    return jnp.zeros((size, size), matrix.dtype).at[:n, :n].set(matrix)
+    return jnp.pad(matrix, ((0, size - matrix.shape[0]), (0, size - matrix.shape[1])))
 
 
 _STATIC_OPTIONS = ("derivatives", "optimize_G", "weight_inv_modB")
