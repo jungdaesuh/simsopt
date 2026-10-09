@@ -1,6 +1,42 @@
 """JAX coil force, torque and energy objectives against the native ones."""
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    import jax.numpy as jnp
+    from simsopt._core.derivative import Derivative
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.field import Coil, Current, RegularizedCoil, coils_via_symmetries
+    from simsopt.field.force import (
+        _B_at_point_from_coil_set_pure,
+        B2Energy,
+        LpCurveForce,
+        LpCurveTorque,
+        NetFluxes,
+        SquaredMeanForce,
+        SquaredMeanTorque,
+    )
+    from simsopt.field.force import lp_force_pure as native_lp_force
+    from simsopt.field.force import squared_mean_force_pure as native_squared_mean_force
+    from simsopt.field.selffield import regularization_circ, regularization_rect
+    from simsopt.geo import CurveXYZFourier, create_equally_spaced_curves
+    from simsopt.geo.curveperturbed import CurvePerturbed, GaussianSampler, PerturbationSample
+    from simsopt_jax.core import coil_forces
+    from simsopt_jax_adapters.field import (
+        JaxB2Energy,
+        JaxLpCurveForce,
+        JaxLpCurveTorque,
+        JaxNetFluxes,
+        JaxSquaredMeanForce,
+        JaxSquaredMeanTorque,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest_jax_support import CompilationLog
 
 
@@ -8,36 +44,8 @@ import logging
 from collections.abc import Callable
 from typing import cast
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
-from simsopt._core.derivative import Derivative
-from simsopt._core.optimizable import Optimizable
-from simsopt.field import Coil, Current, RegularizedCoil, coils_via_symmetries
-from simsopt.field.force import (
-    _B_at_point_from_coil_set_pure,
-    B2Energy,
-    LpCurveForce,
-    LpCurveTorque,
-    NetFluxes,
-    SquaredMeanForce,
-    SquaredMeanTorque,
-)
-from simsopt.field.force import lp_force_pure as native_lp_force
-from simsopt.field.force import squared_mean_force_pure as native_squared_mean_force
-from simsopt.field.selffield import regularization_circ, regularization_rect
-from simsopt.geo import CurveXYZFourier, create_equally_spaced_curves
-from simsopt.geo.curveperturbed import CurvePerturbed, GaussianSampler, PerturbationSample
-from simsopt_jax.core import coil_forces
-from simsopt_jax_adapters.field import (
-    JaxB2Energy,
-    JaxLpCurveForce,
-    JaxLpCurveTorque,
-    JaxNetFluxes,
-    JaxSquaredMeanForce,
-    JaxSquaredMeanTorque,
-)
 
 _NCOILS = 2
 

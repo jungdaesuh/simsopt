@@ -1,6 +1,64 @@
 """Coil force and finite-build terms of the fused Stage-II objective against native composites."""
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    import jax.numpy as jnp
+    from simsopt._core.derivative import Derivative
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.field import (
+        BiotSavart,
+        Coil,
+        Current,
+        RegularizedCoil,
+        apply_symmetries_to_currents,
+        apply_symmetries_to_curves,
+        coils_via_symmetries,
+    )
+    from simsopt.field.force import (
+        B2Energy,
+        LpCurveForce,
+        LpCurveTorque,
+        SquaredMeanForce,
+        SquaredMeanTorque,
+    )
+    from simsopt.field.selffield import regularization_circ, regularization_rect
+    from simsopt.geo import (
+        CurveCurveDistance,
+        CurveLength,
+        CurveSurfaceDistance,
+        CurveXYZFourier,
+        LpCurveCurvature,
+        MeanSquaredCurvature,
+        SurfaceRZFourier,
+        create_equally_spaced_curves,
+        create_multifilament_grid,
+    )
+    from simsopt.objectives import QuadraticPenalty, SquaredFlux
+    from simsopt_jax.objectives import (
+        StageTwoObjectiveConfig,
+        fused_stage_two_objective,
+        fused_stage_two_values,
+        make_stage_two_problem,
+        stage_two_coil_geometry,
+        stage_two_geometry,
+    )
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.geo import (
+        JaxCurveCurveDistance,
+        JaxCurveLength,
+        JaxCurveSurfaceDistance,
+        JaxLpCurveCurvature,
+        JaxMeanSquaredCurvature,
+    )
+    from simsopt_jax_adapters.objectives import JaxSquaredFlux
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 from collections.abc import Callable
@@ -8,59 +66,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-from simsopt._core.derivative import Derivative
-from simsopt._core.optimizable import Optimizable
-from simsopt.field import (
-    BiotSavart,
-    Coil,
-    Current,
-    RegularizedCoil,
-    apply_symmetries_to_currents,
-    apply_symmetries_to_curves,
-    coils_via_symmetries,
-)
-from simsopt.field.force import (
-    B2Energy,
-    LpCurveForce,
-    LpCurveTorque,
-    SquaredMeanForce,
-    SquaredMeanTorque,
-)
-from simsopt.field.selffield import regularization_circ, regularization_rect
-from simsopt.geo import (
-    CurveCurveDistance,
-    CurveLength,
-    CurveSurfaceDistance,
-    CurveXYZFourier,
-    LpCurveCurvature,
-    MeanSquaredCurvature,
-    SurfaceRZFourier,
-    create_equally_spaced_curves,
-    create_multifilament_grid,
-)
-from simsopt.objectives import QuadraticPenalty, SquaredFlux
-from simsopt_jax.objectives import (
-    StageTwoObjectiveConfig,
-    fused_stage_two_objective,
-    fused_stage_two_values,
-    make_stage_two_problem,
-    stage_two_coil_geometry,
-    stage_two_geometry,
-)
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.geo import (
-    JaxCurveCurveDistance,
-    JaxCurveLength,
-    JaxCurveSurfaceDistance,
-    JaxLpCurveCurvature,
-    JaxMeanSquaredCurvature,
-)
-from simsopt_jax_adapters.objectives import JaxSquaredFlux
 
 _QA_INPUT = Path(__file__).resolve().parents[1] / "test_files" / "input.LandremanPaul2021_QA"
 _NCOILS = 3
@@ -110,44 +118,45 @@ def _coil_terms(config: StageTwoObjectiveConfig, coils) -> list[tuple[float | No
     ]
 
 
-_NATIVE_GEOMETRY = (CurveLength, CurveCurveDistance, CurveSurfaceDistance, LpCurveCurvature, MeanSquaredCurvature)
-_JAX_GEOMETRY = (
-    JaxCurveLength, JaxCurveCurveDistance, JaxCurveSurfaceDistance, JaxLpCurveCurvature, JaxMeanSquaredCurvature,
-)
+if JAX_IMPORT_ERROR is None:
+    _NATIVE_GEOMETRY = (CurveLength, CurveCurveDistance, CurveSurfaceDistance, LpCurveCurvature, MeanSquaredCurvature)
+    _JAX_GEOMETRY = (
+        JaxCurveLength, JaxCurveCurveDistance, JaxCurveSurfaceDistance, JaxLpCurveCurvature, JaxMeanSquaredCurvature,
+    )
 
 
-def _geometric_terms(config: StageTwoObjectiveConfig, base, centerlines, surface, classes=_NATIVE_GEOMETRY):
-    """The coil-geometry objectives ``config`` describes, with their weights.
+    def _geometric_terms(config: StageTwoObjectiveConfig, base, centerlines, surface, classes=_NATIVE_GEOMETRY):
+        """The coil-geometry objectives ``config`` describes, with their weights.
 
-    ``classes`` are the native objectives or their drop-in JAX mirrors.
-    """
-    length_class, curve_curve_class, curve_surface_class, curvature_class, msc_class = classes
-    lengths = [length_class(curve) for curve in base]
-    num_basecurves = config.num_basecurves if config.curve_curve_pairs == "base" else None
-    return [
-        (config.length_weight, (
-            sum(lengths) if config.length_target is None
-            else QuadraticPenalty(sum(lengths), config.length_target, config.length_target_mode)
-        )),
-        (config.individual_length_weight, sum(
-            QuadraticPenalty(length, target, config.individual_length_target_mode)
-            for length, target in zip(lengths, config.individual_length_targets, strict=True)
-        ) if config.individual_length_weight is not None else None),
-        (config.curve_curve_weight, curve_curve_class(
-            centerlines, config.curve_curve_minimum_distance, num_basecurves=num_basecurves)),
-        (config.curve_surface_weight, curve_surface_class(
-            centerlines, surface, config.curve_surface_minimum_distance)),
-        (config.curvature_weight, sum(
-            curvature_class(curve, 2, config.curvature_threshold) for curve in base)),
-        (config.mean_squared_curvature_weight, sum(
-            QuadraticPenalty(
-                msc_class(curve),
-                config.mean_squared_curvature_threshold,
-                config.mean_squared_curvature_target_mode,
-            )
-            for curve in base
-        )),
-    ]
+        ``classes`` are the native objectives or their drop-in JAX mirrors.
+        """
+        length_class, curve_curve_class, curve_surface_class, curvature_class, msc_class = classes
+        lengths = [length_class(curve) for curve in base]
+        num_basecurves = config.num_basecurves if config.curve_curve_pairs == "base" else None
+        return [
+            (config.length_weight, (
+                sum(lengths) if config.length_target is None
+                else QuadraticPenalty(sum(lengths), config.length_target, config.length_target_mode)
+            )),
+            (config.individual_length_weight, sum(
+                QuadraticPenalty(length, target, config.individual_length_target_mode)
+                for length, target in zip(lengths, config.individual_length_targets, strict=True)
+            ) if config.individual_length_weight is not None else None),
+            (config.curve_curve_weight, curve_curve_class(
+                centerlines, config.curve_curve_minimum_distance, num_basecurves=num_basecurves)),
+            (config.curve_surface_weight, curve_surface_class(
+                centerlines, surface, config.curve_surface_minimum_distance)),
+            (config.curvature_weight, sum(
+                curvature_class(curve, 2, config.curvature_threshold) for curve in base)),
+            (config.mean_squared_curvature_weight, sum(
+                QuadraticPenalty(
+                    msc_class(curve),
+                    config.mean_squared_curvature_threshold,
+                    config.mean_squared_curvature_target_mode,
+                )
+                for curve in base
+            )),
+        ]
 
 
 def _native_force_composite(surface, coils, config) -> Optimizable:
@@ -171,34 +180,36 @@ def _assert_close(actual, expected, name: str = "") -> None:
     )
 
 
-_value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
-_objective = jax.jit(fused_stage_two_objective)
-_penalties_value_and_grad = jax.jit(
-    jax.value_and_grad(lambda problem, x: fused_stage_two_values(problem, x)[2], argnums=1)
-)
+if JAX_IMPORT_ERROR is None:
+    _value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+    _objective = jax.jit(fused_stage_two_objective)
+    _penalties_value_and_grad = jax.jit(
+        jax.value_and_grad(lambda problem, x: fused_stage_two_values(problem, x)[2], argnums=1)
+    )
 
 # Weights that give every term a visible share of the objective at the test state.
-_ALL_FORCE_TERMS = StageTwoObjectiveConfig(
-    num_basecurves=_NCOILS,
-    length_weight=1e-3,
-    length_target=8.0,
-    curve_curve_minimum_distance=0.6,
-    curve_curve_weight=10.0,
-    curve_surface_minimum_distance=0.4,
-    curve_surface_weight=2.0,
-    curvature_threshold=1.0,
-    curvature_weight=1e-2,
-    mean_squared_curvature_threshold=1.0,
-    mean_squared_curvature_weight=1e-2,
-    force_weight=1e5,
-    force_p=4,
-    torque_weight=1e5,
-    torque_p=3,
-    torque_threshold=1e-4,
-    squared_mean_force_weight=1e2,
-    squared_mean_torque_weight=1e4,
-    vacuum_energy_weight=0.1,
-)
+if JAX_IMPORT_ERROR is None:
+    _ALL_FORCE_TERMS = StageTwoObjectiveConfig(
+        num_basecurves=_NCOILS,
+        length_weight=1e-3,
+        length_target=8.0,
+        curve_curve_minimum_distance=0.6,
+        curve_curve_weight=10.0,
+        curve_surface_minimum_distance=0.4,
+        curve_surface_weight=2.0,
+        curvature_threshold=1.0,
+        curvature_weight=1e-2,
+        mean_squared_curvature_threshold=1.0,
+        mean_squared_curvature_weight=1e-2,
+        force_weight=1e5,
+        force_p=4,
+        torque_weight=1e5,
+        torque_p=3,
+        torque_threshold=1e-4,
+        squared_mean_force_weight=1e2,
+        squared_mean_torque_weight=1e4,
+        vacuum_energy_weight=0.1,
+    )
 
 
 def _force_problem(config, *, perturb=True, shared_dofs=False):
