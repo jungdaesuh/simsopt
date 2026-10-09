@@ -160,9 +160,9 @@ class JaxBoozerSurface(Optimizable):
             (area), webers (toroidal flux), or dimensionless (aspect ratio).
         constraint_weight (float | None): Native penalty coefficient for the squared
             label and z constraints; None for an exact problem. Truthy selects BoozerLS;
-            otherwise run_code uses BoozerExact.
+            otherwise run_code uses BoozerExact. Default None.
         options (dict | None): Native solver options overriding the defaults for the
-            selected formulation.
+            selected formulation; default None uses the native defaults above.
     """
 
     res: dict
@@ -294,19 +294,18 @@ class JaxBoozerSurface(Optimizable):
         """Native's: SciPy BFGS (or L-BFGS-B) on the penalty.
 
         Args:
-            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
-                specific for SciPy).
-            maxiter (int | float): Native iteration or evaluation cap for the selected
-                solver.
+            tol (float): SciPy gradient stopping tolerance (gtol), also relative objective
+                stopping tolerance (ftol) for L-BFGS-B; default 1e-3.
+            maxiter (int | float): Maximum SciPy iterations; default 1000.
             constraint_weight (float): Native penalty coefficient for the squared label and
-                z constraints.
-            iota (float): Initial dimensionless rotational transform.
-            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
-                during penalty solves, optimized during exact solves).
-            limited_memory (bool): Use L-BFGS-B when true, otherwise BFGS.
+                z constraints; default 1.0.
+            iota (float): Initial dimensionless rotational transform; default 0.0.
+            G (float | None): Initial G in tesla meters; default None derives G from currents.
+                Penalty solves then keep G fixed; exact solves optimize G.
+            limited_memory (bool): Use L-BFGS-B when true, otherwise BFGS; default True.
             weight_inv_modB (bool): Divide each point's Boozer residual by the field
-                magnitude in teslas.
-            verbose (bool): Print the native-style solver summary.
+                magnitude in teslas; default True.
+            verbose (bool): Print the native-style solver summary; default False.
 
         Returns:
             dict: Cached or newly stored native-style result, including value, gradient,
@@ -370,19 +369,18 @@ class JaxBoozerSurface(Optimizable):
         """Native's: Newton on the penalty with its analytic Hessian.
 
         Args:
-            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
-                specific for SciPy).
-            maxiter (int | float): Native iteration or evaluation cap for the selected
-                solver.
+            tol (float): Euclidean penalty-gradient norm threshold; default 1e-12.
+            maxiter (int | float): Newton step cap; default 10. Positive fractional caps admit
+                steps while the integer iteration count is below the cap.
             constraint_weight (float): Native penalty coefficient for the squared label and
-                z constraints.
-            iota (float): Initial dimensionless rotational transform.
-            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
-                during penalty solves, optimized during exact solves).
-            stab (float): Diagonal Hessian shift for step solves, in native units.
+                z constraints; default 1.0.
+            iota (float): Initial dimensionless rotational transform; default 0.0.
+            G (float | None): Initial G in tesla meters; default None derives G from currents.
+                Penalty solves then keep G fixed; exact solves optimize G.
+            stab (float): Diagonal Hessian shift for step solves, in native units; default 0.0.
             weight_inv_modB (bool): Divide each point's Boozer residual by the field
-                magnitude in teslas.
-            verbose (bool): Print the native-style solver summary.
+                magnitude in teslas; default True.
+            verbose (bool): Print the native-style solver summary; default False.
 
         Returns:
             dict: Cached or newly stored native-style result with final derivatives,
@@ -446,18 +444,19 @@ class JaxBoozerSurface(Optimizable):
         (whose result, as natively, is returned but not stored in ``res``).
 
         Args:
-            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
-                specific for SciPy).
-            maxiter (int | float): Native iteration or evaluation cap for the selected
-                solver.
+            tol (float): SciPy ftol, xtol and gtol, or the Euclidean penalty-gradient
+                norm threshold for manual Gauss-Newton; default 1e-12.
+            maxiter (int | float): Maximum SciPy residual evaluations (max_nfev), or manual
+                Gauss-Newton steps; default 10.
             constraint_weight (float): Native penalty coefficient for the squared label and
-                z constraints.
-            iota (float): Initial dimensionless rotational transform.
-            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
-                during penalty solves, optimized during exact solves).
-            method (str): SciPy least_squares method, or manual for damped Gauss-Newton.
+                z constraints; default 1.0.
+            iota (float): Initial dimensionless rotational transform; default 0.0.
+            G (float | None): Initial G in tesla meters; default None derives G from currents.
+                Penalty solves then keep G fixed; exact solves optimize G.
+            method (str): SciPy least_squares method, or manual for damped Gauss-Newton;
+                default "lm".
             weight_inv_modB (bool): Divide each point's Boozer residual by the field
-                magnitude in teslas.
+                magnitude in teslas; default True.
 
         Returns:
             dict: Native-style least-squares result after updating the surface. SciPy
@@ -538,12 +537,13 @@ class JaxBoozerSurface(Optimizable):
                 ``z(0, 0)``. If a positive ``maxiter`` cap is reached after a Newton
                 step, success uses the norm checked before the last step. With
                 ``maxiter=0``, the returned stopping norm is the initial ``1e6`` sentinel.
-            maxiter (int | float): Native iteration or evaluation cap for the selected
-                solver.
-            iota (float): Initial dimensionless rotational transform.
-            G (float | None): Initial G in tesla meters; None derives G from currents (fixed
-                during penalty solves, optimized during exact solves).
-            verbose (bool): Print the native-style solver summary.
+                Default 1e-10; the norm combines residual and constraint units.
+            maxiter (int | float): Newton step cap; default 10. Positive fractional caps admit
+                steps while the integer iteration count is below the cap.
+            iota (float): Initial dimensionless rotational transform; default 0.0.
+            G (float | None): Initial G in tesla meters; default None derives G from currents.
+                Penalty solves then keep G fixed; exact solves optimize G.
+            verbose (bool): Print the native-style solver summary; default False.
 
         Returns:
             dict: Cached or newly stored native-style exact solve result, including
