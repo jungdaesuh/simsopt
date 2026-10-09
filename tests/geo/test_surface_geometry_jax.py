@@ -12,7 +12,33 @@ changes, recompilation, implicit transfers, singular normals and unsupported
 surfaces.
 """
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    from simsopt._core.derivative import Derivative, OptimizableDefaultDict
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.geo import CurveXYZFourier, SurfaceGarabedian
+    from simsopt.geo.surface import Surface
+    from simsopt.geo.surfaceobjectives import Area, Volume
+    from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+    from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+    from simsopt_jax.core import surface_geometry
+    from simsopt_jax.core.specs import SurfaceSpec
+    from simsopt_jax.core.surface_fourier_series import (
+        surface_get_dofs,
+        surface_spec_with_dofs,
+    )
+    from simsopt_jax.core.surface_geometry import surface_gamma, surface_quantity_of_dofs
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
+    from simsopt_jax_adapters.geo import surface_spec_from_surface
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 from unittest_jax_support import (
     host_array,
@@ -27,32 +53,17 @@ from dataclasses import dataclass
 from functools import partial
 from typing import cast
 
-import jax
 import numpy as np
 
-from simsopt._core.derivative import Derivative, OptimizableDefaultDict
-from simsopt._core.optimizable import Optimizable
-from simsopt.geo import CurveXYZFourier, SurfaceGarabedian
-from simsopt.geo.surface import Surface
-from simsopt.geo.surfaceobjectives import Area, Volume
-from simsopt.geo.surfacerzfourier import SurfaceRZFourier
-from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
-from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-from simsopt_jax.core import surface_geometry
-from simsopt_jax.core.specs import SurfaceSpec
-from simsopt_jax.core.surface_fourier_series import (
-    surface_get_dofs,
-    surface_spec_with_dofs,
-)
-from simsopt_jax.core.surface_geometry import surface_gamma, surface_quantity_of_dofs
-from simsopt_jax.runtime.host_boundary import disallow_host_transfers
-from simsopt_jax_adapters.geo import surface_spec_from_surface
 
-_NativeSurface = SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier
-_Kernel = Callable[[SurfaceSpec], jax.Array]
-_Transform = Callable[
-    [Callable[[jax.Array], jax.Array]], Callable[[jax.Array], jax.Array]
-]
+if JAX_IMPORT_ERROR is None:
+    _NativeSurface = SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier
+if JAX_IMPORT_ERROR is None:
+    _Kernel = Callable[[SurfaceSpec], jax.Array]
+if JAX_IMPORT_ERROR is None:
+    _Transform = Callable[
+        [Callable[[jax.Array], jax.Array]], Callable[[jax.Array], jax.Array]
+    ]
 
 
 @dataclass(frozen=True)
@@ -66,56 +77,59 @@ class _Case:
     clamped_dims: tuple[bool, bool, bool] = (False, False, False)
 
 
-_CASES = {
-    "rz-stellsym-nfp1-full-torus": _Case(SurfaceRZFourier, True, 1, "full torus"),
-    "rz-stellsym-nfp3-field-period": _Case(SurfaceRZFourier, True, 3, "field period"),
-    "rz-nonsym-nfp2-half-period": _Case(SurfaceRZFourier, False, 2, "half period"),
-    "rz-axisymmetric-ntor0": _Case(SurfaceRZFourier, False, 1, "full torus", 3, 0),
-    "xyz-stellsym-nfp1-full-torus": _Case(SurfaceXYZFourier, True, 1, "full torus"),
-    "xyz-stellsym-nfp3-field-period": _Case(SurfaceXYZFourier, True, 3, "field period"),
-    "xyz-nonsym-nfp2-half-period": _Case(SurfaceXYZFourier, False, 2, "half period"),
-    "tensor-stellsym-nfp1-full-torus": _Case(
-        SurfaceXYZTensorFourier, True, 1, "full torus"
-    ),
-    "tensor-stellsym-nfp3-field-period": _Case(
-        SurfaceXYZTensorFourier, True, 3, "field period", 2, 1
-    ),
-    "tensor-nonsym-nfp2-half-period": _Case(
-        SurfaceXYZTensorFourier, False, 2, "half period"
-    ),
-    "tensor-clamped-stellsym-nfp3-field-period": _Case(
-        SurfaceXYZTensorFourier,
-        True,
-        3,
-        "field period",
-        clamped_dims=(True, False, True),
-    ),
-    "tensor-clamped-nonsym-nfp2-half-period": _Case(
-        SurfaceXYZTensorFourier,
-        False,
-        2,
-        "half period",
-        clamped_dims=(False, True, True),
-    ),
-}
-_CLAMPED_CASES = [name for name, case in _CASES.items() if any(case.clamped_dims)]
+if JAX_IMPORT_ERROR is None:
+    _CASES = {
+        "rz-stellsym-nfp1-full-torus": _Case(SurfaceRZFourier, True, 1, "full torus"),
+        "rz-stellsym-nfp3-field-period": _Case(SurfaceRZFourier, True, 3, "field period"),
+        "rz-nonsym-nfp2-half-period": _Case(SurfaceRZFourier, False, 2, "half period"),
+        "rz-axisymmetric-ntor0": _Case(SurfaceRZFourier, False, 1, "full torus", 3, 0),
+        "xyz-stellsym-nfp1-full-torus": _Case(SurfaceXYZFourier, True, 1, "full torus"),
+        "xyz-stellsym-nfp3-field-period": _Case(SurfaceXYZFourier, True, 3, "field period"),
+        "xyz-nonsym-nfp2-half-period": _Case(SurfaceXYZFourier, False, 2, "half period"),
+        "tensor-stellsym-nfp1-full-torus": _Case(
+            SurfaceXYZTensorFourier, True, 1, "full torus"
+        ),
+        "tensor-stellsym-nfp3-field-period": _Case(
+            SurfaceXYZTensorFourier, True, 3, "field period", 2, 1
+        ),
+        "tensor-nonsym-nfp2-half-period": _Case(
+            SurfaceXYZTensorFourier, False, 2, "half period"
+        ),
+        "tensor-clamped-stellsym-nfp3-field-period": _Case(
+            SurfaceXYZTensorFourier,
+            True,
+            3,
+            "field period",
+            clamped_dims=(True, False, True),
+        ),
+        "tensor-clamped-nonsym-nfp2-half-period": _Case(
+            SurfaceXYZTensorFourier,
+            False,
+            2,
+            "half period",
+            clamped_dims=(False, True, True),
+        ),
+    }
+if JAX_IMPORT_ERROR is None:
+    _CLAMPED_CASES = [name for name, case in _CASES.items() if any(case.clamped_dims)]
 
 # Native method name -> JAX kernel, by the naming rule surface_<native name>.
-_VALUES: dict[str, _Kernel] = {
-    name: getattr(surface_geometry, f"surface_{name}")
-    for name in (
-        "gamma",
-        "gammadash1",
-        "gammadash2",
-        "gammadash1dash1",
-        "gammadash1dash2",
-        "gammadash2dash2",
-        "normal",
-        "unitnormal",
-        "area",
-        "volume",
-    )
-}
+if JAX_IMPORT_ERROR is None:
+    _VALUES: dict[str, _Kernel] = {
+        name: getattr(surface_geometry, f"surface_{name}")
+        for name in (
+            "gamma",
+            "gammadash1",
+            "gammadash2",
+            "gammadash1dash1",
+            "gammadash1dash2",
+            "gammadash2dash2",
+            "normal",
+            "unitnormal",
+            "area",
+            "volume",
+        )
+    }
 
 
 def _second_jacobian(
@@ -125,18 +139,19 @@ def _second_jacobian(
 
 
 # Native coefficient derivative -> (the native quantity it differentiates, JAX transform).
-_DERIVATIVES: dict[str, tuple[str, _Transform]] = {
-    **{
-        f"d{name}_by_dcoeff": (name, jax.jacfwd)
-        for name in _VALUES
-        if name not in ("area", "volume")
-    },
-    "d2normal_by_dcoeffdcoeff": ("normal", _second_jacobian),
-    "darea_by_dcoeff": ("area", jax.grad),
-    "d2area_by_dcoeffdcoeff": ("area", jax.hessian),
-    "dvolume_by_dcoeff": ("volume", jax.grad),
-    "d2volume_by_dcoeffdcoeff": ("volume", jax.hessian),
-}
+if JAX_IMPORT_ERROR is None:
+    _DERIVATIVES: dict[str, tuple[str, _Transform]] = {
+        **{
+            f"d{name}_by_dcoeff": (name, jax.jacfwd)
+            for name in _VALUES
+            if name not in ("area", "volume")
+        },
+        "d2normal_by_dcoeffdcoeff": ("normal", _second_jacobian),
+        "darea_by_dcoeff": ("area", jax.grad),
+        "d2area_by_dcoeffdcoeff": ("area", jax.hessian),
+        "dvolume_by_dcoeff": ("volume", jax.grad),
+        "d2volume_by_dcoeffdcoeff": ("volume", jax.hessian),
+    }
 # Native coefficient VJP -> the native quantity it pulls back through.
 _VJPS = {
     f"d{name}_by_dcoeff_vjp": name
@@ -157,24 +172,26 @@ _RTOL = 1e-12
 _ATOL = 1e-12
 
 
-@partial(jax.jit, static_argnums=(0, 1))
-def _coefficient_derivative(
-    quantity: str, transform: _Transform, spec: SurfaceSpec
-) -> jax.Array:
-    """A coefficient derivative the documented way: a jitted transform with the spec as argument."""
-    return transform(surface_quantity_of_dofs(_VALUES[quantity], spec))(
-        surface_get_dofs(spec)
-    )
+if JAX_IMPORT_ERROR is None:
+    @partial(jax.jit, static_argnums=(0, 1))
+    def _coefficient_derivative(
+        quantity: str, transform: _Transform, spec: SurfaceSpec
+    ) -> jax.Array:
+        """A coefficient derivative the documented way: a jitted transform with the spec as argument."""
+        return transform(surface_quantity_of_dofs(_VALUES[quantity], spec))(
+            surface_get_dofs(spec)
+        )
 
 
-@partial(jax.jit, static_argnums=0)
-def _coefficient_vjp(
-    quantity: str, spec: SurfaceSpec, cotangent: jax.Array
-) -> jax.Array:
-    _, pullback = jax.vjp(
-        surface_quantity_of_dofs(_VALUES[quantity], spec), surface_get_dofs(spec)
-    )
-    return pullback(cotangent)[0]
+if JAX_IMPORT_ERROR is None:
+    @partial(jax.jit, static_argnums=0)
+    def _coefficient_vjp(
+        quantity: str, spec: SurfaceSpec, cotangent: jax.Array
+    ) -> jax.Array:
+        _, pullback = jax.vjp(
+            surface_quantity_of_dofs(_VALUES[quantity], spec), surface_get_dofs(spec)
+        )
+        return pullback(cotangent)[0]
 
 
 def _evaluate(name: str, spec: SurfaceSpec) -> jax.Array:
