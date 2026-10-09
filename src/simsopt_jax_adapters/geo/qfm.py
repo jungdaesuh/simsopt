@@ -9,7 +9,7 @@ and constraint_weight values are explicit traced operands; new values do not rec
 
 from __future__ import annotations
 
-from typing import cast, overload
+from typing import Literal, cast, overload
 
 import jax
 import numpy as np
@@ -62,10 +62,10 @@ def _host_result(result: jax.Array | tuple[jax.Array, jax.Array]):
 
 class JaxQfmResidual(Optimizable):
     """Native QfmResidual value and full surface gradient on JAX.
-
-    Field points and surface-parent notifications follow native semantics.
-    Live public attributes supply every evaluation; snapshots are not cached.
-    """
+    
+        Field points and surface-parent notifications follow native semantics.
+        Live public attributes supply every evaluation; snapshots are not cached.
+        """
 
     def __init__(self, surface: _Surface, biotsavart: JaxBiotSavart):
         self.surface = surface
@@ -95,10 +95,10 @@ class JaxQfmResidual(Optimizable):
 
 class JaxQfmSurface(GSONable):
     """Native QfmSurface methods, SciPy options and ordered result dictionaries.
-
-    Accepts PR 6 surfaces and native Volume, Area and ToroidalFlux labels.
-    SLSQP deliberately constrains the squared label error, as at 9e027eac3.
-    """
+    
+        Accepts PR 6 surfaces and native Volume, Area and ToroidalFlux labels.
+        SLSQP deliberately constrains the squared label error, as at 9e027eac3.
+        """
 
     def __init__(self, biotsavart: JaxBiotSavart, surface: _Surface, label: _Label, targetlabel):
         self.biotsavart = biotsavart
@@ -167,6 +167,15 @@ class JaxQfmSurface(GSONable):
         _ = (value - host_tree(self.targetlabel))**2
         return explicit_device_array(value, dtype=np.float64, reference=spec.surface.quadpoints_phi)
 
+    @overload
+    def qfm_label_constraint(self, x, derivatives: Literal[0] = 0) -> np.float64: ...
+
+    @overload
+    def qfm_label_constraint(self, x, derivatives: Literal[1]) -> tuple[np.float64, np.ndarray]: ...
+
+    @overload
+    def qfm_label_constraint(self, x, derivatives: int = 0) -> np.float64 | tuple[np.float64, np.ndarray]: ...
+
     def qfm_label_constraint(self, x, derivatives=0):
         assert derivatives in [0, 1]
         self.surface.x = x
@@ -174,20 +183,38 @@ class JaxQfmSurface(GSONable):
         function = qfm_label_constraint_value_and_grad if derivatives else qfm_label_constraint
         return _host_result(function(label, self._target(label), self._label_value(label)))
 
+    @overload
+    def qfm_objective(self, x, derivatives: Literal[0] = 0) -> np.float64: ...
+
+    @overload
+    def qfm_objective(self, x, derivatives: Literal[1]) -> tuple[np.float64, np.ndarray]: ...
+
+    @overload
+    def qfm_objective(self, x, derivatives: int = 0) -> np.float64 | tuple[np.float64, np.ndarray]: ...
+
     def qfm_objective(self, x, derivatives=0):
         assert derivatives in [0, 1]
         self.surface.x = x
         function = qfm_residual_value_and_grad if derivatives else qfm_residual
         return _host_result(function(self.qfm._spec()))
 
+    @overload
+    def qfm_penalty_constraints(self, x, derivatives: Literal[0] = 0, constraint_weight: float = 1) -> np.float64: ...
+
+    @overload
+    def qfm_penalty_constraints(self, x, derivatives: Literal[1], constraint_weight: float = 1) -> tuple[np.float64, np.ndarray]: ...
+
+    @overload
+    def qfm_penalty_constraints(self, x, derivatives: int = 0, constraint_weight: float = 1) -> np.float64 | tuple[np.float64, np.ndarray]: ...
+
     def qfm_penalty_constraints(self, x, derivatives=0, constraint_weight: float = 1):
         assert derivatives in [0, 1]
         self.surface.x = x
         spec = self.qfm._spec()
         label = self._label_spec()
-        constraint_weight = explicit_device_array(constraint_weight, dtype=np.float64, reference=label.surface.quadpoints_phi)
+        placed_constraint_weight = explicit_device_array(constraint_weight, dtype=np.float64, reference=label.surface.quadpoints_phi)
         function = qfm_penalty_constraints_value_and_grad if derivatives else qfm_penalty_constraints
-        return _host_result(function(spec, label, self._target(label), constraint_weight, self._label_value(label)))
+        return _host_result(function(spec, label, self._target(label), placed_constraint_weight, self._label_value(label)))
 
     def minimize_qfm_penalty_constraints_LBFGS(self, tol=1e-3, maxiter=1000, constraint_weight=1.):
         def objective(x):

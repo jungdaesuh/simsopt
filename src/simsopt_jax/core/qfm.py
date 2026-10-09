@@ -14,9 +14,11 @@ from typing import Protocol, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from simsopt_jax.backend import register_backend_cache_clear
 from simsopt_jax.pytree import pytree_dataclass
+from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 from .field import (
     grouped_biot_savart_A_from_spec,
@@ -47,7 +49,7 @@ class QfmSpec:
 
     surface: SurfaceSpec
     coils: GroupedCoilSetSpec
-    points: jax.Array
+    points: jax.Array | np.ndarray
 
 
 @pytree_dataclass(data=("surface", "coils", "idx", "points"), meta=("kind",))
@@ -58,7 +60,7 @@ class QfmLabelSpec:
     coils: GroupedCoilSetSpec | None
     idx: jax.Array
     kind: str
-    points: jax.Array | None = None
+    points: jax.Array | np.ndarray | None = None
 
 
 def _norm(vectors: jax.Array) -> jax.Array:
@@ -82,7 +84,7 @@ def _residual_normal(spec: QfmSpec) -> jax.Array:
 
 
 @jax.jit
-def qfm_residual(spec: QfmSpec) -> jax.Array:
+def _jitted_qfm_residual(spec: QfmSpec) -> jax.Array:
     """Native QfmResidual.J; zero field/normal remains non-finite."""
     normal = _residual_normal(spec)
     field = cast(jax.Array, grouped_biot_savart_B_from_spec(spec.points, spec.coils)).reshape(normal.shape)
@@ -90,7 +92,7 @@ def qfm_residual(spec: QfmSpec) -> jax.Array:
 
 
 @jax.jit
-def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
+def _jitted_qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
     """Value and native full-coefficient gradient, including fixed DOFs."""
     normal = _residual_normal(spec)
     field, field_derivative = grouped_biot_savart_B_and_dB_from_spec(spec.points, spec.coils)
@@ -125,7 +127,7 @@ def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
 
 
 @jax.jit
-def qfm_label(spec: QfmLabelSpec) -> jax.Array:
+def _jitted_qfm_label(spec: QfmLabelSpec) -> jax.Array:
     """Native label on its own surface grid and current flux-field points."""
     if spec.kind == "volume":
         return surface_volume(spec.surface)
@@ -175,8 +177,8 @@ def _label_value_and_grad(spec: QfmLabelSpec) -> tuple[jax.Array, jax.Array]:
 
 
 @jax.jit
-def qfm_label_constraint(
-    spec: QfmLabelSpec, targetlabel: jax.Array, label_value: jax.Array | None = None,
+def _jitted_qfm_label_constraint(
+    spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> jax.Array:
     """Squared label error; optional host value preserves native rounding.
 
@@ -188,8 +190,8 @@ def qfm_label_constraint(
 
 
 @jax.jit
-def qfm_label_constraint_value_and_grad(
-    spec: QfmLabelSpec, targetlabel: jax.Array, label_value: jax.Array | None = None,
+def _jitted_qfm_label_constraint_value_and_grad(
+    spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     value, gradient = _label_value_and_grad(spec)
     value = value if label_value is None else label_value
@@ -198,21 +200,73 @@ def qfm_label_constraint_value_and_grad(
 
 
 @jax.jit
-def qfm_penalty_constraints(
-    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array, constraint_weight: jax.Array,
+def _jitted_qfm_penalty_constraints(
+    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
 ) -> jax.Array:
     return qfm_residual(spec) + constraint_weight * qfm_label_constraint(label, targetlabel, label_value)
 
 
 @jax.jit
-def qfm_penalty_constraints_value_and_grad(
-    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array, constraint_weight: jax.Array,
+def _jitted_qfm_penalty_constraints_value_and_grad(
+    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     value, gradient = qfm_residual_value_and_grad(spec)
     constraint, label_gradient = qfm_label_constraint_value_and_grad(label, targetlabel, label_value)
     return value + constraint_weight * constraint, gradient + constraint_weight * label_gradient
+
+
+def qfm_residual(spec: QfmSpec) -> jax.Array:
+    """Snapshot caller-owned host leaves before asynchronous QFM dispatch."""
+    inputs = snapshot_host_tree((spec,))
+    return _jitted_qfm_residual(*inputs)
+
+
+def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
+    """Snapshot caller-owned host leaves before asynchronous QFM dispatch."""
+    inputs = snapshot_host_tree((spec,))
+    return _jitted_qfm_residual_value_and_grad(*inputs)
+
+
+def qfm_label(spec: QfmLabelSpec) -> jax.Array:
+    """Snapshot caller-owned host leaves before asynchronous QFM dispatch."""
+    inputs = snapshot_host_tree((spec,))
+    return _jitted_qfm_label(*inputs)
+
+
+def qfm_label_constraint(
+    spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
+) -> jax.Array:
+    """Snapshot caller-owned host leaves before asynchronous QFM dispatch."""
+    inputs = snapshot_host_tree((spec, targetlabel, label_value))
+    return _jitted_qfm_label_constraint(*inputs)
+
+
+def qfm_label_constraint_value_and_grad(
+    spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Snapshot caller-owned host leaves before asynchronous QFM dispatch."""
+    inputs = snapshot_host_tree((spec, targetlabel, label_value))
+    return _jitted_qfm_label_constraint_value_and_grad(*inputs)
+
+
+def qfm_penalty_constraints(
+    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
+    label_value: jax.Array | None = None,
+) -> jax.Array:
+    """Snapshot caller-owned host leaves before asynchronous QFM dispatch."""
+    inputs = snapshot_host_tree((spec, label, targetlabel, constraint_weight, label_value))
+    return _jitted_qfm_penalty_constraints(*inputs)
+
+
+def qfm_penalty_constraints_value_and_grad(
+    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
+    label_value: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Snapshot caller-owned host leaves before asynchronous QFM dispatch."""
+    inputs = snapshot_host_tree((spec, label, targetlabel, constraint_weight, label_value))
+    return _jitted_qfm_penalty_constraints_value_and_grad(*inputs)
 
 
 class _CompiledFunctionCache(Protocol):
@@ -223,9 +277,9 @@ def _clear_compiled_qfm() -> None:
     # Field kernel tuning is read while tracing: invalidate enclosing QFM
     # programs too when the backend changes its settings.
     for function in (
-        qfm_residual, qfm_residual_value_and_grad, qfm_label,
-        qfm_label_constraint, qfm_label_constraint_value_and_grad,
-        qfm_penalty_constraints, qfm_penalty_constraints_value_and_grad,
+        _jitted_qfm_residual, _jitted_qfm_residual_value_and_grad, _jitted_qfm_label,
+        _jitted_qfm_label_constraint, _jitted_qfm_label_constraint_value_and_grad,
+        _jitted_qfm_penalty_constraints, _jitted_qfm_penalty_constraints_value_and_grad,
     ):
         cast(_CompiledFunctionCache, function).clear_cache()
 

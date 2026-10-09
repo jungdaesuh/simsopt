@@ -8,7 +8,7 @@ from jax_test_support import (
 
 from contextlib import ExitStack, contextmanager
 from copy import copy
-from typing import Iterator
+from typing import Iterator, cast
 
 import jax
 import numpy as np
@@ -84,7 +84,7 @@ def test_values_gradients_and_own_label_grid_match_native(surface_class, stellsy
             expected = getattr(native, name)(x, derivatives=derivatives)
             actual = getattr(port, name)(x, derivatives=derivatives)
             if derivatives:
-                for a, e in zip(actual, expected, strict=True):
+                for a, e in zip(cast(tuple, actual), expected, strict=True):
                     _assert_pair(a, e)
             else:
                 _assert_pair(actual, expected)
@@ -181,7 +181,7 @@ def test_flux_gradient_uses_the_current_label_field_points(jax_label_field, chan
     for name in ("qfm_label_constraint", "qfm_penalty_constraints"):
         expected = getattr(native, name)(native.surface.x, derivatives=1)
         actual = getattr(port, name)(port.surface.x, derivatives=1)
-        for a, e in zip(actual, expected, strict=True):
+        for a, e in zip(cast(tuple, actual), expected, strict=True):
             _assert_pair(a, e)
 
 
@@ -239,7 +239,7 @@ def test_numpy_float_target_keeps_native_nonfinite_results(method, derivatives):
         expected = getattr(native, method)(native.surface.x, derivatives=derivatives)
         actual = getattr(port, method)(port.surface.x, derivatives=derivatives)
     if derivatives:
-        for a, e in zip(actual, expected, strict=True):
+        for a, e in zip(cast(tuple, actual), expected, strict=True):
             _assert_pair(a, e)
     else:
         _assert_pair(actual, expected)
@@ -340,7 +340,7 @@ def test_public_label_target_and_copy_are_live():
     for solver in (port, copied):
         actual = solver.qfm_penalty_constraints(solver.surface.x, 1)
         expected = native.qfm_penalty_constraints(native.surface.x, 1)
-        for a, e in zip(actual, expected, strict=True):
+        for a, e in zip(cast(tuple, actual), expected, strict=True):
             _assert_pair(a, e)
 
 
@@ -389,7 +389,7 @@ def test_jax_flux_label_uses_explicit_host_boundary(parity_lane):
                 expected = native.qfm_label_constraint(native.surface.x, derivatives)
                 actual = port.qfm_label_constraint(port.surface.x, derivatives)
                 if derivatives:
-                    for a, e in zip(actual, expected, strict=True):
+                    for a, e in zip(cast(tuple, actual), expected, strict=True):
                         _assert_pair(a, e)
                 else:
                     _assert_pair(actual, expected)
