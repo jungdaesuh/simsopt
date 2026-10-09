@@ -62,7 +62,9 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
         bs (JaxBiotSavart): Field for the ratio; also a parent so its exclusive coils
             enter x and invalidate caches.
         sDIM (int): Half of each auxiliary grid dimension; grid spans one field period.
+            Default: 20.
         quasi_poloidal (bool): Average over theta when true, otherwise over phi.
+            Default: False.
     """
 
     def __init__(
