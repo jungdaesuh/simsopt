@@ -31,7 +31,6 @@
     "tests/unittest_jax_support.py",
     "examples/2_Intermediate/stage_two_optimization.py",
     "tests/field/test_stage_two_biotsavart_jax.py",
-    "tests/jax",
     "tests/geo/test_surface_geometry_jax.py"
   ],
   "extraPaths": [
