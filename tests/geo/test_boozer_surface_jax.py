@@ -61,7 +61,10 @@ try:
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_problem import boozer_problem
     from simsopt_jax_adapters.geo import boozer_surface as jax_boozer_surface
-    from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerResidual, JaxBoozerSurface
+    from simsopt_jax_adapters.geo.boozer_surface import (
+        JaxBoozerResidual,
+        JaxBoozerSurface,
+    )
 except ImportError:
     if JAX_IMPORT_ERROR is None:
         raise
