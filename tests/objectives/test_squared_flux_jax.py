@@ -1,25 +1,34 @@
 """JaxSquaredFlux and the JAX integral_BdotN against native SquaredFlux."""
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    from core.test_buffer_ownership import _host_array, make_execution_gate
+    import jax
+    import jax.numpy as jnp
+    import simsoptpp as sopp
+    from simsopt._core.derivative import Derivative
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
+    from simsopt.geo import CurveXYZFourier, SurfaceRZFourier, create_equally_spaced_curves
+    from simsopt.objectives import SquaredFlux
+    from simsopt_jax.core.integral_bdotn import integral_BdotN
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.objectives import JaxSquaredFlux
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
-import simsoptpp as sopp
-from simsopt._core.derivative import Derivative
-from simsopt._core.optimizable import Optimizable
-from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
-from simsopt.geo import CurveXYZFourier, SurfaceRZFourier, create_equally_spaced_curves
-from simsopt.objectives import SquaredFlux
-from simsopt_jax.core.integral_bdotn import integral_BdotN
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.objectives import JaxSquaredFlux
 
 _DEFINITIONS = ("quadratic flux", "normalized", "local")
 _QA_INPUT = Path(__file__).resolve().parents[1] / "test_files" / "input.LandremanPaul2021_QA"
@@ -98,6 +107,40 @@ def _objectives(definition, target_kind="none", *, shared_dofs=False):
 
 
 class TestSquaredFluxJax(JaxTestCase):
+    def test_integral_bdotn_snapshots_numpy_before_pending_evaluation(self):
+        """All flux definitions retain caller field, target and normal buffers."""
+        for definition in _DEFINITIONS:
+            for operand_index in range(3):
+                for misaligned in (False, True):
+                    with self.subTest(definition=definition, operand=operand_index, misaligned=misaligned), self.case():
+                        self._case_integral_snapshot(definition, operand_index, misaligned)
+
+    def _case_integral_snapshot(self, definition, operand_index, misaligned):
+        """Mutate one host operand while a warmed flux integral waits for device work."""
+        host_inputs = [_host_array(shape, misaligned=misaligned) for shape in ((32, 32, 3), (32, 32), (32, 32, 3))]
+        expected = np.asarray(integral_BdotN(host_inputs[0], host_inputs[1], host_inputs[2], definition)).copy()
+        inputs: list[np.ndarray | jax.Array] = [jnp.asarray(value) for value in host_inputs]
+        inputs[operand_index] = host_inputs[operand_index]
+        gate_index = 2 if operand_index == 0 else 0
+        gate = make_execution_gate()
+        gate(inputs[gate_index]).block_until_ready()
+        inputs[gate_index] = gate(inputs[gate_index])
+        result = integral_BdotN(inputs[0], inputs[1], inputs[2], definition)
+        self.assertFalse(result.is_ready(), "flux integral finished before caller mutation")
+        host_inputs[operand_index][...] = -7.0
+        np.testing.assert_array_equal(result.block_until_ready(), expected)
+
+    def test_integral_bdotn_supports_nested_jit_and_grad(self):
+        """Static definition specialization and field derivatives work inside outer jit."""
+        B = jnp.asarray(_host_array((2, 3, 3)))
+        target = jnp.zeros((2, 3))
+        normal = jnp.asarray(_host_array((2, 3, 3)))
+        for definition in _DEFINITIONS:
+            with self.subTest(definition=definition):
+                evaluate = lambda field: integral_BdotN(field, target, normal, definition)
+                np.testing.assert_array_equal(jax.jit(evaluate)(B), evaluate(B))
+                np.testing.assert_allclose(jax.jit(jax.grad(evaluate))(B), jax.grad(evaluate)(B), rtol=1e-14, atol=1e-14)
+
     def test_integral_bdotn_matches_cpp(self):
         """All flux definitions and target forms match the native C++ integral."""
         for case_id_0, (target_kind, empty) in zip(["zero_target", "array_target", "empty_target"], [("none", False), ("array", False), ("none", True)], strict=True):
