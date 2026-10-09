@@ -215,9 +215,13 @@ class JaxLpCurveForce(_LpObjective):
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
         source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
         source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
         p: float, dimensionless exponent captured at construction.
+            Default: 2.0.
         threshold: float, density threshold in MN/m (force) or MN (torque), captured at construction.
+            Default: 0.0.
         downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     _native_name = "LpCurveForce"
@@ -259,9 +263,13 @@ class JaxLpCurveTorque(_LpObjective):
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
         source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
         source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
         p: float, dimensionless exponent captured at construction.
+            Default: 2.0.
         threshold: float, density threshold in MN/m (force) or MN (torque), captured at construction.
+            Default: 0.0.
         downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     _native_name = "LpCurveTorque"
@@ -316,7 +324,9 @@ class JaxSquaredMeanForce(_SquaredMeanObjective):
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
         source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
         source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
         downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
@@ -355,7 +365,9 @@ class JaxSquaredMeanTorque(_SquaredMeanObjective):
         target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
         source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
         source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
         downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
@@ -392,6 +404,7 @@ class JaxB2Energy(Optimizable):
     Args:
         target_coils: list of RegularizedCoil, energy coils with a common quadrature count.
         downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coils, downsample=1):
@@ -446,6 +459,7 @@ class JaxNetFluxes(Optimizable):
         target_coil: Coil object, target flux loop; its current does not enter the flux.
         source_coils: Coil or list of Coil, external sources at full quadrature; the target is removed and membership is captured.
         downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coil, source_coils, downsample=1):
