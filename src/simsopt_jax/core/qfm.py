@@ -274,7 +274,7 @@ def qfm_label_constraint(
     Args:
         spec (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
-        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
+        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; default None evaluates the immutable label.
 
     Returns:
         jax.Array: Scalar shape () squared error in squared label units."""
@@ -290,7 +290,7 @@ def qfm_label_constraint_value_and_grad(
     Args:
         spec (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
-        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
+        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; default None evaluates the immutable label.
 
     Returns:
         tuple[jax.Array, jax.Array]: Scalar squared error shape () and full coefficient gradient shape (ndofs,), in squared label units per meter."""
@@ -309,7 +309,7 @@ def qfm_penalty_constraints(
         label (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
         constraint_weight (jax.Array | numpy.ndarray): Scalar shape () coefficient multiplying the squared label error, in the native constraint units.
-        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
+        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; default None evaluates the immutable label.
 
     Returns:
         jax.Array: Scalar shape () native scalarized objective."""
@@ -328,7 +328,7 @@ def qfm_penalty_constraints_value_and_grad(
         label (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
         constraint_weight (jax.Array | numpy.ndarray): Scalar shape () coefficient multiplying the squared label error, in the native constraint units.
-        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
+        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; default None evaluates the immutable label.
 
     Returns:
         tuple[jax.Array, jax.Array]: Objective shape () and full surface-coefficient gradient shape (ndofs,), including fixed DOFs; units follow the native scalarization."""
