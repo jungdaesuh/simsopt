@@ -18,7 +18,7 @@ compute their own geometry and VJPs with implicit transfers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache, partial
+from functools import lru_cache
 
 import jax
 import jax.numpy as jnp
@@ -113,14 +113,10 @@ def _tangent_derivative(curve, grad_gammadash, grad_gammadashdash):
 @lru_cache(maxsize=64)
 def _quadrature_classes(sample_counts: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
     """Curve indices grouped by sample count, classes and members in curve order."""
-    class_by_count: dict[int, int] = {}
-    curve_class = tuple(
-        class_by_count.setdefault(count, len(class_by_count)) for count in sample_counts
-    )
-    return tuple(
-        tuple(index for index, cls in enumerate(curve_class) if cls == target)
-        for target in range(len(class_by_count))
-    )
+    members_by_count: dict[int, list[int]] = {}
+    for index, count in enumerate(sample_counts):
+        members_by_count.setdefault(count, []).append(index)
+    return tuple(tuple(members) for members in members_by_count.values())
 
 
 def _class_stacked_geometry(curves, class_members, downsample):
@@ -379,19 +375,20 @@ def _curve_pairs(num_curves: int, num_basecurves: int):
 def _curve_pair_plan(sample_counts: tuple[int, ...], num_basecurves: int) -> _CurvePairPlan:
     pairs = _curve_pairs(len(sample_counts), num_basecurves)
     class_members = _quadrature_classes(sample_counts)
-    curve_class = {
-        index: cls for cls, members in enumerate(class_members) for index in members
-    }
-    row_in_class = {
-        index: row for members in class_members for row, index in enumerate(members)
+    class_positions = {
+        index: (cls, row)
+        for cls, members in enumerate(class_members)
+        for row, index in enumerate(members)
     }
     batch_rows: dict[tuple[int, int], tuple[list[int], list[int], list[tuple[int, int]]]] = {}
     for first, second in pairs:
+        first_class, first_row = class_positions[first]
+        second_class, second_row = class_positions[second]
         first_rows, second_rows, batch_pairs = batch_rows.setdefault(
-            (curve_class[first], curve_class[second]), ([], [], [])
+            (first_class, second_class), ([], [], [])
         )
-        first_rows.append(row_in_class[first])
-        second_rows.append(row_in_class[second])
+        first_rows.append(first_row)
+        second_rows.append(second_row)
         batch_pairs.append((first, second))
     return _CurvePairPlan(
         class_members=class_members,
@@ -440,21 +437,10 @@ def _curve_pair_penalty_total(class_gammas, class_gammadashes, minimum_distance,
     return total
 
 
-@partial(jax.jit, static_argnames=("plan",))
-def _curve_pair_penalty(class_gammas, class_gammadashes, minimum_distance, batch_candidates, *, plan):
-    return _curve_pair_penalty_total(
-        class_gammas, class_gammadashes, minimum_distance, batch_candidates, plan
-    )
-
-
-@partial(jax.jit, static_argnames=("plan",))
-def _curve_pair_penalty_grad(class_gammas, class_gammadashes, minimum_distance, batch_candidates, *, plan):
-    return jax.grad(
-        lambda gammas, gammadashes: _curve_pair_penalty_total(
-            gammas, gammadashes, minimum_distance, batch_candidates, plan
-        ),
-        argnums=(0, 1),
-    )(class_gammas, class_gammadashes)
+_curve_pair_penalty = jax.jit(_curve_pair_penalty_total, static_argnames=("plan",))
+_curve_pair_penalty_grad = jax.jit(
+    jax.grad(_curve_pair_penalty_total, argnums=(0, 1)), static_argnames=("plan",)
+)
 
 
 class JaxCurveCurveDistance(Optimizable):
