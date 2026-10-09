@@ -15,7 +15,48 @@ cross-sections for AspectRatio, recompilation, implicit transfers, zero fields
 and unsupported inputs.
 """
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    import simsoptpp as sopp
+    from simsopt.configs import get_data
+    from simsopt.field.biotsavart import BiotSavart
+    from simsopt.geo.boozersurface import BoozerSurface
+    from simsopt.geo.surfaceobjectives import (
+        Area,
+        AspectRatio,
+        PrincipalCurvature,
+        ToroidalFlux,
+        Volume,
+        boozer_surface_residual,
+    )
+    from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+    from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+    from simsopt_jax.backend.dtypes import explicit_device_array
+    from simsopt_jax.core.boozer_problem import (
+        BoozerProblem,
+        boozer_exact_constraints,
+        boozer_exact_residual,
+        boozer_penalty_constraints,
+    )
+    from simsopt_jax.core.boozer_problem import (
+        boozer_surface_residual as jax_boozer_surface_residual,
+    )
+    from simsopt_jax.core.boozer_residual import BoozerPoints, boozer_least_squares
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.geo.boozer_problem import (
+        boozer_exact_residual_rows,
+        boozer_problem,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 from unittest_jax_support import (
     assert_matches_native,
@@ -28,48 +69,17 @@ from unittest_jax_support import (
 
 from dataclasses import dataclass, replace
 
-import jax
 import numpy as np
-import simsoptpp as sopp
 
-from simsopt.configs import get_data
-from simsopt.field.biotsavart import BiotSavart
-from simsopt.geo.boozersurface import BoozerSurface
-from simsopt.geo.surfaceobjectives import (
-    Area,
-    AspectRatio,
-    PrincipalCurvature,
-    ToroidalFlux,
-    Volume,
-    boozer_surface_residual,
-)
-from simsopt.geo.surfacerzfourier import SurfaceRZFourier
-from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
-from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-from simsopt_jax.backend.dtypes import explicit_device_array
-from simsopt_jax.core.boozer_problem import (
-    BoozerProblem,
-    boozer_exact_constraints,
-    boozer_exact_residual,
-    boozer_penalty_constraints,
-)
-from simsopt_jax.core.boozer_problem import (
-    boozer_surface_residual as jax_boozer_surface_residual,
-)
-from simsopt_jax.core.boozer_residual import BoozerPoints, boozer_least_squares
-from simsopt_jax.runtime.host_boundary import disallow_host_transfers
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.geo.boozer_problem import (
-    boozer_exact_residual_rows,
-    boozer_problem,
-)
 
-_NativeSurface = SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier
-_SURFACE_CLASSES = {
-    "rz": SurfaceRZFourier,
-    "xyz": SurfaceXYZFourier,
-    "tensor": SurfaceXYZTensorFourier,
-}
+if JAX_IMPORT_ERROR is None:
+    _NativeSurface = SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier
+if JAX_IMPORT_ERROR is None:
+    _SURFACE_CLASSES = {
+        "rz": SurfaceRZFourier,
+        "xyz": SurfaceXYZFourier,
+        "tensor": SurfaceXYZTensorFourier,
+    }
 _IOTA = -0.41
 _G = 1.3
 # Round-off bound relative to the largest native entry: native and JAX sum
