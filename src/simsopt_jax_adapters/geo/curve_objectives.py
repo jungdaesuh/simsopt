@@ -1,6 +1,6 @@
 """JAX coil-geometry penalties as drop-in native Optimizables.
 
-Each class mirrors the objective of the same name without ``JAX`` in
+Each class mirrors the native objective named by removing the ``Jax`` prefix in
 :mod:`simsopt.geo.curveobjectives`: same constructor arguments, value,
 dependencies, ``Derivative`` (fixed and free partials of the curve DOFs) and
 ``shortest_distance``. The curves evaluate their own geometry

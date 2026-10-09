@@ -47,8 +47,11 @@ _squared_flux_value_and_coil_cotangents = jax.jit(
 class JaxSquaredFlux(Optimizable):
     """JAX-backed native SquaredFlux for a fixed surface.
 
-    Construction sets field points and captures surface geometry. Surface DOF
-    changes require rebuilding; target and definition are read each time.
+    Construction sets field points and captures the sampled points and normals,
+    including their quadrature grid. A full surface-DOF digest rejects later DOF
+    edits; quadrature and other geometry edits that leave those DOFs unchanged
+    are not detected. Rebuild after any surface-geometry or quadrature change.
+    Target and definition are read at every evaluation.
 
     Args:
         surface: Surface object, fixed quadrature geometry in m.
