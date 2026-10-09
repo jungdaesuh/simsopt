@@ -1,6 +1,7 @@
 """Float64 QFM kernels with the quadrature and singularities of native simsopt.
 
-Inputs are immutable device snapshots. Points are explicit because native
+Public kernels snapshot caller-owned host arrays before dispatch and retain
+device arrays. Points are explicit because native
 QfmResidual and ToroidalFlux use their fields' current point buffers, including externally
 changed points. Surface derivatives use the native position/normal VJP
 formulation, rather than differentiating through the field's optimizer graph.
