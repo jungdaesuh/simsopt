@@ -33,7 +33,8 @@
     "tests/field/test_stage_two_biotsavart_jax.py",
     "tests/geo/test_surface_geometry_jax.py",
     "examples/1_Simple/qfm_jax.py",
-    "tests/geo/test_qfm_buffer_ownership.py"
+    "tests/geo/test_qfm_buffer_ownership.py",
+    "tests/geo/test_qfm_jax.py"
   ],
   "extraPaths": [
     "src",
