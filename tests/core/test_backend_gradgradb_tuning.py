@@ -1,9 +1,15 @@
 """Independent Hessian reverse-tile configuration regression tests."""
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 from unittest import mock
 import os
-from simsopt_jax.backend.runtime import get_field_kernel_tuning
+
+try:
+    import simsopt_jax  # noqa: F401
+    from simsopt_jax.backend.runtime import get_field_kernel_tuning
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 class TestBackendGradgradbTuning(JaxTestCase):
