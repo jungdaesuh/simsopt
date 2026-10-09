@@ -1030,9 +1030,11 @@ class TestBoozerResidualJax(JaxTestCase):
 
         def jacobian(at):
             setup.surface.set_dofs(at[:-2])
-            return _outputs(boozer_surface_residual(
-                setup.surface, at[-2], at[-1], setup.bs, derivatives=1
-            ))[1]
+            return _outputs(
+                boozer_surface_residual(
+                    setup.surface, at[-2], at[-1], setup.bs, derivatives=1
+                )
+            )[1]
 
         for function, analytic in (
             (gradient, hessian @ direction),
