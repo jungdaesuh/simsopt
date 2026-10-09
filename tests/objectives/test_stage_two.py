@@ -1,54 +1,63 @@
 """The fused Stage-II objective against the native composite objective."""
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    import jax.numpy as jnp
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
+    from simsopt.geo import (
+        CurveCurveDistance,
+        CurveLength,
+        CurveSurfaceDistance,
+        CurveXYZFourier,
+        LpCurveCurvature,
+        MeanSquaredCurvature,
+        SurfaceRZFourier,
+        create_equally_spaced_curves,
+    )
+    from simsopt.objectives import QuadraticPenalty, SquaredFlux
+    from simsopt_jax.objectives import (
+        StageTwoObjectiveConfig,
+        fused_stage_two_objective,
+        fused_stage_two_values,
+        make_stage_two_problem,
+        stage_two_geometric_penalty,
+    )
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.objectives import JaxSquaredFlux
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 from dataclasses import replace
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-from simsopt._core.optimizable import Optimizable
-from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
-from simsopt.geo import (
-    CurveCurveDistance,
-    CurveLength,
-    CurveSurfaceDistance,
-    CurveXYZFourier,
-    LpCurveCurvature,
-    MeanSquaredCurvature,
-    SurfaceRZFourier,
-    create_equally_spaced_curves,
-)
-from simsopt.objectives import QuadraticPenalty, SquaredFlux
-from simsopt_jax.objectives import (
-    StageTwoObjectiveConfig,
-    fused_stage_two_objective,
-    fused_stage_two_values,
-    make_stage_two_problem,
-    stage_two_geometric_penalty,
-)
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.objectives import JaxSquaredFlux
 
 _QA_INPUT = Path(__file__).resolve().parents[1] / "test_files" / "input.LandremanPaul2021_QA"
 _NCOILS = 3
 # Thresholds that make every penalty active at the perturbed test state.
-_ACTIVE = StageTwoObjectiveConfig(
-    num_basecurves=_NCOILS,
-    length_weight=1e-3,
-    curve_curve_minimum_distance=0.6,
-    curve_curve_weight=10.0,
-    curve_surface_minimum_distance=0.4,
-    curve_surface_weight=2.0,
-    curvature_threshold=1.0,
-    curvature_weight=1e-2,
-    mean_squared_curvature_threshold=1.0,
-    mean_squared_curvature_weight=1e-2,
-)
+if JAX_IMPORT_ERROR is None:
+    _ACTIVE = StageTwoObjectiveConfig(
+        num_basecurves=_NCOILS,
+        length_weight=1e-3,
+        curve_curve_minimum_distance=0.6,
+        curve_curve_weight=10.0,
+        curve_surface_minimum_distance=0.4,
+        curve_surface_weight=2.0,
+        curvature_threshold=1.0,
+        curvature_weight=1e-2,
+        mean_squared_curvature_threshold=1.0,
+        mean_squared_curvature_weight=1e-2,
+    )
 
 
 def _surface() -> SurfaceRZFourier:
@@ -133,9 +142,10 @@ def _native_gradient(native: Optimizable, field: JaxBiotSavart) -> np.ndarray:
     return np.asarray(native.dJ(partials=True)(field))
 
 
-_value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
-_objective = jax.jit(fused_stage_two_objective)
-_values = jax.jit(fused_stage_two_values)
+if JAX_IMPORT_ERROR is None:
+    _value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+    _objective = jax.jit(fused_stage_two_objective)
+    _values = jax.jit(fused_stage_two_values)
 
 
 
