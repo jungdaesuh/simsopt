@@ -28,7 +28,43 @@ residuals (native 9e-14, JAX 6e-14 on these problems), below which native's
 decisions follow round-off.
 """
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    import jax.numpy as jnp
+    from simsopt.configs import get_data
+    from simsopt.field.biotsavart import BiotSavart
+    from simsopt.geo.boozersurface import BoozerSurface
+    from simsopt.geo.surfaceobjectives import (
+        Area,
+        AspectRatio,
+        BoozerResidual,
+        Iotas,
+        MajorRadius,
+        NonQuasiSymmetricRatio,
+        PrincipalCurvature,
+        ToroidalFlux,
+        Volume,
+        boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
+        boozer_surface_residual_dB,
+    )
+    from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+    from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+    from simsopt.objectives.utilities import forward_backward
+    from simsopt_jax.core.boozer_problem import boozer_penalty_residual
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.geo.boozer_problem import boozer_problem
+    from simsopt_jax_adapters.geo import boozer_surface as jax_boozer_surface
+    from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerResidual, JaxBoozerSurface
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 from unittest_jax_support import (
     assert_matches_native,
@@ -45,36 +81,8 @@ from contextlib import ExitStack
 from unittest import mock
 from typing import cast
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
-from simsopt.configs import get_data
-from simsopt.field.biotsavart import BiotSavart
-from simsopt.geo.boozersurface import BoozerSurface
-from simsopt.geo.surfaceobjectives import (
-    Area,
-    AspectRatio,
-    BoozerResidual,
-    Iotas,
-    MajorRadius,
-    NonQuasiSymmetricRatio,
-    PrincipalCurvature,
-    ToroidalFlux,
-    Volume,
-    boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
-    boozer_surface_residual_dB,
-)
-from simsopt.geo.surfacerzfourier import SurfaceRZFourier
-from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
-from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-from simsopt.objectives.utilities import forward_backward
-from simsopt_jax.core.boozer_problem import boozer_penalty_residual
-from simsopt_jax.runtime.host_boundary import disallow_host_transfers
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.geo.boozer_problem import boozer_problem
-from simsopt_jax_adapters.geo import boozer_surface as jax_boozer_surface
-from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerResidual, JaxBoozerSurface
 
 _IOTA = -0.406
 _RTOL = 1e-12

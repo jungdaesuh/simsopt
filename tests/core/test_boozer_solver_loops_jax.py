@@ -11,18 +11,24 @@ step past it), on each lane.
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    import jax.numpy as jnp
+    from simsopt_jax.core import boozer_solvers
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 
 from unittest_jax_support import host_array, parity_default_device
 
 import inspect
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
-from simsopt_jax.core import boozer_solvers
 
 _START = np.array([1.0, 0.0])
 _TOL = 1e-12
