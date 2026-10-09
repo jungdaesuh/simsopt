@@ -852,10 +852,54 @@ class TestSingleStageExactJax(JaxTestCase):
             evaluator.evaluate(evaluator.initial_dofs, state)
 
     def test_invalid_free_layout_and_failed_seed_are_rejected(self):
-        """Construction rejects unsupported length curves, failed seeds and non-exact surfaces."""
+        """Evaluation checks shape; construction rejects invalid seeds, fields and length curves."""
         evaluator, boozer, _, _ = _problem()
         with self.assertRaisesRegex(ValueError, "expected coil DOFs of shape"):
             evaluator.evaluate(evaluator.initial_dofs[:-1], evaluator.initial_state)
+        field = JaxBiotSavart(boozer.biotsavart.coils)
+        invalid_formulation = copy(boozer)
+        invalid_formulation.boozer_type = "ls"
+        with self.assertRaisesRegex(ValueError, "requires an exact BoozerSurface"):
+            JaxExactSingleStage.from_boozer_surface(
+                invalid_formulation,
+                field,
+                [],
+                iota_target=-0.406,
+                major_radius_target=1.0,
+                length_target=0.0,
+            )
+        missing_G = copy(boozer)
+        missing_G.res = dict(boozer.res, G=None)
+        with self.assertRaisesRegex(
+            ValueError, "requires G as an explicit inner variable"
+        ):
+            JaxExactSingleStage.from_boozer_surface(
+                missing_G,
+                field,
+                [],
+                iota_target=-0.406,
+                major_radius_target=1.0,
+                length_target=0.0,
+            )
+        with self.assertRaisesRegex(ValueError, "must use the BoozerSurface's coils"):
+            JaxExactSingleStage.from_boozer_surface(
+                boozer,
+                JaxBiotSavart(list(reversed(field.coils))),
+                [],
+                iota_target=-0.406,
+                major_radius_target=1.0,
+                length_target=0.0,
+            )
+        _, _, unlisted_axis, _, _ = get_data("ncsx")
+        with self.assertRaisesRegex(ValueError, "length_curves must occur directly"):
+            JaxExactSingleStage.from_boozer_surface(
+                boozer,
+                field,
+                [unlisted_axis],
+                iota_target=-0.406,
+                major_radius_target=1.0,
+                length_target=0.0,
+            )
         boozer.res["success"] = False
         with self.assertRaisesRegex(
             ValueError, "initial exact BoozerSurface solve must have succeeded"

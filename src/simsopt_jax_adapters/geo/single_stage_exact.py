@@ -150,10 +150,17 @@ class JaxExactSingleStage:
             major_radius_target (float): Major-radius target in meters.
             length_target (float): Upper bound on total selected curve length in meters.
             sDIM (int): Half of each auxiliary non-QS grid dimension; grid spans one field
-                period.
-            quasi_poloidal (bool): Average over theta when true, otherwise over phi.
-            tol (float): Inner exact-solve residual tolerance in native units.
-            maxiter (float): Inner Newton iteration cap, which may be infinite.
+                period; default 20.
+            quasi_poloidal (bool): Average over theta when true, otherwise over phi;
+                default False.
+            tol (float): Euclidean norm threshold for the native masked residual system,
+                including label and nonsymmetric z constraints; default 1e-13.
+                This norm combines residual and constraint units. At the step cap,
+                success uses the norm before the last step; zero steps retain the
+                native 1e6 sentinel.
+            maxiter (float): Inner Newton step cap; default 40, which may be infinite.
+                Positive fractional caps admit steps while the integer count is
+                below the cap.
 
         Returns:
             JaxExactSingleStage: Frozen snapshot evaluator object with explicit state in/out,
