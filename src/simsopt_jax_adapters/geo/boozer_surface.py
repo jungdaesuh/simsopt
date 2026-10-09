@@ -532,8 +532,9 @@ class JaxBoozerSurface(Optimizable):
         the label and, without stellarator symmetry, ``z(0, 0)``.
 
         Args:
-            tol (float): Native stopping tolerance (gradient norm for Newton, solver-
-                specific for SciPy).
+            tol (float): Threshold for the Euclidean norm of residual entries selected
+                by the native exact mask. At ``maxiter``, success uses the norm checked
+                before the last Newton step.
             maxiter (int | float): Native iteration or evaluation cap for the selected
                 solver.
             iota (float): Initial dimensionless rotational transform.
