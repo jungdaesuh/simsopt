@@ -1,6 +1,6 @@
 """JAX coil force, torque and energy objectives as drop-in native Optimizables.
 
-Each class mirrors the objective of the same name without ``JAX`` in
+Each class mirrors the native objective named by removing the ``Jax`` prefix in
 :mod:`simsopt.field.force`: same constructor arguments and validation, value,
 dependencies and ``Derivative`` (fixed and free partials of the coils' curves
 and currents). The objective and its gradient with respect to the coils'
