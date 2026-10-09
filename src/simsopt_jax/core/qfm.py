@@ -47,7 +47,7 @@ __all__ = [
 @pytree_dataclass(data=("surface", "coils", "points"))
 class QfmSpec:
     """Immutable QFM geometry and field evaluation operands.
-    
+
     Args:
         surface (SurfaceSpec): Native Fourier coefficient snapshot and toroidal/poloidal grids in turns.
         coils (GroupedCoilSetSpec): Coil positions/tangents in meters and currents in amperes.
@@ -61,7 +61,7 @@ class QfmSpec:
 @pytree_dataclass(data=("surface", "coils", "idx", "points"), meta=("kind",))
 class QfmLabelSpec:
     """Immutable volume, area or toroidal-flux label on its own grid.
-    
+
     Args:
         surface (SurfaceSpec): Label surface sharing the optimized DOFs, with its own quadrature in turns.
         coils (GroupedCoilSetSpec | None): Flux field coils in meters/amperes; None for area and volume.
@@ -232,10 +232,10 @@ def _jitted_qfm_penalty_constraints_value_and_grad(
 
 def qfm_residual(spec: QfmSpec) -> jax.Array:
     """Evaluate the native quadratic-flux ratio without changing field points.
-    
+
     Args:
         spec (QfmSpec): Surface geometry and coil snapshot with shape (nphi * ntheta, 3) Cartesian field points in meters. Host point buffers are copied before dispatch.
-    
+
     Returns:
         jax.Array: Dimensionless scalar shape () ratio; zero fields or normals remain nonfinite."""
     inputs = snapshot_host_tree((spec,))
@@ -244,10 +244,10 @@ def qfm_residual(spec: QfmSpec) -> jax.Array:
 
 def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
     """Evaluate the native quadratic-flux ratio without changing field points.
-    
+
     Args:
         spec (QfmSpec): Surface geometry and coil snapshot with shape (nphi * ntheta, 3) Cartesian field points in meters. Host point buffers are copied before dispatch.
-    
+
     Returns:
         tuple[jax.Array, jax.Array]: Dimensionless value shape () and full surface-coefficient gradient shape (ndofs,), in inverse meters, including fixed DOFs."""
     inputs = snapshot_host_tree((spec,))
@@ -256,10 +256,10 @@ def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
 
 def qfm_label(spec: QfmLabelSpec) -> jax.Array:
     """Evaluate the native label on its own surface grid and current flux points.
-    
+
     Args:
         spec (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
-    
+
     Returns:
         jax.Array: Scalar shape () volume in cubic meters, area in square meters, or toroidal flux in webers."""
     inputs = snapshot_host_tree((spec,))
@@ -270,12 +270,12 @@ def qfm_label_constraint(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate half the squared native label error with owned host operands.
-    
+
     Args:
         spec (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
         label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
-    
+
     Returns:
         jax.Array: Scalar shape () squared error in squared label units."""
     inputs = snapshot_host_tree((spec, targetlabel, label_value))
@@ -286,12 +286,12 @@ def qfm_label_constraint_value_and_grad(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Evaluate half the squared native label error with owned host operands.
-    
+
     Args:
         spec (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
         label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
-    
+
     Returns:
         tuple[jax.Array, jax.Array]: Scalar squared error shape () and full coefficient gradient shape (ndofs,), in squared label units per meter."""
     inputs = snapshot_host_tree((spec, targetlabel, label_value))
@@ -303,14 +303,14 @@ def qfm_penalty_constraints(
     label_value: jax.Array | None = None,
 ) -> jax.Array:
     """Evaluate the native QFM ratio plus the weighted squared label error.
-    
+
     Args:
         spec (QfmSpec): Surface geometry and coil snapshot with shape (nphi * ntheta, 3) Cartesian field points in meters. Host point buffers are copied before dispatch.
         label (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
         constraint_weight (jax.Array | numpy.ndarray): Scalar shape () coefficient multiplying the squared label error, in the native constraint units.
         label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
-    
+
     Returns:
         jax.Array: Scalar shape () native scalarized objective."""
     inputs = snapshot_host_tree((spec, label, targetlabel, constraint_weight, label_value))
@@ -322,14 +322,14 @@ def qfm_penalty_constraints_value_and_grad(
     label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Evaluate the native QFM ratio plus the weighted squared label error.
-    
+
     Args:
         spec (QfmSpec): Surface geometry and coil snapshot with shape (nphi * ntheta, 3) Cartesian field points in meters. Host point buffers are copied before dispatch.
         label (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
         targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
         constraint_weight (jax.Array | numpy.ndarray): Scalar shape () coefficient multiplying the squared label error, in the native constraint units.
         label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; None evaluates the immutable label.
-    
+
     Returns:
         tuple[jax.Array, jax.Array]: Objective shape () and full surface-coefficient gradient shape (ndofs,), including fixed DOFs; units follow the native scalarization."""
     inputs = snapshot_host_tree((spec, label, targetlabel, constraint_weight, label_value))
