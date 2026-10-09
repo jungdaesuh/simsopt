@@ -37,7 +37,7 @@ from .surface_geometry import (
 __all__ = [
     "QfmSpec", "QfmLabelSpec", "qfm_residual", "qfm_residual_value_and_grad",
     "qfm_label", "qfm_label_constraint", "qfm_label_constraint_value_and_grad",
-    "qfm_penalty", "qfm_penalty_value_and_grad",
+    "qfm_penalty_constraints", "qfm_penalty_constraints_value_and_grad",
 ]
 
 
@@ -176,7 +176,7 @@ def _label_value_and_grad(spec: QfmLabelSpec) -> tuple[jax.Array, jax.Array]:
 
 @jax.jit
 def qfm_label_constraint(
-    spec: QfmLabelSpec, target: jax.Array, label_value: jax.Array | None = None,
+    spec: QfmLabelSpec, targetlabel: jax.Array, label_value: jax.Array | None = None,
 ) -> jax.Array:
     """Squared label error; optional host value preserves native rounding.
 
@@ -184,35 +184,35 @@ def qfm_label_constraint(
     The adapter supplies that value explicitly; standalone kernels compute it.
     """
     value = qfm_label(spec) if label_value is None else label_value
-    return 0.5 * (value - target)**2
+    return 0.5 * (value - targetlabel)**2
 
 
 @jax.jit
 def qfm_label_constraint_value_and_grad(
-    spec: QfmLabelSpec, target: jax.Array, label_value: jax.Array | None = None,
+    spec: QfmLabelSpec, targetlabel: jax.Array, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     value, gradient = _label_value_and_grad(spec)
     value = value if label_value is None else label_value
-    residual = value - target
+    residual = value - targetlabel
     return 0.5 * residual**2, residual * gradient
 
 
 @jax.jit
-def qfm_penalty(
-    spec: QfmSpec, label: QfmLabelSpec, target: jax.Array, weight: jax.Array,
+def qfm_penalty_constraints(
+    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array, constraint_weight: jax.Array,
     label_value: jax.Array | None = None,
 ) -> jax.Array:
-    return qfm_residual(spec) + weight * qfm_label_constraint(label, target, label_value)
+    return qfm_residual(spec) + constraint_weight * qfm_label_constraint(label, targetlabel, label_value)
 
 
 @jax.jit
-def qfm_penalty_value_and_grad(
-    spec: QfmSpec, label: QfmLabelSpec, target: jax.Array, weight: jax.Array,
+def qfm_penalty_constraints_value_and_grad(
+    spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array, constraint_weight: jax.Array,
     label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     value, gradient = qfm_residual_value_and_grad(spec)
-    constraint, label_gradient = qfm_label_constraint_value_and_grad(label, target, label_value)
-    return value + weight * constraint, gradient + weight * label_gradient
+    constraint, label_gradient = qfm_label_constraint_value_and_grad(label, targetlabel, label_value)
+    return value + constraint_weight * constraint, gradient + constraint_weight * label_gradient
 
 
 class _CompiledFunctionCache(Protocol):
@@ -225,7 +225,7 @@ def _clear_compiled_qfm() -> None:
     for function in (
         qfm_residual, qfm_residual_value_and_grad, qfm_label,
         qfm_label_constraint, qfm_label_constraint_value_and_grad,
-        qfm_penalty, qfm_penalty_value_and_grad,
+        qfm_penalty_constraints, qfm_penalty_constraints_value_and_grad,
     ):
         cast(_CompiledFunctionCache, function).clear_cache()
 

@@ -60,10 +60,10 @@ def _pair(surface_class=SurfaceRZFourier, stellsym=True, label_class=Volume, clo
             labels.append(label_class(surface, BiotSavart(field.coils), idx=-1, **options))
         else:
             labels.append(label_class(surface, **options))
-    target = labels[0].J() * 1.03
+    targetlabel = labels[0].J() * 1.03
     return (
-        QfmSurface(native_field, surfaces[0], labels[0], target),
-        JaxQfmSurface(jax_field, surfaces[1], labels[1], target),
+        QfmSurface(native_field, surfaces[0], labels[0], targetlabel),
+        JaxQfmSurface(jax_field, surfaces[1], labels[1], targetlabel),
     )
 
 
@@ -412,26 +412,26 @@ def test_nonfinite_residuals_are_not_sanitized(condition):
         _assert_pair(port.qfm.dJ_by_dsurfacecoefficients(), native.qfm.dJ_by_dsurfacecoefficients())
 
 
-@pytest.mark.parametrize("target,weight", [(np.inf, 0.), (np.nan, 0.), (0., np.inf), (0., np.nan)])
-def test_nonfinite_numeric_operands_match_native(target, weight):
+@pytest.mark.parametrize("targetlabel,constraint_weight", [(np.inf, 0.), (np.nan, 0.), (0., np.inf), (0., np.nan)])
+def test_nonfinite_numeric_operands_match_native(targetlabel, constraint_weight):
     native, port = _pair()
-    native.targetlabel = port.targetlabel = target
+    native.targetlabel = port.targetlabel = targetlabel
     with np.errstate(all="ignore"):
         for a, e in zip(
-            port.qfm_penalty_constraints(port.surface.x, 1, weight),
-            native.qfm_penalty_constraints(native.surface.x, 1, weight), strict=True,
+            port.qfm_penalty_constraints(port.surface.x, 1, constraint_weight),
+            native.qfm_penalty_constraints(native.surface.x, 1, constraint_weight), strict=True,
         ):
             _assert_pair(a, e)
 
 
-@pytest.mark.parametrize("weight", [np.inf, np.nan])
-def test_nonfinite_weight_at_exact_label_feasibility_keeps_native_nans(weight):
+@pytest.mark.parametrize("constraint_weight", [np.inf, np.nan])
+def test_nonfinite_weight_at_exact_label_feasibility_keeps_native_nans(constraint_weight):
     native, port = _pair()
     native.targetlabel = port.targetlabel = native.label.J()
     with np.errstate(all="ignore"):
         for a, e in zip(
-            port.qfm_penalty_constraints(port.surface.x, 1, weight),
-            native.qfm_penalty_constraints(native.surface.x, 1, weight), strict=True,
+            port.qfm_penalty_constraints(port.surface.x, 1, constraint_weight),
+            native.qfm_penalty_constraints(native.surface.x, 1, constraint_weight), strict=True,
         ):
             _assert_pair(a, e)
 

@@ -3,8 +3,8 @@
 SciPy owns the host optimization and native stopping/failure semantics.
 The mutable adapters, like native QFM and BiotSavart, belong to one evaluation
 thread. Immutable input snapshots and kernels may be shared across threads.
-Configure simsopt_jax.backend before constructing the field. Numeric target
-and weight values are explicit traced operands; new values do not recompile.
+Configure simsopt_jax.backend before constructing the field. Numeric targetlabel
+and constraint_weight values are explicit traced operands; new values do not recompile.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ from simsopt_jax.core.qfm import (
     QfmSpec,
     qfm_label_constraint,
     qfm_label_constraint_value_and_grad,
-    qfm_penalty,
-    qfm_penalty_value_and_grad,
+    qfm_penalty_constraints,
+    qfm_penalty_constraints_value_and_grad,
     qfm_residual,
     qfm_residual_value_and_grad,
 )
@@ -56,7 +56,7 @@ def _host_result(result: jax.Array | tuple[jax.Array, jax.Array]):
     materialized = host_tree(result)
     if isinstance(materialized, tuple):
         value, gradient = materialized
-        return np.float64(value), gradient
+        return np.float64(value), host_array(gradient)
     return np.float64(materialized)
 
 
@@ -185,9 +185,9 @@ class JaxQfmSurface(GSONable):
         self.surface.x = x
         spec = self.qfm._spec()
         label = self._label_spec()
-        weight = explicit_device_array(constraint_weight, dtype=np.float64, reference=label.surface.quadpoints_phi)
-        function = qfm_penalty_value_and_grad if derivatives else qfm_penalty
-        return _host_result(function(spec, label, self._target(label), weight, self._label_value(label)))
+        constraint_weight = explicit_device_array(constraint_weight, dtype=np.float64, reference=label.surface.quadpoints_phi)
+        function = qfm_penalty_constraints_value_and_grad if derivatives else qfm_penalty_constraints
+        return _host_result(function(spec, label, self._target(label), constraint_weight, self._label_value(label)))
 
     def minimize_qfm_penalty_constraints_LBFGS(self, tol=1e-3, maxiter=1000, constraint_weight=1.):
         def objective(x):
