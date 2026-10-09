@@ -80,8 +80,8 @@ class BoozerExactNewtonResult:
     ``x``; ``iterations`` native's ``iter``.
 
     Args:
-        x (jax.Array): Final shape (nx,) vector [all surface DOFs in meters, iota,
-            optional G in tesla meters]; G is always present for exact Newton.
+        x (jax.Array): Final shape (nsurface + 2,) vector [all surface DOFs in
+            meters, dimensionless iota, G in tesla meters]; G is always present.
         residual (jax.Array): All unweighted Boozer residuals, shape (3 * npoints,), at
             x.
         jacobian (jax.Array): Masked exact-system Jacobian, shape (nb, nx), at x.
@@ -106,8 +106,9 @@ class BoozerPenaltyNewtonResult:
     """The penalty's gradient and (unshifted) Hessian at the final ``x``.
 
     Args:
-        x (jax.Array): Final shape (nx,) vector [all surface DOFs in meters, iota,
-            optional G in tesla meters]; G is always present for exact Newton.
+        x (jax.Array): Final shape (nx,) vector [all surface DOFs in meters,
+            dimensionless iota, optional G in tesla meters]; G is present only when
+            optimize_G is true, with nx = nsurface + 1 + int(optimize_G).
         gradient (jax.Array): Penalty gradient, shape (nx,), at x.
         hessian (jax.Array): Unshifted penalty Hessian, shape (nx, nx), at x.
         iterations (jax.Array): Scalar shape () int32 completed step count.
@@ -132,8 +133,9 @@ class BoozerGaussNewtonResult:
     """At the final ``x``: the residuals ``r``, ``J^T r`` and ``J^T J``.
 
     Args:
-        x (jax.Array): Final shape (nx,) vector [all surface DOFs in meters, iota,
-            optional G in tesla meters]; G is always present for exact Newton.
+        x (jax.Array): Final shape (nx,) vector [all surface DOFs in meters,
+            dimensionless iota, optional G in tesla meters]; G is present only when
+            optimize_G is true, with nx = nsurface + 1 + int(optimize_G).
         residual (jax.Array): Normalized penalty residuals, shape (3 * npoints + 2,), at
             x.
         gradient (jax.Array): J transpose r, shape (nx,), at x.

@@ -656,8 +656,7 @@ class JaxBoozerResidual(Optimizable):
 
         Returns:
             float: Cached scalar objective, recomputed through the surface solve when
-                invalidated; dimensionless for the non-QS ratio, native penalty units for
-                BoozerResidual.
+                invalidated, in native BoozerResidual penalty units.
         """
         if self._J is None:
             self.compute()
