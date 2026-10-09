@@ -8,12 +8,13 @@ from typing import cast
 import numpy as np
 from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
+from simsopt._core.derivative import Derivative
+from simsopt._core.optimizable import Optimizable
+from simsopt.field import Coil, Current
+from simsopt.field.force import NetFluxes
+from simsopt.geo import CurveXYZFourier
+
 try:
-    from simsopt._core.derivative import Derivative
-    from simsopt._core.optimizable import Optimizable
-    from simsopt.field import Coil, Current
-    from simsopt.field.force import NetFluxes
-    from simsopt.geo import CurveXYZFourier
     from simsopt_jax_adapters.field import JaxNetFluxes
 except ImportError:
     if JAX_IMPORT_ERROR is None:
