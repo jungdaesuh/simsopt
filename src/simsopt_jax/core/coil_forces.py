@@ -31,6 +31,7 @@ from simsopt.field.force import (
     net_ext_fluxes_pure,
 )
 from simsopt.field.selffield import B_regularized_pure
+from simsopt.geo.curve import centroid_pure
 
 from .biotsavart import biot_savart_A
 
@@ -117,9 +118,28 @@ def _self_fields(targets: CoilGroup, gammadashdashs, quadpoints, regularizations
     )
 
 
-def _centroid(gamma, gammadash):
-    arclength = jnp.linalg.norm(gammadash, axis=-1)
-    return jnp.sum(gamma * arclength[:, None], axis=0) / jnp.sum(arclength)
+def _regularized_force_densities(
+    targets: CoilGroup,
+    gammadashdashs,
+    quadpoints,
+    regularizations,
+    sources: tuple[CoilGroup, ...],
+    downsample: int,
+) -> tuple[CoilGroup, jax.Array, jax.Array]:
+    """Return sampled targets, speeds and Lorentz densities including self fields.
+
+    Apply the same quadrature stride to every geometry input and source group.
+    """
+    targets = _sampled(targets, downsample)
+    sources = tuple(_sampled(group, downsample) for group in sources)
+    _gammas, gammadashs, currents = targets
+    gammadash_norms = jnp.linalg.norm(gammadashs, axis=-1)
+    tangents = gammadashs / gammadash_norms[:, :, None]
+    fields = _target_mutual_fields(targets, sources) + _self_fields(
+        targets, gammadashdashs[:, ::downsample], quadpoints[::downsample], regularizations
+    )
+    forces = _lorentz_force_density_pure(tangents, currents[:, None, None], fields)
+    return targets, gammadash_norms, forces
 
 
 def _thresholded_lp(densities, gammadash_norms, p, threshold):
@@ -157,17 +177,9 @@ def lp_force(
     Returns:
         Array: scalar integral penalty in (MN/m)^p m.
     """
-    targets = _sampled(targets, downsample)
-    gammadashdashs = gammadashdashs[:, ::downsample]
-    quadpoints = quadpoints[::downsample]
-    sources = tuple(_sampled(group, downsample) for group in sources)
-    _gammas, gammadashs, currents = targets
-    gammadash_norms = jnp.linalg.norm(gammadashs, axis=-1)
-    tangents = gammadashs / gammadash_norms[:, :, None]
-    fields = _target_mutual_fields(targets, sources) + _self_fields(
-        targets, gammadashdashs, quadpoints, regularizations
+    _, gammadash_norms, forces = _regularized_force_densities(
+        targets, gammadashdashs, quadpoints, regularizations, sources, downsample
     )
-    forces = _lorentz_force_density_pure(tangents, currents[:, None, None], fields)
     return _thresholded_lp(jnp.linalg.norm(forces, axis=-1) / 1e6, gammadash_norms, p, threshold)
 
 
@@ -200,18 +212,11 @@ def lp_torque(
     Returns:
         Array: scalar integral penalty in MN^p m.
     """
-    targets = _sampled(targets, downsample)
-    gammadashdashs = gammadashdashs[:, ::downsample]
-    quadpoints = quadpoints[::downsample]
-    sources = tuple(_sampled(group, downsample) for group in sources)
-    gammas, gammadashs, currents = targets
-    centers = jax.vmap(_centroid)(gammas, gammadashs)
-    gammadash_norms = jnp.linalg.norm(gammadashs, axis=-1)
-    tangents = gammadashs / gammadash_norms[:, :, None]
-    fields = _target_mutual_fields(targets, sources) + _self_fields(
-        targets, gammadashdashs, quadpoints, regularizations
+    targets, gammadash_norms, forces = _regularized_force_densities(
+        targets, gammadashdashs, quadpoints, regularizations, sources, downsample
     )
-    forces = _lorentz_force_density_pure(tangents, currents[:, None, None], fields)
+    gammas, gammadashs, _currents = targets
+    centers = jax.vmap(centroid_pure)(gammas, gammadashs)
     torques = jnp.cross(gammas - centers[:, None, :], forces)
     return _thresholded_lp(jnp.linalg.norm(torques, axis=-1) / 1e6, gammadash_norms, p, threshold)
 
@@ -259,7 +264,7 @@ def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], down
     targets = _sampled(targets, downsample)
     sources = tuple(_sampled(group, downsample) for group in sources)
     gammas, gammadashs, currents = targets
-    centers = jax.vmap(_centroid)(gammas, gammadashs)
+    centers = jax.vmap(centroid_pure)(gammas, gammadashs)
     arclengths = jnp.linalg.norm(gammadashs, axis=-1)
     tangents = gammadashs / arclengths[:, :, None]
     forces = _lorentz_force_density_pure(
@@ -268,8 +273,6 @@ def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], down
     torques = jnp.cross(gammas - centers[:, None, :], forces) * arclengths[:, :, None]
     mean_torques = jnp.sum(torques, axis=1) / gammas.shape[1]
     return jnp.sum(jnp.linalg.norm(mean_torques, axis=-1) ** 2) * 1e-12
-
-
 
 
 def coil_inductances(gammas, gammadashs, regularizations, downsample: int):
