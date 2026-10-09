@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.core.biotsavart import (
+        _radius_squared,
+        biot_savart_A,
+        biot_savart_B,
+        biot_savart_dB_by_dX,
+    )
+    from simsopt_jax.core.curve_xyz_fourier import _constant_row
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
-import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
-
-from simsopt_jax.core.biotsavart import (
-    _radius_squared,
-    biot_savart_A,
-    biot_savart_B,
-    biot_savart_dB_by_dX,
-)
-from simsopt_jax.core.curve_xyz_fourier import _constant_row
+if JAX_IMPORT_ERROR is None:
+    jax.config.update("jax_enable_x64", True)
 
 
 class TestKernelNumericHelpers(JaxTestCase):

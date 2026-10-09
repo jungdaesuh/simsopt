@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.core import coil_specs_from_dof_extraction_spec
+    from simsopt_jax_adapters.field.biotsavart_backend import (
+        JaxBiotSavart,
+        _dof_map_cotangent_to_owner_gradient,
+        _owner_segments_from_free_positions,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
-import jax.numpy as jnp
 import numpy as np
 
 from simsopt.field import BiotSavart, Coil, Current
 from simsopt.geo import CurveXYZFourier
-from simsopt_jax.core import coil_specs_from_dof_extraction_spec
-from simsopt_jax_adapters.field.biotsavart_backend import (
-    JaxBiotSavart,
-    _dof_map_cotangent_to_owner_gradient,
-    _owner_segments_from_free_positions,
-)
 
 _NQUAD = 8
 _ORDER = 1

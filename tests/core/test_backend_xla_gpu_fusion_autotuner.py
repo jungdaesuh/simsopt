@@ -2,28 +2,34 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax.backend.runtime import (
+        BackendConfig,
+        _CPU_OPT_PRESET_FAST_COMPILE,
+        _GPU_AUTOTUNE_LEVEL_PINNED,
+        _GPU_FUSION_AUTOTUNER_DISABLED,
+        _XLA_FLAGS_ENV,
+        _apply_cuda_autotuner_env,
+        apply_cuda_xla_flag_pins,
+        _xla_flags_with_cpu_compile_preset,
+        _xla_flags_with_gpu_autotune_level_pinned,
+        _xla_flags_with_gpu_fusion_autotuner_disabled,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 
 
 import os
 
-from simsopt_jax.backend.runtime import (
-    BackendConfig,
-    _CPU_OPT_PRESET_FAST_COMPILE,
-    _GPU_AUTOTUNE_LEVEL_PINNED,
-    _GPU_FUSION_AUTOTUNER_DISABLED,
-    _XLA_FLAGS_ENV,
-    _apply_cuda_autotuner_env,
-    apply_cuda_xla_flag_pins,
-    _xla_flags_with_cpu_compile_preset,
-    _xla_flags_with_gpu_autotune_level_pinned,
-    _xla_flags_with_gpu_fusion_autotuner_disabled,
-)
 
-_CUDA_PINS = f"{_GPU_FUSION_AUTOTUNER_DISABLED} {_GPU_AUTOTUNE_LEVEL_PINNED}"
+if JAX_IMPORT_ERROR is None:
+    _CUDA_PINS = f"{_GPU_FUSION_AUTOTUNER_DISABLED} {_GPU_AUTOTUNE_LEVEL_PINNED}"
 
 
 def _config(jax_platform):

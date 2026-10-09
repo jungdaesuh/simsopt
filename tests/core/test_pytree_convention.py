@@ -1,8 +1,20 @@
 """Keep JAX registration and immutable record conventions centralized."""
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax import pytree
+    from simsopt_jax.pytree import (
+        pytree_dataclass,
+        pytree_node,
+        registered_pytree_classes,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 import ast
@@ -12,9 +24,6 @@ from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
 from typing import cast
 
-import jax.numpy as jnp
-
-from simsopt_jax.pytree import pytree_dataclass, pytree_node, registered_pytree_classes
 
 ROOT = Path(__file__).resolve().parents[2]
 TREES = (
@@ -640,7 +649,7 @@ class TestPytreeConvention(JaxTestCase):
         """The dataclass helper freezes plain classes and reconstructs fields in declared
         leaf order."""
 
-        @pytree_dataclass(data=("second", "first"), meta=("mode",))
+        @pytree.pytree_dataclass(data=("second", "first"), meta=("mode",))
         class Payload:
             first: int
             second: int
@@ -725,7 +734,7 @@ class TestPytreeConvention(JaxTestCase):
         registration."""
         before = registered_pytree_classes()
 
-        @pytree_dataclass(data=("value",))
+        @pytree.pytree_dataclass(data=("value",))
         class Payload:
             value: int
 
@@ -778,7 +787,7 @@ class TestPytreeConvention(JaxTestCase):
         class Base:
             value: int
 
-        @pytree_dataclass(data=("extra", "value"))
+        @pytree.pytree_dataclass(data=("extra", "value"))
         class Child(Base):
             extra: int = 2
 
@@ -915,7 +924,7 @@ class TestPytreeConvention(JaxTestCase):
         class Base:
             first: int
 
-        @pytree_node
+        @pytree.pytree_node
         class Payload(Base):
             second: int
 
@@ -942,7 +951,7 @@ class TestPytreeConvention(JaxTestCase):
         values."""
         constructed = []
 
-        @pytree_dataclass(data=("value",))
+        @pytree.pytree_dataclass(data=("value",))
         class Payload:
             value: int
 

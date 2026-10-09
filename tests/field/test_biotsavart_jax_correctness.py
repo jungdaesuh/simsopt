@@ -1,8 +1,14 @@
 """Native regression oracles for the JaxBiotSavart correctness review."""
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -23,7 +29,6 @@ from simsopt.geo.curveperturbed import (
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
 from simsopt.geo.finitebuild import CurveFilament
 from simsopt.geo.framedcurve import FrameRotation, FramedCurveFrenet
-from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
 
 
 _POINTS = np.array([[0.8, 0.1, 0.2], [1.1, -0.2, -0.1]])

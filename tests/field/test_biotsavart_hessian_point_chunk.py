@@ -9,17 +9,23 @@ kernel: point tiling never changes any single point's reduction.
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.core import biotsavart as biotsavart_core
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
-import jax.numpy as jnp
 import numpy as np
 
-from simsopt_jax.core import biotsavart as biotsavart_core
 
-jax.config.update("jax_enable_x64", True)
+if JAX_IMPORT_ERROR is None:
+    jax.config.update("jax_enable_x64", True)
 
 
 def _coil_set(rng):

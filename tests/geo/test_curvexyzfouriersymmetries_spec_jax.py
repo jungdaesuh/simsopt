@@ -6,36 +6,41 @@ an independent geometry and derivative oracle at identical DOFs.
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.core import (
+        CurveXYZFourierSymmetriesSpec,
+        curve_gamma_vjp_from_dofs,
+        curve_gammadash_vjp_from_dofs,
+        curve_gammadashdash_vjp_from_dofs,
+        curve_gammadashdashdash_vjp_from_dofs,
+        curve_spec_from_curve,
+        make_curve_xyzfouriersymmetries_spec,
+    )
+    from simsopt_jax.backend import invalidate_backend_cache
+    from simsopt_jax.core.curve_geometry import (
+        _slice_1d_static,
+        _update_1d_static,
+        curve_gamma_and_gammadash_from_dofs,
+        curve_geometry_from_dofs,
+        curve_pullback_from_dofs,
+    )
+    from simsopt_jax.core.specs import curve_spec_kind
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 import os
 
 
 import numpy as np
 
-import jax.numpy as jnp
 
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
-from simsopt_jax.core import (
-    CurveXYZFourierSymmetriesSpec,
-    curve_gamma_vjp_from_dofs,
-    curve_gammadash_vjp_from_dofs,
-    curve_gammadashdash_vjp_from_dofs,
-    curve_gammadashdashdash_vjp_from_dofs,
-    curve_spec_from_curve,
-    make_curve_xyzfouriersymmetries_spec,
-)
-from simsopt_jax.backend import invalidate_backend_cache
-from simsopt_jax.core.curve_geometry import (
-    _slice_1d_static,
-    _update_1d_static,
-    curve_gamma_and_gammadash_from_dofs,
-    curve_geometry_from_dofs,
-    curve_pullback_from_dofs,
-)
-from simsopt_jax.core.specs import curve_spec_kind
 
 
 _DIRECT_KERNEL = {
@@ -70,20 +75,21 @@ _ORDER = 3
 _RAND_SCALE = 1e-2
 _RNG_SEED = 1729
 
-_CURVE_VJP_CASES = (
-    ("gamma", curve_gamma_vjp_from_dofs, "dgamma_by_dcoeff"),
-    ("gammadash", curve_gammadash_vjp_from_dofs, "dgammadash_by_dcoeff"),
-    (
-        "gammadashdash",
-        curve_gammadashdash_vjp_from_dofs,
-        "dgammadashdash_by_dcoeff",
-    ),
-    (
-        "gammadashdashdash",
-        curve_gammadashdashdash_vjp_from_dofs,
-        "dgammadashdashdash_by_dcoeff",
-    ),
-)
+if JAX_IMPORT_ERROR is None:
+    _CURVE_VJP_CASES = (
+        ("gamma", curve_gamma_vjp_from_dofs, "dgamma_by_dcoeff"),
+        ("gammadash", curve_gammadash_vjp_from_dofs, "dgammadash_by_dcoeff"),
+        (
+            "gammadashdash",
+            curve_gammadashdash_vjp_from_dofs,
+            "dgammadashdash_by_dcoeff",
+        ),
+        (
+            "gammadashdashdash",
+            curve_gammadashdashdash_vjp_from_dofs,
+            "dgammadashdashdash_by_dcoeff",
+        ),
+    )
 
 
 def _stellsym_num_dofs(order: int) -> int:

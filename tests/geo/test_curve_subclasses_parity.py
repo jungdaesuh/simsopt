@@ -29,9 +29,24 @@ tolerance several orders of magnitude above the observed noise floor
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax.core.curve_helical import curve_helical_pure
+    from simsopt_jax.core.curve_planar_fourier import curveplanarfourier_pure
+    from simsopt_jax.core.curve_rz_fourier import curverzfourier_pure
+    from simsopt_jax.core import (
+        curve_geometry_from_dofs,
+        make_curve_helical_spec,
+        make_curve_planarfourier_spec,
+        make_curve_rzfourier_spec,
+    )
+    from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 from unittest_jax_support import host_array, parity_default_device, parity_rng
 
@@ -41,16 +56,6 @@ from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curveplanarfourier import CurvePlanarFourier
 from simsopt.geo.curverzfourier import CurveRZFourier
 
-from simsopt_jax.core.curve_helical import curve_helical_pure
-from simsopt_jax.core.curve_planar_fourier import curveplanarfourier_pure
-from simsopt_jax.core.curve_rz_fourier import curverzfourier_pure
-from simsopt_jax.core import (
-    curve_geometry_from_dofs,
-    make_curve_helical_spec,
-    make_curve_planarfourier_spec,
-    make_curve_rzfourier_spec,
-)
-from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
 
 _GAMMA_ATOL = 1e-10
 _GAMMA_RTOL = 1e-10

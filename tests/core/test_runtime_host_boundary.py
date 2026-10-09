@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax.runtime.host_boundary import (
+        disallow_host_transfers,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 import numpy as np
-from simsopt_jax.runtime.host_boundary import (
-    disallow_host_transfers,
-)
 
 
 def _cpu_float64(values: list[float]) -> "jax.Array":

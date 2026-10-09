@@ -1,8 +1,15 @@
 """Public Python objective boundary and explicit runtime initialization."""
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax.backend import set_backend
+    from simsopt_jax_adapters.field import JaxBiotSavart
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -15,8 +22,6 @@ import sys
 
 from simsopt.field import BiotSavart
 from simsopt.field.magneticfield import MagneticFieldMultiply, MagneticFieldSum
-from simsopt_jax.backend import set_backend
-from simsopt_jax_adapters.field import JaxBiotSavart
 
 
 class TestBiotsavartJaxContract(JaxTestCase):

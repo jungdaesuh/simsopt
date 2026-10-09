@@ -2,34 +2,39 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.dtypes import (
+        as_compute_array,
+        as_jax_array,
+        explicit_device_array,
+        runtime_device_put,
+        runtime_device_put_tree,
+    )
+    from simsopt_jax.core import biotsavart as kernels
+    from simsopt_jax.core import specs
+    from simsopt_jax.core.field import group_biot_savart_B_vjp
+    from simsopt_jax.runtime.host_boundary import snapshot_host_tree
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.field import biotsavart_backend as adapter
+    from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
 
 
-import jax.numpy as jnp
 import numpy as np
 
 from simsopt.field import Coil, Current
 from simsopt.geo import create_equally_spaced_curves
 from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
-from simsopt_jax.backend import set_backend
-from simsopt_jax.backend.dtypes import (
-    as_compute_array,
-    as_jax_array,
-    explicit_device_array,
-    runtime_device_put,
-    runtime_device_put_tree,
-)
-from simsopt_jax.core import biotsavart as kernels
-from simsopt_jax.core import specs
-from simsopt_jax.core.field import group_biot_savart_B_vjp
-from simsopt_jax.runtime.host_boundary import snapshot_host_tree
-from simsopt_jax_adapters.field import JaxBiotSavart
-from simsopt_jax_adapters.field import biotsavart_backend as adapter
-from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
 
 
 def _host_array(shape, *, misaligned=False):
@@ -179,15 +184,16 @@ def _kernel_inputs():
     return points, gamma, dash, current
 
 
-_FORWARD_KERNELS = [
-    kernels.biot_savart_B,
-    kernels.biot_savart_A,
-    kernels.biot_savart_dB_by_dX,
-    kernels.biot_savart_dA_by_dX,
-    kernels.biot_savart_d2B_by_dXdX,
-    kernels.biot_savart_d2A_by_dXdX,
-    kernels.biot_savart_B_and_dB,
-]
+if JAX_IMPORT_ERROR is None:
+    _FORWARD_KERNELS = [
+        kernels.biot_savart_B,
+        kernels.biot_savart_A,
+        kernels.biot_savart_dB_by_dX,
+        kernels.biot_savart_dA_by_dX,
+        kernels.biot_savart_d2B_by_dXdX,
+        kernels.biot_savart_d2A_by_dXdX,
+        kernels.biot_savart_B_and_dB,
+    ]
 
 
 def _field():

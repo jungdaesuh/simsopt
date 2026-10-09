@@ -13,18 +13,24 @@ current gradient of a Stage-II flux lost five digits (relative error 1e-11 at
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.core._device_scalars import device_one
+    from simsopt_jax.core.biotsavart import biot_savart_B
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
-import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
+if JAX_IMPORT_ERROR is None:
+    jax.config.update("jax_enable_x64", True)
 
-from simsopt_jax.core._device_scalars import device_one
-from simsopt_jax.core.biotsavart import biot_savart_B
 
 UNIT_ROUNDOFF = float(np.finfo(np.float64).eps) / 2.0
 

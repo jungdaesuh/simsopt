@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.backend import dtypes
+    from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
+    from simsopt_jax.core import _device_scalars
+    from simsopt_jax.core._device_scalars import staged_like
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 import os
@@ -13,12 +23,7 @@ import sys
 from typing import cast
 from unittest import mock
 
-import jax.numpy as jnp
 import numpy as np
-from simsopt_jax.backend import dtypes
-from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
-from simsopt_jax.core import _device_scalars
-from simsopt_jax.core._device_scalars import staged_like
 
 
 # Two host devices exist only if XLA is told so before it initializes, so the

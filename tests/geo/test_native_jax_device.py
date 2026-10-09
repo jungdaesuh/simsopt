@@ -1,8 +1,13 @@
 """Native precision/platform settings and C++ curve length host ownership."""
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from tempfile import TemporaryDirectory
 from pathlib import Path
 

@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    from simsopt_jax.core import (
+        OrientedCurveXYZFourierSpec,
+        curve_gamma_and_gammadash_from_spec,
+        make_oriented_curve_xyzfourier_spec,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 
 
 import numpy as np
-
-from simsopt_jax.core import (
-    OrientedCurveXYZFourierSpec,
-    curve_gamma_and_gammadash_from_spec,
-    make_oriented_curve_xyzfourier_spec,
-)
 
 
 _DIRECT_KERNEL = {

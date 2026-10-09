@@ -17,9 +17,26 @@ name, never by line, so edits inside an owner do not disturb the census.
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
 
-import jax  # noqa: F401
+try:
+    import simsopt_jax  # noqa: F401
+    import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.backend.dtypes import (
+        explicit_device_array,
+        runtime_device_put_tree,
+    )
+    from simsopt_jax.runtime.host_boundary import (
+        allow_host_transfers,
+        block_until_ready,
+        disallow_host_transfers,
+        host_array,
+        host_tree_after_ready,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from tempfile import TemporaryDirectory
 
 
@@ -27,16 +44,7 @@ import ast
 from pathlib import Path
 from typing import NamedTuple
 
-import jax.numpy as jnp
 import numpy as np
-from simsopt_jax.backend.dtypes import explicit_device_array, runtime_device_put_tree
-from simsopt_jax.runtime.host_boundary import (
-    allow_host_transfers,
-    block_until_ready,
-    disallow_host_transfers,
-    host_array,
-    host_tree_after_ready,
-)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCANNED_ROOTS = ("src/simsopt_jax", "src/simsopt_jax_adapters")
