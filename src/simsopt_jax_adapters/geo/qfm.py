@@ -101,7 +101,7 @@ class JaxQfmResidual(Optimizable):
         """Evaluate the dimensionless native QFM ratio from live geometry and field points.
         
         Returns:
-            numpy.float64: Scalar ratio; native nonfinite behavior is retained."""
+            numpy.float64: Dimensionless float scalar ratio; native nonfinite behavior is retained."""
         return _host_result(qfm_residual(self._spec()))
 
     def dJ_by_dsurfacecoefficients(self):
@@ -119,7 +119,7 @@ class JaxQfmSurface(GSONable):
         biotsavart (JaxBiotSavart): Mutable single-device field providing coils and current Cartesian point buffers.
         surface (SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier): Mutable native surface of exactly one supported class; subclasses are rejected.
         label (Volume | Area | ToroidalFlux): Live native label, optionally on a separate grid sharing the surface DOFs. Flux field points stay independent of QFM points.
-        targetlabel (float | jax.Array): Scalar target in the native label units, read afresh for each evaluation."""
+        targetlabel (float | numpy.float64 | numpy.ndarray | jax.Array): Scalar shape () target in the native label units, read afresh for each evaluation."""
 
     def __init__(self, biotsavart: JaxBiotSavart, surface: _Surface, label: _Label, targetlabel):
         self.biotsavart = biotsavart
@@ -189,13 +189,40 @@ class JaxQfmSurface(GSONable):
         return explicit_device_array(value, dtype=np.float64, reference=spec.surface.quadpoints_phi)
 
     @overload
-    def qfm_label_constraint(self, x, derivatives: Literal[0] = 0) -> np.float64: ...
+    def qfm_label_constraint(self, x, derivatives: Literal[0] = 0) -> np.float64: 
+        """Evaluate the native qfm label constraint from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): Literal 0 selects the scalar value.
+        
+        Returns:
+            numpy.float64: Float scalar native value in squared label units."""
+        ...
 
     @overload
-    def qfm_label_constraint(self, x, derivatives: Literal[1]) -> tuple[np.float64, np.ndarray]: ...
+    def qfm_label_constraint(self, x, derivatives: Literal[1]) -> tuple[np.float64, np.ndarray]: 
+        """Evaluate the native qfm label constraint from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): Literal 1 selects the value and full surface gradient.
+        
+        Returns:
+            tuple[numpy.float64, numpy.ndarray]: Float scalar native value in squared label units and shape (ndofs,) full coefficient gradient in squared label units per meter, including fixed DOFs."""
+        ...
 
     @overload
-    def qfm_label_constraint(self, x, derivatives: int = 0) -> np.float64 | tuple[np.float64, np.ndarray]: ...
+    def qfm_label_constraint(self, x, derivatives: int = 0) -> np.float64 | tuple[np.float64, np.ndarray]: 
+        """Evaluate the native qfm label constraint from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): 0 returns the value; 1 returns value and the full surface gradient. Other orders raise the native assertion.
+        
+        Returns:
+            numpy.float64 | tuple[numpy.float64, numpy.ndarray]: Scalar native value, or value and shape (ndofs,) full coefficient gradient, including fixed DOFs. Value uses squared label units; the gradient uses squared label units per meter."""
+        ...
 
     def qfm_label_constraint(self, x, derivatives=0):
         """Evaluate the native qfm label constraint from the current public inputs.
@@ -213,13 +240,40 @@ class JaxQfmSurface(GSONable):
         return _host_result(function(label, self._target(label), self._label_value(label)))
 
     @overload
-    def qfm_objective(self, x, derivatives: Literal[0] = 0) -> np.float64: ...
+    def qfm_objective(self, x, derivatives: Literal[0] = 0) -> np.float64: 
+        """Evaluate the native qfm objective from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): Literal 0 selects the scalar value.
+        
+        Returns:
+            numpy.float64: Float scalar native value in dimensionless units."""
+        ...
 
     @overload
-    def qfm_objective(self, x, derivatives: Literal[1]) -> tuple[np.float64, np.ndarray]: ...
+    def qfm_objective(self, x, derivatives: Literal[1]) -> tuple[np.float64, np.ndarray]: 
+        """Evaluate the native qfm objective from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): Literal 1 selects the value and full surface gradient.
+        
+        Returns:
+            tuple[numpy.float64, numpy.ndarray]: Float scalar native value in dimensionless units and shape (ndofs,) full coefficient gradient in inverse meters, including fixed DOFs."""
+        ...
 
     @overload
-    def qfm_objective(self, x, derivatives: int = 0) -> np.float64 | tuple[np.float64, np.ndarray]: ...
+    def qfm_objective(self, x, derivatives: int = 0) -> np.float64 | tuple[np.float64, np.ndarray]: 
+        """Evaluate the native qfm objective from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): 0 returns the value; 1 returns value and the full surface gradient. Other orders raise the native assertion.
+        
+        Returns:
+            numpy.float64 | tuple[numpy.float64, numpy.ndarray]: Scalar native value, or value and shape (ndofs,) full coefficient gradient, including fixed DOFs. Value is dimensionless; the gradient uses inverse meters."""
+        ...
 
     def qfm_objective(self, x, derivatives=0):
         """Evaluate the native qfm objective from the current public inputs.
@@ -236,13 +290,43 @@ class JaxQfmSurface(GSONable):
         return _host_result(function(self.qfm._spec()))
 
     @overload
-    def qfm_penalty_constraints(self, x, derivatives: Literal[0] = 0, constraint_weight: float = 1) -> np.float64: ...
+    def qfm_penalty_constraints(self, x, derivatives: Literal[0] = 0, constraint_weight: float = 1) -> np.float64: 
+        """Evaluate the native qfm penalty constraints from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): Literal 0 selects the scalar value.
+            constraint_weight (float): Scalar native coefficient multiplying half the squared label error.
+        
+        Returns:
+            numpy.float64: Float scalar native value in the native scalarization units."""
+        ...
 
     @overload
-    def qfm_penalty_constraints(self, x, derivatives: Literal[1], constraint_weight: float = 1) -> tuple[np.float64, np.ndarray]: ...
+    def qfm_penalty_constraints(self, x, derivatives: Literal[1], constraint_weight: float = 1) -> tuple[np.float64, np.ndarray]: 
+        """Evaluate the native qfm penalty constraints from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): Literal 1 selects the value and full surface gradient.
+            constraint_weight (float): Scalar native coefficient multiplying half the squared label error.
+        
+        Returns:
+            tuple[numpy.float64, numpy.ndarray]: Float scalar native value in the native scalarization units and shape (ndofs,) full coefficient gradient in the native scalarization units per meter, including fixed DOFs."""
+        ...
 
     @overload
-    def qfm_penalty_constraints(self, x, derivatives: int = 0, constraint_weight: float = 1) -> np.float64 | tuple[np.float64, np.ndarray]: ...
+    def qfm_penalty_constraints(self, x, derivatives: int = 0, constraint_weight: float = 1) -> np.float64 | tuple[np.float64, np.ndarray]: 
+        """Evaluate the native qfm penalty constraints from the current public inputs.
+        
+        Args:
+            x (numpy.ndarray): Shape (nfree,) free native surface DOFs in meters; evaluation updates the mutable surface.
+            derivatives (int): 0 returns the value; 1 returns value and the full surface gradient. Other orders raise the native assertion.
+            constraint_weight (float): Scalar native coefficient multiplying half the squared label error.
+        
+        Returns:
+            numpy.float64 | tuple[numpy.float64, numpy.ndarray]: Scalar native value, or value and shape (ndofs,) full coefficient gradient, including fixed DOFs. Units follow the native scalarization."""
+        ...
 
     def qfm_penalty_constraints(self, x, derivatives=0, constraint_weight: float = 1):
         """Evaluate the native qfm penalty constraints from the current public inputs.
@@ -285,7 +369,7 @@ class JaxQfmSurface(GSONable):
         """Run the native host optimizer and store its final surface iterate.
         
         Args:
-            tol (float): Native SciPy stopping tolerance; passed as ftol and also gtol for L-BFGS-B.
+            tol (float): Native SciPy stopping tolerance; passed as ftol.
             maxiter (int): Maximum native SciPy iterations; default 1000.
         
         Returns:
