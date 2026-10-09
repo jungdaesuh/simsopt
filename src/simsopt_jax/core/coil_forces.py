@@ -171,7 +171,7 @@ def lp_force(
         regularizations: Array of shape (m,), cross-section regularization in m^2 from regularization_circ/regularization_rect.
         sources: tuple of coil-group tuples with array shapes (m, n, 3), (m, n, 3), (m,); quadrature counts may differ between groups.
         p: float scalar, dimensionless exponent.
-        threshold: float scalar, density threshold in MN/m for force or MN for torque.
+        threshold: float scalar, force-density threshold in MN/m.
         downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
 
     Returns:
@@ -206,7 +206,7 @@ def lp_torque(
         regularizations: Array of shape (m,), cross-section regularization in m^2 from regularization_circ/regularization_rect.
         sources: tuple of coil-group tuples with array shapes (m, n, 3), (m, n, 3), (m,); quadrature counts may differ between groups.
         p: float scalar, dimensionless exponent.
-        threshold: float scalar, density threshold in MN/m for force or MN for torque.
+        threshold: float scalar, torque-density threshold in MN.
         downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
 
     Returns:
