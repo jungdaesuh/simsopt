@@ -112,11 +112,13 @@ def boozer_problem(
         label_coils, coils = list(label.biotsavart.coils), list(biotsavart.coils)
         if len(label_coils) != len(coils) or any(a is not b for a, b in zip(label_coils, coils)):
             raise ValueError("the ToroidalFlux label must use the field's coils.")
+    surface_spec = surface_spec_from_surface(surface)
+    label_surface_spec = surface_spec if label_surface is surface else surface_spec_from_surface(label_surface)
     return make_boozer_problem(
-        surface=surface_spec_from_surface(surface),
+        surface=surface_spec,
         coils=biotsavart.coil_set_spec(),
         label=BoozerLabelSpec(
-            surface=surface_spec_from_surface(label_surface),
+            surface=label_surface_spec,
             kind=kind,
             idx=label.idx if kind == "toroidal_flux" else 0,
         ),
