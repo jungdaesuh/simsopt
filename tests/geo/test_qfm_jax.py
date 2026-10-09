@@ -826,11 +826,7 @@ class TestQfmJax(JaxTestCase):
             "qfm_label_constraint",
             "qfm_penalty_constraints",
         ):
-            options = (
-                {"constraint_weight": 11.1232}
-                if name == "qfm_penalty_constraints"
-                else {}
-            )
+            options = {"constraint_weight": 11.1232} if name == "qfm_penalty_constraints" else {}
             _, gradient = getattr(port, name)(x, derivatives=1, **options)
             analytic = gradient @ direction
             base = getattr(native, name)(x, derivatives=0, **options)
@@ -838,10 +834,7 @@ class TestQfmJax(JaxTestCase):
             powers = range(7, 17) if name == "qfm_label_constraint" else range(13, 20)
             for step in np.power(2.0, -np.asarray(list(powers))):
                 difference = (
-                    getattr(native, name)(
-                        x + step * direction, derivatives=0, **options
-                    )
-                    - base
+                    getattr(native, name)(x + step * direction, derivatives=0, **options) - base
                 ) / step
                 error = np.linalg.norm(difference - analytic) / np.linalg.norm(analytic)
                 self.assertLess(error, 0.6 * previous_error, name)
