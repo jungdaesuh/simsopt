@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -56,10 +54,9 @@ def surface_spec_from_surface(
             f"and SurfaceXYZTensorFourier, got {type(surface).__name__}."
         )
     spec_class, coefficient_names = _SPECS[type(surface)]
-    # Copy first: native set_dofs rewrites the coefficient arrays in place, and a
-    # CPU device_put may alias the NumPy memory it is given.
+    # Placement snapshots native arrays before set_dofs can rewrite them.
     arrays = {
-        name: as_jax_float64(np.array(getattr(surface, name), dtype=np.float64))
+        name: as_jax_float64(getattr(surface, name))
         for name in (*coefficient_names, "quadpoints_phi", "quadpoints_theta")
     }
     clamped_dims = (
