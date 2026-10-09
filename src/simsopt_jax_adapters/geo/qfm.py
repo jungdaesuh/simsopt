@@ -88,7 +88,7 @@ class JaxQfmResidual(Optimizable):
 
         Returns:
             None: Points are replaced with Cartesian surface positions in meters."""
-        self.biotsavart.set_points(np.array(self.surface.gamma().reshape(-1, 3), copy=True))
+        self.biotsavart.set_points(self.surface.gamma().reshape(-1, 3))
 
     def _spec(self) -> QfmSpec:
         return QfmSpec(

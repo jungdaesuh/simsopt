@@ -167,7 +167,7 @@ def _label_value_and_grad(spec: QfmLabelSpec) -> tuple[jax.Array, jax.Array]:
             moved = QfmLabelSpec(
                 surface_spec_with_dofs(spec.surface, dofs), spec.coils, spec.idx, spec.kind, spec.points,
             )
-            return qfm_label(moved)
+            return _jitted_qfm_label(moved)
 
         return jax.value_and_grad(label)(surface_get_dofs(spec.surface))
 
@@ -198,7 +198,7 @@ def _jitted_qfm_label_constraint(
     Native SLSQP's zero-Jacobian failure depends on exact label subtraction.
     The adapter supplies that value explicitly; standalone kernels compute it.
     """
-    value = qfm_label(spec) if label_value is None else label_value
+    value = _jitted_qfm_label(spec) if label_value is None else label_value
     return 0.5 * (value - targetlabel)**2
 
 
@@ -217,7 +217,7 @@ def _jitted_qfm_penalty_constraints(
     spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
 ) -> jax.Array:
-    return qfm_residual(spec) + constraint_weight * qfm_label_constraint(label, targetlabel, label_value)
+    return _jitted_qfm_residual(spec) + constraint_weight * _jitted_qfm_label_constraint(label, targetlabel, label_value)
 
 
 @jax.jit
@@ -225,8 +225,8 @@ def _jitted_qfm_penalty_constraints_value_and_grad(
     spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    value, gradient = qfm_residual_value_and_grad(spec)
-    constraint, label_gradient = qfm_label_constraint_value_and_grad(label, targetlabel, label_value)
+    value, gradient = _jitted_qfm_residual_value_and_grad(spec)
+    constraint, label_gradient = _jitted_qfm_label_constraint_value_and_grad(label, targetlabel, label_value)
     return value + constraint_weight * constraint, gradient + constraint_weight * label_gradient
 
 
