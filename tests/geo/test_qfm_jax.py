@@ -44,60 +44,64 @@ if JAX_IMPORT_ERROR is None:
     _LABELS = [Volume, Area, ToroidalFlux]
 
 
-def _pair(
-    surface_class=SurfaceRZFourier,
-    stellsym=True,
-    label_class=Volume,
-    cloned=False,
-    break_field_symmetry=True,
-):
-    curves, currents, axis, nfp, field = get_data("ncsx")
-    if not stellsym and break_field_symmetry:
-        # The upstream QFM solve test breaks *field* symmetry when surface
-        # symmetry is disabled. A perfectly symmetric field/start introduces
-        # roundoff-sized asymmetric directions in the squared-equality solve.
-        reflected = [RotatedCurve(curve, 0, True) for curve in curves]
-        rng = np.random.default_rng(1)
-        for curve in reflected:
-            curve.rotmat += 0.001 * rng.uniform(-1, 1, curve.rotmat.shape)
-            curve.rotmatT = curve.rotmat.T.copy()
-        field = BiotSavart(
-            coils_via_symmetries(
-                curves + reflected,
-                currents + [-current for current in currents],
-                nfp,
-                False,
+if JAX_IMPORT_ERROR is None:
+
+    def _pair(
+        surface_class=SurfaceRZFourier,
+        stellsym=True,
+        label_class=Volume,
+        cloned=False,
+        break_field_symmetry=True,
+    ):
+        curves, currents, axis, nfp, field = get_data("ncsx")
+        if not stellsym and break_field_symmetry:
+            # The upstream QFM solve test breaks *field* symmetry when surface
+            # symmetry is disabled. A perfectly symmetric field/start introduces
+            # roundoff-sized asymmetric directions in the squared-equality solve.
+            reflected = [RotatedCurve(curve, 0, True) for curve in curves]
+            rng = np.random.default_rng(1)
+            for curve in reflected:
+                curve.rotmat += 0.001 * rng.uniform(-1, 1, curve.rotmat.shape)
+                curve.rotmatT = curve.rotmat.T.copy()
+            field = BiotSavart(
+                coils_via_symmetries(
+                    curves + reflected,
+                    currents + [-current for current in currents],
+                    nfp,
+                    False,
+                )
             )
-        )
-    surfaces = [
-        surface_class(
-            mpol=1,
-            ntor=1,
-            nfp=nfp,
-            stellsym=stellsym,
-            quadpoints_phi=np.linspace(0, 1 / nfp, 7, endpoint=False),
-            quadpoints_theta=np.linspace(0, 1, 8, endpoint=False),
-        )
-        for _ in range(2)
-    ]
-    for surface in surfaces:
-        surface.fit_to_curve(axis, 0.2, flip_theta=True)
-    native_field = BiotSavart(field.coils)
-    jax_field = JaxBiotSavart(field.coils)
-    options = {"nphi": 5, "ntheta": 9, "range": "field period"} if cloned else {}
-    labels = []
-    for surface in surfaces:
-        if label_class is ToroidalFlux:
-            labels.append(
-                label_class(surface, BiotSavart(field.coils), idx=-1, **options)
+        surfaces = [
+            surface_class(
+                mpol=1,
+                ntor=1,
+                nfp=nfp,
+                stellsym=stellsym,
+                quadpoints_phi=np.linspace(0, 1 / nfp, 7, endpoint=False),
+                quadpoints_theta=np.linspace(0, 1, 8, endpoint=False),
             )
-        else:
-            labels.append(label_class(surface, **options))
-    targetlabel = labels[0].J() * 1.03
-    return (
-        QfmSurface(native_field, surfaces[0], labels[0], targetlabel),
-        JaxQfmSurface(jax_field, surfaces[1], labels[1], targetlabel),
-    )
+            for _ in range(2)
+        ]
+        for surface in surfaces:
+            surface.fit_to_curve(axis, 0.2, flip_theta=True)
+        native_field = BiotSavart(field.coils)
+        jax_field = JaxBiotSavart(field.coils)
+        options = {"nphi": 5, "ntheta": 9, "range": "field period"} if cloned else {}
+        labels = []
+        for surface in surfaces:
+            if label_class is ToroidalFlux:
+                labels.append(
+                    cast(type[ToroidalFlux], label_class)(
+                        surface, BiotSavart(field.coils), idx=-1, **options
+                    )
+                )
+            else:
+                labels.append(label_class(surface, **options))
+        targetlabel = labels[0].J() * 1.03
+        return (
+            QfmSurface(native_field, surfaces[0], labels[0], targetlabel),
+            JaxQfmSurface(jax_field, surfaces[1], labels[1], targetlabel),
+        )
 
 
 def _assert_pair(actual, expected):
@@ -822,7 +826,11 @@ class TestQfmJax(JaxTestCase):
             "qfm_label_constraint",
             "qfm_penalty_constraints",
         ):
-            options = {"constraint_weight": 11.1232} if name == "qfm_penalty_constraints" else {}
+            options = (
+                {"constraint_weight": 11.1232}
+                if name == "qfm_penalty_constraints"
+                else {}
+            )
             _, gradient = getattr(port, name)(x, derivatives=1, **options)
             analytic = gradient @ direction
             base = getattr(native, name)(x, derivatives=0, **options)
@@ -830,7 +838,10 @@ class TestQfmJax(JaxTestCase):
             powers = range(7, 17) if name == "qfm_label_constraint" else range(13, 20)
             for step in np.power(2.0, -np.asarray(list(powers))):
                 difference = (
-                    getattr(native, name)(x + step * direction, derivatives=0, **options) - base
+                    getattr(native, name)(
+                        x + step * direction, derivatives=0, **options
+                    )
+                    - base
                 ) / step
                 error = np.linalg.norm(difference - analytic) / np.linalg.norm(analytic)
                 self.assertLess(error, 0.6 * previous_error, name)
