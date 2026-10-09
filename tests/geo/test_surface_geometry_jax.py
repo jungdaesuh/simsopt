@@ -33,7 +33,10 @@ try:
         surface_get_dofs,
         surface_spec_with_dofs,
     )
-    from simsopt_jax.core.surface_geometry import surface_gamma, surface_quantity_of_dofs
+    from simsopt_jax.core.surface_geometry import (
+        surface_gamma,
+        surface_quantity_of_dofs,
+    )
     from simsopt_jax.runtime.host_boundary import disallow_host_transfers
     from simsopt_jax_adapters.geo import surface_spec_from_surface
 except ImportError:
@@ -80,12 +83,18 @@ class _Case:
 if JAX_IMPORT_ERROR is None:
     _CASES = {
         "rz-stellsym-nfp1-full-torus": _Case(SurfaceRZFourier, True, 1, "full torus"),
-        "rz-stellsym-nfp3-field-period": _Case(SurfaceRZFourier, True, 3, "field period"),
+        "rz-stellsym-nfp3-field-period": _Case(
+            SurfaceRZFourier, True, 3, "field period"
+        ),
         "rz-nonsym-nfp2-half-period": _Case(SurfaceRZFourier, False, 2, "half period"),
         "rz-axisymmetric-ntor0": _Case(SurfaceRZFourier, False, 1, "full torus", 3, 0),
         "xyz-stellsym-nfp1-full-torus": _Case(SurfaceXYZFourier, True, 1, "full torus"),
-        "xyz-stellsym-nfp3-field-period": _Case(SurfaceXYZFourier, True, 3, "field period"),
-        "xyz-nonsym-nfp2-half-period": _Case(SurfaceXYZFourier, False, 2, "half period"),
+        "xyz-stellsym-nfp3-field-period": _Case(
+            SurfaceXYZFourier, True, 3, "field period"
+        ),
+        "xyz-nonsym-nfp2-half-period": _Case(
+            SurfaceXYZFourier, False, 2, "half period"
+        ),
         "tensor-stellsym-nfp1-full-torus": _Case(
             SurfaceXYZTensorFourier, True, 1, "full torus"
         ),
@@ -173,6 +182,7 @@ _ATOL = 1e-12
 
 
 if JAX_IMPORT_ERROR is None:
+
     @partial(jax.jit, static_argnums=(0, 1))
     def _coefficient_derivative(
         quantity: str, transform: _Transform, spec: SurfaceSpec
@@ -184,6 +194,7 @@ if JAX_IMPORT_ERROR is None:
 
 
 if JAX_IMPORT_ERROR is None:
+
     @partial(jax.jit, static_argnums=0)
     def _coefficient_vjp(
         quantity: str, spec: SurfaceSpec, cotangent: jax.Array
@@ -339,11 +350,13 @@ def _singular_surface(singularity: str) -> SurfaceRZFourier:
 
 
 if JAX_IMPORT_ERROR is None:
+
     class _SurfaceRZFourierSubclass(SurfaceRZFourier):
         pass
 
 
 if JAX_IMPORT_ERROR is None:
+
     class _SurfaceXYZTensorFourierSubclass(SurfaceXYZTensorFourier):
         pass
 
