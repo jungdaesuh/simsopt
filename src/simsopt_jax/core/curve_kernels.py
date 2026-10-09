@@ -7,7 +7,8 @@ penalties keep the native evaluation boundary: native evaluates the dense
 formula only for candidate pairs (``simsoptpp``'s candidate search: some point
 pair closer than the minimum distance) and skips every other pair. The caller
 passes that decision: the drop-in objectives take it from ``simsoptpp`` itself,
-the fused objective from :func:`distance_candidate_pure`.
+the fused objective from :func:`distance_candidate_pure`. Caller NumPy arrays
+are snapshotted at each public boundary; device arrays and tracers pass through.
 """
 
 from __future__ import annotations
@@ -44,6 +45,11 @@ def distance_candidate_pure(points1, points2, minimum_distance):
     Returns:
         Array: bool scalar candidate decision.
     """
+    points1, points2, minimum_distance = snapshot_host_tree(
+        (points1, points2, minimum_distance)
+    )
+    points1 = jnp.asarray(points1)
+    points2 = jnp.asarray(points2)
     delta = points1[:, None, :] - points2[None, :, :]
     squared_distances = (
         delta[..., 0] * delta[..., 0] + delta[..., 1] * delta[..., 1] + delta[..., 2] * delta[..., 2]
@@ -75,7 +81,6 @@ def _candidate_pair_penalty(points1, weights1, points2, weights2, minimum_distan
     return jnp.where(candidate, penalty, zero)
 
 
-@jax.jit
 def curve_length_from_incremental_arclength_pure(incremental_arclength):
     """Compute length by averaging the speed over a unit-period quadrature grid.
 
@@ -85,10 +90,16 @@ def curve_length_from_incremental_arclength_pure(incremental_arclength):
     Returns:
         Array: scalar curve length in m.
     """
-    return jnp.mean(incremental_arclength)
+    inputs = snapshot_host_tree((incremental_arclength,))
+    return _curve_length_from_incremental_arclength_pure(*inputs)
 
 
 @jax.jit
+def _curve_length_from_incremental_arclength_pure(incremental_arclength):
+    """Compiled formula; the public boundary owns caller NumPy buffers."""
+    return jnp.mean(incremental_arclength)
+
+
 def kappa_pure(d1gamma, d2gamma):
     """Compute curvature as |gamma prime cross gamma double prime| / |gamma prime|^3.
 
@@ -99,13 +110,19 @@ def kappa_pure(d1gamma, d2gamma):
     Returns:
         Array of shape (n,): curvature in 1/m.
     """
+    inputs = snapshot_host_tree((d1gamma, d2gamma))
+    return _kappa_pure(*inputs)
+
+
+@jax.jit
+def _kappa_pure(d1gamma, d2gamma):
+    """Compiled formula; the public boundary owns caller NumPy buffers."""
     return (
         jnp.linalg.norm(jnp.cross(d1gamma, d2gamma), axis=1)
         / jnp.linalg.norm(d1gamma, axis=1) ** 3
     )
 
 
-@jax.jit
 def curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa):
     """Compute (1/p) mean(max(kappa - desired_kappa, 0)^p |gammadash|).
 
@@ -120,6 +137,13 @@ def curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa):
     Returns:
         Array: scalar penalty in m^(1-p).
     """
+    inputs = snapshot_host_tree((kappa, gammadash, p, desired_kappa))
+    return _curvature_p_norm_from_kappa_pure(*inputs)
+
+
+@jax.jit
+def _curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa):
+    """Compiled formula; the public boundary owns caller NumPy buffers."""
     p_jax = jnp.asarray(p, dtype=kappa.dtype)
     desired_kappa_jax = jnp.asarray(desired_kappa, dtype=kappa.dtype)
     zero = jnp.asarray(0.0, dtype=kappa.dtype)
@@ -129,7 +153,6 @@ def curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa):
     return (one / p_jax) * jnp.mean((excess**p_jax) * arc_length)
 
 
-@jax.jit
 def mean_squared_curvature_pure(kappa, gammadash):
     """Compute mean(kappa^2 |gammadash|) / mean(|gammadash|).
 
@@ -140,6 +163,13 @@ def mean_squared_curvature_pure(kappa, gammadash):
     Returns:
         Array: scalar arclength-averaged squared curvature in 1/m^2.
     """
+    inputs = snapshot_host_tree((kappa, gammadash))
+    return _mean_squared_curvature_pure(*inputs)
+
+
+@jax.jit
+def _mean_squared_curvature_pure(kappa, gammadash):
+    """Compiled formula; the public boundary owns caller NumPy buffers."""
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     return jnp.mean(kappa**2 * arc_length) / jnp.mean(arc_length)
 

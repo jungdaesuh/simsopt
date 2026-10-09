@@ -20,6 +20,8 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.runtime.host_boundary import snapshot_host_tree
+
 from .specs import FixedSurfaceFluxSpec
 
 __all__ = [
@@ -48,10 +50,10 @@ def _validate_shapes(Bcoil, target, normal):
         )
 
 
-@partial(jax.jit, static_argnames=("definition",))
 def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     """Compute the flux objective using the module-level integral formulas.
 
+    Caller NumPy arrays are snapshotted before asynchronous execution.
     Zero normals and, for normalized/local definitions, zero field retain the
     native IEEE NaN/inf behavior.
 
@@ -64,6 +66,13 @@ def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     Returns:
         Array: scalar objective in T^2 m^2 (quadratic flux), dimensionless (normalized), or m^2 (local).
     """
+    inputs = snapshot_host_tree((Bcoil, target, normal))
+    return _integral_BdotN(*inputs, definition)
+
+
+@partial(jax.jit, static_argnames=("definition",))
+def _integral_BdotN(Bcoil, target, normal, definition):
+    """Compiled flux formula; the public boundary owns caller NumPy buffers."""
     _validate_shapes(Bcoil, target, normal)
     if definition not in FLUX_DEFINITIONS:
         raise ValueError(f"Unknown definition: {definition!r}")

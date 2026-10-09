@@ -1,8 +1,48 @@
 """JAX coil-geometry penalties against the native curve objectives."""
 
-from unittest_jax_support import JaxTestCase
+from __future__ import annotations
+
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+
+try:
+    import simsopt_jax  # noqa: F401
+    import jax
+    import jax.numpy as jnp
+    from core.test_buffer_ownership import _host_array, make_execution_gate
+    from simsopt._core.derivative import Derivative
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.field import Current, coils_via_symmetries
+    from simsopt.geo import (
+        CurveCurveDistance,
+        CurveLength,
+        CurveSurfaceDistance,
+        CurveXYZFourier,
+        LpCurveCurvature,
+        MeanSquaredCurvature,
+        SurfaceRZFourier,
+        create_equally_spaced_curves,
+    )
+    from simsopt_jax.backend import set_backend
+    from simsopt_jax.core.curve_kernels import (
+        curve_curve_distance_penalty_pure,
+        curve_length_from_incremental_arclength_pure,
+        curvature_p_norm_from_kappa_pure,
+        distance_candidate_pure,
+        kappa_pure,
+        mean_squared_curvature_pure,
+        curve_surface_distance_penalty_pure,
+    )
+    from simsopt_jax_adapters.geo import (
+        JaxCurveCurveDistance,
+        JaxCurveLength,
+        JaxCurveSurfaceDistance,
+        JaxLpCurveCurvature,
+        JaxMeanSquaredCurvature,
+    )
+except ImportError:
+    if JAX_IMPORT_ERROR is None:
+        raise
 from unittest import mock
-from core.test_buffer_ownership import make_execution_gate
 
 
 from collections.abc import Callable
@@ -11,36 +51,8 @@ import subprocess
 import sys
 from typing import cast
 
-import jax
-import jax.numpy as jnp
 import numpy as np
-from core.test_buffer_ownership import _host_array
 
-from simsopt._core.derivative import Derivative
-from simsopt._core.optimizable import Optimizable
-from simsopt.field import Current, coils_via_symmetries
-from simsopt.geo import (
-    CurveCurveDistance,
-    CurveLength,
-    CurveSurfaceDistance,
-    CurveXYZFourier,
-    LpCurveCurvature,
-    MeanSquaredCurvature,
-    SurfaceRZFourier,
-    create_equally_spaced_curves,
-)
-from simsopt_jax.backend import set_backend
-from simsopt_jax.core.curve_kernels import (
-    curve_curve_distance_penalty_pure,
-    curve_surface_distance_penalty_pure,
-)
-from simsopt_jax_adapters.geo import (
-    JaxCurveCurveDistance,
-    JaxCurveLength,
-    JaxCurveSurfaceDistance,
-    JaxLpCurveCurvature,
-    JaxMeanSquaredCurvature,
-)
 
 # The thresholds make every penalty active at the test state.
 _CC_THRESHOLD = 0.6
@@ -251,6 +263,62 @@ _TIE_CASES = (
 
 
 class TestCurveObjectivesJax(JaxTestCase):
+    def test_pure_kernels_snapshot_numpy_before_pending_evaluation(self):
+        """Caller mutation cannot change queued length, curvature or candidate results."""
+        cases = (
+            (curve_length_from_incremental_arclength_pure, ((65536,),)),
+            (kappa_pure, ((65536, 3), (65536, 3))),
+            (curvature_p_norm_from_kappa_pure, ((65536,), (65536, 3), (), ())),
+            (mean_squared_curvature_pure, ((65536,), (65536, 3))),
+            (distance_candidate_pure, ((32, 3), (32, 3), ())),
+        )
+        for kernel, shapes in cases:
+            for operand_index in range(len(shapes)):
+                for misaligned in (False, True):
+                    with self.subTest(kernel=kernel.__name__, operand=operand_index, misaligned=misaligned), self.case():
+                        self._case_pure_kernel_snapshot(kernel, shapes, operand_index, misaligned)
+
+    def _case_pure_kernel_snapshot(self, kernel, shapes, operand_index, misaligned):
+        """Queue real device work before mutating one host operand of a warm kernel."""
+        host_inputs = [_host_array(shape or (1,), misaligned=misaligned).reshape(shape) for shape in shapes]
+        if kernel is kappa_pure:
+            host_inputs[1][:, 0] *= -1.0
+        if kernel is distance_candidate_pure:
+            host_inputs[1] += 0.2
+        expected = np.asarray(kernel(*host_inputs)).copy()
+        inputs: list[np.ndarray | jax.Array] = [jnp.asarray(value) for value in host_inputs]
+        inputs[operand_index] = host_inputs[operand_index]
+        gate = make_execution_gate()
+        gate_index = 1 if operand_index == 0 and len(inputs) > 1 else 0
+        gate(jnp.asarray(host_inputs[gate_index])).block_until_ready()
+        pending = gate(jnp.asarray(host_inputs[gate_index]))
+        if len(inputs) > 1:
+            inputs[gate_index] = pending
+        result = kernel(*inputs)
+        self.assertFalse(result.is_ready(), "pure kernel finished before caller mutation")
+        host_inputs[operand_index][...] = 0.0 if kernel is distance_candidate_pure else -7.0
+        np.testing.assert_array_equal(result.block_until_ready(), expected)
+        pending.block_until_ready()
+
+    def test_pure_kernels_support_nested_jit_and_grad(self):
+        """Host boundaries preserve traced device values and differentiable formulas."""
+        speed = jnp.arange(1.0, 9.0)
+        derivative = jnp.stack((speed, speed * 0.5, speed * 0.25), axis=1)
+        second = derivative.at[:, 0].multiply(-1.0)
+        calls = (
+            (curve_length_from_incremental_arclength_pure, (speed,)),
+            (kappa_pure, (derivative, second)),
+            (curvature_p_norm_from_kappa_pure, (speed, derivative, 2.0, 0.5)),
+            (mean_squared_curvature_pure, (speed, derivative)),
+            (distance_candidate_pure, (derivative, second, 0.5)),
+        )
+        for kernel, inputs in calls:
+            with self.subTest(kernel=kernel.__name__):
+                np.testing.assert_array_equal(jax.jit(kernel)(*inputs), kernel(*inputs))
+                if kernel is not distance_candidate_pure:
+                    gradient = jax.grad(lambda value: jnp.sum(kernel(value, *inputs[1:])))
+                    np.testing.assert_allclose(jax.jit(gradient)(inputs[0]), gradient(inputs[0]), rtol=1e-14, atol=1e-14)
+
     def test_distance_kernels_snapshot_numpy_before_pending_evaluation(self):
         """Mutating each caller-owned geometry array cannot change a queued distance penalty."""
         for misaligned in [False, True]:
