@@ -729,6 +729,7 @@ class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
         self.assertLess(err, 1e-6, "Second derivative disagrees with central difference")
 
     def test_clamped_phi2_derivative(self):
+        """Clamped phi second derivatives and coefficient Jacobians match central differences for odd and even nfp."""
         phis = np.asarray([self.phi0 - self.h, self.phi0, self.phi0 + self.h])
         thetas = np.asarray([self.theta0])
         for nfp in [1, 2, 3, 5]:
@@ -743,6 +744,7 @@ class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
                     s.dgammadash1dash1_by_dcoeff()[1, 0], dd1[2, 0], dd1[0, 0])
 
     def test_clamped_theta2_derivative(self):
+        """Clamped theta second derivatives and coefficient Jacobians match central differences for odd and even nfp."""
         phis = np.asarray([self.phi0])
         thetas = np.asarray([self.theta0 - self.h, self.theta0, self.theta0 + self.h])
         for nfp in [1, 2, 3, 5]:
