@@ -112,8 +112,7 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
 
         Returns:
             float: Cached scalar objective, recomputed through the surface solve when
-                invalidated; dimensionless for the non-QS ratio, native penalty units for
-                BoozerResidual.
+                invalidated; dimensionless non-quasi-symmetric field-energy ratio.
         """
         if self._J is None:
             self.compute()
