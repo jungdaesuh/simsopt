@@ -156,8 +156,9 @@ class JaxExactSingleStage:
             tol (float): Euclidean norm threshold for the native masked residual system,
                 including label and nonsymmetric z constraints; default 1e-13.
                 This norm combines residual and constraint units. At the step cap,
-                success uses the norm before the last step; zero steps retain the
-                native 1e6 sentinel.
+                success uses the norm before the last step. A nonpositive maxiter
+                returns the native 1e6 sentinel; initial convergence with a
+                positive cap returns the computed initial system norm.
             maxiter (float): Inner Newton step cap; default 40, which may be infinite.
                 Positive fractional caps admit steps while the integer count is
                 below the cap.
