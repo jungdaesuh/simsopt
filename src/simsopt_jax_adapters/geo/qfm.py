@@ -63,7 +63,7 @@ def _host_result(result: jax.Array | tuple[jax.Array, jax.Array]):
 class JaxQfmResidual(Optimizable):
     r"""JAX version of :class:`simsopt.geo.QfmResidual`: the normalised quadratic flux through a surface.
 
-    For a surface :math:`S` this computes
+    For a surface :math:`S` with field points at its quadrature points, this computes
 
     .. math::
         f(S) = \frac{\int_{S} d^2 x \, (\textbf{B} \cdot \hat{\textbf{n}})^2}{\int_{S} d^2 x \, B^2}
@@ -76,7 +76,8 @@ class JaxQfmResidual(Optimizable):
         surface (SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier): Mutable native surface of exactly one supported class; subclasses are rejected.
         biotsavart (JaxBiotSavart): Mutable single-device field providing coils and current Cartesian point buffers.
 
-    Whenever the surface changes, the evaluation points of ``biotsavart`` are reset to the surface quadrature points."""
+    Cache invalidation resets the evaluation points of ``biotsavart`` to a snapshot of the current surface quadrature points.
+    Field points replaced externally on ``biotsavart`` are used until the next invalidation, even when they lie away from :math:`S`."""
 
     def __init__(self, surface: _Surface, biotsavart: JaxBiotSavart):
         self.surface = surface
