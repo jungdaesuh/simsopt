@@ -21,8 +21,6 @@ try:
         Iotas,
         MajorRadius,
         NonQuasiSymmetricRatio,
-        SurfaceXYZTensorFourier,
-        Volume,
         boozer_surface_residual,
     )
     from simsopt.objectives import QuadraticPenalty
@@ -69,26 +67,22 @@ from numpy.typing import DTypeLike
 from scipy.optimize import minimize
 from scipy.linalg import lu
 
+from .surface_test_helpers import get_boozer_surface
+
 
 def _problem(*, dropin=False, quasi_poloidal=False, active_penalties=False):
-    curves, currents, axis, nfp, bs = get_data("ncsx")
-    surface = SurfaceXYZTensorFourier(
-        mpol=6,
-        ntor=6,
-        stellsym=True,
-        nfp=nfp,
-        quadpoints_phi=np.linspace(0, 1 / nfp, 13, endpoint=False),
-        quadpoints_theta=np.linspace(0, 1, 13, endpoint=False),
-    )
-    surface.fit_to_curve(axis, 0.1, flip_theta=True)
-    volume = Volume(surface)
+    bs, native = get_boozer_surface(converge=False)
+    curves = [coil.curve for coil in bs.coils[:3]]
+    currents = [coil.current for coil in bs.coils[:3]]
+    surface = native.surface
+    volume = native.label
     field = JaxBiotSavart(bs.coils)
     boozer = (
         JaxBoozerSurface(field, surface, volume, volume.J(), options={"verbose": False})
         if dropin
         else BoozerSurface(bs, surface, volume, volume.J(), options={"verbose": False})
     )
-    G = 4 * np.pi * 1e-7 * nfp * sum(abs(c.get_value()) for c in currents)
+    G = 4 * np.pi * 1e-7 * surface.nfp * sum(abs(c.get_value()) for c in currents)
     solved = boozer.solve_residual_equation_exactly_newton(
         iota=-0.406, G=G, tol=1e-13, maxiter=20
     )

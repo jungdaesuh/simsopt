@@ -40,11 +40,9 @@ try:
     from simsopt.geo.curveobjectives import CurveLength
     from simsopt.geo.curvexyzfourier import CurveXYZFourier
     from simsopt.geo.surfaceobjectives import (
-        Area,
         Iotas,
         MajorRadius,
         NonQuasiSymmetricRatio,
-        ToroidalFlux,
         Volume,
     )
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
@@ -75,10 +73,11 @@ from typing import cast
 import numpy as np
 from scipy.optimize import minimize
 
+from .surface_test_helpers import get_boozer_surface
+
 
 _IOTA = -0.406
 _RTOL = 1e-12
-_WEIGHT = 100.0
 
 
 @dataclass(frozen=True)
@@ -103,32 +102,25 @@ def _problem(
 ) -> _Problem:
     """Upstream's NCSX problem, solved from the axis fit, as a native
     ``BoozerSurface`` or a ``JaxBoozerSurface``."""
-    _, base_currents, axis, nfp, bs = get_data("ncsx")
-    mpol = 6 if boozer_type == "exact" else 3
-    npoints = 13 if boozer_type == "exact" else 20
-    surface = SurfaceXYZTensorFourier(
-        mpol=mpol,
-        ntor=mpol,
+    npoints = {"Volume": None, "Area": 31, "ToroidalFlux": 51}[label]
+    bs, native = get_boozer_surface(
+        label=label,
+        nphi=npoints,
+        ntheta=npoints,
+        boozer_type=boozer_type,
         stellsym=stellsym,
-        nfp=nfp,
-        quadpoints_phi=np.linspace(0, 1 / nfp, npoints, endpoint=False),
-        quadpoints_theta=np.linspace(0, 1, npoints, endpoint=False),
+        converge=False,
+        weight_inv_modB=boozer_type == "ls",
     )
-    surface.fit_to_curve(axis, 0.1, flip_theta=True)
-    labels = {
-        "Volume": lambda: Volume(surface),
-        "Area": lambda: Area(surface, nphi=31, ntheta=31),
-        "ToroidalFlux": lambda: ToroidalFlux(
-            surface, BiotSavart(bs.coils), nphi=51, ntheta=51
-        ),
-    }
-    label_object = labels[label]()
+    surface = native.surface
+    base_currents = [coil.current for coil in bs.coils[:3]]
+    label_object = native.label
     options = (
         {"verbose": False, "newton_tol": 1e-10}
         if boozer_type == "exact"
         else {"verbose": False}
     )
-    weight = None if boozer_type == "exact" else _WEIGHT
+    weight = native.constraint_weight
     boozer = (
         JaxBoozerSurface(
             JaxBiotSavart(bs.coils),
@@ -142,7 +134,7 @@ def _problem(
         else BoozerSurface(bs, surface, label_object, label_object.J(), weight, options)
     )
     if solve:
-        boozer.run_code(_IOTA, G=_G0(nfp, base_currents))
+        boozer.run_code(_IOTA, G=_G0(surface.nfp, base_currents))
         assert boozer.res["success"], f"{boozer_type} {label} solve failed"
     return _Problem(bs.coils, base_currents, boozer)
 
@@ -193,19 +185,13 @@ def _boozer_qa(jax_lane: bool, *, newton_maxiter: int = 40):
     """Upstream's ``examples/2_Intermediate/boozerQA.py`` up to ``minimize``,
     with the JAX switch of ``boozerQA_jax.py``; returns ``fun``, ``x0`` and the
     evaluations ``fun`` records."""
-    base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
-    G0 = _G0(nfp, base_currents)
-    s = SurfaceXYZTensorFourier(
-        mpol=6,
-        ntor=6,
-        stellsym=True,
-        nfp=nfp,
-        quadpoints_phi=np.linspace(0, 1 / nfp, 13, endpoint=False),
-        quadpoints_theta=np.linspace(0, 1, 13, endpoint=False),
-    )
-    s.fit_to_curve(ma, 0.1, flip_theta=True)
-    vol = Volume(s)
-    vol_target = vol.J()
+    bs, native = get_boozer_surface(converge=False)
+    base_curves = [coil.curve for coil in bs.coils[:3]]
+    base_currents = [coil.current for coil in bs.coils[:3]]
+    s = native.surface
+    G0 = _G0(s.nfp, base_currents)
+    vol = native.label
+    vol_target = native.targetlabel
     options = {"verbose": False, "newton_maxiter": newton_maxiter}
     if jax_lane:
         boozer_surface = JaxBoozerSurface(
