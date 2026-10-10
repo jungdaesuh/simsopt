@@ -1,5 +1,11 @@
 """Boozer residual of native ``boozer_surface_residual`` and its derivatives.
 
+The unweighted equation is Eq. (5a) of Giuliani et al., "Direct computation
+of magnetic surfaces in Boozer coordinates and coil optimization for
+quasi-symmetry" (2022), https://doi.org/10.1017/S0022377822000563.
+As in that paper, the surface coordinates are normalized turns in [0, 1).
+The optional inverse-field weighting below is the native simsopt convention.
+
 At each surface quadrature point the residual is
 
 .. math::

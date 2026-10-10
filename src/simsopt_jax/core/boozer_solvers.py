@@ -86,9 +86,13 @@ class BoozerExactNewtonResult:
             x.
         jacobian (jax.Array): Masked exact-system Jacobian, shape (nb, nx), at x.
         iterations (jax.Array): Scalar shape () int32 completed step count.
-        norm (jax.Array): Scalar shape () Stopping residual norm, with native's pre-
-            last-step convention at the iteration cap; units follow the residual or
-            gradient.
+        norm (jax.Array): Scalar shape () Euclidean norm of the unweighted, unscaled
+            Boozer residual rows selected by residual_rows, followed by label minus
+            targetlabel and, without stellarator symmetry, z(0, 0). These terms
+            have mixed physical units. At a reached step cap, this is the norm
+            before the last step; a nonpositive maxiter returns the initial 1e6
+            sentinel. Initial convergence with a positive cap returns the computed
+            initial system norm.
         singular (jax.Array): Scalar shape () bool indicating an exactly singular finite
             step matrix; x retains the iterate that encountered it.
     """
@@ -196,9 +200,11 @@ def boozer_exact_newton(
     starts from native's ``G`` of the coil currents), on the BoozerExact rows
     of :func:`simsopt_jax_adapters.geo.boozer_problem.boozer_exact_residual_rows`.
 
-    As natively, ``norm`` at ``maxiter`` is the one checked before the last
-    step (``1e6`` if none was taken). The adapter defines success by comparing
-    this returned norm with ``tol``.
+    As natively, ``norm`` at a reached step cap is the one checked before
+    the last step. A nonpositive ``maxiter`` returns the initial ``1e6``
+    sentinel; initial convergence with a positive cap returns the computed
+    initial system norm. The adapter defines success by comparing this
+    returned norm with ``tol``.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
