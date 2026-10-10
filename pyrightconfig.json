@@ -30,7 +30,9 @@
     "tests/core/test_pytree_convention.py",
     "tests/unittest_jax_support.py",
     "examples/2_Intermediate/stage_two_optimization.py",
-    "tests/field/test_stage_two_biotsavart_jax.py"
+    "tests/field/test_stage_two_biotsavart_jax.py",
+    "tests/core/test_backend_gradgradb_tuning.py",
+    "tests/field/test_biotsavart_gradgradb_vjp.py"
   ],
   "extraPaths": [
     "src",

@@ -47,6 +47,7 @@ jobs:
           ruff check src/simsopt_jax src/simsopt_jax_adapters tests/unittest_jax_support.py \
             tests/core/test_backend_dtypes_reference_placement.py \
             tests/core/test_backend_strict_jax_device_detection.py \
+            tests/core/test_backend_gradgradb_tuning.py \
             tests/core/test_backend_xla_compile_preset.py \
             tests/core/test_backend_xla_gpu_fusion_autotuner.py \
             tests/core/test_coil_dof_extraction_spec_placement.py \
@@ -57,6 +58,7 @@ jobs:
             tests/core/test_state_tokens.py \
             tests/field/test_biotsavart_field_pullback.py \
             tests/field/test_biotsavart_hessian_point_chunk.py \
+            tests/field/test_biotsavart_gradgradb_vjp.py \
             tests/field/test_biotsavart_jax.py \
             tests/field/test_biotsavart_jax_cache_correctness.py \
             tests/field/test_biotsavart_jax_contract.py \

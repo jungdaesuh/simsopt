@@ -40,6 +40,7 @@ __all__ = [
     "biot_savart_B_vjp",
     "biot_savart_dB_by_dX",
     "biot_savart_d2B_by_dXdX",
+    "biot_savart_d2B_by_dXdX_vjp",
     "biot_savart_B_and_dB",
     "biot_savart_A",
     "biot_savart_dA_by_dX",
@@ -57,9 +58,9 @@ _MU0_OVER_4PI = 1e-7
 def _read_tuning_config() -> tuple:
     """Return ``(coil_chunk_size, quadrature_block_size, point_chunk_size)``.
 
-    Single indirection point for all tuning knobs consumed by the kernel
-    factory.  Tests override this one function (+ ``invalidate_kernel_cache``)
-    instead of patching three separate stubs.
+    Forward factories and the B pullback use these three tuning values.
+    Tests override this reader (+ ``invalidate_kernel_cache``) rather than
+    patching three stubs. The Hessian VJP reads its independent runtime tile.
 
     Resolves the backend config once to avoid repeated mode/policy lookups.
     """
@@ -698,6 +699,55 @@ def _get_B_vjp_kernel():
     return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
 
 
+@lru_cache(maxsize=64)
+def _make_d2B_vjp_kernel(coil_cs, quad_bs, hessian_vjp_point_cs):
+    """Accumulate coil cotangents after completing each point tile's reverse pass.
+
+    The outer loop is not differentiated: each tile's rematerialized Hessian
+    is reversed and accumulated before advancing. Live intermediates are
+    bounded by the reverse tile, independent of npoints.
+    """
+    forward_kernel = jax.checkpoint(_make_kernel(
+        _Integrand.B, _DiffMode.HESSIAN, coil_cs, quad_bs, 0,
+    ))
+    chunk_size = hessian_vjp_point_cs
+
+    def kernel(points, vgradgrad, gammas, gammadashs, currents):
+        def tile_pullback(tile_points, tile_seed):
+            _, pullback = jax.vjp(
+                lambda g, gd, c: forward_kernel(tile_points, g, gd, c),
+                gammas, gammadashs, currents,
+            )
+            return pullback(tile_seed)
+
+        zero = jax.tree.map(jnp.zeros_like, (gammas, gammadashs, currents))
+        point_count = points.shape[0]
+        if point_count == 0:
+            return zero
+        if chunk_size <= 0 or point_count <= chunk_size:
+            return tile_pullback(points, vgradgrad)
+
+        full_chunk_count, tail_size = divmod(point_count, chunk_size)
+
+        def body(chunk_index, cotangents):
+            start = chunk_index * chunk_size
+            return _tree_add(cotangents, tile_pullback(
+                _slice_point_chunk(points, start, chunk_size),
+                _slice_point_chunk(vgradgrad, start, chunk_size),
+            ))
+
+        cotangents = lax.fori_loop(0, full_chunk_count, body, zero)
+        if tail_size:
+            tail_start = full_chunk_count * chunk_size
+            cotangents = _tree_add(
+                cotangents, tile_pullback(points[tail_start:], vgradgrad[tail_start:]),
+            )
+        return cotangents
+
+    kernel.__name__ = "biotsavart_d2B_vjp"
+    return jax.jit(kernel)
+
+
 def invalidate_kernel_cache() -> None:
     """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
@@ -707,6 +757,7 @@ def invalidate_kernel_cache() -> None:
     """
     _make_kernel.cache_clear()
     _make_B_vjp_kernel.cache_clear()
+    _make_d2B_vjp_kernel.cache_clear()
 
 
 register_backend_cache_clear(invalidate_kernel_cache)
@@ -812,6 +863,42 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
         gammadashs,
         currents,
     )
+
+
+def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents):
+    """Pull back a magnetic-field Hessian seed to coil geometry and currents.
+
+    Contracts ``vgradgrad[p, i, j, c]`` with ``d_i d_j B_c(points[p])``.
+    The seed need not be symmetric. Reverse passes accumulate point tiles
+    without differentiating the points themselves.
+
+    Args:
+        points (jax.Array or numpy.ndarray): Cartesian positions of shape
+            ``(npoints, 3)``, in meters.
+        vgradgrad (jax.Array or numpy.ndarray): Hessian cotangent of shape
+            ``(npoints, 3, 3, 3)`` in ``[point, d1, d2, component]`` order.
+            For a scalar objective with units U, the seed has units U m²/T.
+        gammas (jax.Array or numpy.ndarray): Coil positions of shape
+            ``(ncoils, nquad, 3)``, in meters.
+        gammadashs (jax.Array or numpy.ndarray): Coil tangents of shape
+            ``(ncoils, nquad, 3)``, in meters per unit dimensionless curve
+            parameter; quadrature uses uniformly spaced nodes on [0, 1).
+        currents (jax.Array or numpy.ndarray): Coil currents of shape
+            ``(ncoils,)``, in amperes.
+
+    Returns:
+        tuple[jax.Array, jax.Array, jax.Array]: Cotangents of ``gammas``,
+            ``gammadashs`` and ``currents``, with their respective input shapes
+            ``(ncoils, nquad, 3)``, ``(ncoils, nquad, 3)`` and ``(ncoils,)``.
+            For an objective in U, geometry cotangents have units U/m and current
+            cotangents have units U/A.
+    """
+    inputs = snapshot_host_tree((points, vgradgrad, gammas, gammadashs, currents))
+    tuning = get_field_kernel_tuning()
+    return _make_d2B_vjp_kernel(
+        tuning.coil_chunk_size, tuning.quadrature_block_size,
+        tuning.hessian_vjp_point_chunk_size,
+    )(*inputs)
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):

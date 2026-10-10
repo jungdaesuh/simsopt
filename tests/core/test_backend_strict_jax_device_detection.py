@@ -56,8 +56,11 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
     def test_field_kernel_tuning_uses_static_gpu_tiling_without_probes(self):
         """Tiling is a pure function of the mode: no device or ``nvidia-smi`` probe."""
         for mode, expected in [
-            ("jax_gpu_parity", (16, 0, 256)),
-            ("jax_gpu_fast", (64, 64, 1024)),
+            ("native_cpu", (0, 0, 0, 0)),
+            ("jax_cpu_parity", (16, 0, 256, 8)),
+            ("jax_cpu_fast", (64, 64, 1024, 32)),
+            ("jax_gpu_parity", (16, 0, 256, 512)),
+            ("jax_gpu_fast", (64, 64, 1024, 512)),
         ]:
             with self.subTest(mode=mode, expected=expected), self.case() as patches:
                 self._case_field_kernel_tuning_uses_static_gpu_tiling_without_probes(
@@ -94,6 +97,7 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                 tuning.coil_chunk_size,
                 tuning.quadrature_block_size,
                 tuning.point_chunk_size,
+                tuning.hessian_vjp_point_chunk_size,
             )
             == expected,
             "( tuning.coil_chunk_size, tuning.quadrature_block_size, tuning.point_chunk_size, ) == expected",
@@ -112,6 +116,11 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
             mock.patch.dict(os.environ, {"SIMSOPT_JAX_POINT_CHUNK_SIZE": "128"})
         )
 
+        patches.enter_context(
+            mock.patch.dict(
+                os.environ, {"SIMSOPT_JAX_HESSIAN_VJP_POINT_CHUNK_SIZE": "64"}
+            )
+        )
         tuning = get_field_kernel_tuning("jax_gpu_fast")
 
         self.assertTrue(
@@ -119,9 +128,10 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                 tuning.coil_chunk_size,
                 tuning.quadrature_block_size,
                 tuning.point_chunk_size,
+                tuning.hessian_vjp_point_chunk_size,
             )
-            == (8, 32, 128),
-            "( tuning.coil_chunk_size, tuning.quadrature_block_size, tuning.point_chunk_size, ) == (8, 32, 128)",
+            == (8, 32, 128, 64),
+            "( tuning.coil_chunk_size, tuning.quadrature_block_size, tuning.point_chunk_size, ) == (8, 32, 128, 64)",
         )
 
     def test_runtime_jax_device_uses_primary_configured_jax_platform_before_policy(
