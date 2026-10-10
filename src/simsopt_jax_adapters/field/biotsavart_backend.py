@@ -598,44 +598,46 @@ def _affine_current_terms(current, coefficient=1.0):
 
 
 class JaxBiotSavart(Optimizable):
-    """JAX Biot-Savart for Python objectives and their derivatives.
+    r"""JAX version of :class:`simsopt.field.BiotSavart`: the field of closed coils.
 
-    Supports B, A, spatial derivatives and VJPs through the Optimizable coil
-    graph, including native SquaredFlux, CurveLength and scipy minimizers.
-    This is not a simsoptpp.MagneticField: tracing, InterpolatedField and
-    native field arithmetic require simsopt.field.BiotSavart. Native compute,
-    cache and export interfaces are not provided. Arithmetic on
-    this adapter raises TypeError rather than constructing an objective. Native
-    field sums and scaling wrappers also reject this adapter as a dependency.
+    Computes the magnetic field induced by closed curves :math:`\Gamma_k` with
+    electric currents :math:`I_k`,
 
-    Supported curves are XYZ Fourier (including Fourier symmetries), RZ
-    Fourier, planar Fourier and helical curves; rotated, perturbed and Frenet
-    filament wrappers are supported through immutable curve specs. A custom
-    curve may supply a compatible to_spec() method. Unsupported curves raise.
+    .. math::
 
-    Before constructing the adapter, call simsopt_jax.backend.set_backend
-    with the desired device and intent to apply debug, JIT, transfer-guard,
-    dtype, chunking and cache settings. Environment variables are resolved by
-    that call; importing or constructing the adapter does not apply
-    process-global JAX settings. Choose the device before JAX initializes it.
+        B(\mathbf{x}) = \frac{\mu_0}{4\pi} \sum_{k=1}^{n_\mathrm{coils}} I_k \int_0^1 \frac{(\Gamma_k(\phi)-\mathbf{x})\times \Gamma_k'(\phi)}{\|\Gamma_k(\phi)-\mathbf{x}\|^3} d\phi
 
-    Coil extraction and kernels use immutable arrays. This Optimizable wrapper
-    owns mutable point/cache state and is confined to one evaluation thread.
-    As in the native BiotSavart, coil geometry and field values are computed
-    once per coil-DOF state and point set and reused until simsopt's recompute
-    notification (any DOF setter or resample) or set_points invalidates them.
+    and the vector potential
+
+    .. math::
+
+        A(\mathbf{x}) = \frac{\mu_0}{4\pi} \sum_{k=1}^{n_\mathrm{coils}} I_k \int_0^1 \frac{\Gamma_k'(\phi)}{\|\Gamma_k(\phi)-\mathbf{x}\|} d\phi
+
+    where :math:`\mu_0=4\pi 10^{-7}` is the magnetic constant. As in the native
+    class, each integral is the mean of the integrand over the curve's
+    quadrature points. Spatial derivatives of :math:`B` and :math:`A` are
+    provided, and vector-Jacobian products with respect to the coil DOFs
+    propagate through the Optimizable graph.
 
     Args:
         coils (Sequence[Coil]): Native simsopt coil graph; geometry is in meters and
             physical currents in amperes.
+
+    Supported curves are XYZ Fourier (including Fourier symmetries), RZ
+    Fourier, planar Fourier and helical curves, plus rotated, perturbed and
+    Frenet filament wrappers of them; other curves may supply a compatible
+    ``to_spec()`` method.
+
+    This is not a ``simsoptpp.MagneticField``: field-line tracing,
+    :class:`~simsopt.field.InterpolatedField` and native field arithmetic need
+    :class:`simsopt.field.BiotSavart`. Call
+    :func:`simsopt_jax.backend.set_backend` before constructing it to choose
+    the device. An instance holds mutable point state, so do not share it
+    across threads.
     """
 
     def clear_points(self) -> None:
-        """Clear mutable point buffers without changing source geometry.
-
-        Returns:
-            None: Mutable point state is cleared.
-        """
+        """Clear mutable point buffers without changing source geometry."""
         self._points_jax = None
         self._points_cyl_jax = None
         self._invalidate_point_outputs()
@@ -965,9 +967,7 @@ class JaxBiotSavart(Optimizable):
     def update_free_dof_size_indices(self) -> None:
         """Refresh free-DOF layout and invalidate its captured extraction contract.
 
-        Returns:
-            None: Free-DOF indices, extraction contracts and layout version are
-                updated.
+        Free-DOF indices, extraction contracts and the layout version are updated.
         """
         super().update_free_dof_size_indices()
         self._local_free_positions_by_opt.clear()
@@ -1029,9 +1029,6 @@ class JaxBiotSavart(Optimizable):
         Args:
             parent (Optimizable or None): Dependency that triggered the recompute
                 notification; recompute_bell does not inspect it.
-
-        Returns:
-            None: Mutable recompute/cache state is updated.
         """
         self._drop_coil_state()
 
@@ -1077,10 +1074,8 @@ class JaxBiotSavart(Optimizable):
 
         Args:
             parent (Optimizable or None): Dependency that triggered the recompute
-                notification; recompute_bell does not inspect it.
-
-        Returns:
-            None: Mutable recompute/cache state is updated.
+                notification; a non-None parent marks fixed DOFs for re-check on
+                the next read.
         """
         if (
             parent is not None
@@ -1120,12 +1115,11 @@ class JaxBiotSavart(Optimizable):
     def x(self, coil_dofs):
         """Set the global free coil/current DOF vector.
 
+        Native owner DOFs and the dependent field state are updated.
+
         Args:
             coil_dofs (array-like): Global free owner DOFs, shape (self.dof_size,), in
                 Optimizable lineage order.
-
-        Returns:
-            None: Native owner DOFs and the dependent field state are updated.
         """
         self._set_global_coil_dofs(
             Optimizable.x.fset,
@@ -1148,12 +1142,11 @@ class JaxBiotSavart(Optimizable):
     def full_x(self, coil_dofs):
         """Set the global full, including fixed coil/current DOF vector.
 
+        Native owner DOFs and the dependent field state are updated.
+
         Args:
             coil_dofs (array-like): Global full, including fixed owner DOFs, shape
                 (self.full_dof_size,), in Optimizable lineage order.
-
-        Returns:
-            None: Native owner DOFs and the dependent field state are updated.
         """
         self._set_global_coil_dofs(
             Optimizable.full_x.fset,
