@@ -83,7 +83,7 @@ qfm_surface = qfm_surface_class(bs, s, tf, tf_target)
 
 res = qfm_surface.minimize_qfm_penalty_constraints_LBFGS(tol=1e-12, maxiter=maxiter,
                                                          constraint_weight=constraint_weight)
-print(f"||tf constraint||={0.5*(s.volume()-vol_target)**2:.8e}, ||residual||={np.linalg.norm(qfm.J()):.8e}")
+print(f"||tf constraint||={0.5*(tf.J()-tf_target)**2:.8e}, ||residual||={np.linalg.norm(qfm.J()):.8e}")
 
 res = qfm_surface.minimize_qfm_exact_constraints_SLSQP(tol=1e-12, maxiter=maxiter)
 print(f"||tf constraint||={0.5*(tf.J()-tf_target)**2:.8e}, ||residual||={np.linalg.norm(qfm.J()):.8e}")
