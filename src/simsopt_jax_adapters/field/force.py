@@ -1,6 +1,6 @@
 """JAX coil force, torque and energy objectives as drop-in native Optimizables.
 
-Each class mirrors the objective of the same name without ``JAX`` in
+Each class mirrors the native objective named by removing the ``Jax`` prefix in
 :mod:`simsopt.field.force`: same constructor arguments and validation, value,
 dependencies and ``Derivative`` (fixed and free partials of the coils' curves
 and currents). The objective and its gradient with respect to the coils'
@@ -11,7 +11,7 @@ moves to the active JAX device and results back through explicit transfers, so
 for C++ curves (and their rotated copies) J and dJ make no implicit transfer;
 JAX-backed native curves (``JaxCurve`` subclasses, filaments) still transfer
 implicitly inside their own geometry. As in native, ``p``, ``threshold``, the
-target coils' regularizations and the sources of :class:`NetFluxesJAX` are
+target coils' regularizations and the sources of :class:`JaxNetFluxes` are
 fixed at construction, while ``downsample``, ``target_coil`` and the force and
 torque objectives' coil lists are attributes read at every evaluation.
 """
@@ -31,12 +31,12 @@ from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax.runtime.host_boundary import host_array, host_tree
 
 __all__ = [
-    "B2EnergyJAX",
-    "LpCurveForceJAX",
-    "LpCurveTorqueJAX",
-    "NetFluxesJAX",
-    "SquaredMeanForceJAX",
-    "SquaredMeanTorqueJAX",
+    "JaxB2Energy",
+    "JaxLpCurveForce",
+    "JaxLpCurveTorque",
+    "JaxNetFluxes",
+    "JaxSquaredMeanForce",
+    "JaxSquaredMeanTorque",
 ]
 
 
@@ -171,7 +171,7 @@ _net_flux_grad = jax.jit(
 
 
 class _LpObjective(_CoilSetObjective):
-    """Shared evaluation of :class:`LpCurveForceJAX` and :class:`LpCurveTorqueJAX`."""
+    """Shared evaluation of :class:`JaxLpCurveForce` and :class:`JaxLpCurveTorque`."""
 
     _native_name: str
 
@@ -204,12 +204,24 @@ class _LpObjective(_CoilSetObjective):
         ) + self._source_derivative(dsources)
 
 
-class LpCurveForceJAX(_LpObjective):
-    r"""JAX-backed mirror of :class:`~simsopt.field.force.LpCurveForce`.
+class JaxLpCurveForce(_LpObjective):
+    """JAX-backed native LpCurveForce integral penalty.
 
-    ``J = (1/p) sum_i (1/n) sum_k max(|dF/dl| - threshold, 0)^p |gammadash|``
-    in (MN/m)^p, with the force per unit length on each regularized target
-    coil from its self field, the other targets and the sources.
+    J = (1/p) sum_i mean(max(|dF_i/dl| - threshold, 0)^p |gammadash_i|)
+    in (MN/m)^p m. Force density includes regularized self fields and mutual
+    fields. The integral has no p-th root or coil-length normalization.
+
+    Args:
+        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
+        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
+        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
+        p: float, dimensionless exponent captured at construction.
+            Default: 2.0.
+        threshold: float, density threshold in MN/m (force) or MN (torque), captured at construction.
+            Default: 0.0.
+        downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     _native_name = "LpCurveForce"
@@ -219,20 +231,45 @@ class LpCurveForceJAX(_LpObjective):
         super().__init__(target_coils, source_coils_coarse, source_coils_fine, p, threshold, downsample)
 
     def J(self):
+        """Evaluate the native formula using explicitly placed coil operands.
+
+        Returns:
+            float: objective value with units given by the class contract.
+        """
         return self._value(_lp_force)
 
     @derivative_dec
     def dJ(self):
+        """Project combined geometry/current cotangents onto native coil DOFs.
+
+        Shared DOFs accumulate; partials=True includes fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         return self._derivative(_lp_force_grad)
 
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class LpCurveTorqueJAX(_LpObjective):
-    r"""JAX-backed mirror of :class:`~simsopt.field.force.LpCurveTorque`.
+class JaxLpCurveTorque(_LpObjective):
+    """JAX-backed native LpCurveTorque integral penalty.
 
-    As :class:`LpCurveForceJAX` for the torque per unit length (MN) about
-    each target coil's arclength centroid.
+    As JaxLpCurveForce for torque density in MN about each target arclength
+    centroid; the objective has units MN^p m, with no p-th root or length
+    normalization.
+
+    Args:
+        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
+        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
+        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
+        p: float, dimensionless exponent captured at construction.
+            Default: 2.0.
+        threshold: float, density threshold in MN/m (force) or MN (torque), captured at construction.
+            Default: 0.0.
+        downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     _native_name = "LpCurveTorque"
@@ -242,10 +279,22 @@ class LpCurveTorqueJAX(_LpObjective):
         super().__init__(target_coils, source_coils_coarse, source_coils_fine, p, threshold, downsample)
 
     def J(self):
+        """Evaluate the native formula using explicitly placed coil operands.
+
+        Returns:
+            float: objective value with units given by the class contract.
+        """
         return self._value(_lp_torque)
 
     @derivative_dec
     def dJ(self):
+        """Project combined geometry/current cotangents onto native coil DOFs.
+
+        Shared DOFs accumulate; partials=True includes fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         return self._derivative(_lp_torque_grad)
 
     return_fn_map = {"J": J, "dJ": dJ}
@@ -264,51 +313,98 @@ class _SquaredMeanObjective(_CoilSetObjective):
         return _coil_derivative(self.target_coils, *dtargets) + self._source_derivative(dsources)
 
 
-class SquaredMeanForceJAX(_SquaredMeanObjective):
-    r"""JAX-backed mirror of :class:`~simsopt.field.force.SquaredMeanForce`.
+class JaxSquaredMeanForce(_SquaredMeanObjective):
+    """JAX-backed native SquaredMeanForce, using integrated force.
 
-    ``J = sum_i |(1/L_i) int dF_i/dl dl|^2`` in (MN/m)^2 over the target
-    coils, from the other targets and the sources.
+    J = sum_i |integral dF_i/dl dl|^2 in MN^2. Only mutual fields contribute.
+    The native name denotes a quadrature mean of force_density * |gammadash|;
+    there is no division by coil length.
+
+    Args:
+        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
+        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
+        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
+        downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
         super().__init__(target_coils, source_coils_coarse, source_coils_fine, downsample)
 
     def J(self):
+        """Evaluate the native formula using explicitly placed coil operands.
+
+        Returns:
+            float: objective value with units given by the class contract.
+        """
         return self._value(_squared_mean_force)
 
     @derivative_dec
     def dJ(self):
+        """Project combined geometry/current cotangents onto native coil DOFs.
+
+        Shared DOFs accumulate; partials=True includes fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         return self._derivative(_squared_mean_force_grad)
 
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class SquaredMeanTorqueJAX(_SquaredMeanObjective):
-    r"""JAX-backed mirror of :class:`~simsopt.field.force.SquaredMeanTorque`.
+class JaxSquaredMeanTorque(_SquaredMeanObjective):
+    """JAX-backed native SquaredMeanTorque, using integrated torque.
 
-    As :class:`SquaredMeanForceJAX` for the torque per unit length (MN) about
-    each target coil's arclength centroid.
+    J = sum_i |integral dT_i/dl dl|^2 in (MN m)^2, about each target
+    arclength centroid. Only mutual fields contribute; quadrature integrates
+    torque density without division by coil length.
+
+    Args:
+        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
+        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
+        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
+            Default: None.
+        downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
         super().__init__(target_coils, source_coils_coarse, source_coils_fine, downsample)
 
     def J(self):
+        """Evaluate the native formula using explicitly placed coil operands.
+
+        Returns:
+            float: objective value with units given by the class contract.
+        """
         return self._value(_squared_mean_torque)
 
     @derivative_dec
     def dJ(self):
+        """Project combined geometry/current cotangents onto native coil DOFs.
+
+        Shared DOFs accumulate; partials=True includes fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         return self._derivative(_squared_mean_torque_grad)
 
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class B2EnergyJAX(Optimizable):
-    r"""JAX-backed mirror of :class:`~simsopt.field.force.B2Energy`.
+class JaxB2Energy(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.field.force.B2Energy`.
 
     ``J = (1/2) sum_ij I_i L_ij I_j`` in MJ, with the regularized
     self-inductances of the coils' cross sections on the diagonal of ``L``.
+
+    Args:
+        target_coils: list of RegularizedCoil, energy coils with a common quadrature count.
+        downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coils, downsample=1):
@@ -324,28 +420,46 @@ class B2EnergyJAX(Optimizable):
         return (*_coil_group(self.target_coils), _as_jax_float64(self._regularizations))
 
     def J(self):
+        """Evaluate the native formula using explicitly placed coil operands.
+
+        Returns:
+            float: objective value with units given by the class contract.
+        """
         return _host_float(_b2energy(*self._operands(), downsample=self.downsample))
 
     @derivative_dec
     def dJ(self):
+        """Project combined geometry/current cotangents onto native coil DOFs.
+
+        Shared DOFs accumulate; partials=True includes fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         cotangents = host_tree(_b2energy_grad(*self._operands(), downsample=self.downsample), dtype=np.float64)
         return _coil_derivative(self.target_coils, *cotangents)
 
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class NetFluxesJAX(Optimizable):
-    r"""JAX-backed mirror of :class:`~simsopt.field.force.NetFluxes`.
+class JaxNetFluxes(Optimizable):
+    """JAX-backed mirror of :class:`~simsopt.field.force.NetFluxes`.
 
     ``J = (1/n) sum_k A(gamma_k) . gammadash_k`` in Wb: the flux through the
     target coil of the sources' vector potential ``A``, at the target's
-    ``downsample``-strided points. As native, ``dJ`` is the gradient of the
-    flux at full target resolution (``downsample=1``), and the sources are the
+    ``downsample``-strided points. ``dJ`` differentiates this same sampled
+    flux; source quadrature remains full resolution. The sources are the
     ``source_coils`` at construction (native builds a ``BiotSavart`` from
     them): reassigning the attribute changes neither value nor derivative.
     The sources are captured at construction for both the value and the
     gradient; native's gradient reads the list live after in-place edits,
     which makes its value and gradient inconsistent, and is not reproduced.
+
+    Args:
+        target_coil: Coil object, target flux loop; its current does not enter the flux.
+        source_coils: Coil or list of Coil, external sources at full quadrature; the target is removed and membership is captured.
+        downsample: int, positive quadrature stride dividing every nonempty group count.
+            Default: 1.
     """
 
     def __init__(self, target_coil, source_coils, downsample=1):
@@ -370,12 +484,24 @@ class NetFluxesJAX(Optimizable):
         )
 
     def J(self):
+        """Evaluate the native formula using explicitly placed coil operands.
+
+        Returns:
+            float: objective value with units given by the class contract.
+        """
         return _host_float(_net_flux(*self._operands(), downsample=self.downsample))
 
     @derivative_dec
     def dJ(self):
+        """Project combined geometry/current cotangents onto native coil DOFs.
+
+        Shared DOFs accumulate; partials=True includes fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         dgamma, dgammadash, dsources = host_tree(
-            _net_flux_grad(*self._operands(), downsample=1), dtype=np.float64
+            _net_flux_grad(*self._operands(), downsample=self.downsample), dtype=np.float64
         )
         curve = self.target_coil.curve
         return (
