@@ -1,6 +1,6 @@
 """QFM host operands retain call-time values while CPU work is pending."""
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 from dataclasses import replace
 
@@ -8,7 +8,7 @@ import numpy as np
 
 from simsopt.field import BiotSavart, Coil, Current
 from simsopt.geo import SurfaceRZFourier, ToroidalFlux, create_equally_spaced_curves
-try:
+with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     from core.test_buffer_ownership import _host_array, make_execution_gate
@@ -16,9 +16,6 @@ try:
     from simsopt_jax.runtime.host_boundary import host_array
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.qfm import JaxQfmSurface
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 
 
 class TestQfmBufferOwnership(JaxTestCase):

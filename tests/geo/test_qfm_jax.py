@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
 
-try:
+with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     from simsopt.configs import get_data
@@ -23,9 +23,6 @@ try:
     from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_array
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.qfm import JaxQfmSurface
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 from unittest import mock
 import os
 
