@@ -27,9 +27,9 @@ worst 4e-14).
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 
-try:
+with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     from simsopt._core.derivative import Derivative
@@ -54,9 +54,6 @@ try:
     from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
     from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
     from simsopt_jax_adapters.geo.surface_specs import surface_spec_from_surface
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 from unittest import mock
 
 from unittest_jax_support import (

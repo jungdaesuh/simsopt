@@ -7,9 +7,9 @@ Finite differences use their truncation tolerance, not a relaxed parity gate.
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 
-try:
+with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     from simsopt.configs import get_data
@@ -46,9 +46,6 @@ try:
     from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
     from simsopt_jax_adapters.geo.single_stage_exact import JaxExactSingleStage
     from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 
 from unittest_jax_support import (
     assert_matches_native,
