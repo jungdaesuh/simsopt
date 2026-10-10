@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 from contextlib import ExitStack
 from unittest import mock
 from dataclasses import replace
@@ -16,7 +16,7 @@ from simsopt.configs import get_ncsx_data
 from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
 from simsopt.geo import create_equally_spaced_curves
 
-try:
+with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
@@ -28,9 +28,6 @@ try:
     from simsopt_jax.core import biotsavart as core
     from simsopt_jax.core.field import grouped_biot_savart_d2B_by_dXdX_from_inputs
     from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 
 _DIRECT_RTOL, _DIRECT_ATOL = (1e-10, 1e-12)
 _FD_RTOL = 1e-07
