@@ -32,6 +32,7 @@ try:
         block_until_ready,
         disallow_host_transfers,
         host_array,
+        host_tree,
         host_tree_after_ready,
     )
 except ImportError:
@@ -402,6 +403,31 @@ class TestHostBoundarySsotRatchet(JaxTestCase):
         with disallow_host_transfers():
             array = host_array(value["vector"], dtype=np.float32)
             tree = host_tree_after_ready(value)
+            converted_trees = (
+                host_tree(value, dtype=np.float32),
+                host_tree_after_ready(value, dtype=np.float32),
+            )
+
+        for converted in converted_trees:
+            self.assertEqual(converted.keys(), value.keys())
+            self.assertIsInstance(converted["scalar"], tuple)
+            for name, observed in (
+                ("vector", converted["vector"]),
+                ("scalar", converted["scalar"][0]),
+            ):
+                expected = value[name] if name == "vector" else value[name][0]
+                self.assertEqual(observed.shape, expected.shape)
+                self.assertEqual(observed.dtype, np.dtype(np.float32))
+                self.assertTrue(observed.flags.writeable)
+                np.testing.assert_array_equal(observed, jax.device_get(expected))
+            converted["vector"][0] = -1.0
+            np.testing.assert_array_equal(jax.device_get(value["vector"]), [1.0, 2.0])
+        self.assertFalse(
+            np.shares_memory(
+                converted_trees[0]["vector"],
+                converted_trees[1]["vector"],
+            )
+        )
 
         self.assertTrue(isinstance(array, np.ndarray), "isinstance(array, np.ndarray)")
         self.assertTrue(array.dtype == np.float32, "array.dtype == np.float32")

@@ -147,9 +147,9 @@ def host_tree(value, *, dtype=None):
     Args:
         value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
             container structure.
-        dtype (dtype-like or None): Optional dtype for host NumPy leaves and host
-            scalars; None preserves dtypes. Device arrays and tracers are not coerced by
-            snapshotting.
+        dtype (dtype-like or None): Conversion dtype for materialized NumPy leaves
+            and host scalars; default None preserves dtypes. Device arrays are
+            materialized before this conversion; each leaf keeps its shape.
 
     Returns:
         pytree: Host leaves with the same shape per leaf and privately owned
@@ -164,9 +164,9 @@ def host_tree_after_ready(value, *, dtype=None):
     Args:
         value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
             container structure.
-        dtype (dtype-like or None): Optional dtype for host NumPy leaves and host
-            scalars; None preserves dtypes. Device arrays and tracers are not coerced by
-            snapshotting.
+        dtype (dtype-like or None): Conversion dtype for materialized NumPy leaves
+            and host scalars; default None preserves dtypes. Device arrays are
+            materialized before this conversion; each leaf keeps its shape.
 
     Returns:
         pytree object: Ready host leaves with the same shape per leaf and
