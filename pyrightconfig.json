@@ -33,7 +33,11 @@
     "tests/field/test_stage_two_biotsavart_jax.py",
     "tests/geo/test_curve_objectives_jax.py",
     "tests/objectives/test_squared_flux_jax.py",
-    "tests/objectives/test_stage_two.py"
+    "tests/objectives/test_stage_two.py",
+    "examples/3_Advanced/coil_forces.py",
+    "examples/3_Advanced/stage_two_optimization_finitebuild.py",
+    "tests/field/test_force_jax.py",
+    "tests/objectives/test_stage_two_coil_terms.py"
   ],
   "extraPaths": [
     "src",
