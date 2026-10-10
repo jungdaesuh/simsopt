@@ -61,11 +61,22 @@ def _host_result(result: jax.Array | tuple[jax.Array, jax.Array]):
 
 
 class JaxQfmResidual(Optimizable):
-    """Native QfmResidual evaluation and full surface gradient with refreshed JAX snapshots.
+    r"""JAX version of :class:`simsopt.geo.QfmResidual`: the normalised quadratic flux through a surface.
+
+    For a surface :math:`S` this computes
+
+    .. math::
+        f(S) = \frac{\int_{S} d^2 x \, (\textbf{B} \cdot \hat{\textbf{n}})^2}{\int_{S} d^2 x \, B^2}
+
+    where :math:`\textbf{B}` is the field of ``biotsavart`` and :math:`\hat{\textbf{n}}` is the unit normal.
+    Both integrals use the surface quadrature points weighted by :math:`|\textbf{n}|`, the norm of the
+    unnormalised normal, as in the native class. Derivatives are taken with respect to all surface DOFs.
 
     Args:
         surface (SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier): Mutable native surface of exactly one supported class; subclasses are rejected.
-        biotsavart (JaxBiotSavart): Mutable single-device field providing coils and current Cartesian point buffers."""
+        biotsavart (JaxBiotSavart): Mutable single-device field providing coils and current Cartesian point buffers.
+
+    Whenever the surface changes, the evaluation points of ``biotsavart`` are reset to the surface quadrature points."""
 
     def __init__(self, surface: _Surface, biotsavart: JaxBiotSavart):
         self.surface = surface
@@ -74,20 +85,14 @@ class JaxQfmResidual(Optimizable):
         super().__init__(depends_on=[surface, biotsavart])
 
     def recompute_bell(self, parent=None):
-        """Reset field points when a parent invalidates this objective.
+        """Reset the field points to a snapshot of the current surface positions when a parent changes.
 
         Args:
-            parent (Optimizable | None): Changed parent supplied by native notification; unused.
-
-        Returns:
-            None: The field receives a snapshot of the current surface positions."""
+            parent (Optimizable | None): Changed parent supplied by native notification; unused."""
         self.invalidate_cache()
 
     def invalidate_cache(self):
-        """Refresh the field point buffer from the current surface.
-
-        Returns:
-            None: Points are replaced with Cartesian surface positions in meters."""
+        """Replace the field points with the current Cartesian surface positions in meters."""
         self.biotsavart.set_points(self.surface.gamma().reshape(-1, 3))
 
     def _spec(self) -> QfmSpec:
@@ -113,7 +118,18 @@ class JaxQfmResidual(Optimizable):
 
 
 class JaxQfmSurface(GSONable):
-    """Native QfmSurface host solves using immutable single-device QFM snapshots.
+    r"""JAX version of :class:`simsopt.geo.QfmSurface`: computes a quadratic-flux minimizing surface.
+
+    The surface minimizes
+
+    .. math::
+        f(S) = \frac{\int_{S} d^2 x \, \left(\textbf{B} \cdot \hat{\textbf{n}}\right)^2}{\int_{S} d^2 x \, B^2}
+
+    computed by :class:`JaxQfmResidual`, subject to :math:`L(S) = L_0` on a surface label :math:`L` (volume,
+    area or toroidal flux) with target :math:`L_0`. :meth:`minimize_qfm_penalty_constraints_LBFGS` minimizes the
+    penalty :math:`f(S) + \frac{w}{2} (L(S) - L_0)^2`, with :math:`w` = ``constraint_weight``, using L-BFGS-B, and
+    :meth:`minimize_qfm_exact_constraints_SLSQP` minimizes :math:`f(S)` with SLSQP under the equality
+    constraint :math:`\frac{1}{2} (L(S) - L_0)^2 = 0`, as in the native class. The optimizers run in SciPy on the host.
 
     Args:
         biotsavart (JaxBiotSavart): Mutable single-device field providing coils and current Cartesian point buffers.
