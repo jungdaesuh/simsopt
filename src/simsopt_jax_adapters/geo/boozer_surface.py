@@ -142,13 +142,55 @@ def _solution(x: np.ndarray, optimize_G: bool):
 
 
 class JaxBoozerSurface(Optimizable):
-    """Native ``BoozerSurface(biotsavart, surface, label, targetlabel,
-    constraint_weight, options)`` with a ``JaxBiotSavart`` field.
+    r"""JAX version of :class:`simsopt.geo.BoozerSurface`: a magnetic surface of a
+    :class:`~simsopt_jax_adapters.field.JaxBiotSavart` field parametrized by Boozer angles.
 
-    ``constraint_weight`` selects BoozerLS (truthy) or BoozerExact for
-    :meth:`run_code`; the solvers, their arguments, defaults, ``options`` and
-    ``res`` keys are native's. Every solve reads the current ``surface``,
-    coils, ``label``, ``targetlabel`` and options.
+    At each surface quadrature point the Boozer residual is
+
+    .. math::
+
+        \mathbf r = w \left(G \mathbf B - \|\mathbf B\|^2
+            (\mathbf x_\varphi + \iota \mathbf x_\theta)\right),
+
+    with :math:`\mathbf x_\varphi`, :math:`\mathbf x_\theta` the surface tangents (angles in turns),
+    :math:`\mathbf B` the field at :math:`\mathbf x`, and :math:`w = 1/\|\mathbf B\|` when
+    ``weight_inv_modB`` is set, else :math:`w = 1`. The unknowns are the surface DOFs, :math:`\iota`
+    and :math:`G`; when ``G`` is not optimized it is fixed at :math:`\mu_0 \sum_k |I_k|`.
+
+    A truthy ``constraint_weight`` :math:`w_c` selects BoozerLS [2], which minimizes the penalty
+
+    .. math::
+
+        J(x) = \frac{1}{2 n_r} \|\mathbf r(x)\|^2 + \frac{w_c}{2} (l(x) - l_0)^2
+            + \frac{w_c}{2} z(\varphi=0, \theta=0)^2,
+
+    with :math:`n_r = 3 n_\varphi n_\theta` residual entries, label :math:`l` and target :math:`l_0`.
+    Otherwise :meth:`run_code` uses BoozerExact [1], which solves by Newton's method
+
+    .. math::
+
+        \mathbf r_M(x) = 0, \qquad l(x) = l_0, \qquad z(\varphi=0, \theta=0) = 0,
+
+    with :math:`w = 1`, :math:`\mathbf r_M` the residual entries of native's stellarator-symmetry
+    mask, and the :math:`z` equation only without stellarator symmetry.
+
+    Stopping and failure follow native. BoozerExact Newton stops when the Euclidean norm of the
+    augmented system vector :math:`(\mathbf r_M, l - l_0[, z])` is at most ``newton_tol`` (default
+    ``1e-13``) or after ``newton_maxiter`` steps (default 40). BoozerLS runs SciPy BFGS
+    (``bfgs_tol`` 1e-10 as ``gtol``, at most ``bfgs_maxiter`` 1500 iterations; L-BFGS-B if
+    ``limited_memory``), then Newton until the Euclidean norm of :math:`\nabla J` is at most
+    ``newton_tol`` (default ``1e-11``) or after ``newton_maxiter`` steps (default 40). Exhausting a
+    cap returns ``res["success"] = False``; a singular Newton step raises
+    :class:`numpy.linalg.LinAlgError`, leaving the surface at the last iterate.
+
+    References:
+        [1] A. Giuliani, F. Wechsung, G. Stadler, A. Cerfon, M. Landreman, "Direct computation of
+        magnetic surfaces in Boozer coordinates and coil optimization for quasisymmetry",
+        J. Plasma Phys. 88(4), 905880401 (2022), doi:10.1017/S0022377822000563.
+
+        [2] A. Giuliani, F. Wechsung, A. Cerfon, M. Landreman, G. Stadler, "Direct stellarator coil
+        optimization for nested magnetic surfaces with precise quasi-symmetry", Phys. Plasmas
+        30(4) (2023).
 
     Args:
         biotsavart (JaxBiotSavart): Field whose coil DOFs are this solver's parents.
@@ -162,7 +204,11 @@ class JaxBoozerSurface(Optimizable):
             label and z constraints; None for an exact problem. Truthy selects BoozerLS;
             otherwise run_code uses BoozerExact. Default None.
         options (dict | None): Native solver options overriding the defaults for the
-            selected formulation; default None uses the native defaults above.
+            selected formulation (``verbose`` True, the tolerances and caps above,
+            ``limited_memory`` False, ``weight_inv_modB`` True); default None uses the defaults.
+
+    The label must be one of the four classes above; with ``G=None`` in :meth:`run_code` the coil
+    currents must be fixed, as natively. ``minimize_boozer_exact_constraints_newton`` is not provided.
     """
 
     res: dict
@@ -189,14 +235,11 @@ class JaxBoozerSurface(Optimizable):
         self.options = {**_DEFAULT_OPTIONS[self.boozer_type], **(options or {})}
 
     def recompute_bell(self, parent=None):
-        """Invalidate the cached computation after a parent changes.
+        """Mark the surface solve as needing to run again after a parent changes.
 
         Args:
             parent (Optimizable | None): Parent notifying the solver of changed DOFs;
                 unused.
-
-        Returns:
-            None: Marks the surface solve as needing to run again.
         """
         self.need_to_run_code = True
 
@@ -602,25 +645,30 @@ def _coil_derivative(booz_surf: JaxBoozerSurface, cotangents) -> Derivative:
 
 
 class JaxBoozerResidual(Optimizable):
-    """Native ``BoozerResidual(boozer_surface, bs)`` on a BoozerLS
-    :class:`JaxBoozerSurface`, with ``bs`` a ``JaxBiotSavart`` of the surface's
-    coils: ``J = 0.5 |r|^2 / len(r) + 0.5 w (label - target)^2`` on a private
-    ``SurfaceXYZTensorFourier`` copy of the solved surface (its quadrature,
-    ``w`` the surface's ``constraint_weight`` at construction), re-solving
-    first when the surface needs it, as natively.
+    r"""JAX version of :class:`simsopt.geo.BoozerResidual`: the Boozer residual penalty of a solved
+    BoozerLS :class:`JaxBoozerSurface`,
 
-    ``dJ`` is the derivative of ``J`` through the solve: every explicit coil
-    dependence of ``J`` minus the adjoint term of ``res['vjp']``. Native
-    ``BoozerResidual`` takes the explicit part through the field only, so it
-    is not the derivative with a ``ToroidalFlux`` label, nor with free
-    currents when ``G`` is not optimized (a native bug); for ``Volume``,
-    ``Area`` and ``AspectRatio`` labels with ``G`` optimized or the currents
-    fixed, native ``BoozerResidual`` works on a ``JaxBoozerSurface`` and agrees
-    with this class. Evaluating the objective does not set the field's
-    evaluation points, but a ``ToroidalFlux`` label sharing the field resets
-    them through its own callbacks when the surface is re-solved.
-    Shallow copies register with the same solved surface and field, with an
-    independent private surface and empty objective caches.
+    .. math::
+
+        J = \frac{1}{2 n_r} \|\mathbf r\|^2 + \frac{w_c}{2} (l - l_0)^2,
+
+    where :math:`\mathbf r` is the Boozer residual of :class:`JaxBoozerSurface` (with the solve's
+    ``weight_inv_modB``) at the solved :math:`\iota` and :math:`G` on a
+    ``SurfaceXYZTensorFourier`` copy of the solved surface with the same quadrature points,
+    :math:`n_r = 3 n_\varphi n_\theta`, :math:`l` the solver's label with target :math:`l_0`, and
+    :math:`w_c` the solver's ``constraint_weight`` at construction. Unlike the solver's penalty, it
+    has no :math:`z(\varphi=0, \theta=0)` term. The surface is re-solved first when it needs to be.
+
+    ``dJ`` is the total coil derivative through the solve, the explicit coil derivative of
+    :math:`J` minus ``res["vjp"]`` of the adjoint. It includes the coil dependence of a
+    ``ToroidalFlux`` label and, when ``G`` is not optimized, of :math:`G`, which native
+    ``BoozerResidual`` drops; native ``BoozerResidual`` agrees with this class only for
+    ``Volume``, ``Area`` and ``AspectRatio`` labels with ``G`` optimized or the currents fixed.
+
+    References:
+        A. Giuliani, F. Wechsung, G. Stadler, A. Cerfon, M. Landreman, "Direct computation of
+        magnetic surfaces in Boozer coordinates and coil optimization for quasisymmetry",
+        J. Plasma Phys. 88(4), 905880401 (2022), doi:10.1017/S0022377822000563.
 
     Args:
         boozer_surface (JaxBoozerSurface): Mutable BoozerLS solver; the objective owns a
@@ -628,6 +676,9 @@ class JaxBoozerResidual(Optimizable):
         bs (JaxBiotSavart): Field with the solver's coils; evaluating this objective
             leaves its evaluation points unchanged except for shared label callbacks
             during re-solves.
+
+    The solver must be BoozerLS (a truthy ``constraint_weight``); with a ``ToroidalFlux`` label use
+    this class rather than native ``BoozerResidual``.
     """
 
     def __init__(self, boozer_surface: JaxBoozerSurface, bs: JaxBiotSavart):
@@ -681,26 +732,18 @@ class JaxBoozerResidual(Optimizable):
         return self._dJ
 
     def recompute_bell(self, parent=None):
-        """Invalidate the cached computation after a parent changes.
+        """Clear the cached value and derivative after a parent changes.
 
         Args:
             parent (Optimizable | None): Parent notifying this objective of changed DOFs;
                 unused.
-
-        Returns:
-            None: Clears the cached value and derivative.
         """
         self._J = None
         self._dJ = None
 
     def compute(self):
-        """Compute the objective and its direct-minus-adjoint coil derivative.
-
-
-        Returns:
-            None: Populates the objective value and total coil derivative caches, re-solving
-                the Boozer surface when required.
-        """
+        """Compute and cache the objective and its direct-minus-adjoint coil derivative,
+        re-solving the Boozer surface when required."""
         booz_surf = self.boozer_surface
         if booz_surf.need_to_run_code:
             res = booz_surf.res
