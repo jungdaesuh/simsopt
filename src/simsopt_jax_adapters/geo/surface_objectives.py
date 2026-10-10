@@ -47,11 +47,11 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
     For quasi-axisymmetry (``quasi_poloidal=False``) the field strength is split as
 
     .. math::
-        B_{\text{QS}} &= \frac{\int_0^1 B \|\mathbf n\| ~d\varphi}{\int_0^1 \|\mathbf n\| ~d\varphi} \\
+        B_{\text{QS}} &= \frac{\int_0^{1/\mathrm{nfp}} B \|\mathbf n\| ~d\varphi}{\int_0^{1/\mathrm{nfp}} \|\mathbf n\| ~d\varphi} \\
         B_{\text{non-QS}} &= B - B_{\text{QS}}
 
-    and for quasi-poloidal symmetry the averages are taken over :math:`\theta` instead. The
-    objective is
+    where :math:`\mathrm{nfp}` is the number of field periods. For quasi-poloidal symmetry,
+    the averages are taken over :math:`\theta \in [0, 1)` instead. The objective is
 
     .. math::
         J = \frac{\int_{\Gamma_{s}} B_{\text{non-QS}}^2~dS}{\int_{\Gamma_{s}} B_{\text{QS}}^2~dS},
