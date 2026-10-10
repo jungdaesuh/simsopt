@@ -205,23 +205,37 @@ class _LpObjective(_CoilSetObjective):
 
 
 class JaxLpCurveForce(_LpObjective):
-    """JAX-backed native LpCurveForce integral penalty.
+    r"""JAX version of :class:`~simsopt.field.force.LpCurveForce`: :math:`L^p` penalty on coil force per unit length.
 
-    J = (1/p) sum_i mean(max(|dF_i/dl| - threshold, 0)^p |gammadash_i|)
-    in (MN/m)^p m. Force density includes regularized self fields and mutual
-    fields. The integral has no p-th root or coil-length normalization.
+    .. math::
+        J = \frac{1}{p}\sum_i \frac{1}{N}\sum_{k}
+            \max\left(\left|\frac{d\vec{F}_i}{d\ell}(t_k)\right| - F_0, 0\right)^p |\gamma_i'(t_k)|
+          \approx \frac{1}{p}\sum_i \int \max\left(\left|\frac{d\vec{F}_i}{d\ell}\right| - F_0, 0\right)^p d\ell_i,
+
+    where :math:`d` = ``downsample``, the sum over :math:`k` runs over the :math:`N = n/d` points
+    :math:`t_k = kd/n` of the :math:`n` target quadrature points, and :math:`\gamma_i'` is the derivative
+    with respect to the unit-period curve parameter, so the quadrature approximates the arclength integral
+    on the right. The force per unit length
+
+    .. math::
+        \frac{d\vec{F}_i}{d\ell} = I_i\, \hat{t}_i \times (\vec{B}_{i,\text{self}} + \vec{B}_{i,\text{mutual}})
+
+    is in MN/m, with :math:`\hat{t}_i = \gamma_i'/|\gamma_i'|`, the regularized self field of coil :math:`i`'s
+    finite cross section, and the field of the other target coils and all source coils (also sampled with
+    stride :math:`d`). Overlap between the target and source lists is removed, so no field is counted twice.
+
+    :math:`F_0` is ``threshold``. The units of :math:`J` are (MN/m)^p m.
 
     Args:
-        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
-        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
-        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
-            Default: None.
-        p: float, dimensionless exponent captured at construction.
-            Default: 2.0.
-        threshold: float, density threshold in MN/m (force) or MN (torque), captured at construction.
-            Default: 0.0.
-        downsample: int, positive quadrature stride dividing every nonempty group count.
-            Default: 1.
+        target_coils (Coil or list of Coil): RegularizedCoil objects on which the force is computed. Coils that
+            also appear in a source list are removed from that list.
+        source_coils_coarse (Coil or list of Coil): external source coils with one shared quadrature count.
+        source_coils_fine (Coil, list of Coil or None): optional second source list with its own quadrature
+            count, e.g. finely resolved TF coils next to coarse dipole coils. Default: None.
+        p (float): dimensionless exponent, fixed at construction. Default: 2.0.
+        threshold (float): threshold force per unit length in MN/m, fixed at construction. Default: 0.0.
+        downsample (int): stride over the quadrature points of every coil list; it must divide every list's
+            quadrature count. Default: 1.
     """
 
     _native_name = "LpCurveForce"
@@ -253,23 +267,43 @@ class JaxLpCurveForce(_LpObjective):
 
 
 class JaxLpCurveTorque(_LpObjective):
-    """JAX-backed native LpCurveTorque integral penalty.
+    r"""JAX version of :class:`~simsopt.field.force.LpCurveTorque`: :math:`L^p` penalty on coil torque per unit length.
 
-    As JaxLpCurveForce for torque density in MN about each target arclength
-    centroid; the objective has units MN^p m, with no p-th root or length
-    normalization.
+    .. math::
+        J = \frac{1}{p}\sum_i \frac{1}{N}\sum_{k}
+            \max\left(\left|\frac{d\vec{T}_i}{d\ell}(t_k)\right| - T_0, 0\right)^p |\gamma_i'(t_k)|
+          \approx \frac{1}{p}\sum_i \int \max\left(\left|\frac{d\vec{T}_i}{d\ell}\right| - T_0, 0\right)^p d\ell_i,
+
+    with the torque per unit length about the arclength centroid :math:`\vec{c}_i` of coil :math:`i`,
+
+    .. math::
+        \frac{d\vec{T}_i}{d\ell} = (\gamma_i - \vec{c}_i) \times \frac{d\vec{F}_i}{d\ell}, \qquad
+        \vec{c}_i = \frac{\sum_k \gamma_i(t_k)\, |\gamma_i'(t_k)|}{\sum_k |\gamma_i'(t_k)|},
+
+    where :math:`d` = ``downsample``, the sum over :math:`k` runs over the :math:`N = n/d` points
+    :math:`t_k = kd/n` of the :math:`n` target quadrature points, and :math:`\gamma_i'` is the derivative
+    with respect to the unit-period curve parameter, so the quadrature approximates the arclength integral
+    on the right. The force per unit length
+
+    .. math::
+        \frac{d\vec{F}_i}{d\ell} = I_i\, \hat{t}_i \times (\vec{B}_{i,\text{self}} + \vec{B}_{i,\text{mutual}})
+
+    is in MN/m, with :math:`\hat{t}_i = \gamma_i'/|\gamma_i'|`, the regularized self field of coil :math:`i`'s
+    finite cross section, and the field of the other target coils and all source coils (also sampled with
+    stride :math:`d`). Overlap between the target and source lists is removed, so no field is counted twice.
+
+    :math:`T_0` is ``threshold``, the torque per unit length is in MN, and :math:`J` is in MN^p m.
 
     Args:
-        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
-        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
-        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
-            Default: None.
-        p: float, dimensionless exponent captured at construction.
-            Default: 2.0.
-        threshold: float, density threshold in MN/m (force) or MN (torque), captured at construction.
-            Default: 0.0.
-        downsample: int, positive quadrature stride dividing every nonempty group count.
-            Default: 1.
+        target_coils (Coil or list of Coil): RegularizedCoil objects on which the torque is computed. Coils that
+            also appear in a source list are removed from that list.
+        source_coils_coarse (Coil or list of Coil): external source coils with one shared quadrature count.
+        source_coils_fine (Coil, list of Coil or None): optional second source list with its own quadrature
+            count, e.g. finely resolved TF coils next to coarse dipole coils. Default: None.
+        p (float): dimensionless exponent, fixed at construction. Default: 2.0.
+        threshold (float): threshold torque per unit length in MN, fixed at construction. Default: 0.0.
+        downsample (int): stride over the quadrature points of every coil list; it must divide every list's
+            quadrature count. Default: 1.
     """
 
     _native_name = "LpCurveTorque"
@@ -314,19 +348,27 @@ class _SquaredMeanObjective(_CoilSetObjective):
 
 
 class JaxSquaredMeanForce(_SquaredMeanObjective):
-    """JAX-backed native SquaredMeanForce, using integrated force.
+    r"""JAX version of :class:`~simsopt.field.force.SquaredMeanForce`: squared net Lorentz force on each coil.
 
-    J = sum_i |integral dF_i/dl dl|^2 in MN^2. Only mutual fields contribute.
-    The native name denotes a quadrature mean of force_density * |gammadash|;
-    there is no division by coil length.
+    .. math::
+        J = \sum_i \left|\frac{1}{N}\sum_k \frac{d\vec{F}_i}{d\ell}(t_k)\, |\gamma_i'(t_k)|\right|^2
+          \approx \sum_i \left|\int \frac{d\vec{F}_i}{d\ell}\, d\ell_i\right|^2,
+
+    where :math:`d` = ``downsample``, the sum over :math:`k` runs over the :math:`N = n/d` points
+    :math:`t_k = kd/n` of the :math:`n` target quadrature points, and :math:`\gamma_i'` is the derivative
+    with respect to the unit-period curve parameter. The force per unit length
+    :math:`d\vec{F}_i/d\ell = I_i\, \hat{t}_i \times \vec{B}_{i,\text{mutual}}`, in MN/m, uses only the field of
+    the other target coils and all source coils (also sampled with stride :math:`d`); there is no self force.
+    :math:`J` is in MN^2.
 
     Args:
-        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
-        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
-        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
-            Default: None.
-        downsample: int, positive quadrature stride dividing every nonempty group count.
-            Default: 1.
+        target_coils (Coil or list of Coil): coils on which the net force is computed. Coils
+            that also appear in a source list are removed from that list.
+        source_coils_coarse (Coil or list of Coil): external source coils with one shared quadrature count.
+        source_coils_fine (Coil, list of Coil or None): optional second source list with its own quadrature
+            count, e.g. finely resolved TF coils next to coarse dipole coils. Default: None.
+        downsample (int): stride over the quadrature points of every coil list; it must divide every list's
+            quadrature count. Default: 1.
     """
 
     def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
@@ -355,19 +397,29 @@ class JaxSquaredMeanForce(_SquaredMeanObjective):
 
 
 class JaxSquaredMeanTorque(_SquaredMeanObjective):
-    """JAX-backed native SquaredMeanTorque, using integrated torque.
+    r"""JAX version of :class:`~simsopt.field.force.SquaredMeanTorque`: squared net Lorentz torque on each coil.
 
-    J = sum_i |integral dT_i/dl dl|^2 in (MN m)^2, about each target
-    arclength centroid. Only mutual fields contribute; quadrature integrates
-    torque density without division by coil length.
+    .. math::
+        J = \sum_i \left|\frac{1}{N}\sum_k
+            (\gamma_i(t_k) - \vec{c}_i) \times \frac{d\vec{F}_i}{d\ell}(t_k)\, |\gamma_i'(t_k)|\right|^2
+          \approx \sum_i \left|\int (\gamma_i - \vec{c}_i) \times \frac{d\vec{F}_i}{d\ell}\, d\ell_i\right|^2,
+
+    with :math:`\vec{c}_i = \sum_k \gamma_i(t_k) |\gamma_i'(t_k)| / \sum_k |\gamma_i'(t_k)|` the arclength
+    centroid of coil :math:`i`, where :math:`d` = ``downsample``, the sum over :math:`k` runs over the :math:`N = n/d` points
+    :math:`t_k = kd/n` of the :math:`n` target quadrature points, and :math:`\gamma_i'` is the derivative
+    with respect to the unit-period curve parameter. The force per unit length
+    :math:`d\vec{F}_i/d\ell = I_i\, \hat{t}_i \times \vec{B}_{i,\text{mutual}}`, in MN/m, uses only the field of
+    the other target coils and all source coils (also sampled with stride :math:`d`); there is no self force.
+    :math:`J` is in (MN m)^2.
 
     Args:
-        target_coils: Coil or list of Coil, force/torque targets; Lp targets must be RegularizedCoil objects.
-        source_coils_coarse: Coil or list of Coil, external sources at one shared quadrature count; targets are removed.
-        source_coils_fine: Coil object, list of Coil or None, optional finer sources; targets and coarse overlap are removed.
-            Default: None.
-        downsample: int, positive quadrature stride dividing every nonempty group count.
-            Default: 1.
+        target_coils (Coil or list of Coil): coils on which the net torque is computed. Coils
+            that also appear in a source list are removed from that list.
+        source_coils_coarse (Coil or list of Coil): external source coils with one shared quadrature count.
+        source_coils_fine (Coil, list of Coil or None): optional second source list with its own quadrature
+            count, e.g. finely resolved TF coils next to coarse dipole coils. Default: None.
+        downsample (int): stride over the quadrature points of every coil list; it must divide every list's
+            quadrature count. Default: 1.
     """
 
     def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
@@ -396,15 +448,19 @@ class JaxSquaredMeanTorque(_SquaredMeanObjective):
 
 
 class JaxB2Energy(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.field.force.B2Energy`.
+    r"""JAX version of :class:`~simsopt.field.force.B2Energy`: vacuum magnetic field energy of a set of coils.
 
-    ``J = (1/2) sum_ij I_i L_ij I_j`` in MJ, with the regularized
-    self-inductances of the coils' cross sections on the diagonal of ``L``.
+    .. math::
+        J = \frac{1}{2}\sum_{i,j} I_i L_{ij} I_j,
+
+    where :math:`I_i` is the current in coil :math:`i` and :math:`L_{ij}` is the inductance matrix, computed on
+    every ``downsample``-th quadrature point, with the regularized self-inductance of each coil's finite cross
+    section on the diagonal. :math:`J` is in MJ.
 
     Args:
-        target_coils: list of RegularizedCoil, energy coils with a common quadrature count.
-        downsample: int, positive quadrature stride dividing every nonempty group count.
-            Default: 1.
+        target_coils (list of RegularizedCoil, shape (m,)): coils contributing to the energy, with a common
+            quadrature count.
+        downsample (int): stride over the quadrature points; it must divide the quadrature count. Default: 1.
     """
 
     def __init__(self, target_coils, downsample=1):
@@ -443,23 +499,26 @@ class JaxB2Energy(Optimizable):
 
 
 class JaxNetFluxes(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.field.force.NetFluxes`.
+    r"""JAX version of :class:`~simsopt.field.force.NetFluxes`: flux of the source coils through a coil.
 
-    ``J = (1/n) sum_k A(gamma_k) . gammadash_k`` in Wb: the flux through the
-    target coil of the sources' vector potential ``A``, at the target's
-    ``downsample``-strided points. ``dJ`` differentiates this same sampled
-    flux; source quadrature remains full resolution. The sources are the
-    ``source_coils`` at construction (native builds a ``BiotSavart`` from
-    them): reassigning the attribute changes neither value nor derivative.
-    The sources are captured at construction for both the value and the
-    gradient; native's gradient reads the list live after in-place edits,
-    which makes its value and gradient inconsistent, and is not reproduced.
+    .. math::
+        \Psi = \frac{1}{N}\sum_{k=0}^{N-1} \vec{A}(\gamma(t_k)) \cdot \gamma'(t_k)
+            \approx \oint \vec{A} \cdot d\vec{\ell},
+        \qquad t_k = \frac{kd}{n}, \quad N = \frac{n}{d},
+
+    where :math:`\gamma` is the target curve with :math:`n` quadrature points, :math:`\gamma'` its derivative
+    with respect to the unit-period curve parameter, :math:`d` = ``downsample``, and :math:`\vec{A}` is the
+    Biot-Savart vector potential of the source coils at their full quadrature. Both the value and the gradient
+    use only these :math:`N` strided target points. :math:`\Psi` is in Wb.
+
+    The sources are the ``source_coils`` given at construction; reassigning or editing that list afterwards
+    changes neither the value nor the gradient.
 
     Args:
-        target_coil: Coil object, target flux loop; its current does not enter the flux.
-        source_coils: Coil or list of Coil, external sources at full quadrature; the target is removed and membership is captured.
-        downsample: int, positive quadrature stride dividing every nonempty group count.
-            Default: 1.
+        target_coil (Coil): coil whose net flux is computed; its own current does not enter.
+        source_coils (Coil or list of Coil): source coils with one shared quadrature count; the target is removed.
+        downsample (int): stride over the target's quadrature points; it must divide the quadrature count of
+            the target and of the sources. Default: 1.
     """
 
     def __init__(self, target_coil, source_coils, downsample=1):
