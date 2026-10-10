@@ -1,4 +1,7 @@
 from pathlib import Path
+import os
+import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -52,7 +55,15 @@ class Testing(unittest.TestCase):
             assert m_hist.shape == (ndipoles, 3, 21)
 
     def test_MwPGP_repeatable_convergence(self):
-        """Repeated solves must make the same convergence decision."""
+        """Repeated four-thread solves must make the same convergence decision."""
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "Testing._check_MwPGP_repeatable_convergence"],
+            env=dict(os.environ, OMP_NUM_THREADS="4", OMP_DYNAMIC="FALSE"),
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def _check_MwPGP_repeatable_convergence(self):
+        """Compare populated histories and dipoles across 100 identical solves."""
         rng = np.random.default_rng(20261008)
         ndipoles = 64
         nquad = 96
