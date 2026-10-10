@@ -171,6 +171,30 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
 
 @dataclass(frozen=True)
 class BackendConfig:
+    """Resolved immutable process configuration for a field backend.
+
+    Args:
+        mode (str): Canonical backend mode: native_cpu, jax_cpu_fast, jax_cpu_parity,
+            jax_gpu_fast or jax_gpu_parity.
+        backend (str): Implementation selector, cpu for native evaluation or jax.
+        jax_platform (str): JAX platform selector, cpu or cuda.
+        precision (str): mode_default or fp64; all supported modes use double precision.
+        strict (bool): Reject an initialized JAX backend mismatch instead of warning.
+        debug_nans (bool): Enable JAX NaN debugging.
+        disable_jit (bool): Disable JAX compilation for debugging.
+        transfer_guard (str or None): JAX implicit-transfer policy; None leaves the
+            existing guard unchanged when applying the config.
+        compilation_cache_dir (str or None): Persistent compilation-cache directory;
+            None leaves persistent-cache configuration unchanged.
+        xla_gpu_preallocate (bool or None): GPU allocator preallocation setting; None
+            means no resolved environment override.
+        xla_gpu_mem_fraction (float or None): Fraction of GPU memory in (0, 1]; None
+            means no resolved environment override.
+        xla_gpu_allocator (str or None): platform or vmm GPU allocator; None means no
+            resolved environment override.
+        tf_gpu_allocator (str or None): cuda_malloc_async allocator selector; None means
+            no resolved environment override.
+    """
     mode: BackendMode
     backend: str
     jax_platform: str
@@ -188,7 +212,24 @@ class BackendConfig:
 
 @dataclass(frozen=True)
 class BackendPolicy:
-    """Immutable numerical and execution policy for a resolved field backend mode."""
+    """Immutable numerical and execution policy for a resolved field backend mode.
+
+    Args:
+        mode (str): Canonical backend mode: native_cpu, jax_cpu_fast, jax_cpu_parity,
+            jax_gpu_fast or jax_gpu_parity.
+        backend (str): Implementation selector, cpu for native evaluation or jax.
+        jax_platform (str): JAX platform selector, cpu or cuda.
+        parity_mode (bool): Use arithmetic intended to match the native reference.
+        requires_x64 (bool): Required value of JAX double-precision support.
+        runtime_dtype (str): Dtype name for runtime floating values, float64.
+        host_dtype (str): Dtype name for host floating values, float64.
+        compute_dtype (str): Dtype name for kernel floating arithmetic, float64.
+        chunk_policy (str): Field tiling policy name, host_reference, stable_default or
+            performance_tuned.
+        matmul_precision (str): JAX default matmul precision setting.
+        transfer_guard (str or None): JAX implicit-transfer policy; None leaves the
+            existing guard unchanged when applying the config.
+    """
 
     mode: BackendMode
     backend: str
@@ -281,7 +322,14 @@ def _validate_mode(mode: str) -> BackendMode:
 
 @dataclass(frozen=True)
 class JaxExecutionProfile:
-    """Resolved JAX placement and numerical intent."""
+    """Resolved JAX placement and numerical intent.
+
+    Args:
+        device (str): cpu or gpu execution device.
+        intent (str): fast or parity numerical intent.
+        mode (str): Canonical backend mode: native_cpu, jax_cpu_fast, jax_cpu_parity,
+            jax_gpu_fast or jax_gpu_parity.
+    """
 
     device: JaxDevice
     intent: ExecutionIntent
@@ -292,7 +340,16 @@ def resolve_jax_execution_profile(
     device: JaxDevice | str,
     intent: ExecutionIntent | str = "fast",
 ) -> JaxExecutionProfile:
-    """Resolve the public orthogonal JAX selector to one canonical mode."""
+    """Resolve the public orthogonal JAX selector to one canonical mode.
+
+    Args:
+        device (str): cpu or gpu execution device.
+        intent (str): fast or parity numerical intent.
+
+    Returns:
+        JaxExecutionProfile object: Validated selectors and their canonical
+            backend mode.
+    """
     if device not in ("cpu", "gpu"):
         raise ValueError(f"device={device!r} is not valid. Accepted: ('cpu', 'gpu')")
     if intent not in ("fast", "parity"):
