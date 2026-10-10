@@ -45,19 +45,40 @@ _squared_flux_value_and_coil_cotangents = jax.jit(
 
 
 class JaxSquaredFlux(Optimizable):
-    """JAX-backed native SquaredFlux for a fixed surface.
+    r"""JAX version of :class:`simsopt.objectives.SquaredFlux`: quadratic flux on a fixed surface.
 
-    Construction sets field points and captures the sampled points and normals,
-    including their quadrature grid. A full surface-DOF digest rejects later DOF
-    edits; quadrature and other geometry edits that leave those DOFs unchanged
-    are not detected. Rebuild after any surface-geometry or quadrature change.
-    Target and definition are read at every evaluation.
+    For ``definition="quadratic flux"`` (the default),
+
+    .. math::
+        J = \frac12 \int_{S} (\mathbf{B}\cdot \mathbf{n} - B_T)^2 ds,
+
+    where :math:`\mathbf{n}` is the surface unit normal and :math:`B_T` is ``target``
+    (zero by default). For ``definition="normalized"``,
+
+    .. math::
+        J = \frac12 \frac{\int_{S} (\mathbf{B}\cdot \mathbf{n} - B_T)^2 ds}
+                         {\int_{S} |\mathbf{B}|^2 ds},
+
+    and for ``definition="local"``,
+
+    .. math::
+        J = \frac12 \int_{S} \frac{(\mathbf{B}\cdot \mathbf{n} - B_T)^2}{|\mathbf{B}|^2} ds.
+
+    As in the native C++ kernel, the surface integrals are means over the quadrature points
+    weighted by the unnormalized normal :math:`\mathbf{N}`,
+    :math:`ds = |\mathbf{N}|~d\varphi~d\theta`.
+
+    The surface points and normals are captured at construction; changed surface DOFs raise
+    ``RuntimeError``, but quadrature changes are not detected, so rebuild the objective after
+    any surface change. ``target`` and ``definition`` are read at every evaluation.
 
     Args:
-        surface: Surface object, fixed quadrature geometry in m.
-        field: JaxBiotSavart object, coil magnetic field in T.
-        target: Array of shape (nphi, ntheta) or None, normal field target in T; default None means zero.
-        definition: str, "quadratic flux", "normalized", or "local"; default "quadratic flux".
+        surface (Surface): surface with fixed quadrature geometry in m.
+        field (JaxBiotSavart): coil magnetic field in T.
+        target (array or None): shape (nphi, ntheta), normal-field target :math:`B_T` in T;
+            default None means zero.
+        definition (str): ``"quadratic flux"``, ``"normalized"`` or ``"local"``;
+            default ``"quadratic flux"``.
     """
 
     def __init__(self, surface, field: JaxBiotSavart, target=None, definition="quadratic flux"):
