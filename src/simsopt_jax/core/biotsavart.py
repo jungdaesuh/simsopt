@@ -751,11 +751,9 @@ def _make_d2B_vjp_kernel(coil_cs, quad_bs, hessian_vjp_point_cs):
 def invalidate_kernel_cache() -> None:
     """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
-    Call after overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``)
-    to ensure the next ``biot_savart_*`` call rebuilds with the new config.
-
-    Returns:
-        None: Cached forward and pullback kernel factories are cleared.
+    Both the forward and the pullback kernel factories are cleared. Call after
+    overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``) to ensure
+    the next ``biot_savart_*`` call rebuilds with the new config.
     """
     _make_kernel.cache_clear()
     _make_B_vjp_kernel.cache_clear()

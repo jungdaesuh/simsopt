@@ -423,9 +423,6 @@ def register_backend_cache_clear(callback: Callable[[], None]) -> None:
     Args:
         callback (Callable[[], None]): Cache-clearing function, keyed by module and
             qualified name; registration replaces a callback with the same key.
-
-    Returns:
-        None: The callback is registered for subsequent invalidation.
     """
     with _backend_runtime_lock:
         _backend_cache_clear_callbacks[_backend_cache_clear_callback_key(callback)] = (
@@ -453,14 +450,12 @@ def _reset_backend_runtime_caches() -> None:
 def invalidate_backend_cache() -> None:
     """Clear the cached backend configuration and derived caches.
 
-    Call this after mutating ``SIMSOPT_*`` environment variables directly
-    (outside of ``set_backend()``) so the next ``get_backend_config()`` call
-    re-reads the environment.  Test fixtures should call this when they
-    manipulate env vars via ``monkeypatch`` or context managers.
-
-    Returns:
-        None: Configuration and derived caches are cleared, including
-            registered callbacks.
+    Derived caches include those cleared by callbacks registered with
+    ``register_backend_cache_clear()``. Call this after mutating ``SIMSOPT_*``
+    environment variables directly (outside of ``set_backend()``) so the next
+    ``get_backend_config()`` call re-reads the environment.  Test fixtures
+    should call this when they manipulate env vars via ``monkeypatch`` or
+    context managers.
     """
     global _cached_backend_config
     with _backend_runtime_lock:
@@ -694,9 +689,7 @@ def _apply_compilation_cache_config(jax, config: BackendConfig) -> None:
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process.
 
-    Returns:
-        None: The resolved JAX settings are applied in place; native
-            configuration is a no-op.
+    Does nothing when the resolved backend is native.
     """
     config = get_backend_config()
     if config.backend != "jax":
