@@ -40,20 +40,31 @@ __all__ = ["JaxNonQuasiSymmetricRatio"]
 
 
 class JaxNonQuasiSymmetricRatio(Optimizable):
-    """Native ``NonQuasiSymmetricRatio(boozer_surface, bs, sDIM,
-    quasi_poloidal)`` with ``bs`` a ``JaxBiotSavart``.
+    r"""JAX version of :class:`simsopt.geo.NonQuasiSymmetricRatio`: the ratio of the
+    non-quasi-symmetric to the quasi-symmetric part of :math:`B = \|\mathbf B\|_2` on a Boozer
+    surface, with :math:`\mathbf B` from a :class:`~simsopt_jax_adapters.field.JaxBiotSavart`.
 
-    As natively, the ratio is evaluated on ``surface``, a
-    ``SurfaceXYZTensorFourier`` sharing the Boozer surface's DOFs on a
-    ``2 sDIM x 2 sDIM`` grid over one field period, after re-solving when
-    ``boozer_surface`` needs it; ``dJ`` subtracts ``res['vjp']`` of the
-    ``res['PLU']`` adjoint from the direct coil derivative. ``surface``,
-    ``biotsavart``, ``axis`` and ``boozer_surface`` are read at every
-    evaluation; ``boozer_surface`` may be a ``JaxBoozerSurface`` or a native
-    ``BoozerSurface``. Unlike native, ``bs``'s evaluation points are left as
-    they were, and ``bs`` is a parent alongside ``boozer_surface``: coils
-    that only ``bs`` holds are part of ``x`` and ``dJ`` and invalidate ``J``
-    when they change.
+    For quasi-axisymmetry (``quasi_poloidal=False``) the field strength is split as
+
+    .. math::
+        B_{\text{QS}} &= \frac{\int_0^1 B \|\mathbf n\| ~d\varphi}{\int_0^1 \|\mathbf n\| ~d\varphi} \\
+        B_{\text{non-QS}} &= B - B_{\text{QS}}
+
+    and for quasi-poloidal symmetry the averages are taken over :math:`\theta` instead. The
+    objective is
+
+    .. math::
+        J = \frac{\int_{\Gamma_{s}} B_{\text{non-QS}}^2~dS}{\int_{\Gamma_{s}} B_{\text{QS}}^2~dS},
+
+    evaluated as uniform-grid means on an auxiliary surface that shares the Boozer surface's
+    DOFs, with :math:`2\,\mathrm{sDIM}` points in :math:`\varphi` over one field period and
+    :math:`2\,\mathrm{sDIM}` in :math:`\theta`. :math:`J = 0` means perfect quasi-symmetry
+    on that surface. ``dJ`` is the total coil derivative, including the dependence of the
+    Boozer surface on the coils through its solve.
+
+    The surface must be a :class:`~simsopt.geo.SurfaceXYZTensorFourier`. Unlike native,
+    ``bs`` is also a parent, so coils held only by ``bs`` are part of ``x`` and ``dJ``, and
+    the evaluation points of ``bs`` are left unchanged.
 
     Args:
         boozer_surface (JaxBoozerSurface | BoozerSurface): Mutable tensor-surface solver
@@ -96,14 +107,11 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
         self.recompute_bell()
 
     def recompute_bell(self, parent=None):
-        """Invalidate the cached computation after a parent changes.
+        """Clear the cached value and derivative after a parent changes.
 
         Args:
             parent (Optimizable | None): Parent notifying this objective of changed DOFs;
                 unused.
-
-        Returns:
-            None: Clears the cached value and derivative.
         """
         self._J = None
         self._dJ = None
@@ -135,12 +143,8 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
         return self._dJ
 
     def compute(self):
-        """Compute the objective and its direct-minus-adjoint coil derivative.
-
-
-        Returns:
-            None: Populates the objective value and total coil derivative caches, re-solving
-                the Boozer surface when required.
+        """Compute and cache the objective and its direct-minus-adjoint coil derivative,
+        re-solving the Boozer surface when required.
         """
         booz_surf = self.boozer_surface
         if booz_surf.need_to_run_code:

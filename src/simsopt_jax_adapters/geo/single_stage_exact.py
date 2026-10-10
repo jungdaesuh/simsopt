@@ -91,14 +91,30 @@ class ExactSingleStageEvaluation:
 
 @pytree_dataclass(data=("problem", "initial_state", "initial_dofs"))
 class JaxExactSingleStage:
-    """Frozen exact boozerQA snapshot evaluator with explicit state in/out.
+    r"""Exact-Boozer single-stage objective of ``examples/2_Intermediate/boozerQA.py`` and its
+    gradient with respect to the free coil DOFs, evaluated in JAX. There is no single native
+    class for it; native builds it from :class:`simsopt.geo.NonQuasiSymmetricRatio`,
+    :class:`simsopt.geo.Iotas`, :class:`simsopt.geo.MajorRadius`,
+    :class:`simsopt.geo.CurveLength` and :class:`simsopt.objectives.QuadraticPenalty`.
 
-    This evaluator is not an Optimizable and does not track native dependencies.
-    Rebuild it after structural or fixed-value changes.
+    For coil DOFs :math:`c`, the exact Boozer solve gives the surface, :math:`\iota` and
+    :math:`G`, and the objective is
 
-    Construction captures a solved surface, coil layout, label and targets.
-    evaluate(dofs, state) returns the value/gradient and next state;
-    no native object or hidden warm-start/cache is mutated.
+    .. math::
+        J(c) = J_{\text{non-QS}} + \tfrac{1}{2}(\iota - \iota^*)^2 + \tfrac{1}{2}(R - R^*)^2
+            + \tfrac{1}{2}\max\Big(\sum_{k} L_k - L^*, 0\Big)^2,
+
+    where :math:`J_{\text{non-QS}}` is the ratio of :class:`simsopt.geo.NonQuasiSymmetricRatio`,
+    :math:`R` is the major radius of :class:`simsopt.geo.MajorRadius`, :math:`L_k` are the
+    lengths of the selected curves, and :math:`\iota^*`, :math:`R^*`, :math:`L^*` are the
+    targets. If the inner solve fails, the value is :math:`10^3`, as in ``boozerQA.py``. The
+    gradient includes the dependence of the surface, :math:`\iota` and :math:`G` on the
+    coils through the solve.
+
+    Build it with :meth:`from_boozer_surface`, then call ``evaluate(dofs, state)``, which
+    returns the value, gradient and next warm-start state; no native object or hidden
+    state is changed. It is not an Optimizable: rebuild it after changing the coil graph,
+    the free/fixed layout, fixed values or grids.
 
     Args:
         problem (ExactSingleStageProblem): Frozen geometry, coil layout, labels and
