@@ -42,6 +42,9 @@ jobs:
           python -c "import simsopt_jax_adapters.field"
           python examples/2_Intermediate/stage_two_optimization.py
           python examples/2_Intermediate/stage_two_optimization.py --use-jax
+          python examples/2_Intermediate/boozerQA.py --maxiter 1
+          python examples/2_Intermediate/boozerQA.py --use-jax --maxiter 1
+          python examples/2_Intermediate/boozerQA.py --use-jax --fused --maxiter 1
       - name: Check shipped Python code
         run: |
           ruff check src/simsopt_jax src/simsopt_jax_adapters tests/unittest_jax_support.py \
@@ -76,5 +79,8 @@ jobs:
             tests/geo/test_boozer_residual_jax.py \
             tests/core/test_boozer_solver_loops_jax.py \
             tests/geo/test_boozer_surface_jax.py \
-            examples/2_Intermediate/stage_two_optimization.py
+            examples/2_Intermediate/stage_two_optimization.py \
+            tests/geo/test_single_stage_exact_jax.py \
+            tests/geo/test_surface_objectives_jax.py \
+            examples/2_Intermediate/boozerQA.py
           pyright --pythonpath "$(command -v python)"

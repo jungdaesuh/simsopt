@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
+from typing import cast
 import numpy as np
 from scipy.optimize import minimize
 
+from simsopt._core.optimizable import Optimizable
 from simsopt.configs import get_data
 from simsopt.field import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, boozer_surface_residual, \
@@ -29,6 +32,31 @@ too complex.  The BFGS optimizer is used, and quasisymmetry is improved substant
 More details on this work can be found at doi:10.1017/S0022377822000563 or arxiv:2203.03753.
 """
 
+try:
+    from simsopt_jax.backend import set_backend
+    from simsopt_jax.runtime.host_boundary import host_array
+    from simsopt_jax_adapters.field import JaxBiotSavart
+    from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
+    from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
+    from simsopt_jax_adapters.geo.single_stage_exact import JaxExactSingleStage
+except ImportError as error:
+    jax_import_error = str(error)
+else:
+    jax_import_error = None
+
+parser = argparse.ArgumentParser(description="Optimize NCSX coils for QA on one Boozer surface")
+parser.add_argument("--use-jax", action="store_true", help="Use the optional JAX surface solve and objectives")
+parser.add_argument("--fused", action="store_true", help="Fuse the exact solve, objective and adjoint with --use-jax")
+parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
+parser.add_argument("--maxiter", type=int, help="Override the outer BFGS iteration limit")
+args = parser.parse_args()
+if args.fused and not args.use_jax:
+    parser.error("--fused requires --use-jax")
+if args.use_jax:
+    if jax_import_error is not None:
+        parser.error(f"--use-jax requires Python >= 3.11 and jax/jaxlib >= 0.10: {jax_import_error}")
+    set_backend("jax", device="gpu" if args.device == "gpu" else "cpu", intent="parity")
+
 # Directory for output
 OUT_DIR = "./output/"
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -37,6 +65,8 @@ print("Running 2_Intermediate/boozerQA.py")
 print("================================")
 
 base_curves, base_currents, ma, nfp, bs  = get_data("ncsx")
+if args.use_jax:
+    bs = JaxBiotSavart(bs.coils)
 # bs.coils includes all coils after symmetry expansion (not just the base coils).
 # You can access them directly like this:
 all_curves = [c.curve for c in bs.coils]
@@ -64,20 +94,27 @@ vol = Volume(s)
 vol_target = vol.J()
 
 ## compute the surface
-boozer_surface = BoozerSurface(bs, s, vol, vol_target)
+if args.use_jax:
+    boozer_surface = JaxBoozerSurface(cast(JaxBiotSavart, bs), s, vol, vol_target)
+else:
+    boozer_surface = BoozerSurface(bs, s, vol, vol_target)
 res = boozer_surface.solve_residual_equation_exactly_newton(tol=1e-13, maxiter=20, iota=iota, G=G0)
 
-out_res = boozer_surface_residual(s, res['iota'], res['G'], bs, derivatives=0)[0]
+# The native residual diagnostic calls compute(), so use the existing native buffer in the JAX path.
+out_res = boozer_surface_residual(s, res['iota'], res['G'], bs_tf if args.use_jax else bs, derivatives=0)[0]
 print(f"NEWTON {res['success']}: iter={res['iter']}, iota={res['iota']:.3f}, vol={s.volume():.3f}, ||residual||={np.linalg.norm(out_res):.3e}")
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
-bs_nonQS = BiotSavart(bs.coils)
+bs_nonQS = bs if args.use_jax else BiotSavart(bs.coils)
 mr = MajorRadius(boozer_surface)
 ls = [CurveLength(c) for c in base_curves]
 
-J_major_radius = QuadraticPenalty(mr, mr.J(), 'identity')  # target major radius is that computed on the initial surface
+J_major_radius = QuadraticPenalty(mr, cast(float, mr.J()), 'identity')  # target major radius is that computed on the initial surface
 J_iotas = QuadraticPenalty(Iotas(boozer_surface), res['iota'], 'identity')  # target rotational transform is that computed on the initial surface
-J_nonQSRatio = NonQuasiSymmetricRatio(boozer_surface, bs_nonQS)
-Jls = QuadraticPenalty(sum(ls), float(sum(ls).J()), 'max')
+if args.use_jax:
+    J_nonQSRatio = JaxNonQuasiSymmetricRatio(boozer_surface, cast(JaxBiotSavart, bs_nonQS))
+else:
+    J_nonQSRatio = NonQuasiSymmetricRatio(boozer_surface, bs_nonQS)
+Jls = QuadraticPenalty(sum(ls), float(cast(Optimizable, sum(ls)).J()), 'max')
 
 # sum the objectives together
 JF = J_nonQSRatio + J_iotas + J_major_radius + Jls
@@ -89,7 +126,25 @@ boozer_surface.surface.to_vtk(OUT_DIR + "surf_init")
 base_currents[0].fix_all()
 
 
+if args.fused:
+    evaluator = JaxExactSingleStage.from_boozer_surface(
+        cast(JaxBoozerSurface, boozer_surface), cast(JaxBiotSavart, bs), base_curves,
+        iota_target=float(res['iota']), major_radius_target=J_major_radius.cons,
+        length_target=Jls.cons,
+    )
+    fused_state = evaluator.initial_state
+
+
 def fun(dofs):
+    global fused_state
+    if args.fused:
+        evaluation = evaluator.evaluate(dofs, fused_state)
+        fused_state = evaluation.state
+        nonqs, solved_iota, radius, length = evaluation.terms
+        print(f"J={evaluation.value:.1e}, J_nonQSRatio={nonqs:.2e}, iota={solved_iota:.2e}, "
+              f"mr={radius:.2e}, Len={length:.1f}, ║∇J║={np.linalg.norm(evaluation.gradient):.1e}")
+        return evaluation.value, evaluation.gradient
+
     # save these as a backup in case the boozer surface Newton solve fails
     sdofs_prev = boozer_surface.surface.x
     iota_prev = boozer_surface.res['iota']
@@ -122,7 +177,7 @@ print("""
 ################################################################################
 """)
 f = fun
-dofs = JF.x
+dofs = cast(np.ndarray, JF.x)
 np.random.seed(1)
 h = np.random.uniform(size=dofs.shape)
 J0, dJ0 = f(dofs)
@@ -141,8 +196,17 @@ print("""
 """)
 # Number of iterations to perform:
 MAXITER = 50 if in_github_actions else 1e3
+if args.maxiter is not None:
+    MAXITER = args.maxiter
 
 res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15)
+if args.fused:
+    evaluation = evaluator.evaluate(np.asarray(res.x, dtype=np.float64), fused_state)
+    JF.x = res.x
+    final_inner = host_array(evaluation.state.x)
+    boozer_surface.surface.set_dofs(final_inner[:-2])
+    boozer_surface.res['iota'] = float(final_inner[-2])
+    boozer_surface.res['G'] = float(final_inner[-1])
 curves_to_vtk(all_curves, OUT_DIR + "curves_opt")
 boozer_surface.surface.to_vtk(OUT_DIR + "surf_opt")
 
