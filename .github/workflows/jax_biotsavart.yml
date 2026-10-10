@@ -42,6 +42,8 @@ jobs:
           python -c "import simsopt_jax_adapters.field"
           python examples/2_Intermediate/stage_two_optimization.py
           python examples/2_Intermediate/stage_two_optimization.py --use-jax
+          python examples/1_Simple/qfm.py --maxiter 1
+          python examples/1_Simple/qfm.py --use-jax --maxiter 1
       - name: Check shipped Python code
         run: |
           ruff check src/simsopt_jax src/simsopt_jax_adapters tests/unittest_jax_support.py \
@@ -73,5 +75,8 @@ jobs:
             tests/core/test_pytree_convention.py \
             tests/field/test_stage_two_biotsavart_jax.py \
             tests/geo/test_surface_geometry_jax.py \
+            tests/geo/test_qfm_jax.py \
+            tests/geo/test_qfm_buffer_ownership.py \
+            examples/1_Simple/qfm.py \
             examples/2_Intermediate/stage_two_optimization.py
           pyright --pythonpath "$(command -v python)"
