@@ -1,6 +1,6 @@
 """JAX coil-geometry penalties as drop-in native Optimizables.
 
-Each class mirrors the objective of the same name without ``JAX`` in
+Each class mirrors the native objective named by removing the ``Jax`` prefix in
 :mod:`simsopt.geo.curveobjectives`: same constructor arguments, value,
 dependencies, ``Derivative`` (fixed and free partials of the curve DOFs) and
 ``shortest_distance``. The curves evaluate their own geometry
@@ -18,7 +18,7 @@ compute their own geometry and VJPs with implicit transfers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache, partial
+from functools import lru_cache
 
 import jax
 import jax.numpy as jnp
@@ -41,11 +41,11 @@ from simsopt_jax.core.curve_kernels import (
 from simsopt_jax.runtime.host_boundary import host_array, host_tree
 
 __all__ = [
-    "CurveCurveDistanceJAX",
-    "CurveLengthJAX",
-    "CurveSurfaceDistanceJAX",
-    "LpCurveCurvatureJAX",
-    "MeanSquaredCurvatureJAX",
+    "JaxCurveCurveDistance",
+    "JaxCurveLength",
+    "JaxCurveSurfaceDistance",
+    "JaxLpCurveCurvature",
+    "JaxMeanSquaredCurvature",
 ]
 
 
@@ -113,14 +113,10 @@ def _tangent_derivative(curve, grad_gammadash, grad_gammadashdash):
 @lru_cache(maxsize=64)
 def _quadrature_classes(sample_counts: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
     """Curve indices grouped by sample count, classes and members in curve order."""
-    class_by_count: dict[int, int] = {}
-    curve_class = tuple(
-        class_by_count.setdefault(count, len(class_by_count)) for count in sample_counts
-    )
-    return tuple(
-        tuple(index for index, cls in enumerate(curve_class) if cls == target)
-        for target in range(len(class_by_count))
-    )
+    members_by_count: dict[int, list[int]] = {}
+    for index, count in enumerate(sample_counts):
+        members_by_count.setdefault(count, []).append(index)
+    return tuple(tuple(members) for members in members_by_count.values())
 
 
 def _class_stacked_geometry(curves, class_members, downsample):
@@ -189,18 +185,35 @@ def _class_geometry_derivative(curves, class_members, class_dgammas, class_dgamm
     return _sum_curve_vjp_contributions(curves, dgamma_buffers, dgammadash_buffers)
 
 
-class CurveLengthJAX(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.geo.CurveLength`."""
+class JaxCurveLength(Optimizable):
+    """JAX-backed native CurveLength objective.
+
+    Args:
+        curve: Curve object, geometry in m parameterized over [0, 1).
+    """
 
     def __init__(self, curve):
         self.curve = curve
         super().__init__(depends_on=[curve])
 
     def J(self):
+        """Evaluate the native objective formula on the active JAX device.
+
+        Returns:
+            float: objective value in m.
+        """
         return _host_float(_curve_length(_as_jax_float64(self.curve.gammadash())))
 
     @derivative_dec
     def dJ(self):
+        """Differentiate with respect to curve DOFs, accumulating shared DOFs.
+
+        The derivative decorator selects free DOFs by default; partials=True
+        retains fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         return self.curve.dgammadash_by_dcoeff_vjp(
             host_array(
                 _curve_length_grad(_as_jax_float64(self.curve.gammadash())),
@@ -211,8 +224,14 @@ class CurveLengthJAX(Optimizable):
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class LpCurveCurvatureJAX(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.geo.LpCurveCurvature`."""
+class JaxLpCurveCurvature(Optimizable):
+    """JAX-backed native integral of excess curvature, without a p-th root.
+
+    Args:
+        curve: Curve object, geometry in m parameterized over [0, 1).
+        p: float, dimensionless exponent.
+        threshold: float, curvature threshold in 1/m; default 0.0.
+    """
 
     def __init__(self, curve, p, threshold=0.0):
         self.curve = curve
@@ -224,10 +243,23 @@ class LpCurveCurvatureJAX(Optimizable):
         return _as_jax_float64(self.p), _as_jax_float64(self.threshold)
 
     def J(self):
+        """Evaluate the native objective formula on the active JAX device.
+
+        Returns:
+            float: objective value in m^(1-p).
+        """
         return _host_float(_lp_curvature(*_tangents(self.curve), *self._parameters()))
 
     @derivative_dec
     def dJ(self):
+        """Differentiate with respect to curve DOFs, accumulating shared DOFs.
+
+        The derivative decorator selects free DOFs by default; partials=True
+        retains fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         return _tangent_derivative(
             self.curve, *_lp_curvature_grad(*_tangents(self.curve), *self._parameters())
         )
@@ -235,18 +267,35 @@ class LpCurveCurvatureJAX(Optimizable):
     return_fn_map = {"J": J, "dJ": dJ}
 
 
-class MeanSquaredCurvatureJAX(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.geo.MeanSquaredCurvature`."""
+class JaxMeanSquaredCurvature(Optimizable):
+    """JAX-backed native arclength-averaged squared curvature.
+
+    Args:
+        curve: Curve object, geometry in m parameterized over [0, 1).
+    """
 
     def __init__(self, curve):
         self.curve = curve
         super().__init__(depends_on=[curve])
 
     def J(self):
+        """Evaluate the native objective formula on the active JAX device.
+
+        Returns:
+            float: objective value in 1/m^2.
+        """
         return _host_float(_mean_squared_curvature(*_tangents(self.curve)))
 
     @derivative_dec
     def dJ(self):
+        """Differentiate with respect to curve DOFs, accumulating shared DOFs.
+
+        The derivative decorator selects free DOFs by default; partials=True
+        retains fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         return _tangent_derivative(
             self.curve, *_mean_squared_curvature_grad(*_tangents(self.curve))
         )
@@ -326,19 +375,20 @@ def _curve_pairs(num_curves: int, num_basecurves: int):
 def _curve_pair_plan(sample_counts: tuple[int, ...], num_basecurves: int) -> _CurvePairPlan:
     pairs = _curve_pairs(len(sample_counts), num_basecurves)
     class_members = _quadrature_classes(sample_counts)
-    curve_class = {
-        index: cls for cls, members in enumerate(class_members) for index in members
-    }
-    row_in_class = {
-        index: row for members in class_members for row, index in enumerate(members)
+    class_positions = {
+        index: (cls, row)
+        for cls, members in enumerate(class_members)
+        for row, index in enumerate(members)
     }
     batch_rows: dict[tuple[int, int], tuple[list[int], list[int], list[tuple[int, int]]]] = {}
     for first, second in pairs:
+        first_class, first_row = class_positions[first]
+        second_class, second_row = class_positions[second]
         first_rows, second_rows, batch_pairs = batch_rows.setdefault(
-            (curve_class[first], curve_class[second]), ([], [], [])
+            (first_class, second_class), ([], [], [])
         )
-        first_rows.append(row_in_class[first])
-        second_rows.append(row_in_class[second])
+        first_rows.append(first_row)
+        second_rows.append(second_row)
         batch_pairs.append((first, second))
     return _CurvePairPlan(
         class_members=class_members,
@@ -387,31 +437,23 @@ def _curve_pair_penalty_total(class_gammas, class_gammadashes, minimum_distance,
     return total
 
 
-@partial(jax.jit, static_argnames=("plan",))
-def _curve_pair_penalty(class_gammas, class_gammadashes, minimum_distance, batch_candidates, *, plan):
-    return _curve_pair_penalty_total(
-        class_gammas, class_gammadashes, minimum_distance, batch_candidates, plan
-    )
+_curve_pair_penalty = jax.jit(_curve_pair_penalty_total, static_argnames=("plan",))
+_curve_pair_penalty_grad = jax.jit(
+    jax.grad(_curve_pair_penalty_total, argnums=(0, 1)), static_argnames=("plan",)
+)
 
 
-@partial(jax.jit, static_argnames=("plan",))
-def _curve_pair_penalty_grad(class_gammas, class_gammadashes, minimum_distance, batch_candidates, *, plan):
-    return jax.grad(
-        lambda gammas, gammadashes: _curve_pair_penalty_total(
-            gammas, gammadashes, minimum_distance, batch_candidates, plan
-        ),
-        argnums=(0, 1),
-    )(class_gammas, class_gammadashes)
+class JaxCurveCurveDistance(Optimizable):
+    """JAX-backed native curve-pair distance penalty.
 
+    Pairs have j < min(i, num_basecurves). Native candidate search selects
+    pairs before evaluating their strided quadrature samples.
 
-class CurveCurveDistanceJAX(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.geo.CurveCurveDistance`.
-
-    The pairs are ``(i, j)`` with ``j < min(i, num_basecurves)``; each pair
-    contributes the native penalty on the ``downsample``-strided samples of
-    both curves when ``simsoptpp``'s candidate search selects it, exactly as
-    native. The pair selection follows the current attributes, and J and dJ
-    are each one jitted dispatch.
+    Args:
+        curves: list of Curve objects, all curves including symmetry copies.
+        minimum_distance: float, separation threshold in m.
+        num_basecurves: int or None, leading base-curve count; default None. None or zero selects all curves as native does.
+        downsample: int, quadrature stride for both candidate search and penalty; default 1.
     """
 
     def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):
@@ -473,8 +515,14 @@ class CurveCurveDistanceJAX(Optimizable):
         return snapshot.plan, snapshot.operands
 
     def shortest_distance(self):
-        """The native result: the minimum over the native candidate pairs and the
-        threshold, or over all pairs ``j < i`` when there is no candidate."""
+        """Find the native sampled shortest distance.
+
+        With candidates, return the minimum over candidates and the threshold;
+        without candidates, search all eligible geometry.
+
+        Returns:
+            float: sampled distance in m.
+        """
         samples = self._samples()
         candidates = self._candidate_snapshot().candidates
         pairs = candidates or _curve_pairs(len(samples), len(samples))
@@ -482,11 +530,24 @@ class CurveCurveDistanceJAX(Optimizable):
         return min([self.minimum_distance] + distances) if candidates else min(distances)
 
     def J(self):
+        """Evaluate the native objective formula on the active JAX device.
+
+        Returns:
+            float: objective value in m^4.
+        """
         plan, operands = self._operands()
         return _host_float(_curve_pair_penalty(*operands, plan=plan))
 
     @derivative_dec
     def dJ(self):
+        """Differentiate with respect to curve DOFs, accumulating shared DOFs.
+
+        The derivative decorator selects free DOFs by default; partials=True
+        retains fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         plan, operands = self._operands()
         class_dgammas, class_dgammadashes = _curve_pair_penalty_grad(*operands, plan=plan)
         return _class_geometry_derivative(
@@ -528,13 +589,16 @@ _curve_surface_penalty_grad = jax.jit(
 )
 
 
-class CurveSurfaceDistanceJAX(Optimizable):
-    """JAX-backed mirror of :class:`~simsopt.geo.CurveSurfaceDistance`.
+class JaxCurveSurfaceDistance(Optimizable):
+    """JAX-backed native curve-surface penalty.
 
-    As the native objective, this depends on the curves only: the surface
-    geometry is read at every evaluation and its DOFs get no derivative. A
-    curve contributes when ``simsoptpp``'s candidate search selects it, exactly
-    as native.
+    Only curve DOFs receive derivatives. Surface geometry is read at each
+    evaluation; native candidate search determines contributing curves.
+
+    Args:
+        curves: list of Curve objects, all curves to penalize.
+        surface: Surface object, current positions in m and unnormalized normals in m^2.
+        minimum_distance: float, separation threshold in m.
     """
 
     def __init__(self, curves, surface, minimum_distance):
@@ -599,8 +663,14 @@ class CurveSurfaceDistanceJAX(Optimizable):
         return snapshot.class_members, snapshot.operands
 
     def shortest_distance(self):
-        """The native result: the minimum over the native candidate curves and the
-        threshold, or over all curves when there is no candidate."""
+        """Find the native sampled shortest distance.
+
+        With candidates, return the minimum over candidates and the threshold;
+        without candidates, search all eligible geometry.
+
+        Returns:
+            float: sampled distance in m.
+        """
         surface_points = self.surface.gamma().reshape((-1, 3))
         candidates = self._candidate_snapshot().candidates
         indices = [i for i, _ in candidates] or range(len(self.curves))
@@ -608,11 +678,24 @@ class CurveSurfaceDistanceJAX(Optimizable):
         return min([self.minimum_distance] + distances) if candidates else min(distances)
 
     def J(self):
+        """Evaluate the native objective formula on the active JAX device.
+
+        Returns:
+            float: objective value in m^5.
+        """
         _, operands = self._operands()
         return _host_float(_curve_surface_penalty(*operands))
 
     @derivative_dec
     def dJ(self):
+        """Differentiate with respect to curve DOFs, accumulating shared DOFs.
+
+        The derivative decorator selects free DOFs by default; partials=True
+        retains fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
         class_members, operands = self._operands()
         class_dgammas, class_dgammadashes = _curve_surface_penalty_grad(*operands)
         return _class_geometry_derivative(
