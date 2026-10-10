@@ -186,10 +186,16 @@ def _class_geometry_derivative(curves, class_members, class_dgammas, class_dgamm
 
 
 class JaxCurveLength(Optimizable):
-    """JAX-backed native CurveLength objective.
+    r"""JAX version of :class:`simsopt.geo.CurveLength`: the length of a curve,
+
+    .. math::
+        J = \int_{\text{curve}}~dl = \int_0^1 |\Gamma'(t)|~dt,
+
+    where :math:`\Gamma(t)` is the curve, evaluated as the mean of :math:`|\Gamma'|` over its
+    quadrature points.
 
     Args:
-        curve: Curve object, geometry in m parameterized over [0, 1).
+        curve (Curve): curve with geometry in m, parameterized over [0, 1).
     """
 
     def __init__(self, curve):
@@ -225,12 +231,18 @@ class JaxCurveLength(Optimizable):
 
 
 class JaxLpCurveCurvature(Optimizable):
-    """JAX-backed native integral of excess curvature, without a p-th root.
+    r"""JAX version of :class:`simsopt.geo.LpCurveCurvature`: penalize curvature above a threshold,
+
+    .. math::
+        J = \frac{1}{p} \int_{\text{curve}} \max(\kappa - \kappa_0, 0)^p ~dl,
+
+    where :math:`\kappa = |\Gamma' \times \Gamma''| / |\Gamma'|^3` is the curvature and
+    :math:`\kappa_0` is ``threshold``. No :math:`p`-th root is taken.
 
     Args:
-        curve: Curve object, geometry in m parameterized over [0, 1).
-        p: float, dimensionless exponent.
-        threshold: float, curvature threshold in 1/m; default 0.0.
+        curve (Curve): curve with geometry in m, parameterized over [0, 1).
+        p (float): dimensionless exponent.
+        threshold (float): curvature threshold :math:`\kappa_0` in 1/m; default 0.0.
     """
 
     def __init__(self, curve, p, threshold=0.0):
@@ -268,10 +280,16 @@ class JaxLpCurveCurvature(Optimizable):
 
 
 class JaxMeanSquaredCurvature(Optimizable):
-    """JAX-backed native arclength-averaged squared curvature.
+    r"""JAX version of :class:`simsopt.geo.MeanSquaredCurvature`: the mean squared curvature,
+
+    .. math::
+        J = \frac{1}{L} \int_{\text{curve}} \kappa^2 ~dl,
+
+    where :math:`L` is the curve length and
+    :math:`\kappa = |\Gamma' \times \Gamma''| / |\Gamma'|^3` is the curvature.
 
     Args:
-        curve: Curve object, geometry in m parameterized over [0, 1).
+        curve (Curve): curve with geometry in m, parameterized over [0, 1).
     """
 
     def __init__(self, curve):
@@ -444,16 +462,32 @@ _curve_pair_penalty_grad = jax.jit(
 
 
 class JaxCurveCurveDistance(Optimizable):
-    """JAX-backed native curve-pair distance penalty.
+    r"""JAX version of :class:`simsopt.geo.CurveCurveDistance`: penalize close curve pairs,
 
-    Pairs have j < min(i, num_basecurves). Native candidate search selects
-    pairs before evaluating their strided quadrature samples.
+    .. math::
+        J = \sum_{i} \sum_{j < \min(i, N_b)} d_{i,j},
+        \qquad
+        d_{i,j} = \int_{\text{curve}_i} \int_{\text{curve}_j}
+            \max(0, d_{\min} - \| \mathbf{r}_i - \mathbf{r}_j \|_2)^2 ~dl_j ~dl_i,
+
+    where :math:`\mathbf{r}_i`, :math:`\mathbf{r}_j` are points on curves :math:`i` and :math:`j`,
+    :math:`d_{\min}` is ``minimum_distance`` and :math:`N_b` is ``num_basecurves``. Each double
+    integral is the mean over every ``downsample``-th quadrature point of both curves,
+
+    .. math::
+        d_{i,j} \approx \frac{1}{n_i n_j} \sum_{k, l} |\Gamma_i'(t_k)| |\Gamma_j'(t_l)|
+            \max(0, d_{\min} - \| \Gamma_i(t_k) - \Gamma_j(t_l) \|_2)^2,
+
+    with :math:`n_i`, :math:`n_j` the numbers of sampled points. As in the native class, only
+    pairs the native candidate search finds within :math:`d_{\min}` are evaluated; the others
+    contribute zero.
 
     Args:
-        curves: list of Curve objects, all curves including symmetry copies.
-        minimum_distance: float, separation threshold in m.
-        num_basecurves: int or None, leading base-curve count; default None. None or zero selects all curves as native does.
-        downsample: int, quadrature stride for both candidate search and penalty; default 1.
+        curves (list[Curve]): all curves, including symmetry copies.
+        minimum_distance (float): separation threshold :math:`d_{\min}` in m.
+        num_basecurves (int or None): leading base-curve count :math:`N_b`; default None. None or
+            zero selects all curves, as native does.
+        downsample (int): quadrature stride for both candidate search and penalty; default 1.
     """
 
     def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):
@@ -590,15 +624,27 @@ _curve_surface_penalty_grad = jax.jit(
 
 
 class JaxCurveSurfaceDistance(Optimizable):
-    """JAX-backed native curve-surface penalty.
+    r"""JAX version of :class:`simsopt.geo.CurveSurfaceDistance`: penalize curves near a surface,
 
-    Only curve DOFs receive derivatives. Surface geometry is read at each
-    evaluation; native candidate search determines contributing curves.
+    .. math::
+        J = \sum_{i} d_{i},
+        \qquad
+        d_{i} = \int_{\text{curve}_i} \int_{S}
+            \max(0, d_{\min} - \| \mathbf{r}_i - \mathbf{s} \|_2)^2 ~dl_i ~ds,
+
+    where :math:`\mathbf{r}_i` and :math:`\mathbf{s}` are points on curve :math:`i` and the surface
+    and :math:`d_{\min}` is ``minimum_distance``. The surface element uses the unnormalized
+    normal :math:`\mathbf{N}`, :math:`ds = |\mathbf{N}|~d\varphi~d\theta`, and each integral is
+    the mean over the quadrature points. As in the native class, only curves the native
+    candidate search finds within :math:`d_{\min}` are evaluated.
+
+    The surface is not a dependency: only curve DOFs receive derivatives, and the surface
+    geometry is read at each evaluation.
 
     Args:
-        curves: list of Curve objects, all curves to penalize.
-        surface: Surface object, current positions in m and unnormalized normals in m^2.
-        minimum_distance: float, separation threshold in m.
+        curves (list[Curve]): all curves to penalize.
+        surface (Surface): surface with positions in m and unnormalized normals in m^2.
+        minimum_distance (float): separation threshold :math:`d_{\min}` in m.
     """
 
     def __init__(self, curves, surface, minimum_distance):
