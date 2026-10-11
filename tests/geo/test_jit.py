@@ -1,11 +1,12 @@
 import unittest
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
-from simsopt.geo import jit as jit_module
+from simsopt.geo.config import parameters
 from simsopt.geo.jit import jit
 
 
@@ -53,12 +54,8 @@ class JitTests(unittest.TestCase):
     def test_numpy_leaves_are_copied_with_jit_off(self):
         """With jit off the wrapped function still receives private copies of NumPy leaves."""
         received = []
-        previous = jit_module.parameters['jit']
-        jit_module.parameters['jit'] = False
-        try:
+        with mock.patch.dict(parameters, {'jit': False}):
             record = jit(lambda x, *, nested: received.extend([x, *nested['arrays']]))
-        finally:
-            jit_module.parameters['jit'] = previous
         x, y = np.ones(3), np.ones(4)
         record(x, nested={'arrays': [y]})
         self.assertFalse(np.shares_memory(received[0], x))
