@@ -24,12 +24,9 @@ def _sum_after_work(x, matrix):
 
 class JitTests(unittest.TestCase):
     def test_numpy_argument_is_copied_before_dispatch(self):
-        """Changing a NumPy argument after the call cannot change the result.
-
-        Native curves return views of buffers that the next DOF change overwrites.
-        """
+        """Changing a NumPy argument after the call cannot change the result."""
         x = _aligned(1024)
-        matrix = jnp.ones((2048, 2048), dtype=jnp.float32)
+        matrix = jnp.ones((1024, 1024), dtype=jnp.float32)
         _sum_after_work(x, matrix).block_until_ready()
         result = _sum_after_work(x, matrix)
         self.assertFalse(result.is_ready(), "evaluation finished before the argument changed")
