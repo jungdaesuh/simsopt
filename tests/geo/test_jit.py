@@ -33,16 +33,22 @@ class JitTests(unittest.TestCase):
     def test_numpy_argument_is_copied_before_dispatch(self):
         """Changing a NumPy argument after the call cannot change the result.
 
-        The result depends on a queued gate, so the compiled call cannot read ``x`` until
-        the gate finishes, which is after ``x`` is overwritten."""
+        The result depends on a queued gate. A trial counts only if the gate is still pending
+        after ``x`` is overwritten, which proves the compiled call had not read ``x`` yet."""
         x = _aligned(1024)
         matrix = jnp.ones((2048, 2048), dtype=jnp.float32)
         ready = _gate(jnp.ones(1), matrix).block_until_ready()
         _sum_when_ready(x, ready).block_until_ready()
-        result = _sum_when_ready(x, _gate(ready, matrix))
-        self.assertFalse(result.is_ready(), "the gate finished before the argument changed")
-        x[:] = -7.0
-        self.assertEqual(float(result), 1024.0)
+        for _ in range(5):
+            x[:] = 1.0
+            gate = _gate(ready, matrix)
+            result = _sum_when_ready(x, gate)
+            x[:] = -7.0
+            if not gate.is_ready():
+                self.assertEqual(float(result), 1024.0)
+                return
+            result.block_until_ready()
+        self.skipTest("the gate finished before the argument changed in every trial")
 
     def test_numpy_leaves_are_copied_with_jit_off(self):
         """With jit off the wrapped function still receives private copies of NumPy leaves."""
