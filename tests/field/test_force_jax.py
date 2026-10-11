@@ -285,7 +285,7 @@ class TestForceJax(JaxTestCase):
 
     def test_coil_lists_follow_native_after_reassignment(self):
         """NetFluxes keeps the sources of construction (native's BiotSavart); force
-            objectives read their target and source lists at every evaluation."""
+        objectives read their target and source lists at every evaluation."""
         targets, coils = _coils()
         for native, adapter in (
             (NetFluxes(coils[1], coils[:6]), JaxNetFluxes(coils[1], coils[:6])),
@@ -308,8 +308,8 @@ class TestForceJax(JaxTestCase):
 
     def test_self_exclusion_keeps_the_singular_self_terms_out_of_the_gradient(self):
         """Two samples of one target lie 1e-10 apart per component, so the native distance
-            offset cancels their difference exactly; native evaluates the target's own field in
-            an untaken branch, and its gradient stays finite."""
+        offset cancels their difference exactly; native evaluates the target's own field in
+        an untaken branch, and its gradient stays finite."""
         angles = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
         ring = np.stack((np.cos(angles), np.sin(angles), 0.2 * np.sin(2 * angles)), axis=1)
         ring_dash = 2 * np.pi * np.stack((-np.sin(angles), np.cos(angles), 0.4 * np.cos(2 * angles)), axis=1)
@@ -482,3 +482,25 @@ class TestForceJax(JaxTestCase):
             np.testing.assert_array_less(error, 0.31 * previous_error)
             previous_error = error
         adapter.x = x0
+
+    def test_net_fluxes_gradient_taylor(self):
+        """NetFluxes centered differences converge to dJ at second order, with and without downsampling."""
+        _, coils = _coils()
+        target, sources = coils[1], coils[:4 * _NCOILS]
+        for downsample in (1, 4):
+            with self.subTest(downsample=downsample):
+                adapter = JaxNetFluxes(target, sources, downsample=downsample)
+                x0 = np.array(adapter.x, dtype=float)
+                direction = np.random.default_rng(23).standard_normal(x0.shape) * np.maximum(np.abs(x0), 1.0)
+                derivative = adapter.dJ() @ direction
+                self.assertGreater(abs(derivative), 0.0)
+                previous_error = 100
+                for exponent in range(10, 18):
+                    step = 0.5 ** exponent
+                    adapter.x = x0 + step * direction
+                    plus = adapter.J()
+                    adapter.x = x0 - step * direction
+                    error = abs((plus - adapter.J()) / (2 * step) - derivative) / abs(derivative)
+                    np.testing.assert_array_less(error, 0.31 * previous_error)
+                    previous_error = error
+                adapter.x = x0
