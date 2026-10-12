@@ -6,7 +6,6 @@ from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imp
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
-    import jax
     from simsopt.configs import get_data
     from simsopt.field import BiotSavart, coils_via_symmetries
     from simsopt.geo import (
@@ -26,11 +25,10 @@ with optional_jax_imports():
 from unittest import mock
 import os
 
-from unittest_jax_support import parity_default_device
+from unittest_jax_support import jax_compilations, parity_default_device
 
-from contextlib import ExitStack, contextmanager
 from copy import copy
-from typing import Iterator, cast
+from typing import cast
 
 import numpy as np
 
@@ -103,20 +101,6 @@ if JAX_IMPORT_ERROR is None:
 
 def _assert_pair(actual, expected):
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
-
-
-@contextmanager
-def _compilations() -> Iterator[list[str]]:
-    events: list[str] = []
-
-    def record(event: str, duration_secs: float, **kwargs: str | int):
-        if "/compile" in event:
-            events.append(event)
-
-    with ExitStack() as stack:
-        jax.monitoring.register_event_duration_secs_listener(record)
-        stack.callback(jax.monitoring.unregister_event_duration_listener, record)
-        yield events
 
 
 def _evaluate(port):
@@ -384,7 +368,7 @@ class TestQfmJax(JaxTestCase):
         start = np.array(native.surface.x, copy=True)
         # Warming preserves the same explicit-boundary contract under the guard.
         _evaluate(port)
-        with disallow_host_transfers(), _compilations() as events:
+        with disallow_host_transfers(), jax_compilations() as events:
             value, gradient = port.qfm_label_constraint(port.surface.x, derivatives=1)
             self.assertTrue(value == 0, "value == 0")
             np.testing.assert_array_equal(gradient, np.zeros_like(gradient))
@@ -549,7 +533,7 @@ class TestQfmJax(JaxTestCase):
             _evaluate(port)
             old_spec = port.qfm._spec()
             old_value = host_array(qfm_residual(old_spec))
-            with disallow_host_transfers(), _compilations() as events:
+            with disallow_host_transfers(), jax_compilations() as events:
                 port.surface.x = np.asarray(port.surface.x) * 1.001
                 native.surface.x = port.surface.x
                 port.targetlabel = explicit_device_array(
