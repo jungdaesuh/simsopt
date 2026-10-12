@@ -153,8 +153,8 @@ def group_biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
 def group_biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents):
     """Pull back a Hessian seed for one equal-quadrature coil group.
 
-    All inputs are cast to the floating dtype of ``points``. The contraction
-    and cotangent units follow :func:`biot_savart_d2B_by_dXdX_vjp`.
+    All inputs are converted to float64, the runtime precision. The
+    contraction and cotangent units follow :func:`biot_savart_d2B_by_dXdX_vjp`.
 
     Args:
         points (jax.Array or numpy.ndarray): Cartesian positions of shape
@@ -170,16 +170,12 @@ def group_biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, cur
             ``(ncoils,)``, in amperes.
 
     Returns:
-        tuple[jax.Array, jax.Array, jax.Array]: Geometry, tangent and current
-            cotangents in the points' dtype, with shapes ``(ncoils, nquad, 3)``,
+        tuple[jax.Array, jax.Array, jax.Array]: Float64 geometry, tangent and
+            current cotangents, with shapes ``(ncoils, nquad, 3)``,
             ``(ncoils, nquad, 3)`` and ``(ncoils,)``, respectively.
     """
-    compute_points, gammas, gammadashs, currents = _compute_group_inputs(
-        points, gammas, gammadashs, currents,
-    )
     return biot_savart_d2B_by_dXdX_vjp(
-        compute_points, _as_compute_array(vgradgrad, dtype=compute_points.dtype),
-        gammas, gammadashs, currents,
+        *map(_as_jax_float64, (points, vgradgrad, gammas, gammadashs, currents))
     )
 
 
