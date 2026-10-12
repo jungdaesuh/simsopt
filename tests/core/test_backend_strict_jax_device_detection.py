@@ -54,10 +54,10 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
         """Tiling is a pure function of the mode: no device or ``nvidia-smi`` probe."""
         for mode, expected in [
             ("native_cpu", (0, 0, 0, 0)),
-            ("jax_cpu_parity", (16, 0, 256, 128)),
-            ("jax_cpu_fast", (64, 64, 1024, 128)),
-            ("jax_gpu_parity", (16, 0, 256, 512)),
-            ("jax_gpu_fast", (64, 64, 1024, 512)),
+            ("jax_cpu_parity", (16, 0, 256, 262_144)),
+            ("jax_cpu_fast", (64, 64, 1024, 262_144)),
+            ("jax_gpu_parity", (16, 0, 256, 1_048_576)),
+            ("jax_gpu_fast", (64, 64, 1024, 1_048_576)),
         ]:
             with self.subTest(mode=mode, expected=expected), self.case() as patches:
                 self._case_field_kernel_tuning_uses_static_gpu_tiling_without_probes(
@@ -94,14 +94,14 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                 tuning.coil_chunk_size,
                 tuning.quadrature_block_size,
                 tuning.point_chunk_size,
-                tuning.hessian_vjp_point_chunk_size,
+                tuning.hessian_vjp_pair_budget,
             )
             == expected,
-            "( tuning.coil_chunk_size, tuning.quadrature_block_size, tuning.point_chunk_size, ) == expected",
+            "( tuning.coil_chunk_size, tuning.quadrature_block_size, tuning.point_chunk_size, tuning.hessian_vjp_pair_budget, ) == expected",
         )
 
     def test_field_kernel_tuning_applies_environment_overrides(self):
-        """Environment overrides determine the coil, quadrature and point tile sizes."""
+        """Environment overrides set the coil, quadrature and point tiles and the pair budget."""
         patches = self.patches
         patches.enter_context(
             mock.patch.dict(os.environ, {"SIMSOPT_JAX_COIL_CHUNK_SIZE": "8"})
@@ -115,7 +115,7 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
 
         patches.enter_context(
             mock.patch.dict(
-                os.environ, {"SIMSOPT_JAX_HESSIAN_VJP_POINT_CHUNK_SIZE": "64"}
+                os.environ, {"SIMSOPT_JAX_HESSIAN_VJP_PAIR_BUDGET": "65536"}
             )
         )
         tuning = get_field_kernel_tuning("jax_gpu_fast")
@@ -125,10 +125,10 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                 tuning.coil_chunk_size,
                 tuning.quadrature_block_size,
                 tuning.point_chunk_size,
-                tuning.hessian_vjp_point_chunk_size,
+                tuning.hessian_vjp_pair_budget,
             )
-            == (8, 32, 128, 64),
-            "( tuning.coil_chunk_size, tuning.quadrature_block_size, tuning.point_chunk_size, ) == (8, 32, 128, 64)",
+            == (8, 32, 128, 65536),
+            "( tuning.coil_chunk_size, tuning.quadrature_block_size, tuning.point_chunk_size, tuning.hessian_vjp_pair_budget, ) == (8, 32, 128, 65536)",
         )
 
     def test_runtime_jax_device_uses_primary_configured_jax_platform_before_policy(

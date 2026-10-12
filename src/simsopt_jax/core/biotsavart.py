@@ -798,14 +798,28 @@ def _get_B_vjp_kernel():
     return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
 
 
+def _hessian_vjp_point_tile(pair_budget: int, coil_count: int, quadrature_count: int) -> int:
+    """Points per gradgradB VJP tile that fit ``pair_budget`` point-node pairs.
+
+    Live intermediates of :func:`_hessian_vjp_tile_sums` scale with the tile
+    times ``coil_count * quadrature_count``, so the tile is the budget over
+    that product, floored at one point.  A nonpositive budget, or a coil set
+    without nodes, selects a single untiled pass (zero).
+    """
+    pairs_per_point = coil_count * quadrature_count
+    if pair_budget <= 0 or pairs_per_point == 0:
+        return 0
+    return max(1, pair_budget // pairs_per_point)
+
+
 @lru_cache(maxsize=64)
-def _make_d2B_vjp_kernel(point_chunk_size):
+def _make_d2B_vjp_kernel(pair_budget):
     """Build the compiled closed-form gradgradB pullback, tiled over points.
 
-    Each tile of ``point_chunk_size`` points adds its per-node sums of
-    :func:`_hessian_vjp_tile_sums`; nonpositive sizes evaluate all points in
-    one tile.  Live intermediates scale with the tile times ``C * Q``.  Sums
-    and cotangents are float64, the runtime precision.
+    Each point tile adds its per-node sums of :func:`_hessian_vjp_tile_sums`.
+    The tile is :func:`_hessian_vjp_point_tile` of ``pair_budget`` and the
+    traced coil shape, so working memory stays near ``pair_budget`` pairs for
+    any coil set.  Sums and cotangents are float64, the runtime precision.
     """
 
     def kernel(points, vgradgrad, gammas, gammadashs, currents):
@@ -813,6 +827,7 @@ def _make_d2B_vjp_kernel(point_chunk_size):
         zero = _zeros(gammas.shape, dtype=jnp.float64)
         if point_count == 0:
             return zero, zero, _zeros(currents.shape, dtype=jnp.float64)
+        point_chunk_size = _hessian_vjp_point_tile(pair_budget, *gammas.shape[:2])
 
         def tile_sums(start, size):
             return _hessian_vjp_tile_sums(
@@ -968,7 +983,9 @@ def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents)
     Contracts ``vgradgrad[p, i, j, c]`` with ``d_i d_j B_c(points[p])``.
     The seed need not be symmetric. Each point tile evaluates a closed-form
     contraction of the third spatial derivatives of the integrand, so no
-    Hessian is formed; points are held fixed.
+    Hessian is formed; points are held fixed. The tile holds
+    ``hessian_vjp_pair_budget // (ncoils * nquad)`` points (at least one), per
+    :class:`~simsopt_jax.backend.runtime.FieldKernelTuning`.
 
     Args:
         points (jax.Array or numpy.ndarray): Cartesian positions of shape
@@ -993,7 +1010,7 @@ def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents)
     """
     inputs = snapshot_host_tree((points, vgradgrad, gammas, gammadashs, currents))
     tuning = get_field_kernel_tuning()
-    return _make_d2B_vjp_kernel(tuning.hessian_vjp_point_chunk_size)(*inputs)
+    return _make_d2B_vjp_kernel(tuning.hessian_vjp_pair_budget)(*inputs)
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):

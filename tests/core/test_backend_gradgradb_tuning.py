@@ -1,4 +1,4 @@
-"""Independent Hessian reverse-tile configuration regression tests."""
+"""Independent gradgradB VJP pair-budget configuration regression tests."""
 
 from unittest_jax_support import JaxTestCase, optional_jax_imports
 from unittest import mock
@@ -10,8 +10,8 @@ with optional_jax_imports():
 
 
 class TestBackendGradgradbTuning(JaxTestCase):
-    def test_reverse_point_tuning_is_independent_of_forward_override(self):
-        """Overriding forward point tiles leaves the Hessian reverse tile unchanged."""
+    def test_hessian_vjp_pair_budget_is_independent_of_forward_override(self):
+        """Overriding forward point tiles leaves the gradgradB VJP pair budget unchanged."""
         self.patches.enter_context(
             mock.patch.dict(os.environ, {"SIMSOPT_JAX_POINT_CHUNK_SIZE": "4096"})
         )
@@ -20,31 +20,31 @@ class TestBackendGradgradbTuning(JaxTestCase):
             tuning.point_chunk_size, 4096, "tuning.point_chunk_size == 4096"
         )
         self.assertEqual(
-            tuning.hessian_vjp_point_chunk_size,
-            512,
-            "tuning.hessian_vjp_point_chunk_size == 512",
+            tuning.hessian_vjp_pair_budget,
+            1_048_576,
+            "tuning.hessian_vjp_pair_budget == 1_048_576",
         )
 
-    def test_reverse_point_tuning_preserves_dense_override(self):
-        """A zero Hessian reverse tile selects dense evaluation independently."""
+    def test_hessian_vjp_pair_budget_preserves_dense_override(self):
+        """A zero gradgradB VJP pair budget selects dense evaluation independently."""
         self.patches.enter_context(
             mock.patch.dict(
-                os.environ, {"SIMSOPT_JAX_HESSIAN_VJP_POINT_CHUNK_SIZE": "0"}
+                os.environ, {"SIMSOPT_JAX_HESSIAN_VJP_PAIR_BUDGET": "0"}
             )
         )
         tuning = get_field_kernel_tuning("jax_gpu_parity")
         self.assertEqual(tuning.point_chunk_size, 256, "tuning.point_chunk_size == 256")
         self.assertEqual(
-            tuning.hessian_vjp_point_chunk_size,
+            tuning.hessian_vjp_pair_budget,
             0,
-            "tuning.hessian_vjp_point_chunk_size == 0",
+            "tuning.hessian_vjp_pair_budget == 0",
         )
 
-    def test_dense_audit_zeroes_reverse_tile_despite_environment_override(self):
-        """The disallow transfer guard disables even an explicitly set reverse tile."""
+    def test_dense_audit_zeroes_pair_budget_despite_environment_override(self):
+        """The disallow transfer guard disables even an explicitly set pair budget."""
         self.patches.enter_context(
             mock.patch.dict(
-                os.environ, {"SIMSOPT_JAX_HESSIAN_VJP_POINT_CHUNK_SIZE": "128"}
+                os.environ, {"SIMSOPT_JAX_HESSIAN_VJP_PAIR_BUDGET": "262144"}
             )
         )
         self.patches.enter_context(
@@ -57,7 +57,7 @@ class TestBackendGradgradbTuning(JaxTestCase):
             "tuning.chunk_policy == 'stable_default_dense_audit'",
         )
         self.assertEqual(
-            tuning.hessian_vjp_point_chunk_size,
+            tuning.hessian_vjp_pair_budget,
             0,
-            "tuning.hessian_vjp_point_chunk_size == 0",
+            "tuning.hessian_vjp_pair_budget == 0",
         )

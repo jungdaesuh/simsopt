@@ -30,9 +30,9 @@ Retained settings:
   owner's ``allow_host_transfers`` context when evaluating in that debug mode.
 * Runtime, compute and host precision is float64 for every supported mode.
 * ``SIMSOPT_JAX_COIL_CHUNK_SIZE``, ``SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE``,
-  ``SIMSOPT_JAX_POINT_CHUNK_SIZE`` and ``SIMSOPT_JAX_HESSIAN_VJP_POINT_CHUNK_SIZE``
-  (the gradgradB VJP's point tile) override the mode's field tiling. A disallow
-  transfer guard selects dense audit kernels (zero chunk sizes).
+  ``SIMSOPT_JAX_POINT_CHUNK_SIZE`` and ``SIMSOPT_JAX_HESSIAN_VJP_PAIR_BUDGET``
+  (point-node pairs per gradgradB VJP tile) override the mode's field tiling.
+  A disallow transfer guard selects dense audit kernels (zero chunk sizes).
 * ``SIMSOPT_JAX_COMPILATION_CACHE_DIR`` enables persistent compilation caching;
   backend reconfiguration clears registered in-process kernel and placement caches.
 * GPU allocation controls are ``SIMSOPT_JAX_GPU_PREALLOCATE``,
