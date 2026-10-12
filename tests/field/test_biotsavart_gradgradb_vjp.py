@@ -85,12 +85,7 @@ def _central_difference(native, owner: Optimizable, seed, step):
 
 
 def _set_reverse_tile(patches: ExitStack, tile: int) -> None:
-    tuning = replace(
-        get_field_kernel_tuning(),
-        coil_chunk_size=0,
-        quadrature_block_size=0,
-        hessian_vjp_point_chunk_size=tile,
-    )
+    tuning = replace(get_field_kernel_tuning(), hessian_vjp_point_chunk_size=tile)
     patches.enter_context(
         mock.patch.object(core, "get_field_kernel_tuning", lambda: tuning)
     )
