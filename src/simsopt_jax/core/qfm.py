@@ -243,10 +243,7 @@ def qfm_residual(spec: QfmSpec) -> jax.Array:
 
 
 def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
-    """Evaluate the native quadratic-flux ratio without changing field points.
-
-    Args:
-        spec (QfmSpec): Surface geometry and coil snapshot with shape (nphi * ntheta, 3) Cartesian field points in meters. Host point buffers are copied before dispatch.
+    """As :func:`qfm_residual`, plus the full surface-coefficient gradient.
 
     Returns:
         tuple[jax.Array, jax.Array]: Dimensionless value shape () and full surface-coefficient gradient shape (ndofs,), in inverse meters, including fixed DOFs."""
@@ -285,12 +282,7 @@ def qfm_label_constraint(
 def qfm_label_constraint_value_and_grad(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Evaluate half the squared native label error with owned host operands.
-
-    Args:
-        spec (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
-        targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
-        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; default None evaluates the immutable label.
+    """As :func:`qfm_label_constraint`, plus the full surface-coefficient gradient.
 
     Returns:
         tuple[jax.Array, jax.Array]: Scalar squared error shape () and full coefficient gradient shape (ndofs,), in squared label units per meter."""
@@ -321,14 +313,7 @@ def qfm_penalty_constraints_value_and_grad(
     spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Evaluate the native QFM ratio plus the weighted squared label error.
-
-    Args:
-        spec (QfmSpec): Surface geometry and coil snapshot with shape (nphi * ntheta, 3) Cartesian field points in meters. Host point buffers are copied before dispatch.
-        label (QfmLabelSpec): Independent native label grid, flux-coil state and optional Cartesian field points in meters.
-        targetlabel (jax.Array | numpy.ndarray): Scalar shape () targetlabel in cubic meters for volume, square meters for area, or webers for flux.
-        constraint_weight (jax.Array | numpy.ndarray): Scalar shape () coefficient multiplying the squared label error, in the native constraint units.
-        label_value (jax.Array | None): Optional scalar shape () native label value in the label units, preserving exact host subtraction; default None evaluates the immutable label.
+    """As :func:`qfm_penalty_constraints`, plus the full surface-coefficient gradient.
 
     Returns:
         tuple[jax.Array, jax.Array]: Objective shape () and full surface-coefficient gradient shape (ndofs,), including fixed DOFs; units follow the native scalarization."""
