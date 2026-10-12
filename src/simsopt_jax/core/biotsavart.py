@@ -496,9 +496,9 @@ def _hessian_vjp_tile_sums(points, vgradgrad, gammas, gammadashs):
     )
     t_cross_r = _cross3(t, r)
     a = _dot3(t_cross_r, q)
-    b_plus_d = _dot3(t, _cross3(r, tau)) + _dot3(t, axial_r)
-    r_cross_q = _cross3(r, q)
     r_cross_tau = _cross3(r, tau)
+    b_plus_d = _dot3(t, r_cross_tau) + _dot3(t, axial_r)
+    r_cross_q = _cross3(r, q)
     q_cross_t = _cross3(q, t)
     tau_cross_t = _cross3(tau, t)
     c = tuple(
@@ -813,25 +813,29 @@ def _make_d2B_vjp_kernel(point_chunk_size):
         zero = _zeros(gammas.shape, dtype=jnp.float64)
         if point_count == 0:
             return zero, zero, _zeros(currents.shape, dtype=jnp.float64)
+
+        def tile_sums(start, size):
+            return _hessian_vjp_tile_sums(
+                _slice_point_chunk(points, start, size),
+                _slice_point_chunk(vgradgrad, start, size),
+                gammas, gammadashs,
+            )
+
         if point_chunk_size <= 0 or point_count <= point_chunk_size:
-            grad_sum, c_sum = _hessian_vjp_tile_sums(points, vgradgrad, gammas, gammadashs)
+            grad_sum, c_sum = tile_sums(0, point_count)
         else:
             full_chunk_count, tail_size = divmod(point_count, point_chunk_size)
 
             def body(chunk_index, sums):
-                start = chunk_index * point_chunk_size
-                return _tree_add(sums, _hessian_vjp_tile_sums(
-                    _slice_point_chunk(points, start, point_chunk_size),
-                    _slice_point_chunk(vgradgrad, start, point_chunk_size),
-                    gammas, gammadashs,
-                ))
+                return _tree_add(
+                    sums, tile_sums(chunk_index * point_chunk_size, point_chunk_size),
+                )
 
             grad_sum, c_sum = lax.fori_loop(0, full_chunk_count, body, (zero, zero))
             if tail_size:
-                tail_start = full_chunk_count * point_chunk_size
-                grad_sum, c_sum = _tree_add((grad_sum, c_sum), _hessian_vjp_tile_sums(
-                    points[tail_start:], vgradgrad[tail_start:], gammas, gammadashs,
-                ))
+                grad_sum, c_sum = _tree_add(
+                    (grad_sum, c_sum), tile_sums(point_count - tail_size, tail_size),
+                )
         scale = _float64_scalar(currents, _MU0_OVER_4PI) / gammas.shape[1]
         coil_scale = (scale * currents)[:, None, None]
         current_cotangent = scale * _pairwise_sum_axis(jnp.sum(gammadashs * c_sum, axis=-1), axis=1)
