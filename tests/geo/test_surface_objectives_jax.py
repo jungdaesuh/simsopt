@@ -146,9 +146,6 @@ def _jax_objective(problem: _Problem, **kwargs) -> JaxNonQuasiSymmetricRatio:
     )
 
 
-# --- the ratio and its partial derivatives ----------------------------------------
-
-
 # --- the objective on solved surfaces ---------------------------------------------
 
 # name: (boozer type, label, stellsym, objective arguments)
@@ -180,7 +177,7 @@ _JAX_SURFACE_CASES = {
 
 def _boozer_qa(jax_lane: bool, *, newton_maxiter: int = 40):
     """Upstream's ``examples/2_Intermediate/boozerQA.py`` up to ``minimize``,
-    with the JAX switch of ``boozerQA_jax.py``; returns ``fun``, ``x0`` and the
+    with the JAX switch of ``boozerQA.py --use-jax``; returns ``fun``, ``x0`` and the
     evaluations ``fun`` records."""
     bs, native = get_boozer_surface(converge=False)
     base_curves = [coil.curve for coil in bs.coils[:3]]
@@ -241,9 +238,6 @@ def _boozer_qa(jax_lane: bool, *, newton_maxiter: int = 40):
         return J, grad
 
     return fun, np.asarray(JF.x, dtype=np.float64), evaluations
-
-
-# --- settings, compilation, transfers and the boundary --------------------------
 
 
 class TestSurfaceObjectivesJax(JaxTestCase):
