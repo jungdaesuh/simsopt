@@ -45,6 +45,7 @@ from .specs import (
     ZeroRotationSpec,
     curve_spec_kind,
 )
+from .surface_geometry import _norm
 
 __all__ = [
     "curve_gamma_and_gammadash_from_dofs",
@@ -557,8 +558,7 @@ def curve_length_from_dofs(spec: CurveSpec, dofs: jax.Array) -> jax.Array:
             full-turn quadrature convention.
     """
     _, tangent = curve_gamma_and_gammadash_from_dofs(spec, dofs)
-    x, y, z = tangent[..., 0], tangent[..., 1], tangent[..., 2]
-    return jnp.mean(jnp.sqrt(x * x + y * y + z * z))
+    return jnp.mean(_norm(tangent))
 
 
 def curve_gamma_and_gammadash_from_dofs(
