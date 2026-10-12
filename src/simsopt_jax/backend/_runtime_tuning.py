@@ -20,15 +20,17 @@ from simsopt_jax.backend._runtime_policy import (
 
 _FIELD_KERNEL_DEFAULTS = {
     "native_cpu": {"coil_chunk_size": 0, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 0},
-    "jax_cpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64, "hessian_vjp_point_chunk_size": 32},
-    "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 8},
+    "jax_cpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64, "hessian_vjp_point_chunk_size": 128},
+    "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 128},
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 512},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64, "hessian_vjp_point_chunk_size": 512},
 }
-# GPU reverse tile 512 (RTX 5090, 16 coils x 128 nodes, 16384 points):
-# 191 ms at 0.66 GB peak, versus 218 ms for 128 and 181 ms at 1.38 GB for
-# 1024. CPU defaults stay at the previous parity/fast tiles; forward point
-# tiling is independent.
+# Closed-form gradgradB VJP point tiles (16 coils x 128 nodes; XLA temp grows
+# about 64-100 bytes per point-node pair). RTX 5090, 16384 points: tile 512
+# takes 18 ms with 68 MB temp, versus 19 ms/34 MB for 256 and 14 ms/807 MB for
+# 4096, so 512 keeps the tile well below the B/dB VJP's peak. CPU, 4096
+# points: tile 128 takes 27 ms with 15 MB temp, versus 65 ms for 8 and 48 ms
+# for 32. Forward point tiling is independent.
 _POINT_CHUNK_SIZE_BY_POLICY = {
     "host_reference": 0,
     "stable_default": 256,
