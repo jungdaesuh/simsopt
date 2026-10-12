@@ -37,7 +37,7 @@ class JitTests(unittest.TestCase):
         The result depends on a queued gate. A trial counts only if the gate is still pending
         after ``x`` is overwritten, which proves the compiled call had not read ``x`` yet."""
         x = _aligned(1024)
-        matrix = jnp.ones((2048, 2048), dtype=jnp.float32)
+        matrix = jnp.ones((1448, 1448))
         ready = _gate(jnp.ones(1), matrix).block_until_ready()
         _sum_when_ready(x, ready).block_until_ready()
         for _ in range(5):
