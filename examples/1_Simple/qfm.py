@@ -32,7 +32,7 @@ args = parser.parse_args()
 if args.use_jax:
     if jax_import_error is not None:
         parser.error(f"--use-jax requires Python >= 3.11 and jax/jaxlib >= 0.10: {jax_import_error}")
-    set_backend("jax", device="gpu" if args.device == "gpu" else "cpu", intent="parity")
+    set_backend("jax", device=args.device, intent="parity")
 maxiter = 1000 if args.maxiter is None else args.maxiter
 
 print("Running 1_Simple/qfm.py")
