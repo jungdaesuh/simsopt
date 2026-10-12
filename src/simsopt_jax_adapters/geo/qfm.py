@@ -313,7 +313,7 @@ class JaxQfmSurface(GSONable):
             return self.qfm_objective(x, derivatives=1)
 
         def constraint(x):
-            return self.qfm_label_constraint(x, derivatives=1)[0]
+            return self.qfm_label_constraint(x, derivatives=0)
 
         def constraint_gradient(x):
             return self.qfm_label_constraint(x, derivatives=1)[1]
