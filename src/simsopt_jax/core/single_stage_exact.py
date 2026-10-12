@@ -252,7 +252,6 @@ def exact_single_stage_evaluate(
     iota = solved.x[-2]
     multipliers = jnp.stack((jnp.ones_like(iota), iota - problem.targets[0], major_radius - problem.targets[1]))
     value = nonqs + 0.5 * multipliers[1]**2 + 0.5 * multipliers[2]**2
-    surface_terms = jnp.stack((nonqs, iota, major_radius))
     component_rhs = jnp.stack((
         jnp.pad(dnonqs, (0, 2)),
         jnp.zeros_like(solved.x).at[-2].set(1),
@@ -299,5 +298,5 @@ def exact_single_stage_evaluate(
             & jnp.all(jnp.isfinite(component_adjoints))
         ),
         radius_singular=radius_singular,
-        terms=jnp.concatenate((surface_terms, total_length[None])),
+        terms=jnp.stack((nonqs, iota, major_radius, total_length)),
     )
