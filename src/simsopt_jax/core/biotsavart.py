@@ -982,7 +982,11 @@ def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents)
     Contracts ``vgradgrad[p, i, j, c]`` with ``d_i d_j B_c(points[p])``.
     The seed need not be symmetric. Each point tile evaluates a closed-form
     contraction of the third spatial derivatives of the integrand, so no
-    Hessian is formed; points are held fixed. The tile holds
+    Hessian is formed; points are held fixed. Per point and coil node the
+    contraction and its spatial gradient are evaluated in closed form, as
+    derived (formula, signs and index order) in the "gradgradB pullback"
+    comment above ``_hessian_seed_point_terms``; the result matches the C++
+    pullback of upstream simsopt PR #649. The tile holds
     ``hessian_vjp_pair_budget // (ncoils * nquad)`` points (at least one), per
     :class:`~simsopt_jax.backend.runtime.FieldKernelTuning`.
 
