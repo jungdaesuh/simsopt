@@ -55,7 +55,7 @@ if args.fused and not args.use_jax:
 if args.use_jax:
     if jax_import_error is not None:
         parser.error(f"--use-jax requires Python >= 3.11 and jax/jaxlib >= 0.10: {jax_import_error}")
-    set_backend("jax", device="gpu" if args.device == "gpu" else "cpu", intent="parity")
+    set_backend("jax", device=args.device, intent="parity")
 
 # Directory for output
 OUT_DIR = "./output/"
