@@ -804,13 +804,15 @@ def _make_d2B_vjp_kernel(point_chunk_size):
 
     Each tile of ``point_chunk_size`` points adds its per-node sums of
     :func:`_hessian_vjp_tile_sums`; nonpositive sizes evaluate all points in
-    one tile.  Live intermediates scale with the tile times ``C * Q``.
+    one tile.  Live intermediates scale with the tile times ``C * Q``.  Sums
+    and cotangents are float64, the runtime precision.
     """
 
     def kernel(points, vgradgrad, gammas, gammadashs, currents):
         point_count = points.shape[0]
+        zero = _zeros(gammas.shape, dtype=jnp.float64)
         if point_count == 0:
-            return jax.tree.map(jnp.zeros_like, (gammas, gammadashs, currents))
+            return zero, zero, _zeros(currents.shape, dtype=jnp.float64)
         if point_chunk_size <= 0 or point_count <= point_chunk_size:
             grad_sum, c_sum = _hessian_vjp_tile_sums(points, vgradgrad, gammas, gammadashs)
         else:
@@ -824,8 +826,7 @@ def _make_d2B_vjp_kernel(point_chunk_size):
                     gammas, gammadashs,
                 ))
 
-            zero = (jnp.zeros_like(gammas), jnp.zeros_like(gammas))
-            grad_sum, c_sum = lax.fori_loop(0, full_chunk_count, body, zero)
+            grad_sum, c_sum = lax.fori_loop(0, full_chunk_count, body, (zero, zero))
             if tail_size:
                 tail_start = full_chunk_count * point_chunk_size
                 grad_sum, c_sum = _tree_add((grad_sum, c_sum), _hessian_vjp_tile_sums(
