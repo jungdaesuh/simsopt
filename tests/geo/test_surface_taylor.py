@@ -708,11 +708,13 @@ class SurfaceTaylorTests(unittest.TestCase):
 class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
     """
     Second derivatives of a SurfaceXYZTensorFourier with all dimensions clamped,
-    compared to central differences of the first derivatives, for odd and even nfp.
+    Taylor-tested with shrinking forward-difference steps of the first
+    derivatives, for odd and even nfp.
     """
     phi0 = 0.13
     theta0 = 0.37
-    h = 1e-5
+    phi_epss = tuple(0.5**i for i in range(10, 15))
+    theta_epss = tuple(0.5**i for i in range(5, 10))
 
     def get_clamped_surface(self, nfp, phis, thetas):
         s = SurfaceXYZTensorFourier(
@@ -723,40 +725,39 @@ class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
         s.x = s.x + 0.05 * rng.standard_normal(len(s.x))
         return s
 
-    def assert_central_difference(self, exact, fplus, fminus):
-        estimate = (fplus - fminus) / (2 * self.h)
-        err = np.linalg.norm(estimate - exact) / np.linalg.norm(exact)
-        self.assertLess(err, 1e-6, "Second derivative disagrees with central difference")
+    def assert_taylor_convergence(self, first, second, epss):
+        """first[0] is taken at the base point and first[i+1] at the base point plus epss[i]."""
+        err_old = 1e6
+        for eps, fh in zip(epss, first[1:]):
+            err = np.linalg.norm((fh - first[0]) / eps - second)
+            self.assertLess(err, 0.55 * err_old)
+            err_old = err
 
     def test_clamped_phi2_derivative(self):
-        """Clamped phi second derivatives and coefficient Jacobians match central differences for odd and even nfp."""
-        phis = np.asarray([self.phi0 - self.h, self.phi0, self.phi0 + self.h])
+        """Clamped phi second derivatives and coefficient Jacobians pass a shrinking-step Taylor test for odd and even nfp."""
+        phis = np.asarray([self.phi0] + [self.phi0 + eps for eps in self.phi_epss])
         thetas = np.asarray([self.theta0])
         for nfp in [1, 2, 3, 5]:
             s = self.get_clamped_surface(nfp, phis, thetas)
             with self.subTest(nfp=nfp, output="gammadash1dash1"):
-                d1 = s.gammadash1()
-                self.assert_central_difference(
-                    s.gammadash1dash1()[1, 0], d1[2, 0], d1[0, 0])
+                self.assert_taylor_convergence(
+                    s.gammadash1()[:, 0], s.gammadash1dash1()[0, 0], self.phi_epss)
             with self.subTest(nfp=nfp, output="dgammadash1dash1_by_dcoeff"):
-                dd1 = s.dgammadash1_by_dcoeff()
-                self.assert_central_difference(
-                    s.dgammadash1dash1_by_dcoeff()[1, 0], dd1[2, 0], dd1[0, 0])
+                self.assert_taylor_convergence(
+                    s.dgammadash1_by_dcoeff()[:, 0], s.dgammadash1dash1_by_dcoeff()[0, 0], self.phi_epss)
 
     def test_clamped_theta2_derivative(self):
-        """Clamped theta second derivatives and coefficient Jacobians match central differences for odd and even nfp."""
+        """Clamped theta second derivatives and coefficient Jacobians pass a shrinking-step Taylor test for odd and even nfp."""
         phis = np.asarray([self.phi0])
-        thetas = np.asarray([self.theta0 - self.h, self.theta0, self.theta0 + self.h])
+        thetas = np.asarray([self.theta0] + [self.theta0 + eps for eps in self.theta_epss])
         for nfp in [1, 2, 3, 5]:
             s = self.get_clamped_surface(nfp, phis, thetas)
             with self.subTest(nfp=nfp, output="gammadash2dash2"):
-                d2 = s.gammadash2()
-                self.assert_central_difference(
-                    s.gammadash2dash2()[0, 1], d2[0, 2], d2[0, 0])
+                self.assert_taylor_convergence(
+                    s.gammadash2()[0, :], s.gammadash2dash2()[0, 0], self.theta_epss)
             with self.subTest(nfp=nfp, output="dgammadash2dash2_by_dcoeff"):
-                dd2 = s.dgammadash2_by_dcoeff()
-                self.assert_central_difference(
-                    s.dgammadash2dash2_by_dcoeff()[0, 1], dd2[0, 2], dd2[0, 0])
+                self.assert_taylor_convergence(
+                    s.dgammadash2_by_dcoeff()[0, :], s.dgammadash2dash2_by_dcoeff()[0, 0], self.theta_epss)
 
 
 if __name__ == "__main__":
