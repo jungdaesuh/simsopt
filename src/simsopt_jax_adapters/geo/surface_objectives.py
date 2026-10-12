@@ -39,6 +39,24 @@ from .surface_specs import surface_spec_from_surface
 __all__ = ["JaxNonQuasiSymmetricRatio"]
 
 
+def _nonqs_surface(surface: SurfaceXYZTensorFourier, sDIM: int) -> SurfaceXYZTensorFourier:
+    """Auxiliary surface sharing ``surface``'s DOFs on a 2*sDIM x 2*sDIM grid over one field period."""
+    return SurfaceXYZTensorFourier(
+        mpol=surface.mpol,
+        ntor=surface.ntor,
+        stellsym=surface.stellsym,
+        nfp=surface.nfp,
+        quadpoints_phi=np.linspace(0, 1 / surface.nfp, 2 * sDIM, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1.0, 2 * sDIM, endpoint=False),
+        dofs=surface.dofs,
+    )
+
+
+def _nonqs_axis(quasi_poloidal: bool) -> int:
+    """Grid axis the quasi-symmetric average runs over: theta (1) or phi (0)."""
+    return 1 if quasi_poloidal else 0
+
+
 class JaxNonQuasiSymmetricRatio(Optimizable):
     r"""JAX version of :class:`simsopt.geo.NonQuasiSymmetricRatio`: the ratio of the
     non-quasi-symmetric to the quasi-symmetric part of :math:`B = \|\mathbf B\|_2` on a Boozer
@@ -92,16 +110,8 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
         Optimizable.__init__(self, depends_on=[boozer_surface, bs])
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
-        self.surface = SurfaceXYZTensorFourier(
-            mpol=in_surface.mpol,
-            ntor=in_surface.ntor,
-            stellsym=in_surface.stellsym,
-            nfp=in_surface.nfp,
-            quadpoints_phi=np.linspace(0, 1 / in_surface.nfp, 2 * sDIM, endpoint=False),
-            quadpoints_theta=np.linspace(0, 1.0, 2 * sDIM, endpoint=False),
-            dofs=in_surface.dofs,
-        )
-        self.axis = 1 if quasi_poloidal else 0
+        self.surface = _nonqs_surface(in_surface, sDIM)
+        self.axis = _nonqs_axis(quasi_poloidal)
         self.in_surface = in_surface
         self.biotsavart = bs
         self.recompute_bell()

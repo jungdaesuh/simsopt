@@ -52,6 +52,7 @@ from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
 
 from .boozer_problem import boozer_exact_residual_rows, boozer_problem
 from .boozer_surface import JaxBoozerSurface
+from .surface_objectives import _nonqs_axis, _nonqs_surface
 from .surface_specs import surface_spec_from_surface
 
 __all__ = ["ExactSingleStageEvaluation", "JaxExactSingleStage"]
@@ -204,12 +205,7 @@ class JaxExactSingleStage:
             length_indices.append(index)
         problem = boozer_problem(biotsavart, surface, boozer_surface.label, boozer_surface.targetlabel)
         reference = commit_in_place(problem.targetlabel)
-        auxiliary = SurfaceXYZTensorFourier(
-            mpol=surface.mpol, ntor=surface.ntor, stellsym=surface.stellsym, nfp=surface.nfp,
-            quadpoints_phi=np.linspace(0, 1 / surface.nfp, 2 * sDIM, endpoint=False),
-            quadpoints_theta=np.linspace(0, 1, 2 * sDIM, endpoint=False),
-            dofs=surface.dofs,
-        )
+        auxiliary = _nonqs_surface(surface, sDIM)
         # Commit all inputs like the warm-start outputs to avoid a second
         # executable when the first evaluation's state is fed back.
         problem = jax.tree.map(commit_in_place, problem)
@@ -230,7 +226,7 @@ class JaxExactSingleStage:
                 tol=explicit_device_array(tol, dtype=np.float64, reference=reference),
                 maxiter=explicit_device_array(maxiter, dtype=np.float64, reference=reference),
                 length_indices=tuple(length_indices),
-                axis=1 if quasi_poloidal else 0,
+                axis=_nonqs_axis(quasi_poloidal),
             ),
             initial_state=ExactSingleStageState(
                 explicit_device_array(initial_x, dtype=np.float64, reference=reference),
