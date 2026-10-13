@@ -20,15 +20,17 @@ from simsopt_jax.backend._runtime_policy import (
 
 _FIELD_KERNEL_DEFAULTS = {
     "native_cpu": {"coil_chunk_size": 0, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 0},
-    "jax_cpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64, "hessian_vjp_point_chunk_size": 32},
-    "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 8},
-    "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 512},
-    "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64, "hessian_vjp_point_chunk_size": 512},
+    "jax_cpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64, "hessian_vjp_point_chunk_size": 128},
+    "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 128},
+    "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0, "hessian_vjp_point_chunk_size": 2048},
+    "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64, "hessian_vjp_point_chunk_size": 2048},
 }
-# GPU reverse tile 512 (RTX 5090, 16 coils x 128 nodes, 16384 points):
-# 191 ms at 0.66 GB peak, versus 218 ms for 128 and 181 ms at 1.38 GB for
-# 1024. CPU defaults stay at the previous parity/fast tiles; forward point
-# tiling is independent.
+# gradgradB VJP point tile, measured with 16 coils x 128 nodes. GPU 2048 (RTX
+# 5090, 16384 points): d2B pullback 74 ms at 0.91 GB peak, versus 84 ms at
+# 0.54 GB for 512 and 70 ms at 1.82 GB for 4096. CPU 128 (4096 points, 4
+# threads): 115 ms, versus 360 ms for 8, 253 ms for 32 and 240 ms for 512.
+# Live memory is about 220 bytes per (point, coil node) pair in a tile.
+# Forward point tiling is independent.
 _POINT_CHUNK_SIZE_BY_POLICY = {
     "host_reference": 0,
     "stable_default": 256,
@@ -54,7 +56,7 @@ class FieldKernelTuning:
         quadrature_block_size (int): Number of quadrature nodes per tile.
         point_chunk_size (int): Number of evaluation points per forward tile.
         hessian_vjp_point_chunk_size (int): Number of evaluation points per
-            Hessian reverse tile, independent of ``point_chunk_size``.
+            gradgradB VJP tile, independent of ``point_chunk_size``.
     """
     mode: str
     chunk_policy: str

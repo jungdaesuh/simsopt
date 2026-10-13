@@ -54,10 +54,10 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
         """Tiling is a pure function of the mode: no device or ``nvidia-smi`` probe."""
         for mode, expected in [
             ("native_cpu", (0, 0, 0, 0)),
-            ("jax_cpu_parity", (16, 0, 256, 8)),
-            ("jax_cpu_fast", (64, 64, 1024, 32)),
-            ("jax_gpu_parity", (16, 0, 256, 512)),
-            ("jax_gpu_fast", (64, 64, 1024, 512)),
+            ("jax_cpu_parity", (16, 0, 256, 128)),
+            ("jax_cpu_fast", (64, 64, 1024, 128)),
+            ("jax_gpu_parity", (16, 0, 256, 2048)),
+            ("jax_gpu_fast", (64, 64, 1024, 2048)),
         ]:
             with self.subTest(mode=mode, expected=expected), self.case() as patches:
                 self._case_field_kernel_tuning_uses_static_gpu_tiling_without_probes(

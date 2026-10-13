@@ -21,8 +21,8 @@ class TestBackendGradgradbTuning(JaxTestCase):
         )
         self.assertEqual(
             tuning.hessian_vjp_point_chunk_size,
-            512,
-            "tuning.hessian_vjp_point_chunk_size == 512",
+            2048,
+            "tuning.hessian_vjp_point_chunk_size == 2048",
         )
 
     def test_reverse_point_tuning_preserves_dense_override(self):
