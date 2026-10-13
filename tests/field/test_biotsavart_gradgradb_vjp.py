@@ -1,4 +1,4 @@
-"""gradgradB VJP against native Hessian finite differences, on CPU."""
+"""Autodiff gradgradB VJP against native Hessian finite differences, on CPU."""
 
 from __future__ import annotations
 
@@ -84,8 +84,13 @@ def _central_difference(native, owner: Optimizable, seed, step):
     return gradient
 
 
-def _set_hessian_vjp_pair_budget(patches: ExitStack, pair_budget: int) -> None:
-    tuning = replace(get_field_kernel_tuning(), hessian_vjp_pair_budget=pair_budget)
+def _set_reverse_tile(patches: ExitStack, tile: int) -> None:
+    tuning = replace(
+        get_field_kernel_tuning(),
+        coil_chunk_size=0,
+        quadrature_block_size=0,
+        hessian_vjp_point_chunk_size=tile,
+    )
     patches.enter_context(
         mock.patch.object(core, "get_field_kernel_tuning", lambda: tuning)
     )
@@ -231,7 +236,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
                 np.testing.assert_array_equal(value, added.data[owner])
 
     def test_tiled_hessian_vjp_matches_dense_tile_zero_with_multiple_groups(self):
-        """Tiled Hessian pullbacks match dense and direct autodiff across coil groups."""
+        """Point-tiled autodiff pullbacks match the untiled one and jax.vjp of the grouped forward Hessian."""
         for point_count in [0, 1, 4, 5, 8, 12, 13, 37]:
             with self.subTest(point_count=point_count), self.case() as patches:
                 self._case_tiled_hessian_vjp_matches_dense_tile_zero_with_multiple_groups(
@@ -241,7 +246,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
     def _case_tiled_hessian_vjp_matches_dense_tile_zero_with_multiple_groups(
         self, point_count, patches: ExitStack
     ):
-        """Tiled Hessian pullbacks match dense and direct autodiff across coil groups."""
+        """Point-tiled autodiff pullbacks match the untiled one and jax.vjp of the grouped forward Hessian."""
         curves = create_equally_spaced_curves(
             2, 1, stellsym=False, R0=1.0, R1=0.3, order=2, numquadpoints=12
         )
@@ -255,13 +260,12 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         points = rng.uniform(-0.2, 0.2, (point_count, 3)) + np.array([0.9, 0, 0])
         field.set_points(points)
         seed = jnp.asarray(rng.standard_normal((point_count, 3, 3, 3)))
-        _set_hessian_vjp_pair_budget(patches, 0)
+        _set_reverse_tile(patches, 0)
         expected = field.d2B_by_dXdX_pullback_native(seed).d_coil_arrays
         direct = field._field_pullback_native(
             grouped_biot_savart_d2B_by_dXdX_from_inputs, seed
         ).d_coil_arrays
-        # Four-point tiles for the 12-node coil, three for the 16-node one.
-        _set_hessian_vjp_pair_budget(patches, 4 * 12)
+        _set_reverse_tile(patches, 4)
         pullback = field.d2B_by_dXdX_pullback_native(seed)
         self.assertEqual(
             pullback.coil_indices,
@@ -314,9 +318,8 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         """Changing the Hessian seed reuses compilation and scales the cotangents."""
         patches = self.patches
         field, _, _, _, seeds = _ncsx_case("one", "free")
-        # Four-point tiles for one 250-node coil.
-        _set_hessian_vjp_pair_budget(patches, 4 * 250)
-        kernel = cast(_CompiledCache, core._make_d2B_vjp_kernel(4 * 250))
+        _set_reverse_tile(patches, 4)
+        kernel = cast(_CompiledCache, core._make_d2B_vjp_kernel(0, 0, 4))
         first = field.d2B_by_dXdX_pullback_native(seeds[2])
         jax.block_until_ready(first.d_coil_arrays)
         compiled_count = kernel._cache_size()
@@ -335,47 +338,33 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         ):
             np.testing.assert_allclose(actual, -2 * original, rtol=1e-13, atol=1e-14)
 
-    def test_hessian_vjp_point_tile_is_pair_budget_over_coil_nodes(self):
-        """The point tile is the pair budget over coils x nodes, shrinking for larger coil sets."""
-        cpu = get_field_kernel_tuning("jax_cpu_parity").hessian_vjp_pair_budget
-        gpu = get_field_kernel_tuning("jax_gpu_parity").hessian_vjp_pair_budget
-        # (budget, coils, nodes, tile); 16 x 128 nodes keeps the measured tiles.
-        for pair_budget, coil_count, quadrature_count, tile in [
-            (gpu, 16, 128, 512),
-            (cpu, 16, 128, 128),
-            (gpu, 64, 128, 128),
-            (cpu, 64, 128, 32),
-            (cpu, 4096, 128, 1),
-            (0, 16, 128, 0),
-        ]:
-            self.assertEqual(
-                core._hessian_vjp_point_tile(pair_budget, coil_count, quadrature_count),
-                tile,
-                f"tile for budget {pair_budget} at {coil_count} x {quadrature_count}",
-            )
-        traced_tiles: list[int] = []
-        tile_sums = core._hessian_vjp_tile_sums
-
-        def recording_tile_sums(points, vgradgrad, gammas, gammadashs):
-            traced_tiles.append(points.shape[0])
-            return tile_sums(points, vgradgrad, gammas, gammadashs)
-
-        self.patches.callback(core.invalidate_kernel_cache)
-        self.patches.enter_context(
-            mock.patch.object(core, "_hessian_vjp_tile_sums", recording_tile_sums)
-        )
-        core.invalidate_kernel_cache()
+    def test_hessian_vjp_evaluates_float32_inputs_in_float64(self):
+        """Float32 inputs give the float64 cotangents of their float64 values."""
+        set_backend("jax", device="cpu", intent="parity")
+        _set_reverse_tile(self.patches, 4)
         rng = np.random.default_rng(649)
-        points = 0.2 * rng.standard_normal((13, 3))
-        seed = rng.standard_normal((13, 3, 3, 3))
-        kernel = core._make_d2B_vjp_kernel(4 * 12)
-        # 13 points: full tiles of the derived size plus a one-point tail.
-        for coil_count, expected in [(1, {4, 1}), (2, {2, 1})]:
-            traced_tiles.clear()
-            coils = rng.standard_normal((2, coil_count, 12, 3))
-            kernel(points, seed, coils[0] + 3, coils[1], np.ones(coil_count))
-            self.assertEqual(
-                set(traced_tiles), expected, f"{coil_count} coils x 12 nodes"
+        # 13 points: three four-point tiles plus a one-point tail.
+        inputs = (
+            0.2 * rng.standard_normal((13, 3)),
+            rng.standard_normal((13, 3, 3, 3)),
+            rng.standard_normal((2, 12, 3)) + 3,
+            rng.standard_normal((2, 12, 3)),
+            np.array([1e5, -2e4]),
+        )
+        single = tuple(value.astype(np.float32) for value in inputs)
+        expected = core.biot_savart_d2B_by_dXdX_vjp(
+            *(value.astype(np.float64) for value in single)
+        )
+        actual = core.biot_savart_d2B_by_dXdX_vjp(*single)
+        for observed, reference in zip(
+            jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+        ):
+            self.assertEqual(observed.dtype, jnp.float64, "observed.dtype == float64")
+            np.testing.assert_allclose(
+                observed,
+                reference,
+                rtol=1e-12,
+                atol=1e-14 * float(np.max(np.abs(reference))),
             )
 
     def test_hessian_vjp_owns_numpy_inputs(self):
@@ -397,8 +386,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         """Caller mutation after dispatch cannot alter pending Hessian cotangents."""
         _execution_gate = _make_execution_gate()
         set_backend("jax", device="cpu", intent="parity")
-        # Four-point tiles for one 12-node coil.
-        _set_hessian_vjp_pair_budget(patches, 4 * 12)
+        _set_reverse_tile(patches, 4)
         sources = [
             _host_input(shape, misaligned=misaligned)
             for shape in ((13, 3), (13, 3, 3, 3), (1, 12, 3), (1, 12, 3), (1,))
