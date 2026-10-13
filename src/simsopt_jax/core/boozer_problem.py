@@ -182,8 +182,7 @@ def make_boozer_problem(
 
 def _G_from_coil_currents(coils: GroupedCoilSetSpec) -> jax.Array:
     """Native's ``G`` when it is not a variable: ``mu0`` times the sum of ``|I|``
-    (``0`` without coils).
-    """
+    (``0`` without coils)."""
     no_currents = jnp.zeros(0, jnp.float64)
     currents = jnp.concatenate([no_currents, *(group.currents for group in coils.groups)])
     return 2.0 * np.pi * jnp.sum(jnp.abs(currents)) * (4 * np.pi * 10 ** (-7) / (2 * np.pi))
@@ -206,8 +205,7 @@ def _boozer_points(
     problem: BoozerProblem, surface_dofs: jax.Array, derivatives: int
 ) -> tuple[BoozerPoints, tuple[jax.Array, ...]]:
     """The surface and field at the quadrature points, and ``z(0, 0)`` with,
-    for ``derivatives > 0``, its coefficient derivative.
-    """
+    for ``derivatives > 0``, its coefficient derivative."""
 
     def positions(dofs):
         spec = surface_spec_with_dofs(problem.surface, dofs)
@@ -244,8 +242,7 @@ def _boozer_points(
 
 def _aspect_ratio(spec: SurfaceSpec) -> jax.Array:
     """Native ``Surface.aspect_ratio()``: major over minor radius, from the
-    volume and the mean cross-sectional area.
-    """
+    volume and the mean cross-sectional area."""
     gamma, xphi, xtheta = surface_gamma(spec), surface_gammadash1(spec), surface_gammadash2(spec)
     x, y = gamma[..., 0], gamma[..., 1]
     radius = jnp.sqrt(x * x + y * y)
@@ -276,9 +273,7 @@ def _label_value(label: BoozerLabelSpec, coils: GroupedCoilSetSpec, surface_dofs
 def _label_derivatives(
     problem: BoozerProblem, surface_dofs: jax.Array, order: int
 ) -> tuple[jax.Array, ...]:
-    """The label and, up to ``order``, its gradient and Hessian.
-
-    """
+    """The label and, up to ``order``, its gradient and Hessian."""
     label = partial(_label_value, problem.label, problem.coils)
     if order == 0:
         return (label(surface_dofs),)
