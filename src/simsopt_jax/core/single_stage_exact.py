@@ -171,22 +171,21 @@ def _absolute_jvp(
 def _major_radius(surface: SurfaceSpec) -> tuple[jax.Array, jax.Array]:
     """Native volume/(2*pi**2*minor_radius**2), with its singular-map flag.
 
-    The cylindrical-area expression is PR7's closed form of native's det/inv
-    evaluation. The flag preserves native's error on an exactly singular
-    finite map, where the closed form alone could otherwise remain finite.
-    Float64 underflow/overflow limits of PR6 surface geometry still apply.
+    The cylindrical-angle derivatives along the two surface tangents are
+    forward-mode derivatives of ``atan2(y, x)``. The flag preserves native's
+    error on an exactly singular finite map, where the cross-section area alone
+    could otherwise remain finite. Float64 underflow/overflow limits of PR6
+    surface geometry still apply.
     """
     gamma = surface_gamma(surface)
     xphi, xtheta = surface_gammadash1(surface), surface_gammadash2(surface)
     x, y = gamma[..., 0], gamma[..., 1]
-    radius_squared = x * x + y * y
-    phi_numerator = x * xphi[..., 1] - y * xphi[..., 0]
-    phi_derivative = phi_numerator / radius_squared
+    _, phi_derivative = jax.jvp(jnp.arctan2, (y, x), (xphi[..., 1], xphi[..., 0]))
+    _, theta_phi_derivative = jax.jvp(jnp.arctan2, (y, x), (xtheta[..., 1], xtheta[..., 0]))
     singular = jnp.any(jnp.isfinite(phi_derivative) & (phi_derivative == 0))
-    section = (
-        xtheta[..., 2] * phi_numerator
-        - xphi[..., 2] * (x * xtheta[..., 1] - y * xtheta[..., 0])
-    ) / jnp.sqrt(radius_squared)
+    section = jnp.sqrt(x * x + y * y) * (
+        xtheta[..., 2] * phi_derivative - xphi[..., 2] * theta_phi_derivative
+    )
     mean_area = _absolute(jnp.mean(section)) / (2 * np.pi)
     minor_radius = jnp.sqrt(mean_area / np.pi)
     major_radius = _absolute(surface_volume(surface)) / (2 * np.pi**2 * minor_radius**2)
