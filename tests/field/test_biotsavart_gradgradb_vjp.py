@@ -319,7 +319,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         patches = self.patches
         field, _, _, _, seeds = _ncsx_case("one", "free")
         _set_reverse_tile(patches, 4)
-        kernel = cast(_CompiledCache, core._make_d2B_vjp_kernel(0, 0, 4))
+        kernel = cast(_CompiledCache, core._make_d2B_vjp_kernel(4))
         first = field.d2B_by_dXdX_pullback_native(seeds[2])
         jax.block_until_ready(first.d_coil_arrays)
         compiled_count = kernel._cache_size()
