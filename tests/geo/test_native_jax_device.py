@@ -1,10 +1,12 @@
-"""Native precision/platform settings and C++ curve length host ownership."""
+"""Backend mode validation, native x64/platform settings and the native jit device
+policy."""
 
 from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
+    from simsopt_jax.backend import get_backend_config, set_backend
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -12,6 +14,9 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+from unittest.mock import patch
+
+import numpy as np
 
 
 def _fresh_environment():
@@ -44,24 +49,30 @@ def _run_fresh_process(script, *arguments, environment):
     )
 
 
-from simsopt.geo import CurveLength, create_equally_spaced_curves
+from simsopt.geo.config import parameters
+from simsopt.geo.jit import jit, native_jax_device
 
 
 class TestNativeJaxDevice(JaxTestCase):
-    def test_removed_float32_mode_is_rejected_in_fresh_process(self):
-        """Removed float32 backend modes are rejected through both explicit and
-        environment selection."""
+    def test_unknown_backend_mode_is_rejected(self):
+        """An unknown backend mode is rejected through both explicit and environment
+        selection, naming the accepted modes."""
         for selector in ["set_backend", "environment"]:
             with self.subTest(selector=selector), self.case():
-                self._case_removed_float32_mode_is_rejected_in_fresh_process(selector)
+                self._case_unknown_backend_mode_is_rejected(selector)
 
-    def _case_removed_float32_mode_is_rejected_in_fresh_process(self, selector):
+    def _case_unknown_backend_mode_is_rejected(self, selector):
         """Run one row with case-local objects released before runtime cleanup."""
-        environment = _fresh_environment()
-        environment["JAX_PLATFORMS"] = "cpu"
-        if selector == "environment":
-            environment["SIMSOPT_BACKEND_MODE"] = "jax_cpu_float32_smoke"
-        _run_fresh_process("removed_float32_mode.py", selector, environment=environment)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"Backend mode 'jax_cpu_unknown' is not valid\. Accepted: \('native_cpu',",
+        ):
+            if selector == "set_backend":
+                # The mode is deliberately outside the accepted ``BackendMode`` values.
+                set_backend("jax_cpu_unknown")  # pyright: ignore[reportArgumentType]
+            else:
+                os.environ["SIMSOPT_BACKEND_MODE"] = "jax_cpu_unknown"
+                get_backend_config()
 
     def test_native_import_preserves_platform_selection_in_fresh_process(self):
         """Importing native geometry respects explicit CPU platform selection and enables
@@ -148,8 +159,7 @@ class TestNativeJaxDevice(JaxTestCase):
 
     def test_native_stage_two_with_explicit_platforms_in_fresh_process(self):
         """Native stage II after ``set_backend``; ``gpu-no-platform-env`` exports no
-        JAX platform variable, so ``simsopt.geo`` sets ``cpu`` before ``set_backend``
-        and native length kernels run on CUDA alone."""
+        JAX platform variable, so ``simsopt.geo`` sets ``cpu`` before ``set_backend``."""
         for case_id_0, (device, jax_platforms) in zip(
             ["cpu", "gpu-cuda-cpu-platforms", "gpu-no-platform-env"],
             [("cpu", "cpu"), ("gpu", "cuda,cpu"), ("gpu", None)],
@@ -175,23 +185,37 @@ class TestNativeJaxDevice(JaxTestCase):
         )
         if jax_platforms is not None:
             environment["JAX_PLATFORMS"] = jax_platforms
-        native_platform = "gpu" if jax_platforms is None else "cpu"
         _run_fresh_process(
             "native_stage_two.py",
             device,
-            native_platform,
             jax_platforms or "",
             environment=environment,
         )
 
-    def test_curve_length_preserves_incremental_arclength_derivative(self):
-        """CurveLength retains its upstream dJ_dl callable and exact mean gradient."""
-        curve = create_equally_spaced_curves(
-            1, 1, False, R0=1.0, R1=0.5, order=2, numquadpoints=32,
-        )[0]
-        length = CurveLength(curve)
-        arclength = curve.incremental_arclength()
-        self.assertTrue(callable(length.dJ_dl))
-        self.assertTrue(jax.numpy.array_equal(
-            length.dJ_dl(arclength), jax.numpy.full_like(arclength, 1.0 / arclength.size),
-        ))
+    def test_native_jit_runs_on_cpu_with_cuda_default_in_fresh_process(self):
+        """Under ``JAX_PLATFORMS=cuda,cpu`` native jitted kernels return CPU arrays."""
+        if not any(d.platform == "gpu" for d in jax.devices()):
+            self.skipTest("CUDA JAX device required")
+        environment = _with_gpu_determinism(_fresh_environment())
+        environment["JAX_PLATFORMS"] = "cuda,cpu"
+        _run_fresh_process("native_jit_device_policy.py", environment=environment)
+
+    def test_native_jit_wrapper_preserves_results(self):
+        """The native ``jit`` wrapper returns ``jax.jit``'s result on ``native_jax_device()``."""
+
+        def scaled_norm(x, scale):
+            """Scaled Euclidean norm."""
+            return scale * jax.numpy.linalg.norm(x)
+
+        # Upstream geo tests disable jit at import; this check needs it enabled.
+        self.patches.enter_context(patch.dict(parameters, {"jit": True}))
+        x = np.linspace(0.0, 1.0, 7)
+        wrapped = jit(scaled_norm, static_argnums=1)
+        result = wrapped(x, 2.0)
+        np.testing.assert_array_equal(
+            result, jax.jit(scaled_norm, static_argnums=1)(x, 2.0)
+        )
+        self.assertEqual(result.devices(), {native_jax_device()})
+        self.assertIs(wrapped.__wrapped__, scaled_norm)
+        self.assertEqual(wrapped.__name__, scaled_norm.__name__)
+        self.assertEqual(wrapped.__doc__, scaled_norm.__doc__)
