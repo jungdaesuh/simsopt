@@ -27,7 +27,7 @@ from .boozer_problem import BoozerProblem
 from .boozer_solvers import boozer_exact_newton, boozer_exact_residual_coil_vjp
 from .curve_geometry import curve_length_from_dofs, optimizable_input_dofs_from_map_spec
 from .field import coil_set_spec_from_dof_extraction_spec
-from .quasisymmetry import non_quasi_symmetric_ratio
+from .quasisymmetry import _ratio
 from .specs import CoilSetDofExtractionSpec, GroupedCoilSetSpec, SurfaceSpec
 from .surface_fourier_series import surface_spec_with_dofs
 from .surface_geometry import (
@@ -214,8 +214,10 @@ def exact_single_stage_evaluate(
     One jitted dispatch; no differentiation through the Newton iteration.
     New free DOFs, warm starts, targets, tolerance and cap reuse the program.
     Callers place all arguments on a single device before calling.
-    Finite penalty weights share one coil VJP; nonfinite weights are applied
-    after component coil VJPs, preserving native's inf/NaN propagation.
+    The gradient is one reverse-mode derivative of the composed objective,
+    one adjoint solve and one implicit coil VJP. When a penalty multiplier is
+    nonfinite, each component is solved and pulled back on its own and then
+    scaled, preserving native's inf/NaN propagation.
 
     Successful values add the non-QS ratio to half the squared iota and
     major-radius target errors, plus ``0.5 * max(total_length - length_target, 0)**2``.
@@ -239,45 +241,62 @@ def exact_single_stage_evaluate(
     coils, coil_pullback = jax.vjp(reconstruct, dofs)
     boozer = replace(problem.boozer, coils=coils)
     solved = boozer_exact_newton(boozer, state.x, problem.residual_rows, problem.tol, problem.maxiter)
-    nonqs_surface = surface_spec_with_dofs(problem.nonqs_surface, solved.x[:-2])
-    nonqs, dnonqs, direct_coils = non_quasi_symmetric_ratio(
-        nonqs_surface, coils, axis=problem.axis,
-    )
 
-    def radius(dofs: jax.Array) -> tuple[jax.Array, jax.Array]:
-        return _major_radius(surface_spec_with_dofs(problem.boozer.surface, dofs))
+    def terms_of(x: jax.Array, coils: GroupedCoilSetSpec) -> tuple[jax.Array, jax.Array]:
+        nonqs = _ratio(surface_spec_with_dofs(problem.nonqs_surface, x[:-2]), coils, problem.axis)
+        major_radius, singular = _major_radius(surface_spec_with_dofs(problem.boozer.surface, x[:-2]))
+        return jnp.stack((nonqs, x[-2], major_radius)), singular
 
-    (major_radius, radius_singular), dradius = jax.value_and_grad(radius, has_aux=True)(solved.x[:-2])
-    iota = solved.x[-2]
-    multipliers = jnp.stack((jnp.ones_like(iota), iota - problem.targets[0], major_radius - problem.targets[1]))
-    value = nonqs + 0.5 * multipliers[1]**2 + 0.5 * multipliers[2]**2
-    component_rhs = jnp.stack((
-        jnp.pad(dnonqs, (0, 2)),
-        jnp.zeros_like(solved.x).at[-2].set(1),
-        jnp.pad(dradius, (0, 2)),
-    ), axis=1)
-    # Native component objectives solve before QuadraticPenalty multiplies
-    # their derivatives. One LU and a matrix RHS retain that error boundary.
-    component_adjoints = lu_solve(lu_factor(solved.jacobian), component_rhs, trans=1)
-    direct_gradient = coil_pullback(direct_coils)[0]
+    def scalarization(terms: jax.Array) -> jax.Array:
+        return (
+            terms[0] + 0.5 * (terms[1] - problem.targets[0])**2
+            + 0.5 * (terms[2] - problem.targets[1])**2
+        )
+
+    def objective(
+        x: jax.Array, coils: GroupedCoilSetSpec,
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        terms, singular = terms_of(x, coils)
+        return scalarization(terms), (terms, singular)
+
+    (value, (terms, radius_singular)), (rhs, direct_coils) = jax.value_and_grad(
+        objective, argnums=(0, 1), has_aux=True,
+    )(solved.x, coils)
+    factor = lu_factor(solved.jacobian)
 
     def implicit_gradient(adjoint: jax.Array) -> jax.Array:
         cotangent = boozer_exact_residual_coil_vjp(boozer, solved.x, problem.residual_rows, adjoint)
         return coil_pullback(cotangent)[0]
 
-    def finite_gradient() -> jax.Array:
-        return direct_gradient - implicit_gradient(component_adjoints @ multipliers)
-
-    def nonfinite_gradient() -> jax.Array:
-        # Applying infinity before a solve/VJP spreads NaNs to unrelated
-        # entries. Native scales each completed free-vector derivative.
-        components = jax.lax.map(implicit_gradient, component_adjoints.T)
+    def adjoint_finite(rhs: jax.Array, adjoint: jax.Array) -> jax.Array:
         return (
-            direct_gradient - components[0]
-            - multipliers[1] * components[1] - multipliers[2] * components[2]
+            jnp.all(jnp.isfinite(solved.jacobian))
+            & jnp.all(jnp.isfinite(rhs))
+            & jnp.all(jnp.isfinite(adjoint))
         )
 
-    gradient = jax.lax.cond(jnp.all(jnp.isfinite(multipliers)), finite_gradient, nonfinite_gradient)
+    def composed_gradient() -> tuple[jax.Array, jax.Array]:
+        adjoint = lu_solve(factor, rhs, trans=1)
+        return coil_pullback(direct_coils)[0] - implicit_gradient(adjoint), adjoint_finite(rhs, adjoint)
+
+    multipliers = jax.grad(scalarization)(terms)
+
+    def component_gradient() -> tuple[jax.Array, jax.Array]:
+        # Sending an infinite multiplier into the solve or the VJPs spreads
+        # NaNs to unrelated entries. Native solves each component objective,
+        # then scales its completed free-vector derivative by the multiplier;
+        # its error flag reads the component right-hand sides and adjoints.
+        _, terms_pullback, _ = jax.vjp(terms_of, solved.x, coils, has_aux=True)
+        component_rhs, component_direct = jax.vmap(terms_pullback)(jnp.eye(3, dtype=solved.x.dtype))
+        component_adjoints = lu_solve(factor, component_rhs.T, trans=1)
+        components = (
+            jax.vmap(lambda cotangent: coil_pullback(cotangent)[0])(component_direct)
+            - jax.lax.map(implicit_gradient, component_adjoints.T)
+        )
+        gradient = components[0] + multipliers[1] * components[1] + multipliers[2] * components[2]
+        return gradient, adjoint_finite(component_rhs, component_adjoints)
+
+    gradient, finite = jax.lax.cond(jnp.all(jnp.isfinite(multipliers)), composed_gradient, component_gradient)
     (length_penalty, total_length), length_gradient = jax.value_and_grad(
         _length_penalty, argnums=1, has_aux=True,
     )(problem, dofs)
@@ -291,11 +310,7 @@ def exact_single_stage_evaluate(
         iterations=solved.iterations,
         norm=solved.norm,
         singular=solved.singular,
-        adjoint_finite=(
-            jnp.all(jnp.isfinite(solved.jacobian))
-            & jnp.all(jnp.isfinite(component_rhs))
-            & jnp.all(jnp.isfinite(component_adjoints))
-        ),
+        adjoint_finite=finite,
         radius_singular=radius_singular,
-        terms=jnp.stack((nonqs, iota, major_radius, total_length)),
+        terms=jnp.concatenate((terms, total_length[None])),
     )
