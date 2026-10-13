@@ -758,18 +758,16 @@ class NetFluxes(Optimizable):
             Derivative: The gradient of J with respect to all DOFs.
         """
         gamma = self.target_coil.curve.gamma()
-        self.biotsavart.set_points(np.array(gamma[::self.downsample, :]))
+        self.biotsavart.set_points(gamma)
         args = [
             self.target_coil.curve.gammadash(),
             self.biotsavart.A(),
-            self.downsample
+            1
         ]
 
         dJ_dA = self.dJ_dA(*args)
         dA_dX = self.biotsavart.dA_by_dX()
-        # Native curve VJPs require cotangents on the full quadrature grid.
-        dJ_dX = np.zeros_like(gamma)
-        dJ_dX[::self.downsample, :] = np.einsum('ij,ikj->ik', dJ_dA, dA_dX)
+        dJ_dX = np.einsum('ij,ikj->ik', dJ_dA, dA_dX)
         A_vjp = self.biotsavart.A_vjp(dJ_dA)
 
         dJ = (
