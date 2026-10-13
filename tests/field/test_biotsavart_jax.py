@@ -81,6 +81,20 @@ def _ncsx_biotsavart_parity_fixture():
     return bs, points_np, gammas_np, gds_np, currents_np
 
 
+def _native_taylor_fixture():
+    """Coil and points of the native ``tests/field/test_biotsavart.py`` Taylor tests."""
+    curve = CurveXYZFourier(200, 3)
+    coeffs = curve.dofs_matrix
+    coeffs[1][0] = 1.0
+    coeffs[1][1] = 0.5
+    coeffs[2][2] = 0.5
+    curve.set_dofs(np.concatenate(coeffs))
+    rng = np.random.default_rng(1)
+    points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+    points += 0.001 * (rng.random(points.shape) - 0.5)
+    return Coil(curve, Current(1e4)), points
+
+
 def _cart_points_to_cyl(points):
     return np.ascontiguousarray(
         np.stack(
@@ -377,6 +391,57 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
                     new_err = np.linalg.norm((plus - minus) / (2 * eps) - deriv)
                     self.assertLess(new_err, 0.3 * err)
                     err = new_err
+
+
+class TestJaxBiotSavartSpatialTaylor(JaxTestCase):
+    """Shrinking-step Taylor tests of the ``JaxBiotSavart`` spatial derivatives.
+
+    Mirrors the native ``tests/field/test_biotsavart.py`` checks on its coil
+    and points: steps ``0.5**i`` for ``i`` in ``5..9``, a one-sided difference
+    with error ratio 0.55 for first derivatives and a central difference of
+    the first derivative with error ratio 0.30 for second derivatives.
+    """
+
+    def _assert_spatial_taylor(self, value_name, derivative_name, *, central, ratio):
+        """Assert ``derivative[:, k]`` is the shrinking-step limit along ``e_k``."""
+        coil, points_np = _native_taylor_fixture()
+        bs_jax = JaxBiotSavart([coil])
+        bs_jax.set_points(points_np)
+        value0 = np.asarray(getattr(bs_jax, value_name)())
+        derivative = np.asarray(getattr(bs_jax, derivative_name)())
+        for k, direction in enumerate(np.eye(3)):
+            with self.subTest(direction=k):
+                expected = derivative[:, k]
+                err = 1e6
+                for i in range(5, 10):
+                    eps = 0.5**i
+                    bs_jax.set_points(points_np + eps * direction)
+                    plus = np.asarray(getattr(bs_jax, value_name)())
+                    if central:
+                        bs_jax.set_points(points_np - eps * direction)
+                        minus = np.asarray(getattr(bs_jax, value_name)())
+                        estimate = (plus - minus) / (2.0 * eps)
+                    else:
+                        estimate = (plus - value0) / eps
+                    new_err = np.linalg.norm(estimate - expected)
+                    self.assertLess(new_err, ratio * err)
+                    err = new_err
+
+    def test_dB_by_dX_taylor(self):
+        """dB_by_dX is the first-order shrinking-step limit of B along each axis."""
+        self._assert_spatial_taylor("B", "dB_by_dX", central=False, ratio=0.55)
+
+    def test_d2B_by_dXdX_taylor(self):
+        """d2B_by_dXdX is the central shrinking-step limit of dB_by_dX along each axis."""
+        self._assert_spatial_taylor("dB_by_dX", "d2B_by_dXdX", central=True, ratio=0.30)
+
+    def test_dA_by_dX_taylor(self):
+        """dA_by_dX is the first-order shrinking-step limit of A along each axis."""
+        self._assert_spatial_taylor("A", "dA_by_dX", central=False, ratio=0.55)
+
+    def test_d2A_by_dXdX_taylor(self):
+        """d2A_by_dXdX is the central shrinking-step limit of dA_by_dX along each axis."""
+        self._assert_spatial_taylor("dA_by_dX", "d2A_by_dXdX", central=True, ratio=0.30)
 
 
 class TestBiotSavartJaxCppCoilCurrentParity(JaxTestCase):
