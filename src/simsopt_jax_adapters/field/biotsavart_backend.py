@@ -24,13 +24,9 @@ from simsopt_jax.runtime.host_boundary import host_array
 from simsopt._core.optimizable import Optimizable
 from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.core.state_tokens import make_state_token_factory
-from simsopt_jax.backend.dtypes import (
-    runtime_device_put,
-    runtime_device_put_tree,
-)
+from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.core import (
     coil_specs_from_dof_extraction_spec,
-    curve_pullback_from_dofs,
     make_coil_dof_extraction_spec,
     make_coil_set_dof_extraction_spec,
     make_optimizable_dof_map_spec,
@@ -62,10 +58,12 @@ from simsopt_jax.core.field import (
 from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
 )
+from simsopt_jax.core.curve_geometry import optimizable_input_dofs_from_map_spec
 from simsopt_jax.core._device_scalars import two_pi as _two_pi
 from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
     GroupedCoilSetSpec,
+    OptimizableDofMapSpec,
     make_field_eval_spec,
 )
 from simsopt_jax_adapters.field._coil_graph import (
@@ -75,7 +73,6 @@ from simsopt_jax_adapters.geo.curve_contract import _optimizable_dof_layout
 from simsopt_jax_adapters.geo.curve_specs import (
     adapter_curve_dof_mode,
     curve_spec_from_adapter_curve,
-    supports_adapter_curve_spec,
 )
 
 _new_backend_epoch = make_state_token_factory()
@@ -101,7 +98,7 @@ class _DeviceCoilContract:
     """The adapter's immutable extraction contracts, placed on one device."""
 
     extraction: CoilSetDofExtractionSpec
-    owner_extraction: CoilSetDofExtractionSpec
+    owner_full_map: OptimizableDofMapSpec
     owner_projection: CoilSetDofExtractionSpec
 
 
@@ -188,12 +185,30 @@ def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     )
 
 
-@jax.jit
-def _grad_absB_from_B_and_dB(B, dB_by_dX):
-    B_jax = _as_jax_float64(B)
-    dB_jax = _as_jax_float64(dB_by_dX)
-    absB = jnp.linalg.norm(B_jax, axis=1)
-    return jnp.sum(dB_jax * B_jax[:, None, :], axis=2) / absB[:, None]
+@partial(jax.jit, static_argnames=("kernel_tuning",))
+def _jitted_grad_absB(points, coil_set_spec, kernel_tuning):
+    """``jax.grad`` of ``|B|`` in each point, tiled like the field kernels.
+
+    ``kernel_tuning`` is static so a retuned backend retraces the B kernels
+    this program calls; a zero point tile evaluates every point at once.
+    """
+
+    def abs_B(point):
+        return jnp.linalg.norm(
+            grouped_biot_savart_B_from_spec(point[jnp.newaxis, :], coil_set_spec)[0]
+        )
+
+    grad_abs_B = jax.grad(abs_B)
+    point_chunk_size = kernel_tuning.point_chunk_size
+    if point_chunk_size <= 0:
+        return jax.vmap(grad_abs_B)(points)
+    return jax.lax.map(grad_abs_B, points, batch_size=point_chunk_size)
+
+
+def _grouped_grad_absB_from_spec(points, coil_set_spec):
+    return _jitted_grad_absB(
+        points, coil_set_spec, kernel_tuning=get_field_kernel_tuning(),
+    )
 
 
 def _per_coil_unit_field_with_batch_size(points, coil_set_spec, kernel, *, batch_size):
@@ -308,42 +323,6 @@ def _get_biot_savart_points_cyl(field):
     return host_array(_cart_points_to_cyl(field._points_jax), dtype=np.float64)
 
 
-def _require_native_curve_geometry(curve):
-    if not supports_adapter_curve_spec(curve):
-        raise TypeError(
-            "JaxBiotSavart coil cotangent projection requires immutable JAX "
-            f"curve specs; unsupported type {type(curve).__name__}. "
-            "Provide a native curve spec."
-        )
-
-
-def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
-    return jax.lax.slice_in_dim(array, int(start), int(end), axis=0)
-
-
-def _update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
-    start = int(start)
-    stop = start + int(values.shape[0])
-    return jnp.concatenate(
-        (
-            _slice_1d(array, 0, start),
-            values,
-            _slice_1d(array, stop, int(array.shape[0])),
-        )
-    )
-
-
-def _add_update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
-    start = int(start)
-    stop = start + int(values.shape[0])
-    return _update_1d(array, start, _slice_1d(array, start, stop) + values)
-
-
-def _take_positions_1d(array: jax.Array, positions) -> jax.Array:
-    indexer = runtime_device_put(positions, dtype=np.int32)
-    return jnp.take(_as_jax_float64(array), indexer, axis=0)
-
-
 def _owner_segments_from_free_positions(
     owner_start: int,
     free_positions,
@@ -368,139 +347,41 @@ def _owner_segments_from_free_positions(
     )
 
 
-def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.Array):
-    free_positions = np.asarray(free_positions, dtype=np.int64)
-    if np.array_equal(free_positions, np.arange(int(template.shape[0]))):
-        return free_values
-    mask = np.ones(int(template.shape[0]), dtype=np.float64)
-    mask[free_positions] = 0.0
-    indexer = runtime_device_put(free_positions[:, None], dtype=np.int32)
-    dnums = jax.lax.ScatterDimensionNumbers(
-        update_window_dims=(),
-        inserted_window_dims=(0,),
-        scatter_dims_to_operand_dims=(0,),
-    )
-    return jax.lax.scatter(
-        template * runtime_device_put(mask, dtype=np.float64),
-        indexer,
-        free_values,
-        dnums,
-        indices_are_sorted=True,
-        unique_indices=True,
+def _coil_cotangent_tree(d_coil_arrays):
+    """Grouped ``(d_gammas, d_gammadashs, d_currents)`` cotangents as float64 tuples."""
+    return tuple(
+        tuple(_as_jax_float64(leaf) for leaf in group) for group in d_coil_arrays
     )
 
 
-def _dof_map_cotangent_to_owner_gradient(map_spec, input_cotangent, owner_dofs):
-    owner_dofs = _as_jax_float64(owner_dofs)
-    input_cotangent = _as_jax_float64(input_cotangent)
-    if map_spec.input_mode == "full":
-        full_cotangent = input_cotangent
-    else:
-        zero = jnp.sum(input_cotangent, dtype=input_cotangent.dtype)
-        full_cotangent = jnp.broadcast_to(
-            zero - zero,
-            map_spec.template_full_dofs.shape,
-        )
-        full_cotangent = _add_update_1d(
-            full_cotangent,
-            map_spec.input_start,
-            input_cotangent,
-        )
+def _extraction_input_cotangent(extraction_spec, d_coil_arrays, coil_indices, input_dofs):
+    """Pull grouped coil cotangents back to an extraction spec's input DOFs.
 
-    owner_gradient = owner_dofs - owner_dofs
-    for owner_start, _owner_end, target_start, target_end in map_spec.owner_segments:
-        owner_gradient = _add_update_1d(
-            owner_gradient,
-            owner_start,
-            _slice_1d(full_cotangent, target_start, target_end),
-        )
-    return owner_gradient
+    One ``jax.vjp`` of the forward reconstruction: the transposes of the DOF
+    maps, symmetry rotations, current scales and curve geometry all come from
+    autodiff of ``coil_set_spec_from_dof_extraction_spec``.
+    """
 
-
-def _add_extraction_cotangent_to_dofs_gradient(
-    dofs_gradient,
-    extraction_spec,
-    coil_spec,
-    dg,
-    dgd,
-    dc,
-    coil_dofs,
-):
-    if extraction_spec.symmetry.has_rotation:
-        rotmat_t = _as_jax_float64(extraction_spec.symmetry.rotmat).T
-        dg = _as_jax_float64(dg) @ rotmat_t
-        dgd = _as_jax_float64(dgd) @ rotmat_t
-
-    coeff_cotangent = curve_pullback_from_dofs(
-        coil_spec.curve,
-        coil_spec.curve.dofs,
-        dg,
-        dgd,
-    )
-    current_cotangent = jnp.atleast_1d(
-        _as_jax_float64(extraction_spec.symmetry.scale) * _as_jax_float64(dc)
-    )
-    dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
-        extraction_spec.curve_map,
-        coeff_cotangent,
-        coil_dofs,
-    )
-    current_maps = extraction_spec.current_term_maps or (extraction_spec.current_map,)
-    current_scales = extraction_spec.current_term_scales or (1.0,)
-    for current_map, scale in zip(current_maps, current_scales, strict=True):
-        dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
-            current_map,
-            _as_jax_float64(scale) * current_cotangent,
-            coil_dofs,
-        )
-    return dofs_gradient
-
-
-def _coil_cotangents_to_dofs_gradient_from_extraction_spec(
-    coil_dof_extraction_spec,
-    d_coil_arrays,
-    coil_indices,
-    coil_dofs,
-    *,
-    projection_spec=None,
-    owner_width=None,
-):
-    coil_dofs = _as_jax_float64(coil_dofs)
-    dofs_gradient = (
-        coil_dofs - coil_dofs
-        if owner_width is None
-        else jnp.zeros((owner_width,), dtype=coil_dofs.dtype)
-    )
-    owner_template = dofs_gradient
-    coil_specs = coil_specs_from_dof_extraction_spec(
-        coil_dof_extraction_spec,
-        coil_dofs,
-    )
-    extraction_specs = (
-        coil_dof_extraction_spec if projection_spec is None else projection_spec
-    ).coils
-    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-        for local_i, global_i in enumerate(indices):
-            dofs_gradient = _add_extraction_cotangent_to_dofs_gradient(
-                dofs_gradient,
-                extraction_specs[global_i],
-                coil_specs[global_i],
-                jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
-                jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
-                jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
-                owner_template,
+    def coil_field_inputs(dofs):
+        coil_set_spec = coil_set_spec_from_dof_extraction_spec(extraction_spec, dofs)
+        if coil_set_spec.coil_index_lists() != coil_indices:
+            raise ValueError(
+                "Coil cotangent groups do not match the adapter's coil grouping: "
+                f"got {coil_indices}, expected {coil_set_spec.coil_index_lists()}."
             )
-    return dofs_gradient
+        return coil_set_spec.field_inputs()
+
+    _, pullback = jax.vjp(coil_field_inputs, input_dofs)
+    return pullback(d_coil_arrays)[0]
 
 
-@partial(jax.jit, static_argnames=("coil_indices", "owner_width"))
+@partial(jax.jit, static_argnames=("coil_indices",))
 def _jitted_coil_cotangents_to_owner_partials(
-    extraction_spec, projection_spec, d_coil_arrays, coil_indices, coil_dofs,
-    owner_width,
+    projection_spec, owner_full_map, d_coil_arrays, coil_indices, coil_dofs,
 ):
-    return _coil_cotangents_to_dofs_gradient_from_extraction_spec(
-        extraction_spec, d_coil_arrays, coil_indices, coil_dofs,
-        projection_spec=projection_spec, owner_width=owner_width,
+    owner_full_dofs = optimizable_input_dofs_from_map_spec(owner_full_map, coil_dofs)
+    return _extraction_input_cotangent(
+        projection_spec, d_coil_arrays, coil_indices, owner_full_dofs,
     )
 
 
@@ -511,59 +392,13 @@ def _jitted_coil_cotangents_to_dofs_gradient(
     coil_indices,
     coil_dofs,
 ):
-    return _coil_cotangents_to_dofs_gradient_from_extraction_spec(
-        coil_dof_extraction_spec,
-        d_coil_arrays,
-        coil_indices,
-        coil_dofs,
+    return _extraction_input_cotangent(
+        coil_dof_extraction_spec, d_coil_arrays, coil_indices, coil_dofs,
     )
 
 
 def _canonical_coil_indices(coil_indices):
     return tuple(tuple(int(index) for index in indices) for indices in coil_indices)
-
-
-def _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays):
-    leaves = jax.tree.leaves(d_coil_arrays)
-    return all(
-        isinstance(leaf, (jax.Array, np.ndarray)) or hasattr(leaf, "aval")
-        for leaf in leaves
-    )
-
-
-def _add_local_cotangent_to_dofs_gradient(
-    dofs_gradient: jax.Array,
-    opt,
-    full_cotangent,
-    dof_indices,
-    *,
-    free_positions,
-):
-    if opt.local_dof_size == 0:
-        return dofs_gradient
-    start, end = dof_indices[opt]
-    free_cotangent = _take_positions_1d(full_cotangent, free_positions)
-    return _add_update_1d(dofs_gradient, start, free_cotangent)
-
-
-def _add_full_curve_cotangent_to_dofs_gradient(
-    dofs_gradient: jax.Array,
-    curve,
-    full_cotangent,
-    dof_indices,
-    *,
-    free_positions_for_opt,
-):
-    full_cotangent = _as_jax_float64(full_cotangent)
-    for opt, (start, end) in curve._full_dof_indices.items():
-        dofs_gradient = _add_local_cotangent_to_dofs_gradient(
-            dofs_gradient,
-            opt,
-            _slice_1d(full_cotangent, start, end),
-            dof_indices,
-            free_positions=free_positions_for_opt(opt),
-        )
-    return dofs_gradient
 
 
 def _unwrap_coil_curve_and_current(coil):
@@ -744,11 +579,14 @@ class JaxBiotSavart(Optimizable):
     def GradAbsB(self):
         """Cartesian gradient of ``|B|`` at the evaluation points.
 
+        Reverse-mode ``jax.grad`` of ``|B|`` through the Biot-Savart B kernel,
+        one point at a time; it does not form dB/dX.
+
         Returns:
             jax.Array: Cartesian gradient of field magnitude, shape (P, 3), in
                 tesla per meter; zero field retains the division singularity.
         """
-        return _grad_absB_from_B_and_dB(*self.B_and_dB())
+        return self._field_output(_grouped_grad_absB_from_spec)
 
     def B_cyl(self):
         """Magnetic field components in the cylindrical basis.
@@ -1039,7 +877,7 @@ class JaxBiotSavart(Optimizable):
             contract = _DeviceCoilContract(*_place_array_tree_on_device(
                 (
                     self._coil_dof_extraction_spec,
-                    self._owner_partial_extraction_spec,
+                    self._owner_full_dof_map_spec,
                     self._owner_partial_projection_spec,
                 ),
                 device,
@@ -1218,6 +1056,8 @@ class JaxBiotSavart(Optimizable):
 
         Reconstruction uses the free-vector maps; projection uses full local
         owner slices. Shared DOFs retain separate native Derivative owner keys.
+        The owner-full map rebuilds the concatenated owner vectors from the
+        free vector, as the point where the projection is differentiated.
         """
         owner_slices = {}
         width = 0
@@ -1239,7 +1079,6 @@ class JaxBiotSavart(Optimizable):
                 segments.append((owner_start, owner_end, start, end))
             return replace(source_map, owner_segments=tuple(segments))
 
-        owner_extraction_coils = []
         projection_coils = []
         for coil, spec in zip(self._coils, extraction_spec.coils, strict=True):
             curve, _rotation, current, _scale = _unwrap_coil_curve_and_current(coil)
@@ -1253,7 +1092,6 @@ class JaxBiotSavart(Optimizable):
                     ),
                 ) if full_graph else spec
             )
-            owner_extraction_coils.append(owner_spec)
             terms = _affine_current_terms(current)
             term_maps = spec.current_term_maps or (spec.current_map,)
             projection_coils.append(replace(
@@ -1267,10 +1105,25 @@ class JaxBiotSavart(Optimizable):
                 ),
                 current_term_scales=tuple(coefficient for _term, coefficient in terms),
             ))
-        self._owner_partial_extraction_spec = make_coil_set_dof_extraction_spec(owner_extraction_coils)
         self._owner_partial_projection_spec = make_coil_set_dof_extraction_spec(projection_coils)
         self._owner_partial_slices = tuple(owner_slices.items())
-        self._owner_partial_width = width
+        self._owner_full_dof_map_spec = self._full_input_dof_map_spec(
+            _as_jax_float64(np.concatenate(
+                [np.zeros(0)] + [
+                    np.asarray(owner.local_full_x, dtype=np.float64)
+                    for owner in owner_slices
+                ]
+            )),
+            tuple(
+                (source_start, source_end, owner_start + target_start, owner_start + target_end)
+                for owner, (owner_start, _owner_end) in owner_slices.items()
+                if int(owner.local_dof_size) > 0
+                for source_start, source_end, target_start, target_end in
+                _owner_segments_from_free_positions(
+                    self._coil_dof_indices[owner][0], self._local_free_positions(owner),
+                )
+            ),
+        )
 
     def coil_dof_extraction_spec(self):
         """Return the cached immutable owner-DOF reconstruction contract.
@@ -1295,36 +1148,6 @@ class JaxBiotSavart(Optimizable):
                 rebuilt.
         """
         return self._dof_layout_version
-
-    def _local_full_dofs_from_free_vector(self, opt, coil_dofs):
-        """Rebuild one Optimizable's full local DOF vector from ``coil_dofs``.
-
-        ``Optimizable.x`` is ordered by unique ancestor name, not by the
-        JAX-native coil grouping used below. Reconstruct each curve/current
-        block from its own free-DOF slice so mixed free-current / free-curve
-        graphs decode correctly.
-        """
-        full_x = _as_jax_float64(opt.local_full_x)
-        if opt.local_dof_size == 0:
-            return full_x
-
-        start, end = self._coil_dof_indices[opt]
-        free_positions = self._local_free_positions(opt)
-        coil_slice = _slice_1d(coil_dofs, start, end)
-        return _scatter_free_values(full_x, free_positions, coil_slice)
-
-    def _full_dofs_from_free_vector(self, opt, coil_dofs):
-        """Rebuild one Optimizable graph's full DOF vector from ``coil_dofs``."""
-        full_x = _as_jax_float64(opt.full_x)
-        for dep_opt, (start, end) in opt._full_dof_indices.items():
-            dep_full_x = self._local_full_dofs_from_free_vector(dep_opt, coil_dofs)
-            full_x = _update_1d(full_x, start, dep_full_x)
-        return full_x
-
-    def _curve_dofs_from_free_vector(self, curve, coil_dofs):
-        if adapter_curve_dof_mode(curve) == "full":
-            return self._full_dofs_from_free_vector(curve, coil_dofs)
-        return self._local_full_dofs_from_free_vector(curve, coil_dofs)
 
     def _free_vector_dof_map_spec(self, opt, *, full_graph, separate_owners=False):
         if full_graph:
@@ -1610,9 +1433,9 @@ class JaxBiotSavart(Optimizable):
         a :class:`Derivative` mapping every coil DOF, including fixed DOFs, to its
         contribution to the scalar objective.
 
-        Uses ``jax.vjp`` through the pure Biot-Savart kernel, then
-        projects each coil's geometry/current cotangents through immutable
-        curve specs. Unsupported curves are rejected explicitly.
+        Uses ``jax.vjp`` through the pure Biot-Savart kernel, then pulls the
+        grouped geometry/current cotangents back to the owner DOFs with one
+        ``jax.vjp`` of the coil-spec reconstruction.
 
         Args:
             v (array-like): Field-value cotangent, shape (P, 3), contracting the output
@@ -1833,57 +1656,6 @@ class JaxBiotSavart(Optimizable):
             self._pullback_to_derivative(self.d2B_by_dXdX_pullback_native(vgradgrad)),
         )
 
-    def _add_single_coil_cotangent_to_dofs_gradient(
-        self,
-        dofs_gradient,
-        coil,
-        dg,
-        dgd,
-        dc,
-        coil_dofs,
-    ):
-        curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-        _require_native_curve_geometry(curve)
-
-        if rotmat is not None:
-            rotmat_t = _as_jax_float64(rotmat).T
-            dg = _as_jax_float64(dg) @ rotmat_t
-            dgd = _as_jax_float64(dgd) @ rotmat_t
-
-        coeff_cotangent = curve_pullback_from_dofs(
-            curve_spec_from_adapter_curve(curve),
-            self._curve_dofs_from_free_vector(curve, coil_dofs),
-            dg,
-            dgd,
-        )
-        if adapter_curve_dof_mode(curve) == "full":
-            dofs_gradient = _add_full_curve_cotangent_to_dofs_gradient(
-                dofs_gradient,
-                curve,
-                coeff_cotangent,
-                self._coil_dof_indices,
-                free_positions_for_opt=self._local_free_positions,
-            )
-        else:
-            dofs_gradient = _add_local_cotangent_to_dofs_gradient(
-                dofs_gradient,
-                curve,
-                coeff_cotangent,
-                self._coil_dof_indices,
-                free_positions=self._local_free_positions(curve),
-            )
-
-        current_cotangent = jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc))
-        for owner, block in current.vjp(current_cotangent).data.items():
-            dofs_gradient = _add_local_cotangent_to_dofs_gradient(
-                dofs_gradient,
-                owner,
-                block,
-                self._coil_dof_indices,
-                free_positions=self._local_free_positions(owner),
-            )
-        return dofs_gradient
-
     def coil_cotangents_to_dofs_gradient(
         self,
         d_coil_arrays,
@@ -1910,32 +1682,19 @@ class JaxBiotSavart(Optimizable):
         if coil_dofs is None:
             coil_dofs = self.x.copy()
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
-        if _coil_cotangent_arrays_are_jax_compatible(d_coil_arrays):
-            self.coil_dof_extraction_spec()
-            return _jitted_coil_cotangents_to_dofs_gradient(
-                self._device_contract(coil_dofs.device).extraction,
-                d_coil_arrays,
-                _canonical_coil_indices(coil_indices),
-                coil_dofs,
-            )
-
-        dofs_gradient = coil_dofs - coil_dofs
-        for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-            for local_i, global_i in enumerate(indices):
-                dofs_gradient = self._add_single_coil_cotangent_to_dofs_gradient(
-                    dofs_gradient,
-                    self._coils[global_i],
-                    jax.lax.index_in_dim(d_g, local_i, axis=0, keepdims=False),
-                    jax.lax.index_in_dim(d_gd, local_i, axis=0, keepdims=False),
-                    jax.lax.index_in_dim(d_c, local_i, axis=0, keepdims=False),
-                    coil_dofs,
-                )
-        return dofs_gradient
+        self.coil_dof_extraction_spec()
+        return _jitted_coil_cotangents_to_dofs_gradient(
+            self._device_contract(coil_dofs.device).extraction,
+            _coil_cotangent_tree(d_coil_arrays),
+            _canonical_coil_indices(coil_indices),
+            coil_dofs,
+        )
 
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.
 
-        Curves are projected through immutable specs into full owner partials.
+        The partials of every owner, fixed DOFs included, are one ``jax.vjp``
+        of the coil-spec reconstruction from the concatenated owner vectors.
         Free/fixed filtering belongs to ``Derivative.__call__``.
 
         Args:
@@ -1954,8 +1713,9 @@ class JaxBiotSavart(Optimizable):
         contract = self._device_contract(coil_dofs.device)
         partials = host_array(
             _jitted_coil_cotangents_to_owner_partials(
-                contract.owner_extraction, contract.owner_projection, d_coil_arrays,
-                _canonical_coil_indices(coil_indices), coil_dofs, self._owner_partial_width,
+                contract.owner_projection, contract.owner_full_map,
+                _coil_cotangent_tree(d_coil_arrays),
+                _canonical_coil_indices(coil_indices), coil_dofs,
             ),
             dtype=np.float64,
         )
