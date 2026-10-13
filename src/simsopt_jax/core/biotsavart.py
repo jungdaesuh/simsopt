@@ -700,11 +700,15 @@ def _get_B_vjp_kernel():
 
 @lru_cache(maxsize=64)
 def _make_d2B_vjp_kernel(coil_cs, quad_bs, hessian_vjp_point_cs):
-    """Accumulate coil cotangents after completing each point tile's reverse pass.
+    """Build the compiled autodiff gradgradB pullback, tiled over points.
 
-    The outer loop is not differentiated: each tile's rematerialized Hessian
-    is reversed and accumulated before advancing. Live intermediates are
-    bounded by the reverse tile, independent of npoints.
+    Each tile is ``jax.vjp`` of the forward Hessian kernel, itself
+    ``jax.jacfwd(jax.jacfwd(B))`` per point, evaluated at that tile's points
+    and seeded with its slice of ``vgradgrad``. The outer loop is not
+    differentiated: each tile's rematerialized Hessian is reversed and its
+    cotangents summed before advancing, so live intermediates are bounded by
+    the reverse tile, independent of npoints. A nonpositive
+    ``hessian_vjp_point_cs`` reverses all points in one tile.
     """
     forward_kernel = jax.checkpoint(_make_kernel(
         _Integrand.B, _DiffMode.HESSIAN, coil_cs, quad_bs, 0,
@@ -868,8 +872,14 @@ def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents)
     """Pull back a magnetic-field Hessian seed to coil geometry and currents.
 
     Contracts ``vgradgrad[p, i, j, c]`` with ``d_i d_j B_c(points[p])``.
-    The seed need not be symmetric. Reverse passes accumulate point tiles
-    without differentiating the points themselves.
+    The seed need not be symmetric. The pullback is JAX autodiff only:
+    ``jax.vjp`` of the forward Hessian kernel, which is
+    ``jax.jacfwd(jax.jacfwd(B))`` per point, with no hand-derived terms, so it
+    is an independent, mechanically derived reference for hand-derived
+    pullbacks such as the C++ one in upstream simsopt PR #649. Reverse passes
+    run over tiles of ``hessian_vjp_point_chunk_size`` points (see
+    :class:`~simsopt_jax.backend.runtime.FieldKernelTuning`) and sum their
+    cotangents; the points themselves are held fixed.
 
     Args:
         points (jax.Array or numpy.ndarray): Cartesian positions of shape

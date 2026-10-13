@@ -1,4 +1,4 @@
-"""gradgradB VJP against native Hessian finite differences, on CPU."""
+"""Autodiff gradgradB VJP against native Hessian finite differences, on CPU."""
 
 from __future__ import annotations
 
@@ -236,7 +236,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
                 np.testing.assert_array_equal(value, added.data[owner])
 
     def test_tiled_hessian_vjp_matches_dense_tile_zero_with_multiple_groups(self):
-        """Tiled Hessian pullbacks match dense and direct autodiff across coil groups."""
+        """Point-tiled autodiff pullbacks match the untiled one and jax.vjp of the grouped forward Hessian."""
         for point_count in [0, 1, 4, 5, 8, 12, 13, 37]:
             with self.subTest(point_count=point_count), self.case() as patches:
                 self._case_tiled_hessian_vjp_matches_dense_tile_zero_with_multiple_groups(
@@ -246,7 +246,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
     def _case_tiled_hessian_vjp_matches_dense_tile_zero_with_multiple_groups(
         self, point_count, patches: ExitStack
     ):
-        """Tiled Hessian pullbacks match dense and direct autodiff across coil groups."""
+        """Point-tiled autodiff pullbacks match the untiled one and jax.vjp of the grouped forward Hessian."""
         curves = create_equally_spaced_curves(
             2, 1, stellsym=False, R0=1.0, R1=0.3, order=2, numquadpoints=12
         )
