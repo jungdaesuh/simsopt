@@ -417,105 +417,6 @@ def _biot_savart_B_and_dB_integrand(x, gammas, gammadashs):
     return B_integrand, dB_integrand
 
 
-# The gradgradB pullback contracts a Hessian seed ``W[p, i, j, l]`` with
-# ``d_i d_j B_l`` at each point.  Per pair (point p, node k) the integrand is
-# ``f(r, t) = t x r / |r|^3`` with ``r = x_p - gamma_k`` and ``t = gamma'_k``,
-# and ``d_i d_j f_l = -eps_lmn t_m h_ijn`` with ``h = 1/|r|``.  The contracted
-# scalar is therefore ``phi = t . c(r)``, writing ``rho = |r|``, with
-#   c(r) = 15 rho^-7 (r x q) - 3 rho^-5 (r x tau + X^T r),
-#   q_l = r^T S_l r,  tau_l = W_iil,  X_jm = eps_mnl (W_njl + W_jnl),
-# where ``S_l`` is the symmetric part of ``W[:, :, l]``.  Its spatial gradient
-#   grad phi = 15 rho^-7 (q x t + 2 sum_l (t x r)_l S_l r) - 105 rho^-9 a r
-#              - 3 rho^-5 (tau x t + X t) + 15 rho^-7 (b + d) r,
-#   a = (t x r) . q,  b = t . (r x tau),  d = t . X^T r,
-# pulls back to ``gamma`` with a minus sign; ``c`` is the ``gamma'`` cotangent
-# and ``t . c`` the per-unit-current one.  The closed form avoids reverse mode
-# through ``jacfwd(jacfwd(B))`` and the tangent planes it stores.
-
-
-def _cross3(left, right):
-    return (
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    )
-
-
-def _dot3(left, right):
-    return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-
-
-def _hessian_seed_point_terms(vgradgrad):
-    """Per-point ``(S, tau, X)`` from a ``[point, d1, d2, component]`` seed."""
-    symmetric_sum = vgradgrad + jnp.swapaxes(vgradgrad, 1, 2)
-    trace = jnp.trace(vgradgrad, axis1=1, axis2=2)
-    axial = jnp.stack(
-        (
-            symmetric_sum[:, 1, :, 2] - symmetric_sum[:, 2, :, 1],
-            symmetric_sum[:, 2, :, 0] - symmetric_sum[:, 0, :, 2],
-            symmetric_sum[:, 0, :, 1] - symmetric_sum[:, 1, :, 0],
-        ),
-        axis=-1,
-    )
-    return 0.5 * symmetric_sum, trace, axial
-
-
-def _hessian_vjp_tile_sums(points, vgradgrad, gammas, gammadashs):
-    """Point sums of ``grad phi`` and ``c`` per node, each of shape ``(C, Q, 3)``.
-
-    Unscaled by currents, ``mu0/4pi`` and the quadrature weight; see the
-    closed form above.
-    """
-    seed_sym, seed_trace, seed_axial = _hessian_seed_point_terms(vgradgrad)
-
-    def per_point(values):
-        return values[:, None, None]
-
-    r = tuple(per_point(points[:, i]) - gammas[None, :, :, i] for i in range(3))
-    t = tuple(gammadashs[None, :, :, i] for i in range(3))
-    tau = tuple(per_point(seed_trace[:, l]) for l in range(3))
-    r2 = _dot3(r, r)
-    r_inv2 = _explicit_inv(r2)
-    r_inv5 = _explicit_rsqrt(r2) * r_inv2 * r_inv2
-    r_inv7 = r_inv5 * r_inv2
-    r_inv9 = r_inv7 * r_inv2
-    sym_r = tuple(
-        tuple(
-            sum(per_point(seed_sym[:, i, j, l]) * r[j] for j in range(3))
-            for i in range(3)
-        )
-        for l in range(3)
-    )
-    q = tuple(_dot3(r, sym_r[l]) for l in range(3))
-    axial_r = tuple(
-        sum(per_point(seed_axial[:, j, m]) * r[j] for j in range(3)) for m in range(3)
-    )
-    axial_t = tuple(
-        sum(per_point(seed_axial[:, j, m]) * t[m] for m in range(3)) for j in range(3)
-    )
-    t_cross_r = _cross3(t, r)
-    a = _dot3(t_cross_r, q)
-    r_cross_tau = _cross3(r, tau)
-    b_plus_d = _dot3(t, r_cross_tau) + _dot3(t, axial_r)
-    r_cross_q = _cross3(r, q)
-    q_cross_t = _cross3(q, t)
-    tau_cross_t = _cross3(tau, t)
-    c = tuple(
-        15.0 * r_inv7 * r_cross_q[m] - 3.0 * r_inv5 * (r_cross_tau[m] + axial_r[m])
-        for m in range(3)
-    )
-    grad = tuple(
-        15.0 * r_inv7 * (q_cross_t[k] + 2.0 * _dot3(t_cross_r, tuple(sym_r[l][k] for l in range(3))))
-        + (15.0 * r_inv7 * b_plus_d - 105.0 * r_inv9 * a) * r[k]
-        - 3.0 * r_inv5 * (tau_cross_t[k] + axial_t[k])
-        for k in range(3)
-    )
-    return (
-        jnp.stack([jnp.sum(component, axis=0) for component in grad], axis=-1),
-        jnp.stack([jnp.sum(component, axis=0) for component in c], axis=-1),
-    )
-
-
 # ── Dense one-point kernels ──────────────────────────────────────────
 
 
@@ -797,63 +698,50 @@ def _get_B_vjp_kernel():
     return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
 
 
-def _hessian_vjp_point_tile(pair_budget: int, coil_count: int, quadrature_count: int) -> int:
-    """Points per gradgradB VJP tile that fit ``pair_budget`` point-node pairs.
-
-    Live intermediates of :func:`_hessian_vjp_tile_sums` scale with the tile
-    times ``coil_count * quadrature_count``, so the tile is the budget over
-    that product, floored at one point.  A nonpositive budget, or a coil set
-    without nodes, selects a single untiled pass (zero).
-    """
-    pairs_per_point = coil_count * quadrature_count
-    if pair_budget <= 0 or pairs_per_point == 0:
-        return 0
-    return max(1, pair_budget // pairs_per_point)
-
-
 @lru_cache(maxsize=64)
-def _make_d2B_vjp_kernel(pair_budget):
-    """Build the compiled closed-form gradgradB pullback, tiled over points.
+def _make_d2B_vjp_kernel(coil_cs, quad_bs, hessian_vjp_point_cs):
+    """Accumulate coil cotangents after completing each point tile's reverse pass.
 
-    Each point tile adds its per-node sums of :func:`_hessian_vjp_tile_sums`.
-    The tile is :func:`_hessian_vjp_point_tile` of ``pair_budget`` and the
-    traced coil shape, so working memory stays near ``pair_budget`` pairs for
-    any coil set.  Sums and cotangents are float64, the runtime precision.
+    The outer loop is not differentiated: each tile's rematerialized Hessian
+    is reversed and accumulated before advancing. Live intermediates are
+    bounded by the reverse tile, independent of npoints.
     """
+    forward_kernel = jax.checkpoint(_make_kernel(
+        _Integrand.B, _DiffMode.HESSIAN, coil_cs, quad_bs, 0,
+    ))
+    chunk_size = hessian_vjp_point_cs
 
     def kernel(points, vgradgrad, gammas, gammadashs, currents):
-        point_count = points.shape[0]
-        zero = _zeros(gammas.shape, dtype=jnp.float64)
-        if point_count == 0:
-            return zero, zero, _zeros(currents.shape, dtype=jnp.float64)
-        point_chunk_size = _hessian_vjp_point_tile(pair_budget, *gammas.shape[:2])
-
-        def tile_sums(start, size):
-            return _hessian_vjp_tile_sums(
-                _slice_point_chunk(points, start, size),
-                _slice_point_chunk(vgradgrad, start, size),
-                gammas, gammadashs,
+        def tile_pullback(tile_points, tile_seed):
+            _, pullback = jax.vjp(
+                lambda g, gd, c: forward_kernel(tile_points, g, gd, c),
+                gammas, gammadashs, currents,
             )
+            return pullback(tile_seed)
 
-        if point_chunk_size <= 0 or point_count <= point_chunk_size:
-            grad_sum, c_sum = tile_sums(0, point_count)
-        else:
-            full_chunk_count, tail_size = divmod(point_count, point_chunk_size)
+        zero = jax.tree.map(jnp.zeros_like, (gammas, gammadashs, currents))
+        point_count = points.shape[0]
+        if point_count == 0:
+            return zero
+        if chunk_size <= 0 or point_count <= chunk_size:
+            return tile_pullback(points, vgradgrad)
 
-            def body(chunk_index, sums):
-                return _tree_add(
-                    sums, tile_sums(chunk_index * point_chunk_size, point_chunk_size),
-                )
+        full_chunk_count, tail_size = divmod(point_count, chunk_size)
 
-            grad_sum, c_sum = lax.fori_loop(0, full_chunk_count, body, (zero, zero))
-            if tail_size:
-                grad_sum, c_sum = _tree_add(
-                    (grad_sum, c_sum), tile_sums(point_count - tail_size, tail_size),
-                )
-        scale = _float64_scalar(currents, _MU0_OVER_4PI) / gammas.shape[1]
-        coil_scale = (scale * currents)[:, None, None]
-        current_cotangent = scale * _pairwise_sum_axis(jnp.sum(gammadashs * c_sum, axis=-1), axis=1)
-        return -coil_scale * grad_sum, coil_scale * c_sum, current_cotangent
+        def body(chunk_index, cotangents):
+            start = chunk_index * chunk_size
+            return _tree_add(cotangents, tile_pullback(
+                _slice_point_chunk(points, start, chunk_size),
+                _slice_point_chunk(vgradgrad, start, chunk_size),
+            ))
+
+        cotangents = lax.fori_loop(0, full_chunk_count, body, zero)
+        if tail_size:
+            tail_start = full_chunk_count * chunk_size
+            cotangents = _tree_add(
+                cotangents, tile_pullback(points[tail_start:], vgradgrad[tail_start:]),
+            )
+        return cotangents
 
     kernel.__name__ = "biotsavart_d2B_vjp"
     return jax.jit(kernel)
@@ -980,15 +868,8 @@ def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents)
     """Pull back a magnetic-field Hessian seed to coil geometry and currents.
 
     Contracts ``vgradgrad[p, i, j, c]`` with ``d_i d_j B_c(points[p])``.
-    The seed need not be symmetric. Each point tile evaluates a closed-form
-    contraction of the third spatial derivatives of the integrand, so no
-    Hessian is formed; points are held fixed. Per point and coil node the
-    contraction and its spatial gradient are evaluated in closed form, as
-    derived (formula, signs and index order) in the "gradgradB pullback"
-    comment above ``_hessian_seed_point_terms``; the result matches the C++
-    pullback of upstream simsopt PR #649. The tile holds
-    ``hessian_vjp_pair_budget // (ncoils * nquad)`` points (at least one), per
-    :class:`~simsopt_jax.backend.runtime.FieldKernelTuning`.
+    The seed need not be symmetric. Reverse passes accumulate point tiles
+    without differentiating the points themselves.
 
     Args:
         points (jax.Array or numpy.ndarray): Cartesian positions of shape
@@ -1013,7 +894,10 @@ def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents)
     """
     inputs = snapshot_host_tree((points, vgradgrad, gammas, gammadashs, currents))
     tuning = get_field_kernel_tuning()
-    return _make_d2B_vjp_kernel(tuning.hessian_vjp_pair_budget)(*inputs)
+    return _make_d2B_vjp_kernel(
+        tuning.coil_chunk_size, tuning.quadrature_block_size,
+        tuning.hessian_vjp_point_chunk_size,
+    )(*inputs)
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
