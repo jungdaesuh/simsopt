@@ -625,8 +625,9 @@ class TestSingleStageExactJax(JaxTestCase):
 
     def _case_evaluation_makes_no_implicit_transfers(self, parity_lane, patches):
         """Run one row with case-local objects released before runtime cleanup."""
-        with parity_default_device(parity_lane), disallow_host_transfers():
+        with parity_default_device(parity_lane):
             evaluator, _, objective, _ = _problem(active_penalties=True)
+        with parity_default_device(parity_lane), disallow_host_transfers():
             result = evaluator.evaluate(
                 host_array(evaluator.initial_dofs), evaluator.initial_state
             )
