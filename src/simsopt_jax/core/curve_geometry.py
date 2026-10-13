@@ -15,10 +15,7 @@ from simsopt_jax.backend.dtypes import _has_jax_array_value, explicit_device_arr
 from .curve_helical import curve_helical_pure
 from .curve_planar_fourier import curveplanarfourier_pure
 from .curve_rz_fourier import curverzfourier_pure
-from .curve_xyz_fourier import (
-    jaxfouriercurve_geometry_pure,
-    jaxfouriercurve_pure,
-)
+from .curve_xyz_fourier import jaxfouriercurve_pure
 from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from .framedcurve import (
@@ -243,19 +240,6 @@ def _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, tangents, *, ord
     return gamma, gammadash, gammadashdash, gammadashdashdash
 
 
-def _direct_curve_geometry_terms(spec: CurveSpec, dofs, *, order):
-    if curve_spec_kind(spec) != "xyz_fourier":
-        return None
-    spec = cast(CurveXYZFourierSpec, spec)
-    curve_dofs = spec.dofs if dofs is None else dofs
-    geometry = jaxfouriercurve_geometry_pure(
-        curve_dofs,
-        spec.quadpoints,
-        spec.order,
-    )
-    return geometry[: order + 1]
-
-
 def _mapped_full_dofs(
     map_spec: OptimizableDofMapSpec,
     owner_dofs,
@@ -348,9 +332,6 @@ def _curve_geometry_with_third_derivative_from_dofs(
         )
         return _add_curve_perturbation(spec, *base_geometry)
     quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=3)
-    if direct_geometry is not None:
-        return direct_geometry
     gamma_kernel = _curve_gamma_kernel(
         spec,
         dofs,
@@ -562,9 +543,6 @@ def curve_gamma_and_gammadash_from_dofs(
         spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_gamma_and_dash_from_dofs(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=1)
-    if direct_geometry is not None:
-        return direct_geometry
     gamma_kernel = _curve_gamma_kernel(
         spec,
         dofs,
@@ -601,9 +579,6 @@ def curve_geometry_from_dofs(
         spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_geometry_from_dofs(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=2)
-    if direct_geometry is not None:
-        return direct_geometry
     gamma_kernel = _curve_gamma_kernel(
         spec,
         dofs,
