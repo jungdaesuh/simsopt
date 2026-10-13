@@ -705,5 +705,60 @@ class SurfaceTaylorTests(unittest.TestCase):
                     self.subtest_surface_theta_derivative(surfacetype, stellsym)
 
 
+class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
+    """
+    Second derivatives of a SurfaceXYZTensorFourier with all dimensions clamped,
+    Taylor-tested with shrinking forward-difference steps of the first
+    derivatives, for odd and even nfp.
+    """
+    phi0 = 0.13
+    theta0 = 0.37
+    phi_epss = tuple(0.5**i for i in range(10, 15))
+    theta_epss = tuple(0.5**i for i in range(5, 10))
+
+    def get_clamped_surface(self, nfp, phis, thetas):
+        s = SurfaceXYZTensorFourier(
+            nfp=nfp, stellsym=False, mpol=2, ntor=2,
+            clamped_dims=[True, True, True],
+            quadpoints_phi=phis, quadpoints_theta=thetas)
+        rng = np.random.default_rng(3)
+        s.x = s.x + 0.05 * rng.standard_normal(len(s.x))
+        return s
+
+    def assert_taylor_convergence(self, first, second, epss):
+        """first[0] is taken at the base point and first[i+1] at the base point plus epss[i]."""
+        err_old = 1e6
+        for eps, fh in zip(epss, first[1:]):
+            err = np.linalg.norm((fh - first[0]) / eps - second)
+            self.assertLess(err, 0.55 * err_old)
+            err_old = err
+
+    def test_clamped_phi2_derivative(self):
+        """Clamped phi second derivatives and coefficient Jacobians pass a shrinking-step Taylor test for odd and even nfp."""
+        phis = np.asarray([self.phi0] + [self.phi0 + eps for eps in self.phi_epss])
+        thetas = np.asarray([self.theta0])
+        for nfp in [1, 2, 3, 5]:
+            s = self.get_clamped_surface(nfp, phis, thetas)
+            with self.subTest(nfp=nfp, output="gammadash1dash1"):
+                self.assert_taylor_convergence(
+                    s.gammadash1()[:, 0], s.gammadash1dash1()[0, 0], self.phi_epss)
+            with self.subTest(nfp=nfp, output="dgammadash1dash1_by_dcoeff"):
+                self.assert_taylor_convergence(
+                    s.dgammadash1_by_dcoeff()[:, 0], s.dgammadash1dash1_by_dcoeff()[0, 0], self.phi_epss)
+
+    def test_clamped_theta2_derivative(self):
+        """Clamped theta second derivatives and coefficient Jacobians pass a shrinking-step Taylor test for odd and even nfp."""
+        phis = np.asarray([self.phi0])
+        thetas = np.asarray([self.theta0] + [self.theta0 + eps for eps in self.theta_epss])
+        for nfp in [1, 2, 3, 5]:
+            s = self.get_clamped_surface(nfp, phis, thetas)
+            with self.subTest(nfp=nfp, output="gammadash2dash2"):
+                self.assert_taylor_convergence(
+                    s.gammadash2()[0, :], s.gammadash2dash2()[0, 0], self.theta_epss)
+            with self.subTest(nfp=nfp, output="dgammadash2dash2_by_dcoeff"):
+                self.assert_taylor_convergence(
+                    s.dgammadash2_by_dcoeff()[0, :], s.dgammadash2dash2_by_dcoeff()[0, 0], self.theta_epss)
+
+
 if __name__ == "__main__":
     unittest.main()
