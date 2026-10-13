@@ -708,14 +708,16 @@ def _make_d2B_vjp_kernel(coil_cs, quad_bs, hessian_vjp_point_cs):
     differentiated: each tile's rematerialized Hessian is reversed and its
     cotangents summed before advancing, so live intermediates are bounded by
     the reverse tile, independent of npoints. A nonpositive
-    ``hessian_vjp_point_cs`` reverses all points in one tile.
+    ``hessian_vjp_point_cs`` reverses all points in one tile. Inputs are
+    converted to float64, the runtime precision of the forward kernel, so
+    seeds and cotangents match its float64 Hessian.
     """
     forward_kernel = jax.checkpoint(_make_kernel(
         _Integrand.B, _DiffMode.HESSIAN, coil_cs, quad_bs, 0,
     ))
     chunk_size = hessian_vjp_point_cs
 
-    def kernel(points, vgradgrad, gammas, gammadashs, currents):
+    def float64_kernel(points, vgradgrad, gammas, gammadashs, currents):
         def tile_pullback(tile_points, tile_seed):
             _, pullback = jax.vjp(
                 lambda g, gd, c: forward_kernel(tile_points, g, gd, c),
@@ -746,6 +748,12 @@ def _make_d2B_vjp_kernel(coil_cs, quad_bs, hessian_vjp_point_cs):
                 cotangents, tile_pullback(points[tail_start:], vgradgrad[tail_start:]),
             )
         return cotangents
+
+    def kernel(points, vgradgrad, gammas, gammadashs, currents):
+        return float64_kernel(*(
+            jnp.asarray(value, dtype=jnp.float64)
+            for value in (points, vgradgrad, gammas, gammadashs, currents)
+        ))
 
     kernel.__name__ = "biotsavart_d2B_vjp"
     return jax.jit(kernel)

@@ -338,6 +338,35 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         ):
             np.testing.assert_allclose(actual, -2 * original, rtol=1e-13, atol=1e-14)
 
+    def test_hessian_vjp_evaluates_float32_inputs_in_float64(self):
+        """Float32 inputs give the float64 cotangents of their float64 values."""
+        set_backend("jax", device="cpu", intent="parity")
+        _set_reverse_tile(self.patches, 4)
+        rng = np.random.default_rng(649)
+        # 13 points: three four-point tiles plus a one-point tail.
+        inputs = (
+            0.2 * rng.standard_normal((13, 3)),
+            rng.standard_normal((13, 3, 3, 3)),
+            rng.standard_normal((2, 12, 3)) + 3,
+            rng.standard_normal((2, 12, 3)),
+            np.array([1e5, -2e4]),
+        )
+        single = tuple(value.astype(np.float32) for value in inputs)
+        expected = core.biot_savart_d2B_by_dXdX_vjp(
+            *(value.astype(np.float64) for value in single)
+        )
+        actual = core.biot_savart_d2B_by_dXdX_vjp(*single)
+        for observed, reference in zip(
+            jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+        ):
+            self.assertEqual(observed.dtype, jnp.float64, "observed.dtype == float64")
+            np.testing.assert_allclose(
+                observed,
+                reference,
+                rtol=1e-12,
+                atol=1e-14 * float(np.max(np.abs(reference))),
+            )
+
     def test_hessian_vjp_owns_numpy_inputs(self):
         """Caller mutation after dispatch cannot alter pending Hessian cotangents."""
         for pending_input in ["points", "seed"]:
