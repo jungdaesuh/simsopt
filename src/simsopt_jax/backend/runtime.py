@@ -16,8 +16,8 @@ constructing the adapter or touching JAX devices. It makes CUDA the default JAX
 backend, also when native geometry (``simsopt.geo``) was imported first. The
 stage-II example accepts ``--device gpu`` with this launch environment.
 Exporting ``JAX_PLATFORMS=cuda,cpu`` as well keeps a CPU device next to CUDA,
-so the native C++ curve length kernels run on the host; with CUDA alone they
-run on the GPU through the same explicit transfers.
+so the small JAX kernels native simsopt compiles with ``simsopt.geo.jit.jit``
+run on the host; with CUDA alone they run on the GPU.
 
 Retained settings:
 
