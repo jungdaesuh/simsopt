@@ -197,11 +197,17 @@ def parity_rng(seed: int = 0) -> np.random.RandomState:
 
 
 def _parity_device_for_lane(jax_module, lane: str):
+    """First device of the lane's platform among every initialized backend.
+
+    ``jax.devices()`` lists only the default backend, so the lookup walks each
+    initialized platform; a process with both CUDA and CPU runs both lanes.
+    """
     if lane not in {"cpu", "gpu"}:
         raise ValueError(f"Unknown parity lane {lane!r}; expected 'cpu' or 'gpu'.")
-    for device in jax_module.devices():
-        if device.platform == lane:
-            return device
+    for platform in jax_module.extend.backend.backends():
+        for device in jax_module.devices(platform):
+            if device.platform == lane:
+                return device
     if lane == "gpu":
         raise SkipTest("CUDA GPU not available")
     if lane == "cpu":
