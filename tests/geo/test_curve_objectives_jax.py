@@ -421,9 +421,9 @@ class TestCurveObjectivesJax(JaxTestCase):
     def test_shortest_distances_match_native(self):
         """Native scans all pairs only when no selected pair is a candidate.
 
-            The close pair (2, 1) is outside the pairs ``j < num_basecurves = 1``: it
-            sets the shortest distance only when the selected pairs are all far.
-            """
+        The close pair (2, 1) is outside the pairs ``j < num_basecurves = 1``: it
+        sets the shortest distance only when the selected pairs are all far.
+        """
         for case_id_0, threshold in zip(["no_candidates", "candidates"], [0.1, 5.0], strict=True):
             with self.subTest(case_id_0=case_id_0, threshold=threshold), self.case() as patches:
                 self._case_shortest_distances_match_native(threshold, patches)
