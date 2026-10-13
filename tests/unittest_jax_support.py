@@ -16,6 +16,7 @@ JAX_IMPORT_ERROR: str | None = None
 try:
     import simsopt_jax  # noqa: F401
     import jax
+    import jax.extend.backend
 except ImportError as error:
     JAX_IMPORT_ERROR = str(error)
 
@@ -64,9 +65,16 @@ def _force_x64(jax_module) -> None:
 # probes devices (lane availability) at collection, before any test installs a
 # backend config, so the CUDA autotuner pins must already be in the environment
 # here; both are inert on the CPU backend.
+#
+# Every configured platform is initialized here, once, before any case runs.
+# ``set_backend(device=...)`` narrows ``jax_platforms``; if a case did that
+# before the process first touched a device, JAX would initialize only that
+# platform, and the others would stay missing for the rest of the process even
+# after ``jax_runtime_isolation`` restores the configuration.
 if JAX_IMPORT_ERROR is None:
     apply_cuda_xla_flag_pins()
     _force_x64(jax)
+    jax.extend.backend.backends()
 
 _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
