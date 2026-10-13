@@ -3,14 +3,17 @@
 Public kernels snapshot caller-owned host arrays before dispatch and retain
 device arrays. Points are explicit because native
 QfmResidual and ToroidalFlux use their fields' current point buffers, including externally
-changed points. Surface derivatives use the native position/normal VJP
-formulation, rather than differentiating through the field's optimizer graph.
+changed points. Surface derivatives come from ``jax.value_and_grad`` of the
+ratio and labels, with the field linearized at the buffer points so those
+points move with the surface as in native, rather than differentiating
+through the field's optimizer graph.
 Float64 subnormal/overflow limits are those documented in surface_geometry;
 XLA reductions and derivative arithmetic need not be bitwise native.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, cast
 
 import jax
@@ -23,9 +26,7 @@ from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 from .field import (
     grouped_biot_savart_A_from_spec,
-    grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
-    grouped_biot_savart_dA_by_dX_from_spec,
 )
 from .specs import GroupedCoilSetSpec, SurfaceSpec
 from .surface_fourier_series import surface_get_dofs, surface_spec_with_dofs
@@ -104,39 +105,37 @@ def _jitted_qfm_residual(spec: QfmSpec) -> jax.Array:
     return _residual(normal, field)
 
 
+def _field_at_moving_points(
+    field: Callable[[jax.Array], jax.Array], points: jax.Array | np.ndarray, positions: jax.Array,
+) -> jax.Array:
+    """First-order field model at buffer points that move with the surface.
+
+    Native evaluates the field at its point buffer but differentiates as if
+    the points were the surface positions. The increment
+    positions - stop_gradient(positions) is exactly zero, so the value is the
+    buffer field, while reverse mode differentiates the field linearized at
+    the buffer points along the surface position derivative.
+    """
+    anchor = jnp.asarray(points)
+    displacement = positions - jax.lax.stop_gradient(positions)
+    return field(anchor) + jax.jvp(field, (anchor,), (displacement,))[1]
+
+
 @jax.jit
 def _jitted_qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
     """Value and native full-coefficient gradient, including fixed DOFs."""
-    normal = _residual_normal(spec)
-    field, field_derivative = grouped_biot_savart_B_and_dB_from_spec(spec.points, spec.coils)
-    field = field.reshape(normal.shape)
-    field_derivative = field_derivative.reshape((*normal.shape, 3))
-    norm_normal = _norm(normal)
-    field_normal = jnp.sum(field * normal, axis=-1)
-    numerator = jnp.sum(field_normal**2 / norm_normal)
-    denominator = jnp.sum(field**2 * norm_normal[..., None])
-    numerator_position = (2 * field_normal / norm_normal)[..., None] * jnp.sum(
-        field_derivative * normal[..., None, :], axis=-1
-    )
-    numerator_normal = (
-        (2 * field_normal / norm_normal)[..., None] * field
-        - (field_normal**2 / norm_normal**3)[..., None] * normal
-    )
-    denominator_position = 2 * jnp.sum(
-        field_derivative * field[..., None, :], axis=-1
-    ) * norm_normal[..., None]
-    denominator_normal = (jnp.sum(field * field, axis=-1) / norm_normal)[..., None] * normal
+    _residual_normal(spec)
 
-    def geometry(dofs: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def field(points: jax.Array) -> jax.Array:
+        return cast(jax.Array, grouped_biot_savart_B_from_spec(points, spec.coils))
+
+    def ratio(dofs: jax.Array) -> jax.Array:
         surface = surface_spec_with_dofs(spec.surface, dofs)
-        return surface_normal(surface), surface_gamma(surface)
+        normal = surface_normal(surface)
+        positions = surface_gamma(surface).reshape(-1, 3)
+        return _residual(normal, _field_at_moving_points(field, spec.points, positions).reshape(normal.shape))
 
-    _, pullback = jax.vjp(geometry, surface_get_dofs(spec.surface))
-    gradient, = pullback((
-        numerator_normal / denominator - denominator_normal * numerator / denominator**2,
-        numerator_position / denominator - denominator_position * numerator / denominator**2,
-    ))
-    return _residual(normal, field), gradient
+    return jax.value_and_grad(ratio)(surface_get_dofs(spec.surface))
 
 
 @jax.jit
@@ -155,38 +154,42 @@ def _jitted_qfm_label(spec: QfmLabelSpec) -> jax.Array:
     return jnp.sum(potential * tangent) / tangent.shape[0]
 
 
-def _label_value_and_grad(spec: QfmLabelSpec) -> tuple[jax.Array, jax.Array]:
+def _label_value_and_grad(
+    spec: QfmLabelSpec, label_value: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
     """Native label derivative, including spatial derivatives at flux points.
 
     Native holds the field buffer independently of the label's surface. Its
     spatial derivative is pulled back through the surface at the current idx,
     even when those points differ from the field buffer after copying/editing.
+    An optional host label value replaces the value without changing the
+    gradient.
     """
     if spec.kind != "toroidal_flux":
-        def label(dofs: jax.Array) -> jax.Array:
+        def evaluate(dofs: jax.Array) -> jax.Array:
             moved = QfmLabelSpec(
                 surface_spec_with_dofs(spec.surface, dofs), spec.coils, spec.idx, spec.kind, spec.points,
             )
             return _jitted_qfm_label(moved)
+    else:
+        coils = spec.coils
+        assert coils is not None
+        points = surface_gamma(spec.surface)[spec.idx] if spec.points is None else spec.points
 
-        return jax.value_and_grad(label)(surface_get_dofs(spec.surface))
+        def potential(field_points: jax.Array) -> jax.Array:
+            return cast(jax.Array, grouped_biot_savart_A_from_spec(field_points, coils))
 
-    assert spec.coils is not None
-    points = surface_gamma(spec.surface)[spec.idx] if spec.points is None else spec.points
-    potential = cast(jax.Array, grouped_biot_savart_A_from_spec(points, spec.coils))
-    derivative = cast(jax.Array, grouped_biot_savart_dA_by_dX_from_spec(points, spec.coils))
+        def evaluate(dofs: jax.Array) -> jax.Array:
+            surface = surface_spec_with_dofs(spec.surface, dofs)
+            tangent = surface_gammadash2(surface)[spec.idx]
+            moved = _field_at_moving_points(potential, points, surface_gamma(surface)[spec.idx])
+            return jnp.sum(moved * tangent) / tangent.shape[0]
 
-    def geometry(dofs: jax.Array) -> tuple[jax.Array, jax.Array]:
-        surface = surface_spec_with_dofs(spec.surface, dofs)
-        return surface_gamma(surface)[spec.idx], surface_gammadash2(surface)[spec.idx]
+    def label(dofs: jax.Array) -> jax.Array:
+        value = evaluate(dofs)
+        return value if label_value is None else value + jax.lax.stop_gradient(label_value - value)
 
-    (_, tangent), pullback = jax.vjp(geometry, surface_get_dofs(spec.surface))
-    ntheta = tangent.shape[0]
-    gradient, = pullback((
-        jnp.sum(derivative * tangent[:, None, :], axis=-1) / ntheta,
-        jnp.broadcast_to(potential, tangent.shape) / ntheta,
-    ))
-    return jnp.sum(potential * tangent) / ntheta, gradient
+    return jax.value_and_grad(label)(surface_get_dofs(spec.surface))
 
 
 @jax.jit
@@ -206,8 +209,7 @@ def _jitted_qfm_label_constraint(
 def _jitted_qfm_label_constraint_value_and_grad(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    value, gradient = _label_value_and_grad(spec)
-    value = value if label_value is None else label_value
+    value, gradient = _label_value_and_grad(spec, label_value)
     residual = value - targetlabel
     return 0.5 * residual**2, residual * gradient
 
