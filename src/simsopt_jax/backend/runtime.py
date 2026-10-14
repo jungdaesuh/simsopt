@@ -55,6 +55,7 @@ import warnings
 from typing import Callable, Literal
 
 import jax
+import jax.extend.backend
 
 # Public + private re-exports: callers and tests keep importing from this facade.
 from simsopt_jax.backend._runtime_policy import (
@@ -459,18 +460,50 @@ def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
     return frozenset({jax_platform})
 
 
-def _validate_initialized_jax_runtime(jax_module, config: BackendConfig) -> None:
-    default_backend = getattr(jax_module, "default_backend", None)
-    if not callable(default_backend):
-        return
-    active_backend = str(default_backend())
+def _device_platform(device) -> str:
+    """Platform of a ``jax_default_device`` value: a Device or a platform name."""
+    return device if isinstance(device, str) else device.platform
+
+
+def _select_initialized_jax_default_device(jax_module, config: BackendConfig) -> None:
+    """Make the requested platform JAX's default device in an initialized process.
+
+    ``jax_platforms`` only decides which platforms JAX initializes, so once a
+    process has several, the requested one becomes the default through
+    ``jax_default_device``; a stale selection is cleared when JAX's own default
+    backend already matches. A platform JAX never initialized cannot be
+    selected: that warns, or raises in strict and GPU parity modes.
+    """
     expected_backends = _expected_runtime_backend_names(config.jax_platform)
-    if active_backend in expected_backends:
+    selected_device = jax_module.config.jax_default_device
+    default_backend = str(jax_module.default_backend())
+    effective_backend = (
+        default_backend
+        if selected_device is None
+        else _device_platform(selected_device)
+    )
+    if effective_backend in expected_backends:
+        return
+    if default_backend in expected_backends:
+        jax_module.config.update("jax_default_device", None)
+        return
+    initialized_platform = next(
+        (
+            platform
+            for platform in jax_module.extend.backend.backends()
+            if platform in expected_backends
+        ),
+        None,
+    )
+    if initialized_platform is not None:
+        jax_module.config.update(
+            "jax_default_device", jax_module.devices(initialized_platform)[0]
+        )
         return
     message = (
         f"Requested JAX platform {config.jax_platform!r} for backend mode "
         f"{config.mode!r}, but the active JAX default backend is "
-        f"{active_backend!r}. Set backend environment variables before "
+        f"{effective_backend!r}. Set backend environment variables before "
         "importing or touching JAX devices."
     )
     _raise_or_warn_runtime_issue(config, message)
@@ -701,7 +734,7 @@ def apply_jax_runtime_config() -> None:
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     _apply_compilation_cache_config(jax, config)
-    _validate_initialized_jax_runtime(jax, config)
+    _select_initialized_jax_default_device(jax, config)
 
 
 def set_backend(
@@ -731,10 +764,14 @@ def set_backend(
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
         device (str or None): Required cpu or gpu selector when mode is jax; omit with a
-            canonical mode.
+            canonical mode. Before JAX initializes its backends, it limits JAX to
+            that platform. In a process that already initialized several platforms
+            (for example ``JAX_PLATFORMS=cuda,cpu``), it makes the platform's first
+            device JAX's default device; a platform JAX never initialized warns.
         intent (str or None): fast or parity when mode is jax; None selects fast. Omit
             with a canonical mode.
-        strict (bool): Reject an initialized JAX backend mismatch instead of warning.
+        strict (bool): Raise instead of warning when JAX never initialized the
+            requested platform.
         debug_nans (bool or None): Enable JAX NaN debugging; None resolves the
             environment, then the mode default. SIMSOPT_DEBUG forces True.
         disable_jit (bool or None): Disable JAX compilation; None resolves the
