@@ -192,6 +192,39 @@ class TestNativeJaxDevice(JaxTestCase):
             environment=environment,
         )
 
+    def _run_platform_startup(self, scenario, jax_platforms, *, needs_cuda):
+        """Run one ``set_backend_platform_startup.py`` scenario in a fresh process."""
+        if needs_cuda and not any(d.platform == "gpu" for d in jax.devices()):
+            self.skipTest("CUDA JAX device required")
+        environment = _with_gpu_determinism(_fresh_environment())
+        if jax_platforms is not None:
+            environment["JAX_PLATFORMS"] = jax_platforms
+        _run_fresh_process(
+            "set_backend_platform_startup.py", scenario, environment=environment
+        )
+
+    def test_gpu_selected_at_startup_also_starts_the_cpu_in_fresh_process(self):
+        """Without ``JAX_PLATFORMS``, a GPU selection starts CUDA as default and the CPU for native kernels."""
+        self._run_platform_startup("gpu_at_startup", None, needs_cuda=True)
+
+    def test_selections_after_initialization_keep_the_platforms_in_fresh_process(self):
+        """Under ``cuda,cpu``, CPU-then-GPU selections after initialization keep native kernels and platforms."""
+        self._run_platform_startup(
+            "cpu_then_gpu_after_initialization", "cuda,cpu", needs_cuda=True
+        )
+
+    def test_explicit_cuda_platforms_start_cuda_alone_in_fresh_process(self):
+        """An explicit ``JAX_PLATFORMS=cuda`` starts only CUDA, and native kernels fall back to it."""
+        self._run_platform_startup("explicit_cuda_only", "cuda", needs_cuda=True)
+
+    def test_cpu_selected_before_initialization_keeps_cuda_off_in_fresh_process(self):
+        """A CPU selection before initialization starts only the CPU, also under ``cuda,cpu``."""
+        for jax_platforms in (None, "cuda,cpu"):
+            with self.subTest(jax_platforms=jax_platforms), self.case():
+                self._run_platform_startup(
+                    "cpu_before_initialization", jax_platforms, needs_cuda=False
+                )
+
     def test_native_jit_runs_on_cpu_with_cuda_default_in_fresh_process(self):
         """Under ``JAX_PLATFORMS=cuda,cpu`` native jitted kernels return CPU arrays."""
         if not any(d.platform == "gpu" for d in jax.devices()):
