@@ -6,8 +6,12 @@ whose state the spec holds, with the same conventions and array shapes:
 ``gamma``, its derivatives ``gammadash1``, ``gammadash2``, ``gammadash1dash1``,
 ``gammadash1dash2``, ``gammadash2dash2`` with respect to ``quadpoints_phi``
 and ``quadpoints_theta``, ``normal``, ``unitnormal``, ``area`` and ``volume``.
-Each is jitted with the spec's arrays as traced operands, so new coefficient
-values reuse the compiled program; pass arrays already on the intended device
+The angle derivatives are nested ``jax.jvp`` of ``gamma`` in the angles
+``phi = 2 pi quadpoints_phi`` and ``theta = 2 pi quadpoints_theta``, in
+radians, scaled once by ``(2 pi)**k`` for a derivative of order ``k``, as
+native scales its sums. Each is jitted with the spec's arrays as traced
+operands, so new coefficient values reuse the compiled program; pass arrays
+already on the intended device
 (:func:`simsopt_jax_adapters.geo.surface_spec_from_surface` does).
 
 Coefficient derivatives are JAX transforms of :func:`surface_quantity_of_dofs`
@@ -36,7 +40,6 @@ native's hand-written derivatives.
 from __future__ import annotations
 
 from collections.abc import Callable
-from math import comb
 
 import jax
 import jax.numpy as jnp
@@ -44,7 +47,7 @@ import numpy as np
 
 from .specs import SurfaceSpec
 from .surface_fourier_series import (
-    _rotating_frame_derivative,
+    _rotating_frame_components,
     surface_spec_with_dofs,
 )
 
@@ -63,6 +66,21 @@ __all__ = [
 ]
 
 _TWO_PI = 2.0 * np.pi
+_AngleFunction = Callable[[jax.Array, jax.Array], jax.Array]
+
+
+def _position(spec: SurfaceSpec, phi: jax.Array, theta: jax.Array) -> jax.Array:
+    """gamma at the toroidal angles ``phi``, shape ``(nphi,)``, and poloidal
+    angles ``theta``, shape ``(ntheta,)``, in radians; shape ``(nphi, ntheta,
+    3)``: the rotating-frame components turned by ``phi``."""
+    cos_phi, sin_phi = jnp.cos(phi)[:, None], jnp.sin(phi)[:, None]
+    x_hat, y_hat, z = _rotating_frame_components(spec, phi, theta)
+    if y_hat is None:
+        return jnp.stack((x_hat * cos_phi, x_hat * sin_phi, z), axis=-1)
+    return jnp.stack(
+        (x_hat * cos_phi - y_hat * sin_phi, x_hat * sin_phi + y_hat * cos_phi, z),
+        axis=-1,
+    )
 
 
 def _position_derivative(
@@ -71,30 +89,36 @@ def _position_derivative(
     """``d^(phi_order + theta_order) gamma / dquadpoints_phi^phi_order
     dquadpoints_theta^theta_order``, shape ``(nphi, ntheta, 3)``.
 
-    Leibniz rule for the rotation ``x = xhat cos(phi) - yhat sin(phi)``,
-    ``y = xhat sin(phi) + yhat cos(phi)``; each derivative of ``(cos(phi),
-    sin(phi))`` turns it by a quarter.
+    Nested forward-mode JAX derivatives of :func:`_position` in the angles
+    ``phi = 2 pi quadpoints_phi`` and ``theta = 2 pi quadpoints_theta``, times
+    the chain factor ``(2 pi)**(phi_order + theta_order)``. Each grid point
+    depends on one ``phi`` and one ``theta`` entry, so a tangent of ones gives
+    the partial derivative at every point.
     """
-    phi = _TWO_PI * spec.quadpoints_phi
-    cos_phi, sin_phi = jnp.cos(phi)[:, None], jnp.sin(phi)[:, None]
-    turns = ((cos_phi, sin_phi), (-sin_phi, cos_phi), (-cos_phi, -sin_phi))
-    x_terms, y_terms = [], []
-    for rotation_order in range(phi_order + 1):
-        x_hat, y_hat, z_hat = _rotating_frame_derivative(
-            spec, phi_order - rotation_order, theta_order
-        )
-        if rotation_order == 0:
-            z = z_hat
-        cos_turned, sin_turned = turns[rotation_order]
-        weight = comb(phi_order, rotation_order)
-        if y_hat is None:
-            x_terms.append(weight * (x_hat * cos_turned))
-            y_terms.append(weight * (x_hat * sin_turned))
-        else:
-            x_terms.append(weight * (x_hat * cos_turned - y_hat * sin_turned))
-            y_terms.append(weight * (x_hat * sin_turned + y_hat * cos_turned))
-    position = jnp.stack((sum(x_terms), sum(y_terms), z), axis=-1)
-    return _TWO_PI ** (phi_order + theta_order) * position
+
+    def position(phi: jax.Array, theta: jax.Array) -> jax.Array:
+        return _position(spec, phi, theta)
+
+    def d_phi(f: _AngleFunction) -> _AngleFunction:
+        return lambda phi, theta: jax.jvp(
+            lambda p: f(p, theta), (phi,), (jnp.ones_like(phi),)
+        )[1]
+
+    def d_theta(f: _AngleFunction) -> _AngleFunction:
+        return lambda phi, theta: jax.jvp(
+            lambda t: f(phi, t), (theta,), (jnp.ones_like(theta),)
+        )[1]
+
+    derivative = position
+    for _ in range(theta_order):
+        derivative = d_theta(derivative)
+    for _ in range(phi_order):
+        derivative = d_phi(derivative)
+    angle_derivative = derivative(
+        _TWO_PI * spec.quadpoints_phi, _TWO_PI * spec.quadpoints_theta
+    )
+    # Native's order (sum in radians, then scale) keeps exact cancellations exact.
+    return _TWO_PI ** (phi_order + theta_order) * angle_derivative
 
 
 def _norm(vectors: jax.Array) -> jax.Array:
