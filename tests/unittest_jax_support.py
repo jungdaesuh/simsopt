@@ -111,6 +111,7 @@ _JAX_RUNTIME_CONFIG_DEFAULTS = {
     "jax_platforms": None,
     "jax_platform_name": "",
     "jax_compilation_cache_dir": None,
+    "jax_default_device": None,
 }
 _PARITY_SEED_BASE = 1729
 
