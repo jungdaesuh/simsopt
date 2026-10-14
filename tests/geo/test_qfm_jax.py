@@ -98,6 +98,21 @@ if JAX_IMPORT_ERROR is None:
             JaxQfmSurface(jax_field, surfaces[1], labels[1], targetlabel),
         )
 
+    def _pair_with_nonzero_label_gradient():
+        """Perturbed Area pair whose label gradient has no zero entry.
+
+        Volume is invariant to theta-independent vertical displacements even
+        after DOF perturbation, so some Volume gradient entries are rounding
+        residue, and a nonfinite coefficient gives them the residue's sign.
+        """
+        native, port = _pair(label_class=Area)
+        for solver in (native, port):
+            start = np.asarray(solver.surface.x)
+            solver.surface.x = start + np.random.default_rng(4).normal(
+                0, 1e-3, start.shape
+            )
+        return native, port
+
 
 def _assert_pair(actual, expected):
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
@@ -423,14 +438,7 @@ class TestQfmJax(JaxTestCase):
         self, method, derivatives, patches
     ):
         """Run one row with case-local objects released before runtime cleanup."""
-        native, port = _pair(label_class=Area)
-        # Perturbed Area has nonzero gradient components. Volume is invariant to
-        # theta-independent vertical displacements even after DOF perturbation.
-        for solver in (native, port):
-            start = np.asarray(solver.surface.x)
-            solver.surface.x = start + np.random.default_rng(4).normal(
-                0, 1e-3, start.shape
-            )
+        native, port = _pair_with_nonzero_label_gradient()
         native.targetlabel = port.targetlabel = np.float64(1e200)
         with np.errstate(all="ignore"):
             expected = getattr(native, method)(
@@ -695,7 +703,7 @@ class TestQfmJax(JaxTestCase):
         self, targetlabel, constraint_weight, patches
     ):
         """Run one row with case-local objects released before runtime cleanup."""
-        native, port = _pair()
+        native, port = _pair_with_nonzero_label_gradient()
         native.targetlabel = port.targetlabel = targetlabel
         with np.errstate(all="ignore"):
             for a, e in zip(
