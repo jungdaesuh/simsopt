@@ -7,8 +7,10 @@
 coefficient entries the native class sums: ``SurfaceRZFourier`` drops ``rs``
 and ``zc`` when stellarator symmetric, ``SurfaceXYZFourier`` sums all six
 arrays, ``SurfaceXYZTensorFourier`` skips the stellarator-symmetry entries it
-holds no DOF for. Angle derivatives are JAX forward-mode derivatives of these
-components (:mod:`simsopt_jax.core.surface_geometry`).
+holds no DOF for. The components take the toroidal and poloidal angles
+``phi`` and ``theta`` in radians as arguments, so that
+:mod:`simsopt_jax.core.surface_geometry` takes the angle derivatives as JAX
+forward-mode derivatives in those angles.
 :func:`surface_get_dofs` and :func:`surface_spec_with_dofs` are native
 ``get_dofs`` and ``set_dofs``.
 
@@ -41,27 +43,25 @@ __all__ = [
     "surface_spec_with_dofs",
 ]
 
-_TWO_PI = 2.0 * np.pi
-
 
 def _angle_difference_series(
     spec: SurfaceRZFourierSpec | SurfaceXYZFourierSpec,
+    phi: jax.Array,
+    theta: jax.Array,
     coefficients: jax.Array,
     sine: bool,
 ) -> jax.Array:
     """``sum_{m,n} coefficients[m, n + ntor] f(m theta - nfp n phi)``, ``f`` the
     sine if ``sine`` else the cosine.
 
-    The angles ``phi = 2 pi quadpoints_phi`` and ``theta = 2 pi
-    quadpoints_theta`` are in radians; the result has shape ``(nphi,
-    ntheta)``. The angle difference expands into separate theta and phi tables.
+    The angles ``phi``, shape ``(nphi,)``, and ``theta``, shape ``(ntheta,)``,
+    are in radians; the result has shape ``(nphi, ntheta)``. The angle
+    difference expands into separate theta and phi tables.
     """
     mpol, ntor = coefficients.shape[0] - 1, (coefficients.shape[1] - 1) // 2
     m = np.arange(mpol + 1, dtype=np.float64)
     nfp_n = spec.nfp * np.arange(-ntor, ntor + 1, dtype=np.float64)
 
-    theta = _TWO_PI * spec.quadpoints_theta
-    phi = _TWO_PI * spec.quadpoints_phi
     cos_theta = jnp.cos(theta[:, None] * m[None, :])
     sin_theta = jnp.sin(theta[:, None] * m[None, :])
     cos_phi = jnp.cos(phi[:, None] * nfp_n[None, :])
@@ -79,47 +79,48 @@ def _angle_difference_series(
 
 def _series_pair(
     spec: SurfaceRZFourierSpec | SurfaceXYZFourierSpec,
+    phi: jax.Array,
+    theta: jax.Array,
     cosine: jax.Array,
     sine: jax.Array,
 ) -> jax.Array:
-    return _angle_difference_series(spec, cosine, False) + _angle_difference_series(
-        spec, sine, True
-    )
+    return _angle_difference_series(
+        spec, phi, theta, cosine, False
+    ) + _angle_difference_series(spec, phi, theta, sine, True)
 
 
 def _rz_fourier_components(
-    spec: SurfaceRZFourierSpec,
+    spec: SurfaceRZFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, None, jax.Array]:
     if spec.stellsym:
         return (
-            _angle_difference_series(spec, spec.rc, False),
+            _angle_difference_series(spec, phi, theta, spec.rc, False),
             None,
-            _angle_difference_series(spec, spec.zs, True),
+            _angle_difference_series(spec, phi, theta, spec.zs, True),
         )
     return (
-        _series_pair(spec, spec.rc, spec.rs),
+        _series_pair(spec, phi, theta, spec.rc, spec.rs),
         None,
-        _series_pair(spec, spec.zc, spec.zs),
+        _series_pair(spec, phi, theta, spec.zc, spec.zs),
     )
 
 
 def _xyz_fourier_components(
-    spec: SurfaceXYZFourierSpec,
+    spec: SurfaceXYZFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     return (
-        _series_pair(spec, spec.xc, spec.xs),
-        _series_pair(spec, spec.yc, spec.ys),
-        _series_pair(spec, spec.zc, spec.zs),
+        _series_pair(spec, phi, theta, spec.xc, spec.xs),
+        _series_pair(spec, phi, theta, spec.yc, spec.ys),
+        _series_pair(spec, phi, theta, spec.zc, spec.zs),
     )
 
 
-def _harmonic_basis(quadpoints: jax.Array, count: int, frequency: int) -> jax.Array:
-    """The native tensor basis at ``a = 2 pi quadpoints``.
+def _harmonic_basis(angles: jax.Array, count: int, frequency: int) -> jax.Array:
+    """The native tensor basis at the angles ``a`` in radians.
 
     The basis is ``1, cos(k a), ..., cos(count k a), sin(k a), ...,
     sin(count k a)`` with ``k = frequency``; shape ``(npoints, 2 count + 1)``.
     """
-    angles = _TWO_PI * quadpoints
     cosine_modes = frequency * np.arange(count + 1, dtype=np.float64)
     sine_modes = frequency * np.arange(1, count + 1, dtype=np.float64)
     return jnp.concatenate(
@@ -146,19 +147,21 @@ def _tensor_keep_masks(
     return keep_x, ~keep_x, ~keep_x
 
 
-def _clamping_factor(spec: SurfaceXYZTensorFourierSpec) -> jax.Array:
+def _clamping_factor(
+    spec: SurfaceXYZTensorFourierSpec, phi: jax.Array, theta: jax.Array
+) -> jax.Array:
     """``sin(nfp phi / 2)**2 + sin(theta / 2)**2``, shape ``(nphi, ntheta)``."""
-    sin_phi = jnp.sin(spec.nfp * (_TWO_PI * spec.quadpoints_phi) / 2.0)[:, None]
-    sin_theta = jnp.sin((_TWO_PI * spec.quadpoints_theta) / 2.0)[None, :]
+    sin_phi = jnp.sin(spec.nfp * phi / 2.0)[:, None]
+    sin_theta = jnp.sin(theta / 2.0)[None, :]
     return sin_phi * sin_phi + sin_theta * sin_theta
 
 
 def _xyz_tensor_fourier_components(
-    spec: SurfaceXYZTensorFourierSpec,
+    spec: SurfaceXYZTensorFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     mpol, ntor = (spec.xcs.shape[0] - 1) // 2, (spec.xcs.shape[1] - 1) // 2
-    phi_basis = _harmonic_basis(spec.quadpoints_phi, ntor, spec.nfp)
-    theta_basis = _harmonic_basis(spec.quadpoints_theta, mpol, 1)
+    phi_basis = _harmonic_basis(phi, ntor, spec.nfp)
+    theta_basis = _harmonic_basis(theta, mpol, 1)
 
     def series(coefficients: jax.Array) -> jax.Array:
         return (phi_basis @ coefficients.T) @ theta_basis.T
@@ -175,22 +178,24 @@ def _xyz_tensor_fourier_components(
             continue
         components.append(
             series(jnp.where(clamped_block, 0.0, summed))
-            + _clamping_factor(spec) * series(jnp.where(clamped_block, summed, 0.0))
+            + _clamping_factor(spec, phi, theta)
+            * series(jnp.where(clamped_block, summed, 0.0))
         )
     return tuple(components)
 
 
 def _rotating_frame_components(
-    spec: SurfaceSpec,
+    spec: SurfaceSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, jax.Array | None, jax.Array]:
-    """``(xhat, yhat, z)``, each ``(nphi, ntheta)``; ``yhat`` is ``None`` for
-    ``SurfaceRZFourier``.
+    """``(xhat, yhat, z)`` at the toroidal angles ``phi``, shape ``(nphi,)``,
+    and poloidal angles ``theta``, shape ``(ntheta,)``, in radians; each is
+    ``(nphi, ntheta)``, and ``yhat`` is ``None`` for ``SurfaceRZFourier``.
     """
     if isinstance(spec, SurfaceRZFourierSpec):
-        return _rz_fourier_components(spec)
+        return _rz_fourier_components(spec, phi, theta)
     if isinstance(spec, SurfaceXYZFourierSpec):
-        return _xyz_fourier_components(spec)
-    return _xyz_tensor_fourier_components(spec)
+        return _xyz_fourier_components(spec, phi, theta)
+    return _xyz_tensor_fourier_components(spec, phi, theta)
 
 
 # The arrays holding the native DOFs of the angle-difference series, in
