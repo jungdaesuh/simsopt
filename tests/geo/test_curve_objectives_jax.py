@@ -458,6 +458,19 @@ class TestCurveObjectivesJax(JaxTestCase):
         _assert_matches_native_including_nans("num_basecurves=3", native, adapter, active=True)
         self.assertTrue(adapter.J() > value, 'adapter.J() > value')
 
+    def test_downsampled_distance_of_grids_with_one_sampled_count_matches_native(self):
+        """Grids of 24 and 23 points both give 12 samples at stride 2; gradients reach every point.
+
+        The adapter stacks full grids and samples inside the differentiated program,
+        so the two grids are separate classes while native evaluates the same samples.
+        """
+        base, curves = _curves()
+        odd_twin = CurveXYZFourier(np.linspace(0, 1, 23, endpoint=False) + 0.013, 3, dofs=base[1].dofs)
+        curves = curves + [odd_twin]
+        native = CurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base), downsample=2)
+        adapter = JaxCurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base), downsample=2)
+        _assert_matches_native_including_nans("downsample=2 with 24- and 23-point grids", native, adapter, active=True)
+
     def test_distance_evaluations_share_one_native_candidate_search(self):
         """Value, gradient and shortest-distance calls reuse one native search."""
         for case_id_0, objective_index in zip(["curve_curve", "downsampled", "curve_surface"], [0, 1, 2], strict=True):
