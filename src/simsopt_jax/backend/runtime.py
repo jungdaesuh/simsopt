@@ -15,9 +15,10 @@ Then call ``set_backend("jax", device="gpu", intent="parity")`` before
 constructing the adapter or touching JAX devices. It makes CUDA the default JAX
 backend, also when native geometry (``simsopt.geo``) was imported first. The
 stage-II example accepts ``--device gpu`` with this launch environment.
-Exporting ``JAX_PLATFORMS=cuda,cpu`` as well keeps a CPU device next to CUDA,
-so the small JAX kernels native simsopt compiles with ``simsopt.geo.jit.jit``
-run on the host; with CUDA alone they run on the GPU.
+Selecting CUDA also starts the CPU backend, so the small JAX kernels native
+simsopt compiles with ``simsopt.geo.jit.jit`` run on the host; exporting
+``JAX_PLATFORMS=cuda`` (without ``cpu``) starts CUDA alone, and they run on
+the GPU.
 
 Retained settings:
 
@@ -55,6 +56,7 @@ import warnings
 from typing import Callable, Literal
 
 import jax
+import jax.extend.backend
 
 # Public + private re-exports: callers and tests keep importing from this facade.
 from simsopt_jax.backend._runtime_policy import (
@@ -459,18 +461,50 @@ def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
     return frozenset({jax_platform})
 
 
-def _validate_initialized_jax_runtime(jax_module, config: BackendConfig) -> None:
-    default_backend = getattr(jax_module, "default_backend", None)
-    if not callable(default_backend):
-        return
-    active_backend = str(default_backend())
+def _device_platform(device) -> str:
+    """Platform of a ``jax_default_device`` value: a Device or a platform name."""
+    return device if isinstance(device, str) else device.platform
+
+
+def _select_initialized_jax_default_device(jax_module, config: BackendConfig) -> None:
+    """Make the requested platform JAX's default device in an initialized process.
+
+    ``jax_platforms`` only decides which platforms JAX initializes, so once a
+    process has several, the requested one becomes the default through
+    ``jax_default_device``; a stale selection is cleared when JAX's own default
+    backend already matches. A platform JAX never initialized cannot be
+    selected: that warns, or raises in strict and GPU parity modes.
+    """
     expected_backends = _expected_runtime_backend_names(config.jax_platform)
-    if active_backend in expected_backends:
+    selected_device = jax_module.config.jax_default_device
+    default_backend = str(jax_module.default_backend())
+    effective_backend = (
+        default_backend
+        if selected_device is None
+        else _device_platform(selected_device)
+    )
+    if effective_backend in expected_backends:
+        return
+    if default_backend in expected_backends:
+        jax_module.config.update("jax_default_device", None)
+        return
+    initialized_platform = next(
+        (
+            platform
+            for platform in jax_module.extend.backend.backends()
+            if platform in expected_backends
+        ),
+        None,
+    )
+    if initialized_platform is not None:
+        jax_module.config.update(
+            "jax_default_device", jax_module.devices(initialized_platform)[0]
+        )
         return
     message = (
         f"Requested JAX platform {config.jax_platform!r} for backend mode "
         f"{config.mode!r}, but the active JAX default backend is "
-        f"{active_backend!r}. Set backend environment variables before "
+        f"{effective_backend!r}. Set backend environment variables before "
         "importing or touching JAX devices."
     )
     _raise_or_warn_runtime_issue(config, message)
@@ -596,6 +630,44 @@ def _jax_backends_initialized() -> bool:
     return bool(xla_bridge.backends_are_initialized())
 
 
+# ``set_backend`` exports ``JAX_PLATFORMS`` so child processes start the same
+# platforms. The caller's request is the variable's value unless it still holds
+# that export, so a later call never reads its own export as the caller's choice.
+_requested_jax_platforms_value: str | None = None
+_exported_jax_platforms: str | None = None
+
+
+def _requested_jax_platforms() -> str | None:
+    """``JAX_PLATFORMS`` as the caller set it, not as ``set_backend`` exported it."""
+    global _requested_jax_platforms_value
+    with _backend_runtime_lock:
+        current = _optional_env_value(_JAX_PLATFORMS_ENV)
+        if _exported_jax_platforms is None or current != _exported_jax_platforms:
+            _requested_jax_platforms_value = current
+        return _requested_jax_platforms_value
+
+
+def _startup_jax_platforms(config: BackendConfig) -> str:
+    """The platforms JAX should initialize for ``config``."""
+    return _runtime_jax_platforms_value(config.jax_platform, _requested_jax_platforms())
+
+
+def _export_startup_jax_platforms(config: BackendConfig) -> None:
+    """Export ``config``'s startup platforms to ``JAX_PLATFORMS`` for child processes.
+
+    Once JAX initialized its backends the variable is left alone: it no longer
+    changes this process, and narrowing it would misstate the platforms JAX
+    runs to child processes and to ``native_jax_device()``.
+    """
+    global _exported_jax_platforms
+    if _jax_backends_initialized():
+        return
+    with _backend_runtime_lock:
+        exported = _startup_jax_platforms(config)
+        os.environ[_JAX_PLATFORMS_ENV] = exported
+        _exported_jax_platforms = exported
+
+
 def apply_cuda_xla_flag_pins() -> str:
     """Put both CUDA autotuner pins into ``XLA_FLAGS`` and return its value.
 
@@ -684,10 +756,8 @@ def apply_jax_runtime_config() -> None:
     _apply_cpu_compile_preset_env(config, policy)
     _apply_cuda_autotuner_env(config)
 
-    jax.config.update(
-        "jax_platforms",
-        _runtime_jax_platforms_value(config.jax_platform),
-    )
+    if not _jax_backends_initialized():
+        jax.config.update("jax_platforms", _startup_jax_platforms(config))
     # JAX resolves the default backend from the deprecated ``jax_platform_name``
     # before ``jax_platforms``. ``simsopt.geo`` sets it to ``"cpu"`` when no JAX
     # platform environment variable is set, which would keep the selected
@@ -701,7 +771,7 @@ def apply_jax_runtime_config() -> None:
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     _apply_compilation_cache_config(jax, config)
-    _validate_initialized_jax_runtime(jax, config)
+    _select_initialized_jax_default_device(jax, config)
 
 
 def set_backend(
@@ -731,10 +801,16 @@ def set_backend(
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
         device (str or None): Required cpu or gpu selector when mode is jax; omit with a
-            canonical mode.
+            canonical mode. Before JAX initializes its backends, it limits JAX to
+            that platform, keeping the CPU next to CUDA unless ``JAX_PLATFORMS``
+            lists cuda without cpu. In a process that already initialized several
+            platforms (for example ``JAX_PLATFORMS=cuda,cpu``), it leaves them
+            running and makes the platform's first device JAX's default device; a
+            platform JAX never initialized warns.
         intent (str or None): fast or parity when mode is jax; None selects fast. Omit
             with a canonical mode.
-        strict (bool): Reject an initialized JAX backend mismatch instead of warning.
+        strict (bool): Raise instead of warning when JAX never initialized the
+            requested platform.
         debug_nans (bool or None): Enable JAX NaN debugging; None resolves the
             environment, then the mode default. SIMSOPT_DEBUG forces True.
         disable_jit (bool or None): Disable JAX compilation; None resolves the
@@ -789,13 +865,11 @@ def set_backend(
         _cached_backend_config = config
         _reset_backend_runtime_caches()
         for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
-            config_attribute_name = (
-                "jax_platform" if attribute_name == "jax_platforms" else attribute_name
-            )
             os.environ[env_name] = _runtime_env_value(
                 attribute_name,
-                getattr(config, config_attribute_name),
+                getattr(config, attribute_name),
             )
+        _export_startup_jax_platforms(config)
         _apply_cuda_autotuner_env(config)
     if configure_runtime:
         apply_jax_runtime_config()
