@@ -45,7 +45,7 @@ __all__ = [
     "curve_gamma_and_gammadash_from_dofs",
     "curve_gamma_and_gammadash_from_spec",
     "curve_gamma_vjp_from_dofs",
-    "curve_filament_frame_from_dofs",
+    "curve_filament_pack_from_dofs",
     "curve_geometry_from_dofs",
     "curve_gammadash_vjp_from_dofs",
     "curve_gammadashdash_vjp_from_dofs",
@@ -468,27 +468,6 @@ def _curve_filament_base_jets(spec: CurveFilamentSpec, dofs):
     )
 
 
-def curve_filament_frame_from_dofs(spec: CurveFilamentSpec, dofs) -> tuple[jax.Array, ...]:
-    """Return the underlying curve and rotated frame of a finite-build filament.
-
-    The result is ``(gamma, gammadash, gammadashdash, normal, binormal,
-    normal_dash, binormal_dash)`` of the filament's base curve; the frame's
-    parameter derivatives are the ``jax.jvp`` of the frame along the curve.
-
-    Args:
-        spec: CurveFilamentSpec object, base curve, DOF maps, rotation and frame convention.
-        dofs: Array of shape (ndofs,), filament full DOFs in the spec mapping order.
-
-    Returns:
-        tuple of arrays of shape (nquadpoints, 3): base gamma, first and second parameter derivatives in m, unit normal and binormal, and their unit-period parameter derivatives.
-    """
-    base_geometry, frame, inputs, input_tangents = _curve_filament_base_jets(spec, dofs)
-    (_tangent, normal, binormal), (_tangent_dash, normal_dash, binormal_dash) = jax.jvp(
-        frame, inputs, input_tangents
-    )
-    return (*base_geometry, normal, binormal, normal_dash, binormal_dash)
-
-
 def _filament_offset(
     gamma: jax.Array,
     normal: jax.Array,
@@ -508,6 +487,39 @@ def _filament_gamma_and_dash(frame, inputs, input_tangents, dn, db) -> tuple[jax
         return _filament_offset(frame_inputs[0], normal, binormal, dn, db)
 
     return jax.jvp(filament, inputs, input_tangents)
+
+
+def curve_filament_pack_from_dofs(
+    spec: CurveFilamentSpec,
+    dofs,
+    offsets: tuple[tuple[float, float], ...],
+) -> tuple[jax.Array, ...]:
+    """Return the base curve and the filaments of a finite-build pack sharing ``spec``'s curve and frame.
+
+    Each filament is ``gamma + dn * normal + db * binormal`` for one
+    ``(dn, db)`` of ``offsets``; its tangent is the ``jax.jvp`` of that
+    expression along the base curve's parameter derivatives. The frame does
+    not depend on the offsets, so ``jax.vmap`` over them evaluates it once.
+
+    Args:
+        spec: CurveFilamentSpec object, base curve, DOF maps, rotation and frame convention of the pack.
+        dofs: Array of shape (ndofs,), filament full DOFs in the spec mapping order.
+        offsets: tuple of (dn, db) pairs in m, one per filament.
+
+    Returns:
+        tuple: (gamma, gammadash, gammadashdash) of the base curve, arrays of shape (nquadpoints, 3) in m, then the filaments' gamma and gammadash, arrays of shape (nfilaments, nquadpoints, 3) in m.
+    """
+    base_geometry, frame, inputs, input_tangents = _curve_filament_base_jets(spec, dofs)
+    dn, db = (
+        _as_explicit_array(np.asarray(values, dtype=np.float64), reference=dofs)
+        for values in zip(*offsets, strict=True)
+    )
+    gammas, gammadashs = jax.vmap(
+        lambda filament_dn, filament_db: _filament_gamma_and_dash(
+            frame, inputs, input_tangents, filament_dn, filament_db
+        )
+    )(dn, db)
+    return (*base_geometry, gammas, gammadashs)
 
 
 def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):

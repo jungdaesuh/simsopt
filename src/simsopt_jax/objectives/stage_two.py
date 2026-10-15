@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Integral
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -26,8 +26,7 @@ from simsopt_jax.core import coil_forces
 from simsopt_jax.core._device_scalars import placement_zero
 from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core.curve_geometry import (
-    _filament_offset,
-    curve_filament_frame_from_dofs,
+    curve_filament_pack_from_dofs,
     curve_geometry_from_dofs,
 )
 from simsopt_jax.core.curve_kernels import (
@@ -688,33 +687,37 @@ def stage_two_geometry(
     # current's would otherwise be a symbolic zero) without coupling any
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
-    # (gamma, gammadash, gammadashdash) of a curve, followed for a filament
-    # pack by its rotated frame (normal, binormal and their derivatives); keyed
-    # by the curve of the coil, or of the pack's first coil for filaments.
+    # (gamma, gammadash, gammadashdash) of a curve, keyed by the curve of the
+    # coil, or of the pack's first coil for filaments; a pack's filaments
+    # (gamma, gammadash) are evaluated with it and keyed by their own curves.
     curve_geometry: dict[int, tuple[jax.Array, ...]] = {}
     filament_geometry: dict[int, tuple[jax.Array, jax.Array]] = {}
     coils: list[tuple[jax.Array, jax.Array, jax.Array]] = []
     centerlines: list[tuple[jax.Array, ...]] = []
     for index, coil_spec in enumerate(coil_specs):
         curve = coil_spec.curve
-        is_filament = isinstance(curve, CurveFilamentSpec)
-        source = coil_specs[index - index % filaments_per_pack].curve if is_filament else curve
-        if id(source) not in curve_geometry:
-            curve_geometry[id(source)] = (
-                curve_filament_frame_from_dofs(source, source.dofs)
-                if isinstance(source, CurveFilamentSpec)
-                else curve_geometry_from_dofs(source, source.dofs)
-            )
-        geometry = curve_geometry[id(source)]
         if isinstance(curve, CurveFilamentSpec):
+            start = index - index % filaments_per_pack
+            source = coil_specs[start].curve
             if id(curve) not in filament_geometry:
-                gamma, gammadash, _gammadashdash, normal, binormal, normal_dash, binormal_dash = geometry
-                filament_geometry[id(curve)] = (
-                    _filament_offset(gamma, normal, binormal, curve.dn, curve.db),
-                    _filament_offset(gammadash, normal_dash, binormal_dash, curve.dn, curve.db),
+                # _check_packs guarantees every curve in this pack is a filament.
+                pack = cast(
+                    tuple[CurveFilamentSpec, ...],
+                    tuple(coil_specs[start + k].curve for k in range(filaments_per_pack)),
                 )
+                *base_geometry, pack_gammas, pack_gammadashs = curve_filament_pack_from_dofs(
+                    pack[0], pack[0].dofs, tuple((filament.dn, filament.db) for filament in pack)
+                )
+                curve_geometry[id(source)] = tuple(base_geometry)
+                filament_geometry.update(
+                    (id(filament), (pack_gammas[k], pack_gammadashs[k])) for k, filament in enumerate(pack)
+                )
+            geometry = curve_geometry[id(source)]
             gamma, gammadash = filament_geometry[id(curve)]
         else:
+            if id(curve) not in curve_geometry:
+                curve_geometry[id(curve)] = curve_geometry_from_dofs(curve, curve.dofs)
+            geometry = curve_geometry[id(curve)]
             gamma, gammadash = geometry[0], geometry[1]
         gamma, gammadash, current = apply_coil_symmetry(
             gamma, gammadash, coil_spec.current.value[0], coil_spec.symmetry
@@ -722,7 +725,7 @@ def stage_two_geometry(
         coils.append((gamma, gammadash, current + parameter_zero))
         if index % filaments_per_pack:
             continue
-        if is_filament:
+        if isinstance(curve, CurveFilamentSpec):
             centerlines.append(_with_symmetry(*geometry[:3], symmetry=coil_spec.symmetry))
         else:
             centerlines.append((gamma, gammadash, *_with_symmetry(geometry[2], symmetry=coil_spec.symmetry)))
