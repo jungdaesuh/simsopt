@@ -20,9 +20,7 @@ from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from .framedcurve import (
     rotated_centroid_frame,
-    rotated_centroid_frame_dash,
     rotated_frenet_frame,
-    rotated_frenet_frame_dash,
     rotation_alpha as jaxrotation_pure,
     rotation_alphadash as jaxrotationdash_pure,
 )
@@ -44,10 +42,10 @@ from .specs import (
 )
 
 __all__ = [
-    "curve_filament_frame_from_dofs",
     "curve_gamma_and_gammadash_from_dofs",
     "curve_gamma_and_gammadash_from_spec",
     "curve_gamma_vjp_from_dofs",
+    "curve_filament_frame_from_dofs",
     "curve_geometry_from_dofs",
     "curve_gammadash_vjp_from_dofs",
     "curve_gammadashdash_vjp_from_dofs",
@@ -428,7 +426,7 @@ def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
                 gammadash,
                 alpha,
             )
-        return _filament_offset(gamma, normal, binormal, quad_spec.dn, quad_spec.db)
+        return gamma + quad_spec.dn * normal + quad_spec.db * binormal
 
     quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
     gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
@@ -437,13 +435,45 @@ def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
     return gamma, gammadash, gammadashdash
 
 
+def _curve_filament_base_jets(spec: CurveFilamentSpec, dofs):
+    """Return a filament's base-curve geometry, frame, and the frame inputs with their parameter derivatives.
+
+    The result is ``((gamma, gammadash, gammadashdash), frame, inputs,
+    input_tangents)``: ``frame(*inputs)`` is the base curve's rotated frame
+    ``(t, n, b)`` and ``input_tangents`` are the derivatives of ``inputs``
+    with respect to the curve parameter.
+    """
+    base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
+    alpha, alphadash = _rotation_alpha_and_dash_from_dofs(
+        spec.rotation,
+        spec.rotation_map,
+        dofs,
+    )
+    if spec.frame_kind == "frenet":
+        gamma, gammadash, gammadashdash, gammadashdashdash = (
+            _curve_geometry_with_third_derivative_from_dofs(spec.base_curve, base_dofs)
+        )
+        return (
+            (gamma, gammadash, gammadashdash),
+            rotated_frenet_frame,
+            (gamma, gammadash, gammadashdash, alpha),
+            (gammadash, gammadashdash, gammadashdashdash, alphadash),
+        )
+    gamma, gammadash, gammadashdash = curve_geometry_from_dofs(spec.base_curve, base_dofs)
+    return (
+        (gamma, gammadash, gammadashdash),
+        rotated_centroid_frame,
+        (gamma, gammadash, alpha),
+        (gammadash, gammadashdash, alphadash),
+    )
+
+
 def curve_filament_frame_from_dofs(spec: CurveFilamentSpec, dofs) -> tuple[jax.Array, ...]:
     """Return the underlying curve and rotated frame of a finite-build filament.
 
     The result is ``(gamma, gammadash, gammadashdash, normal, binormal,
-    normal_dash, binormal_dash)`` of the filament's base curve; the filament
-    is ``gamma + dn * normal + db * binormal`` and its tangent
-    ``gammadash + dn * normal_dash + db * binormal_dash``.
+    normal_dash, binormal_dash)`` of the filament's base curve; the frame's
+    parameter derivatives are the ``jax.jvp`` of the frame along the curve.
 
     Args:
         spec: CurveFilamentSpec object, base curve, DOF maps, rotation and frame convention.
@@ -452,48 +482,11 @@ def curve_filament_frame_from_dofs(spec: CurveFilamentSpec, dofs) -> tuple[jax.A
     Returns:
         tuple of arrays of shape (nquadpoints, 3): base gamma, first and second parameter derivatives in m, unit normal and binormal, and their unit-period parameter derivatives.
     """
-    base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
-    alpha, alphadash = _rotation_alpha_and_dash_from_dofs(
-        spec.rotation,
-        spec.rotation_map,
-        dofs,
+    base_geometry, frame, inputs, input_tangents = _curve_filament_base_jets(spec, dofs)
+    (_tangent, normal, binormal), (_tangent_dash, normal_dash, binormal_dash) = jax.jvp(
+        frame, inputs, input_tangents
     )
-
-    if spec.frame_kind == "frenet":
-        gamma, gammadash, gammadashdash, gammadashdashdash = (
-            _curve_geometry_with_third_derivative_from_dofs(spec.base_curve, base_dofs)
-        )
-        _tangent, normal, binormal = rotated_frenet_frame(
-            gamma,
-            gammadash,
-            gammadashdash,
-            alpha,
-        )
-        _tangent_dash, normal_dash, binormal_dash = rotated_frenet_frame_dash(
-            gamma,
-            gammadash,
-            gammadashdash,
-            gammadashdashdash,
-            alpha,
-            alphadash,
-        )
-    else:
-        gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
-            spec.base_curve, base_dofs
-        )
-        _tangent, normal, binormal = rotated_centroid_frame(
-            gamma,
-            gammadash,
-            alpha,
-        )
-        _tangent_dash, normal_dash, binormal_dash = rotated_centroid_frame_dash(
-            gamma,
-            gammadash,
-            gammadashdash,
-            alpha,
-            alphadash,
-        )
-    return gamma, gammadash, gammadashdash, normal, binormal, normal_dash, binormal_dash
+    return (*base_geometry, normal, binormal, normal_dash, binormal_dash)
 
 
 def _filament_offset(
@@ -503,20 +496,25 @@ def _filament_offset(
     dn: float | jax.Array,
     db: float | jax.Array,
 ) -> jax.Array:
-    """Apply the normal/binormal offset to a frame component, in native arithmetic order."""
+    """Apply the normal/binormal offset to the base curve, in native arithmetic order."""
     return gamma + dn * normal + db * binormal
 
 
+def _filament_gamma_and_dash(frame, inputs, input_tangents, dn, db) -> tuple[jax.Array, jax.Array]:
+    """Return the filament ``gamma + dn * normal + db * binormal`` and, by ``jax.jvp``, its parameter derivative."""
+
+    def filament(*frame_inputs):
+        _tangent, normal, binormal = frame(*frame_inputs)
+        return _filament_offset(frame_inputs[0], normal, binormal, dn, db)
+
+    return jax.jvp(filament, inputs, input_tangents)
+
+
 def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
-    gamma, gammadash, _gammadashdash, normal, binormal, normal_dash, binormal_dash = (
-        curve_filament_frame_from_dofs(spec, dofs)
-    )
-    dn = _runtime_scalar(spec.dn, reference=normal)
-    db = _runtime_scalar(spec.db, reference=binormal)
-    return (
-        _filament_offset(gamma, normal, binormal, dn, db),
-        _filament_offset(gammadash, normal_dash, binormal_dash, dn, db),
-    )
+    _base_geometry, frame, inputs, input_tangents = _curve_filament_base_jets(spec, dofs)
+    dn = _runtime_scalar(spec.dn, reference=inputs[0])
+    db = _runtime_scalar(spec.db, reference=inputs[0])
+    return _filament_gamma_and_dash(frame, inputs, input_tangents, dn, db)
 
 
 def curve_spec_with_dofs(
