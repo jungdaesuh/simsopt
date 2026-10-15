@@ -54,11 +54,11 @@ def _static_arguments(fun, options):
             signature = None
         if signature is not None:
             signature_parameters = tuple(signature.parameters.items())
-            if argnums is None:
+            if argnums is None and argnames is not None:
                 argnums = tuple(i for i, (name, param) in enumerate(signature_parameters)
                                 if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
                                 and name in argnames)
-            else:
+            elif argnums is not None:
                 argnames = tuple(name for i, (name, param) in enumerate(signature_parameters)
                                  if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
                                  and i in argnums)

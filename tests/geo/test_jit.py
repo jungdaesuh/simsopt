@@ -34,8 +34,10 @@ Arrays = namedtuple('Arrays', ['first', 'rest'])
 
 
 class HashableArray(np.ndarray):
-    __hash__ = object.__hash__
     __eq__ = object.__eq__
+
+    def __hash__(self) -> int:
+        return object.__hash__(self)
 
 
 def _static_array():
@@ -122,7 +124,7 @@ class JitTests(unittest.TestCase):
         self.assertFalse(np.shares_memory(copied.data, masked.data))
         self.assertFalse(np.shares_memory(copied.mask, masked.mask))
         masked.data[:] = -7
-        masked.mask[:] = False
+        np.ma.getmaskarray(masked)[:] = False
         np.testing.assert_array_equal(copied.data, [2.0, 9.0])
         np.testing.assert_array_equal(copied.mask, [False, True])
         np.testing.assert_array_equal(result.mask, [False, True])
