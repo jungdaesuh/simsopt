@@ -20,9 +20,7 @@ from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from .framedcurve import (
     rotated_centroid_frame,
-    rotated_centroid_frame_dash,
     rotated_frenet_frame,
-    rotated_frenet_frame_dash,
     rotation_alpha as jaxrotation_pure,
     rotation_alphadash as jaxrotationdash_pure,
 )
@@ -436,54 +434,65 @@ def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
     return gamma, gammadash, gammadashdash
 
 
-def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
+def _curve_filament_base_jets(spec: CurveFilamentSpec, dofs):
+    """Return a filament's base-curve geometry, frame, and the frame inputs with their parameter derivatives.
+
+    The result is ``((gamma, gammadash, gammadashdash), frame, inputs,
+    input_tangents)``: ``frame(*inputs)`` is the base curve's rotated frame
+    ``(t, n, b)`` and ``input_tangents`` are the derivatives of ``inputs``
+    with respect to the curve parameter.
+    """
     base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
     alpha, alphadash = _rotation_alpha_and_dash_from_dofs(
         spec.rotation,
         spec.rotation_map,
         dofs,
     )
-
     if spec.frame_kind == "frenet":
         gamma, gammadash, gammadashdash, gammadashdashdash = (
             _curve_geometry_with_third_derivative_from_dofs(spec.base_curve, base_dofs)
         )
-        _tangent, normal, binormal = rotated_frenet_frame(
-            gamma,
-            gammadash,
-            gammadashdash,
-            alpha,
+        return (
+            (gamma, gammadash, gammadashdash),
+            rotated_frenet_frame,
+            (gamma, gammadash, gammadashdash, alpha),
+            (gammadash, gammadashdash, gammadashdashdash, alphadash),
         )
-        _tangent_dash, normal_dash, binormal_dash = rotated_frenet_frame_dash(
-            gamma,
-            gammadash,
-            gammadashdash,
-            gammadashdashdash,
-            alpha,
-            alphadash,
-        )
-    else:
-        gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
-            spec.base_curve, base_dofs
-        )
-        _tangent, normal, binormal = rotated_centroid_frame(
-            gamma,
-            gammadash,
-            alpha,
-        )
-        _tangent_dash, normal_dash, binormal_dash = rotated_centroid_frame_dash(
-            gamma,
-            gammadash,
-            gammadashdash,
-            alpha,
-            alphadash,
-        )
-    dn = _runtime_scalar(spec.dn, reference=normal)
-    db = _runtime_scalar(spec.db, reference=binormal)
+    gamma, gammadash, gammadashdash = curve_geometry_from_dofs(spec.base_curve, base_dofs)
     return (
-        gamma + dn * normal + db * binormal,
-        gammadash + dn * normal_dash + db * binormal_dash,
+        (gamma, gammadash, gammadashdash),
+        rotated_centroid_frame,
+        (gamma, gammadash, alpha),
+        (gammadash, gammadashdash, alphadash),
     )
+
+
+def _filament_offset(
+    gamma: jax.Array,
+    normal: jax.Array,
+    binormal: jax.Array,
+    dn: float | jax.Array,
+    db: float | jax.Array,
+) -> jax.Array:
+    """Apply the normal/binormal offset to the base curve, in native arithmetic order."""
+    return gamma + dn * normal + db * binormal
+
+
+def _filament_gamma_and_dash(frame, inputs, input_tangents, dn, db) -> tuple[jax.Array, jax.Array]:
+    """Return the filament ``gamma + dn * normal + db * binormal`` and, by ``jax.jvp``, its parameter derivative."""
+
+    def filament(*frame_inputs):
+        _tangent, normal, binormal = frame(*frame_inputs)
+        return _filament_offset(frame_inputs[0], normal, binormal, dn, db)
+
+    return jax.jvp(filament, inputs, input_tangents)
+
+
+def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
+    _base_geometry, frame, inputs, input_tangents = _curve_filament_base_jets(spec, dofs)
+    dn = _runtime_scalar(spec.dn, reference=inputs[0])
+    db = _runtime_scalar(spec.db, reference=inputs[0])
+    return _filament_gamma_and_dash(frame, inputs, input_tangents, dn, db)
 
 
 def curve_spec_with_dofs(
