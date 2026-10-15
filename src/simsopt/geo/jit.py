@@ -2,6 +2,7 @@ import os
 from functools import wraps
 
 import jax
+import numpy as np
 from jax import jit as jaxjit
 
 from .config import parameters
@@ -23,29 +24,37 @@ def native_jax_device():
     return jax.devices("cpu")[0]
 
 
+def _owned(value):
+    # Native caches can overwrite NumPy views while JAX still reads them.
+    return np.array(value, copy=True) if isinstance(value, np.ndarray) else value
+
+
 def jit(fun, **args):
     """Compile ``fun`` with :func:`jax.jit` for native simsopt.
 
-    Each call runs under ``jax.default_device(native_jax_device())``, so NumPy
+    Each call snapshots NumPy pytree leaves, including when jit is disabled.
+    Compiled calls run under ``jax.default_device(native_jax_device())``, so NumPy
     and other uncommitted inputs, and the results, stay on the CPU even when
     another platform such as CUDA is the default backend. Inputs committed to a
-    device keep their placement. When ``parameters['jit']`` is false, ``fun`` is
-    returned unchanged.
+    device keep their placement. When ``parameters['jit']`` is false, only the
+    input snapshots are applied before calling ``fun``.
 
     Args:
         fun (callable): Function to compile.
         **args: Keyword arguments forwarded to :func:`jax.jit`.
 
     Returns:
-        callable: The compiled function, or ``fun`` when jit is disabled.
+        callable: The input-owning wrapper, compiled when jit is enabled.
     """
-    if not parameters['jit']:
-        return fun
-    compiled = jaxjit(fun, **args)
+    use_jit = parameters['jit']
+    run = jaxjit(fun, **args) if use_jit else fun
 
     @wraps(fun)
     def on_native_device(*fun_args, **fun_kwargs):
+        fun_args, fun_kwargs = jax.tree_util.tree_map(_owned, (fun_args, fun_kwargs))
+        if not use_jit:
+            return run(*fun_args, **fun_kwargs)
         with jax.default_device(native_jax_device()):
-            return compiled(*fun_args, **fun_kwargs)
+            return run(*fun_args, **fun_kwargs)
 
     return on_native_device
