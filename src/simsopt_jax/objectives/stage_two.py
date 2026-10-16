@@ -738,10 +738,15 @@ def stage_two_geometry(
     # current's would otherwise be a symbolic zero) without coupling any
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
-    # (gamma, gammadash, gammadashdash) of a curve, keyed by the curve of the
-    # coil, or of the pack's first coil for filaments; a pack's filaments
-    # (gamma, gammadash) are evaluated with it and keyed by their own curves.
-    curve_geometry: dict[int, tuple[jax.Array, ...]] = {}
+    # Ordinary geometry is keyed by curve identity; pack centerlines retain
+    # the first filament's identity, with offsets cached per filament below.
+    curve_geometry = _ordinary_curve_geometry(
+        tuple(
+            coil.curve
+            for coil in coil_specs
+            if not isinstance(coil.curve, CurveFilamentSpec)
+        )
+    )
     filament_geometry: dict[int, tuple[jax.Array, jax.Array]] = {}
     coils: list[tuple[jax.Array, jax.Array, jax.Array]] = []
     centerlines: list[tuple[jax.Array, ...]] = []
@@ -766,8 +771,6 @@ def stage_two_geometry(
             geometry = curve_geometry[id(source)]
             gamma, gammadash = filament_geometry[id(curve)]
         else:
-            if id(curve) not in curve_geometry:
-                curve_geometry[id(curve)] = curve_geometry_from_dofs(curve, curve.dofs)
             geometry = curve_geometry[id(curve)]
             gamma, gammadash = geometry[0], geometry[1]
         gamma, gammadash, current = apply_coil_symmetry(
