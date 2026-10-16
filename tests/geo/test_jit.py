@@ -213,19 +213,6 @@ class JitTests(unittest.TestCase):
                 self.assertEqual(len(traced_constants), 1)
                 self.assertIs(traced_constants[0], constant)
 
-    def test_static_arguments_without_an_inspectable_signature(self):
-        class AddStatic:
-            __signature__ = 'unavailable'
-
-            def __call__(self, value, constant):
-                return value + constant[0]
-
-        constant = _static_array()
-        with mock.patch.dict(parameters, {'jit': True}):
-            wrapped = jit(AddStatic(), static_argnums=1)
-        for _ in range(3):
-            self.assertEqual(float(wrapped(2.0, constant)), 5.0)
-
     def test_keyword_only_static_subtree_is_not_copied(self):
         traced_options = []
 

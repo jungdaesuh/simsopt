@@ -2,6 +2,7 @@ import inspect
 import operator
 import os
 from functools import wraps
+from numbers import Integral
 
 import jax
 import numpy as np
@@ -37,31 +38,24 @@ def _static_arguments(fun, options):
     argnames = options.get('static_argnames')
     compile_options = dict(options)
     if argnums is not None:
-        try:
-            argnums = (operator.index(argnums),)
-        except TypeError:
-            argnums = tuple(map(operator.index, argnums))
+        argnums = tuple(map(operator.index,
+                            (argnums,) if isinstance(argnums, Integral) else argnums))
         compile_options['static_argnums'] = argnums
     if argnames is not None:
         argnames = (argnames,) if isinstance(argnames, str) else tuple(argnames)
         compile_options['static_argnames'] = argnames
 
     if (argnums is None) != (argnames is None):
-        # Like JAX, signature-less callables retain only explicit selectors.
-        try:
-            signature = inspect.signature(fun)
-        except (TypeError, ValueError):
-            signature = None
-        if signature is not None:
-            signature_parameters = tuple(signature.parameters.items())
-            if argnums is None and argnames is not None:
-                argnums = tuple(i for i, (name, param) in enumerate(signature_parameters)
-                                if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
-                                and name in argnames)
-            elif argnums is not None:
-                argnames = tuple(name for i, (name, param) in enumerate(signature_parameters)
-                                 if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
-                                 and i in argnums)
+        # As in JAX, one selector implies the other through the signature.
+        signature_parameters = tuple(inspect.signature(fun).parameters.items())
+        if argnames is not None:
+            argnums = tuple(i for i, (name, param) in enumerate(signature_parameters)
+                            if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                            and name in argnames)
+        elif argnums is not None:
+            argnames = tuple(name for i, (name, param) in enumerate(signature_parameters)
+                             if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                             and i in argnums)
     return frozenset(argnums or ()), frozenset(argnames or ()), compile_options
 
 
