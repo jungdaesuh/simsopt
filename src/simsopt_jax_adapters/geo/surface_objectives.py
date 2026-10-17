@@ -33,7 +33,7 @@ from simsopt_jax.core.quasisymmetry import non_quasi_symmetric_ratio
 from simsopt_jax.runtime.host_boundary import host_tree
 from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
 
-from .boozer_surface import JaxBoozerSurface
+from .boozer_surface import JaxBoozerSurface, _coil_derivative
 from .surface_specs import surface_spec_from_surface
 
 __all__ = ["JaxNonQuasiSymmetricRatio"]
@@ -170,9 +170,7 @@ class JaxNonQuasiSymmetricRatio(Optimizable):
         # Native's adjoint: dJ/diota = dJ/dG = 0 after the surface DOFs.
         res = booz_surf.res
         P, L, U = res["PLU"]
-        direct = self.biotsavart.coil_cotangents_to_derivative(
-            dJ_by_dcoils.field_inputs(), dJ_by_dcoils.coil_index_lists()
-        )
+        direct = _coil_derivative(self.biotsavart, dJ_by_dcoils)
         dJ_ds = np.zeros(L.shape[0])
         dJ_ds[: dJ_by_dsurface.size] = dJ_by_dsurface
         adj = forward_backward(P, L, U, dJ_ds)
