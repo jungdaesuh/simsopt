@@ -1044,6 +1044,76 @@ class TestBoozerResidualJax(JaxTestCase):
                 replace(exact, constraint_weight=exact.targetlabel), x, optimize_G=True
             )
 
+    def test_penalty_gradient_taylor(self):
+        """The penalty gradient matches forward differences of the penalty at shrinking
+        steps, as native ``test_boozer_penalty_constraints_gradient`` checks."""
+        for name in _PENALTY_CASES:
+            with self.subTest(name=name), self.case():
+                self._case_penalty_gradient_taylor(name)
+
+    def _case_penalty_gradient_taylor(self, name):
+        """Run one row with case-local objects released before runtime cleanup."""
+        case = _PENALTY_CASES[name]
+        setup = _setup(case.surface, case.stellsym, case.label)
+        problem = boozer_problem(
+            setup.field, setup.surface, setup.label, setup.target, 11.1232
+        )
+        x = _decision(setup.surface, case.optimize_G)
+        direction = parity_rng(1).uniform(size=x.size) - 0.5
+
+        def penalty(at, derivatives=0):
+            return boozer_penalty_constraints(
+                problem,
+                place_float64(at, problem.targetlabel),
+                derivatives=derivatives,
+                optimize_G=case.optimize_G,
+                weight_inv_modB=case.weight_inv_modB,
+            )
+
+        base, gradient = (host_array(output) for output in penalty(x, derivatives=1))
+        analytic = gradient @ direction
+        previous_error = 1e9
+        for step in np.power(2.0, -np.arange(7, 20)):
+            difference = (host_array(penalty(x + step * direction)) - base) / step
+            error = abs(difference - analytic) / abs(analytic)
+            self.assertLess(error, 0.55 * previous_error)
+            previous_error = error
+
+    def test_exact_constraints_jacobian_taylor(self):
+        """The Jacobian of the BoozerExact optimality conditions matches forward
+        differences of ``res`` at shrinking steps, as native
+        ``test_boozer_constrained_jacobian`` checks, with nonzero multipliers."""
+        for name in _EXACT_CONSTRAINT_CASES:
+            with self.subTest(name=name), self.case():
+                self._case_exact_constraints_jacobian_taylor(name)
+
+    def _case_exact_constraints_jacobian_taylor(self, name):
+        """Run one row with case-local objects released before runtime cleanup."""
+        case = _EXACT_CONSTRAINT_CASES[name]
+        setup = _setup(case.surface, case.stellsym, case.label)
+        problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
+        xl = _decision(setup.surface, case.optimize_G, (0.37, -0.23))
+        direction = parity_rng(1).uniform(size=xl.size) - 0.5
+
+        def constraints(at, derivatives=0):
+            return boozer_exact_constraints(
+                problem,
+                place_float64(at, problem.targetlabel),
+                derivatives=derivatives,
+                optimize_G=case.optimize_G,
+            )
+
+        base, jacobian = (
+            host_array(output) for output in constraints(xl, derivatives=1)
+        )
+        analytic = jacobian @ direction
+        previous_error = 1e9
+        for step in np.power(2.0, -np.arange(7, 20)):
+            difference = (host_array(constraints(xl + step * direction)) - base) / step
+            error = np.linalg.norm(difference - analytic)
+            self.assertLess(error, 0.55 * previous_error)
+            previous_error = error
+
     def test_hessians_taylor(self):
         """Boozer Hessians converge from native gradients and Jacobians at shrinking steps."""
         setup = _setup("xyz", False, "toroidal_flux")
