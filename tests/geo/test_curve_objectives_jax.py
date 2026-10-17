@@ -421,9 +421,9 @@ class TestCurveObjectivesJax(JaxTestCase):
     def test_shortest_distances_match_native(self):
         """Native scans all pairs only when no selected pair is a candidate.
 
-            The close pair (2, 1) is outside the pairs ``j < num_basecurves = 1``: it
-            sets the shortest distance only when the selected pairs are all far.
-            """
+        The close pair (2, 1) is outside the pairs ``j < num_basecurves = 1``: it
+        sets the shortest distance only when the selected pairs are all far.
+        """
         for case_id_0, threshold in zip(["no_candidates", "candidates"], [0.1, 5.0], strict=True):
             with self.subTest(case_id_0=case_id_0, threshold=threshold), self.case() as patches:
                 self._case_shortest_distances_match_native(threshold, patches)
@@ -457,6 +457,19 @@ class TestCurveObjectivesJax(JaxTestCase):
         native.recompute_bell()
         _assert_matches_native_including_nans("num_basecurves=3", native, adapter, active=True)
         self.assertTrue(adapter.J() > value, 'adapter.J() > value')
+
+    def test_downsampled_distance_of_grids_with_one_sampled_count_matches_native(self):
+        """Grids of 24 and 23 points both give 12 samples at stride 2; gradients reach every point.
+
+        The adapter stacks full grids and samples inside the differentiated program,
+        so the two grids are separate classes while native evaluates the same samples.
+        """
+        base, curves = _curves()
+        odd_twin = CurveXYZFourier(np.linspace(0, 1, 23, endpoint=False) + 0.013, 3, dofs=base[1].dofs)
+        curves = curves + [odd_twin]
+        native = CurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base), downsample=2)
+        adapter = JaxCurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base), downsample=2)
+        _assert_matches_native_including_nans("downsample=2 with 24- and 23-point grids", native, adapter, active=True)
 
     def test_distance_evaluations_share_one_native_candidate_search(self):
         """Value, gradient and shortest-distance calls reuse one native search."""

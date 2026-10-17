@@ -12,6 +12,7 @@ with optional_jax_imports():
     from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
     from simsopt_jax.core import _device_scalars
     from simsopt_jax.core._device_scalars import staged_like
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
 
 
 import os
@@ -382,6 +383,75 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         environment = dict(os.environ)
         environment.update({"JAX_PLATFORMS": "cuda,cpu", "JAX_ENABLE_X64": "1"})
         completed = _run_placement_child("cuda_two_backend", environment)
+        self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
+
+    def test_explicit_cross_backend_moves_pass_a_disallow_guard(self):
+        """Under ``disallow_host_transfers``, explicit moves of a GPU array and a pytree to the CPU and back keep their values."""
+        if not any(device.platform == "gpu" for device in jax.devices()):
+            self.skipTest("CUDA device required for cross-backend placement")
+        gpu = jax.devices("gpu")[0]
+        cpu = jax.devices("cpu")[0]
+        array = np.arange(5.0)
+        pair = np.ones((2, 3))
+        on_gpu = jax.device_put(array, gpu)
+        tree = {"array": on_gpu, "pair": (jax.device_put(pair, gpu), np.arange(3))}
+        with disallow_host_transfers():
+            array_on_cpu = dtypes.runtime_device_put_tree(on_gpu, device=cpu)
+            tree_on_cpu = dtypes.runtime_device_put_tree(tree, device=cpu)
+            array_back = dtypes.runtime_device_put_tree(array_on_cpu, device=gpu)
+            tree_back = dtypes.runtime_device_put_tree(tree_on_cpu, device=gpu)
+        for placed, device in [
+            (array_on_cpu, cpu),
+            (tree_on_cpu, cpu),
+            (array_back, gpu),
+            (tree_back, gpu),
+        ]:
+            for leaf in jax.tree.leaves(placed):
+                self.assertEqual(leaf.devices(), {device})
+                self.assertTrue(leaf.committed)
+        for placed in (array_on_cpu, array_back):
+            np.testing.assert_array_equal(np.asarray(placed), array)
+        for placed in (tree_on_cpu, tree_back):
+            np.testing.assert_array_equal(np.asarray(placed["array"]), array)
+            np.testing.assert_array_equal(np.asarray(placed["pair"][0]), pair)
+            np.testing.assert_array_equal(np.asarray(placed["pair"][1]), np.arange(3))
+
+    def test_runtime_placement_moves_a_gpu_array_to_a_cpu_policy_under_a_disallow_guard(
+        self,
+    ):
+        """A jax-cpu policy in a CUDA process moves a committed GPU array to the CPU under a disallow guard."""
+        if not any(device.platform == "gpu" for device in jax.devices()):
+            self.skipTest("CUDA device required for cross-backend placement")
+        gpu = jax.devices("gpu")[0]
+        cpu = jax.devices("cpu")[0]
+        values = np.arange(4.0)
+        on_gpu = jax.device_put(values, gpu)
+        set_backend("jax_cpu_parity", configure_runtime=False)
+        with disallow_host_transfers():
+            placed = dtypes.runtime_device_put_tree({"x": on_gpu})["x"]
+        self.assertEqual(placed.devices(), {cpu})
+        np.testing.assert_array_equal(np.asarray(placed), values)
+
+    def test_sharded_cross_backend_moves_pass_a_disallow_guard(self):
+        """A GPU array moves to a two-CPU sharding and back under a disallow guard, values unchanged."""
+        if not any(device.platform == "gpu" for device in jax.devices()):
+            self.skipTest("CUDA device required for cross-backend placement")
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "JAX_PLATFORMS": "cuda,cpu",
+                "JAX_ENABLE_X64": "1",
+                "XLA_FLAGS": " ".join(
+                    flag
+                    for flag in (
+                        environment.get("XLA_FLAGS"),
+                        "--xla_force_host_platform_device_count=2",
+                    )
+                    if flag
+                ),
+            }
+        )
+        completed = _run_placement_child("cuda_sharded_cross_backend", environment)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_commit_in_place_commits_where_the_array_lives(self):

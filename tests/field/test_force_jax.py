@@ -131,6 +131,23 @@ def _assert_matches_native(name: str, native: Optimizable, adapter: Optimizable)
     )
 
 
+def _assert_centered_taylor_ratio(objective: Optimizable, direction: np.ndarray, name: str) -> None:
+    """Centered differences at steps ``0.5**10 .. 0.5**17`` shrink the relative error by 0.31 per halving."""
+    x0 = np.array(objective.x, dtype=float)
+    derivative = objective.dJ() @ direction
+    assert abs(derivative) > 0.0, f"{name} must have a nonzero directional derivative"
+    previous_error = 100
+    for exponent in range(10, 18):
+        step = 0.5 ** exponent
+        objective.x = x0 + step * direction
+        plus = objective.J()
+        objective.x = x0 - step * direction
+        error = abs((plus - objective.J()) / (2 * step) - derivative) / abs(derivative)
+        np.testing.assert_array_less(error, 0.31 * previous_error, err_msg=f"{name} at step 0.5**{exponent}")
+        previous_error = error
+    objective.x = x0
+
+
 
 
 
@@ -468,39 +485,12 @@ class TestForceJax(JaxTestCase):
         adapter = JaxLpCurveForce(
             targets, coils[:4 * _NCOILS], coils[4 * _NCOILS:], p=2.5, threshold=1e-3,
         )
-        x0 = np.array(adapter.x, dtype=float)
-        direction = np.ones_like(x0)
-        derivative = adapter.dJ() @ direction
-        self.assertGreater(abs(derivative), 0.0)
-        previous_error = 100
-        for exponent in range(10, 18):
-            step = 0.5 ** exponent
-            adapter.x = x0 + step * direction
-            plus = adapter.J()
-            adapter.x = x0 - step * direction
-            error = abs((plus - adapter.J()) / (2 * step) - derivative) / abs(derivative)
-            np.testing.assert_array_less(error, 0.31 * previous_error)
-            previous_error = error
-        adapter.x = x0
+        _assert_centered_taylor_ratio(adapter, np.ones(len(adapter.x)), "LpCurveForce(p=2.5, threshold=1e-3)")
 
-    def test_net_fluxes_gradient_taylor(self):
-        """NetFluxes centered differences converge to dJ at second order, with and without downsampling."""
-        _, coils = _coils()
-        target, sources = coils[1], coils[:4 * _NCOILS]
-        for downsample in (1, 4):
-            with self.subTest(downsample=downsample):
-                adapter = JaxNetFluxes(target, sources, downsample=downsample)
+    def test_force_gradients_taylor(self):
+        """Every force, torque, energy and flux objective converges to dJ at second order under centered differences."""
+        for name, _, adapter in _objective_pairs(shared_dofs=True):
+            with self.subTest(name=name):
                 x0 = np.array(adapter.x, dtype=float)
                 direction = np.random.default_rng(23).standard_normal(x0.shape) * np.maximum(np.abs(x0), 1.0)
-                derivative = adapter.dJ() @ direction
-                self.assertGreater(abs(derivative), 0.0)
-                previous_error = 100
-                for exponent in range(10, 18):
-                    step = 0.5 ** exponent
-                    adapter.x = x0 + step * direction
-                    plus = adapter.J()
-                    adapter.x = x0 - step * direction
-                    error = abs((plus - adapter.J()) / (2 * step) - derivative) / abs(derivative)
-                    np.testing.assert_array_less(error, 0.31 * previous_error)
-                    previous_error = error
-                adapter.x = x0
+                _assert_centered_taylor_ratio(adapter, direction, name)
