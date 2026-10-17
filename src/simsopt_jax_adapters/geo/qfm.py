@@ -147,12 +147,16 @@ class JaxQfmSurface(GSONable):
         self.name = str(id(self))
         self._native_label_field: tuple[BiotSavart, tuple[int, ...], JaxBiotSavart] | None = None
 
-    def _label_spec(self) -> QfmLabelSpec:
+    def _label_spec(self, qfm_spec: QfmSpec | None = None) -> QfmLabelSpec:
         label = self.label
         kinds = {Volume: "volume", Area: "area", ToroidalFlux: "toroidal_flux"}
         if type(label) not in kinds:
             raise TypeError("JaxQfmSurface supports native Volume, Area and ToroidalFlux labels.")
-        surface = surface_spec_from_surface(label.surface)
+        # Reuse the snapshot of qfm_spec when the label shares the QFM surface.
+        if qfm_spec is not None and label.surface is self.qfm.surface:
+            surface = qfm_spec.surface
+        else:
+            surface = surface_spec_from_surface(label.surface)
         coils = None
         points = None
         idx = 0
@@ -274,7 +278,7 @@ class JaxQfmSurface(GSONable):
         assert derivatives in [0, 1]
         self.surface.x = x
         spec = self.qfm._spec()
-        label = self._label_spec()
+        label = self._label_spec(spec)
         placed_constraint_weight = explicit_device_array(constraint_weight, dtype=np.float64, reference=label.surface.quadpoints_phi)
         function = qfm_penalty_constraints_value_and_grad if derivatives else qfm_penalty_constraints
         return _host_result(function(spec, label, self._target(label), placed_constraint_weight, self._label_value(label)))
