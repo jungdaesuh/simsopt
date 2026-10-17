@@ -26,7 +26,6 @@ from ._device_scalars import device_one as _device_one
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
     axis0_entries as _axis0_entries,
-    eye as _eye,
     scalar_like as _scalar_like,
     zeros as _zeros,
 )
@@ -48,16 +47,13 @@ __all__ = [
 _MU0_OVER_4PI = 1e-7
 
 
-# ── Config reader (monkeypatchable by tests) ──────────────────────────
+# ── Config reader ─────────────────────────────────────────────────────
 
 
 def _read_tuning_config() -> tuple:
     """Return ``(coil_chunk_size, quadrature_block_size, point_chunk_size)``.
 
-    Single indirection point for all tuning knobs consumed by the kernel
-    factory.  Tests override this one function (+ ``invalidate_kernel_cache``)
-    instead of patching three separate stubs.
-
+    The forward and pullback kernel factories are keyed on these values.
     Resolves the backend config once to avoid repeated mode/policy lookups.
     """
     fkt = get_field_kernel_tuning()
@@ -193,12 +189,12 @@ def _coil_chunk_reduce(
             (
                 _slice_coil_chunk(gammas, 0, chunk_size),
                 _slice_coil_chunk(gammadashs, 0, chunk_size),
-                lax.dynamic_slice(currents, (0,), (chunk_size,)),
+                _slice_coil_chunk(currents, 0, chunk_size),
             ),
             (
                 _slice_coil_chunk(gammas, chunk_size, second_chunk_size),
                 _slice_coil_chunk(gammadashs, chunk_size, second_chunk_size),
-                lax.dynamic_slice(currents, (chunk_size,), (second_chunk_size,)),
+                _slice_coil_chunk(currents, chunk_size, second_chunk_size),
             ),
             reduce_chunk,
         )
@@ -212,11 +208,7 @@ def _coil_chunk_reduce(
         start = chunk_index * chunk_size
         chunk_gammas = _slice_coil_chunk(gammas, start, chunk_size)
         chunk_gammadashs = _slice_coil_chunk(gammadashs, start, chunk_size)
-        chunk_currents = lax.dynamic_slice(
-            currents,
-            (start,),
-            (chunk_size,),
-        )
+        chunk_currents = _slice_coil_chunk(currents, start, chunk_size)
         return _tree_add(
             acc,
             reduce_chunk(chunk_gammas, chunk_gammadashs, chunk_currents),
@@ -600,7 +592,8 @@ def _make_kernel(
             )
         per_point = hessian_point
 
-    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN and integrand_key is _Integrand.B:
+    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN:
+        # Fused B and dB/dX kernel, built for ``_Integrand.B`` only.
 
         def B_and_jacobian_point(x, gammas, gammadashs, currents):
             return _coil_chunk_reduce(
@@ -621,15 +614,6 @@ def _make_kernel(
                 ),
             )
         per_point = B_and_jacobian_point
-
-    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN:
-
-        def value_and_jacobian_point(x, gammas, gammadashs, currents):
-            f = lambda xx: one_point(xx, gammas, gammadashs, currents)
-            primals, tangents_fn = jax.linearize(f, x)
-            basis = _eye(3, dtype=jnp.float64)
-            return primals, jax.vmap(tangents_fn, in_axes=(0,))(basis)
-        per_point = value_and_jacobian_point
 
     kernel_point_cs = (
         hessian_point_chunk_size(point_cs)
@@ -698,9 +682,8 @@ def _get_B_vjp_kernel():
 def invalidate_kernel_cache() -> None:
     """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
-    Both the forward and the pullback kernel factories are cleared. Call after
-    overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``) to ensure
-    the next ``biot_savart_*`` call rebuilds with the new config.
+    Both the forward and the pullback kernel factories are cleared, so the
+    next ``biot_savart_*`` call rebuilds its kernel.
     """
     _make_kernel.cache_clear()
     _make_B_vjp_kernel.cache_clear()
