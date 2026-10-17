@@ -64,20 +64,24 @@ def _ncsx_case(case, fixed):
     return (field, native, curves, currents, seeds)
 
 
-def _central_difference(native, owner: Optimizable, seed, step):
+def _contracted(native, points, seed):
+    # Native fields do not receive recompute notifications from all-fixed graphs.
+    native.set_points(points)
+    return np.sum(native.d2B_by_dXdX() * seed)
+
+
+def _central_difference(native, owner: Optimizable, seed, step, directions=None):
+    """Central differences of the contracted Hessian along ``directions`` (default: each DOF)."""
     original = cast(np.ndarray, owner.local_full_x).copy()
     points = native.get_points_cart().copy()
-    gradient = np.empty_like(original)
-    for index in range(len(original)):
-        direction = np.zeros_like(original)
-        direction[index] = step
-        owner.local_full_x = original + direction
-        # Native fields do not receive recompute notifications from all-fixed graphs.
-        native.set_points(points)
-        plus = np.sum(native.d2B_by_dXdX() * seed)
-        owner.local_full_x = original - direction
-        native.set_points(points)
-        minus = np.sum(native.d2B_by_dXdX() * seed)
+    if directions is None:
+        directions = np.eye(original.size)
+    gradient = np.empty(len(directions))
+    for index, direction in enumerate(directions):
+        owner.local_full_x = original + step * direction
+        plus = _contracted(native, points, seed)
+        owner.local_full_x = original - step * direction
+        minus = _contracted(native, points, seed)
         gradient[index] = (plus - minus) / (2 * step)
     owner.local_full_x = original
     native.set_points(points)
@@ -128,15 +132,11 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
                 # Current dependence is affine, so no truncation ratio is expected.
                 for exponent in range(5, 10):
                     step = 0.5**exponent
-                    owner.local_full_x = original + step * direction
-                    native.set_points(points)
-                    plus = np.sum(native.d2B_by_dXdX() * seeds[2])
-                    owner.local_full_x = original - step * direction
-                    native.set_points(points)
-                    minus = np.sum(native.d2B_by_dXdX() * seeds[2])
                     np.testing.assert_allclose(
                         analytic,
-                        (plus - minus) / (2 * step),
+                        _central_difference(
+                            native, owner, seeds[2], step, direction[None]
+                        )[0],
                         rtol=_FD_RTOL,
                         atol=1e-12 * abs(analytic),
                         err_msg=f"{case}/{fixed}: current Hessian contraction at step {step}",
@@ -150,9 +150,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
                 for exponent in range(5, 10):
                     step = 0.5**exponent
                     owner.local_full_x = original + step * direction
-                    # All-fixed graphs need explicit native cache invalidation.
-                    native.set_points(points)
-                    value = np.sum(native.d2B_by_dXdX() * seeds[2])
+                    value = _contracted(native, points, seeds[2])
                     next_error = np.linalg.norm((value - baseline) / step - analytic)
                     self.assertLess(
                         next_error,
@@ -167,13 +165,13 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         """Hessian VJPs match native finite differences for free and fixed coil DOFs."""
         for fixed in ["free", "partial", "all"]:
             for case in ["one", "ncsx"]:
-                with self.subTest(fixed=fixed, case=case), self.case() as patches:
+                with self.subTest(fixed=fixed, case=case), self.case():
                     self._case_gradgradb_vjp_matches_native_curve_and_current_central_differences(
-                        case, fixed, patches
+                        case, fixed
                     )
 
     def _case_gradgradb_vjp_matches_native_curve_and_current_central_differences(
-        self, case, fixed, patches: ExitStack
+        self, case, fixed
     ):
         """Hessian VJPs match native finite differences for free and fixed coil DOFs."""
         set_backend("jax", device="cpu", intent="parity")
@@ -189,11 +187,9 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
             atol=_DIRECT_ATOL,
         )
         derivatives = field.B_and_dB_and_d2B_vjp(*seeds)
-        self.assertTrue(
-            len(derivatives) == 3
-            and all((isinstance(value, Derivative) for value in derivatives)),
-            "len(derivatives) == 3 and all((isinstance(value, Derivative) for value in derivatives))",
-        )
+        self.assertEqual(len(derivatives), 3)
+        for value in derivatives:
+            self.assertIsInstance(value, Derivative)
         derivative = derivatives[2]
         partials = cast(Derivative, derivative(field, as_derivative=True))
         for owner in [*curves, *currents]:
@@ -215,17 +211,15 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         )
         gradient = np.asarray(derivative(field))
         np.testing.assert_allclose(projected, gradient, rtol=1e-12, atol=1e-14)
-        self.assertEqual(len(gradient), len(native.x), "len(gradient) == len(native.x)")
+        self.assertEqual(len(gradient), len(native.x))
 
     def test_first_two_slots_equal_existing_B_and_dB_vjp(self):
         """Adding the Hessian slot preserves both existing field and gradient VJPs."""
         for case in ["one", "ncsx"]:
-            with self.subTest(case=case), self.case() as patches:
-                self._case_first_two_slots_equal_existing_B_and_dB_vjp(case, patches)
+            with self.subTest(case=case), self.case():
+                self._case_first_two_slots_equal_existing_B_and_dB_vjp(case)
 
-    def _case_first_two_slots_equal_existing_B_and_dB_vjp(
-        self, case, patches: ExitStack
-    ):
+    def _case_first_two_slots_equal_existing_B_and_dB_vjp(self, case):
         """Adding the Hessian slot preserves both existing field and gradient VJPs."""
         field, _, _, _, seeds = _ncsx_case(case, "partial")
         expected = field.B_and_dB_vjp(*seeds[:2])
@@ -268,22 +262,16 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         _set_reverse_tile(patches, 4)
         pullback = field.d2B_by_dXdX_pullback_native(seed)
         self.assertEqual(
-            pullback.coil_indices,
-            field.coil_set_spec().coil_index_lists(),
-            "pullback.coil_indices == field.coil_set_spec().coil_index_lists()",
+            pullback.coil_indices, field.coil_set_spec().coil_index_lists()
         )
-        for actual, reference in zip(
+        for actual, untiled, dense in zip(
             jax.tree.leaves(pullback.d_coil_arrays),
             jax.tree.leaves(expected),
-            strict=True,
-        ):
-            np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-14)
-        for actual, reference in zip(
-            jax.tree.leaves(pullback.d_coil_arrays),
             jax.tree.leaves(direct),
             strict=True,
         ):
-            np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-14)
+            np.testing.assert_allclose(actual, untiled, rtol=1e-12, atol=1e-14)
+            np.testing.assert_allclose(actual, dense, rtol=1e-12, atol=1e-14)
 
     def test_nonsymmetric_seed_contracts_native_ordered_hessian_current_gradient(self):
         """Mixed spatial partials commute; this oracle detects component-axis mixups."""
@@ -323,14 +311,10 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         first = field.d2B_by_dXdX_pullback_native(seeds[2])
         jax.block_until_ready(first.d_coil_arrays)
         compiled_count = kernel._cache_size()
-        self.assertEqual(compiled_count, 1, "compiled_count == 1")
+        self.assertEqual(compiled_count, 1)
         second = field.d2B_by_dXdX_pullback_native(-2 * seeds[2])
         jax.block_until_ready(second.d_coil_arrays)
-        self.assertEqual(
-            kernel._cache_size(),
-            compiled_count,
-            "kernel._cache_size() == compiled_count",
-        )
+        self.assertEqual(kernel._cache_size(), compiled_count)
         for actual, original in zip(
             jax.tree.leaves(second.d_coil_arrays),
             jax.tree.leaves(first.d_coil_arrays),
@@ -359,7 +343,7 @@ class TestBiotsavartGradgradbVjp(JaxTestCase):
         for observed, reference in zip(
             jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
         ):
-            self.assertEqual(observed.dtype, jnp.float64, "observed.dtype == float64")
+            self.assertEqual(observed.dtype, jnp.float64)
             np.testing.assert_allclose(
                 observed,
                 reference,
