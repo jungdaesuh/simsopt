@@ -65,7 +65,6 @@ _SYNCED_RUNTIME_ENV_VALUES = (
     (_TF_GPU_ALLOCATOR_OVERRIDE_ENV, "tf_gpu_allocator"),
     (_BACKEND_ENV, "backend"),
     (_PLATFORM_ENV, "jax_platform"),
-    (_JAX_PLATFORMS_ENV, "jax_platforms"),
 )
 VALID_BACKEND_MODES: tuple[BackendMode, ...] = (
     "native_cpu",
@@ -375,18 +374,23 @@ def _runtime_jax_platform_value(platform: str) -> str:
 _CUDA_WITH_CPU_FALLBACK_PLATFORMS = "cuda,cpu"
 
 
-def _runtime_jax_platforms_value(platform: str) -> str:
+def _runtime_jax_platforms_value(platform: str, requested_platforms: str | None) -> str:
+    """The ``jax_platforms`` value that starts ``platform`` as JAX's default.
+
+    CUDA keeps the CPU backend next to it, where native simsopt runs its
+    jitted kernels, unless the caller's own ``JAX_PLATFORMS``
+    (``requested_platforms``) lists cuda without cpu.
+    """
     if platform != "cuda":
         return _runtime_jax_platform_value(platform)
-    requested_platforms = _optional_env_value(_JAX_PLATFORMS_ENV)
     requested_parts = (
         ()
         if requested_platforms is None
         else tuple(part.strip().lower() for part in requested_platforms.split(","))
     )
-    if "cuda" in requested_parts and "cpu" in requested_parts:
-        return _CUDA_WITH_CPU_FALLBACK_PLATFORMS
-    return _runtime_jax_platform_value(platform)
+    if "cuda" in requested_parts and "cpu" not in requested_parts:
+        return _runtime_jax_platform_value(platform)
+    return _CUDA_WITH_CPU_FALLBACK_PLATFORMS
 
 
 def _runtime_jax_backend_name(platform: str) -> str:
@@ -602,8 +606,6 @@ def _runtime_env_value(attribute_name: str, value: object) -> str:
         "xla_gpu_preallocate",
     }:
         return "1" if bool(value) else "0"
-    if attribute_name == "jax_platforms":
-        return _runtime_jax_platforms_value(str(value))
     if attribute_name == "jax_platform":
         return _runtime_jax_platform_value(str(value))
     return str(value)
