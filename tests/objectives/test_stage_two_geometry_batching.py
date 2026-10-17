@@ -266,7 +266,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
                 self.assertFalse(np.allclose(actual[0][0], actual[0][1]))
 
     def test_current_derivatives_do_not_couple_nonfinite_geometry(self) -> None:
-        """Current JVPs and VJPs stay zero when a geometry tangent or cotangent is infinite."""
+        """Infinite geometry tangents do not reach currents, and infinite current cotangents do not reach geometry DOFs."""
         for geometry_function in (
             stage_two_coil_geometry,
             _ordinary_stage_two_geometry,
