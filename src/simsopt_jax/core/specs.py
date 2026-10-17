@@ -440,15 +440,6 @@ class CoilGroupSpec:
         """
         return self.gammas, self.gammadashs, self.currents
 
-    def as_grouped_data(self) -> tuple[jax.Array, jax.Array, jax.Array, list[int]]:
-        """Return kernel inputs together with original coil indices.
-
-        Returns:
-            tuple: Stored arrays of shapes (C, Q, 3), (C, Q, 3), (C,), followed by
-                a new list[int] of original coil indices.
-        """
-        return self.gammas, self.gammadashs, self.currents, list(self.coil_indices)
-
 
 @pytree_dataclass(data=("groups",), meta=())
 class GroupedCoilSetSpec:
@@ -478,17 +469,6 @@ class GroupedCoilSetSpec:
                 matching row order.
         """
         return tuple(group.coil_indices for group in self.groups)
-
-    def as_grouped_data(
-        self,
-    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, list[int]], ...]:
-        """Return grouped kernel inputs and original coil indices.
-
-        Returns:
-            tuple[tuple]: Array triples of shapes (C, Q, 3), (C, Q, 3), (C,) and
-                new index lists, one tuple per group.
-        """
-        return tuple(group.as_grouped_data() for group in self.groups)
 
 
 RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
