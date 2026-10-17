@@ -630,9 +630,7 @@ class JaxBoozerSurface(Optimizable):
                 f"||residual||_inf = {np.linalg.norm(res['residual'], ord=np.inf):.3e}",
                 flush=True,
             )
-        self.res = res
-        self.need_to_run_code = False
-        return res
+        return self._store(res, iota, G, with_surface=True)
 
 
 def _coil_derivative(field: JaxBiotSavart, cotangents) -> Derivative:
@@ -752,7 +750,7 @@ class JaxBoozerResidual(Optimizable):
             boozer_problem(self.biotsavart, self.in_surface, booz_surf.label, booz_surf.targetlabel, self.constraint_weight),
             surface=surface_spec_from_surface(self.surface),
         )
-        x = np.concatenate((self.surface.get_dofs(), [iota] if G is None else [iota, G]))
+        x = booz_surf._decision_vector(iota, G)
         value, dJ_dx, dJ_dcoils = boozer_residual_objective(
             problem, _place(x, problem), optimize_G=G is not None, weight_inv_modB=weight_inv_modB
         )
