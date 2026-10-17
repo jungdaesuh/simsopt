@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
+from unittest_jax_support import (
+    JAX_IMPORT_ERROR,
+    JaxTestCase,
+    jax_compilations,
+    optional_jax_imports,
+    parity_default_device,
+)
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -25,21 +31,14 @@ with optional_jax_imports():
 from unittest import mock
 import os
 
-from unittest_jax_support import jax_compilations, parity_default_device
-
 from copy import copy
-from typing import cast
 
 import numpy as np
 
 
 if JAX_IMPORT_ERROR is None:
     _SURFACES = [SurfaceRZFourier, SurfaceXYZFourier, SurfaceXYZTensorFourier]
-if JAX_IMPORT_ERROR is None:
     _LABELS = [Volume, Area, ToroidalFlux]
-
-
-if JAX_IMPORT_ERROR is None:
 
     def _pair(
         surface_class=SurfaceRZFourier,
@@ -86,9 +85,7 @@ if JAX_IMPORT_ERROR is None:
         for surface in surfaces:
             if label_class is ToroidalFlux:
                 labels.append(
-                    cast(type[ToroidalFlux], label_class)(
-                        surface, BiotSavart(field.coils), idx=-1, **options
-                    )
+                    label_class(surface, BiotSavart(field.coils), idx=-1, **options)
                 )
             else:
                 labels.append(label_class(surface, **options))
@@ -107,15 +104,36 @@ if JAX_IMPORT_ERROR is None:
         """
         native, port = _pair(label_class=Area)
         for solver in (native, port):
-            start = np.asarray(solver.surface.x)
-            solver.surface.x = start + np.random.default_rng(4).normal(
-                0, 1e-3, start.shape
-            )
+            _perturb(solver, 4)
         return native, port
 
 
+def _perturb(solver, seed):
+    """Move the solver surface by seeded normal noise of scale 1e-3."""
+    start = np.asarray(solver.surface.x)
+    solver.surface.x = start + np.random.default_rng(seed).normal(0, 1e-3, start.shape)
+
+
+def _label_surface(solver):
+    """An independent copy of the solver surface, so QFM updates do not notify its labels."""
+    label_surface = SurfaceRZFourier(
+        mpol=1,
+        ntor=1,
+        nfp=solver.surface.nfp,
+        quadpoints_phi=solver.surface.quadpoints_phi,
+        quadpoints_theta=solver.surface.quadpoints_theta,
+    )
+    label_surface.set_dofs(solver.surface.get_dofs())
+    return label_surface
+
+
 def _assert_pair(actual, expected):
-    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+    """Compare a native value, or each entry of a native (value, gradient) tuple."""
+    if isinstance(expected, tuple):
+        for a, e in zip(actual, expected, strict=True):
+            _assert_pair(a, e)
+    else:
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
 def _evaluate(port):
@@ -138,13 +156,13 @@ class TestQfmJax(JaxTestCase):
                             label_class=label_class,
                             stellsym=stellsym,
                             surface_class=surface_class,
-                        ), self.case() as patches:
+                        ), self.case():
                             self._case_values_gradients_and_own_label_grid_match_native(
-                                cloned, label_class, stellsym, surface_class, patches
+                                cloned, label_class, stellsym, surface_class
                             )
 
     def _case_values_gradients_and_own_label_grid_match_native(
-        self, cloned, label_class, stellsym, surface_class, patches
+        self, cloned, label_class, stellsym, surface_class
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair(surface_class, stellsym, label_class, cloned)
@@ -158,11 +176,7 @@ class TestQfmJax(JaxTestCase):
             for derivatives in (0, 1):
                 expected = getattr(native, name)(x, derivatives=derivatives)
                 actual = getattr(port, name)(x, derivatives=derivatives)
-                if derivatives:
-                    for a, e in zip(cast(tuple, actual), expected, strict=True):
-                        _assert_pair(a, e)
-                else:
-                    _assert_pair(actual, expected)
+                _assert_pair(actual, expected)
         _assert_pair(port.qfm.J(), native.qfm.J())
         _assert_pair(
             port.qfm.dJ_by_dsurfacecoefficients(),
@@ -178,13 +192,13 @@ class TestQfmJax(JaxTestCase):
             for label_class in _LABELS:
                 with self.subTest(
                     stellsym=stellsym, label_class=label_class
-                ), self.case() as patches:
+                ), self.case():
                     self._case_gradients_are_central_differences_of_native_values(
-                        stellsym, label_class, patches
+                        stellsym, label_class
                     )
 
     def _case_gradients_are_central_differences_of_native_values(
-        self, stellsym, label_class, patches
+        self, stellsym, label_class
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair(stellsym=stellsym, label_class=label_class, cloned=True)
@@ -210,14 +224,10 @@ class TestQfmJax(JaxTestCase):
         """Penalty and squared-equality solves match native state and optimizer results from identical starts."""
         for stellsym in [True, False]:
             for method in ["LBFGS", "SLSQP"]:
-                with self.subTest(
-                    stellsym=stellsym, method=method
-                ), self.case() as patches:
-                    self._case_solves_from_the_same_start_match_native(
-                        stellsym, method, patches
-                    )
+                with self.subTest(stellsym=stellsym, method=method), self.case():
+                    self._case_solves_from_the_same_start_match_native(stellsym, method)
 
-    def _case_solves_from_the_same_start_match_native(self, stellsym, method, patches):
+    def _case_solves_from_the_same_start_match_native(self, stellsym, method):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair(stellsym=stellsym)
         if method == "SLSQP":
@@ -229,70 +239,51 @@ class TestQfmJax(JaxTestCase):
             port.surface.x = np.array(native.surface.x, copy=True)
         expected = native.minimize_qfm(method=method, tol=1e-13, maxiter=1000)
         actual = port.minimize_qfm(method=method, tol=1e-13, maxiter=1000)
-        self.assertTrue(
-            list(actual)
-            == list(expected)
-            == ["fun", "gradient", "iter", "info", "success", "s"],
-            'list(actual) == list(expected) == ["fun", "gradient", "iter", "info", "success", "s"]',
+        self.assertEqual(list(actual), list(expected))
+        self.assertEqual(
+            list(expected), ["fun", "gradient", "iter", "info", "success", "s"]
         )
-        self.assertTrue(
-            actual["success"] == expected["success"],
-            'actual["success"] == expected["success"]',
-        )
+        self.assertEqual(actual["success"], expected["success"])
         self.assertTrue(expected["success"], expected["info"].message)
-        self.assertTrue(actual["s"] is port.surface, 'actual["s"] is port.surface')
+        self.assertIs(actual["s"], port.surface)
         np.testing.assert_allclose(actual["s"].x, expected["s"].x, rtol=1e-7, atol=1e-8)
         np.testing.assert_allclose(
             actual["fun"], expected["fun"], rtol=1e-8, atol=1e-12
         )
-        self.assertTrue(
-            list(actual["info"]) == list(expected["info"]),
-            'list(actual["info"]) == list(expected["info"])',
-        )
+        self.assertEqual(list(actual["info"]), list(expected["info"]))
 
     def test_iteration_limit_and_squared_constraint_failure_match_native(self):
         """Capped solves and feasible squared-equality failures retain native status and final surface."""
         for method in ["LBFGS", "SLSQP"]:
-            with self.subTest(method=method), self.case() as patches:
+            with self.subTest(method=method), self.case():
                 self._case_iteration_limit_and_squared_constraint_failure_match_native(
-                    method, patches
+                    method
                 )
 
-    def _case_iteration_limit_and_squared_constraint_failure_match_native(
-        self, method, patches
-    ):
+    def _case_iteration_limit_and_squared_constraint_failure_match_native(self, method):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair()
         if method == "SLSQP":
             # This perturbation makes native and compiled Volume differ by ulps;
             # the singular squared equality must use the native scalar exactly.
             for solver in (native, port):
-                start = np.asarray(solver.surface.x)
-                solver.surface.x = start + np.random.default_rng(4).normal(
-                    0, 1e-3, start.shape
-                )
+                _perturb(solver, 4)
             native.targetlabel = native.label.J()
             port.targetlabel = port.label.J()
-            self.assertTrue(
-                host_array(qfm_label(port._label_spec())) != port.targetlabel,
-                "host_array(qfm_label(port._label_spec())) != port.targetlabel",
+            self.assertNotEqual(
+                host_array(qfm_label(port._label_spec())), port.targetlabel
             )
             start = np.array(native.surface.x, copy=True)
         expected = native.minimize_qfm(method=method, tol=1e-12, maxiter=1)
         actual = port.minimize_qfm(method=method, tol=1e-12, maxiter=1)
-        self.assertTrue(
-            actual["success"] == expected["success"] == False,
-            'actual["success"] == expected["success"] == False',
-        )
-        self.assertTrue(
-            actual["info"].status == expected["info"].status,
-            'actual["info"].status == expected["info"].status',
-        )
+        self.assertEqual(actual["success"], expected["success"])
+        self.assertEqual(expected["success"], False)
+        self.assertEqual(actual["info"].status, expected["info"].status)
         np.testing.assert_allclose(
             actual["s"].x, expected["s"].x, rtol=1e-12, atol=1e-12
         )
         if method == "SLSQP":
-            self.assertTrue(actual["info"].status == 6, 'actual["info"].status == 6')
+            self.assertEqual(actual["info"].status, 6)
             np.testing.assert_array_equal(actual["s"].x, start)
 
     def test_flux_gradient_uses_the_current_label_field_points(self):
@@ -301,13 +292,13 @@ class TestQfmJax(JaxTestCase):
             for jax_label_field in [False, True]:
                 with self.subTest(
                     changed_state=changed_state, jax_label_field=jax_label_field
-                ), self.case() as patches:
+                ), self.case():
                     self._case_flux_gradient_uses_the_current_label_field_points(
-                        changed_state, jax_label_field, patches
+                        changed_state, jax_label_field
                     )
 
     def _case_flux_gradient_uses_the_current_label_field_points(
-        self, changed_state, jax_label_field, patches
+        self, changed_state, jax_label_field
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair(label_class=ToroidalFlux)
@@ -325,14 +316,7 @@ class TestQfmJax(JaxTestCase):
             else:
                 # An independent label surface keeps QFM's surface assignment
                 # from notifying the label and replacing the external points.
-                label_surface = SurfaceRZFourier(
-                    mpol=1,
-                    ntor=1,
-                    nfp=solver.surface.nfp,
-                    quadpoints_phi=solver.surface.quadpoints_phi,
-                    quadpoints_theta=solver.surface.quadpoints_theta,
-                )
-                label_surface.set_dofs(solver.surface.get_dofs())
+                label_surface = _label_surface(solver)
                 field_class = (
                     JaxBiotSavart
                     if isinstance(solver.label.biotsavart, JaxBiotSavart)
@@ -350,8 +334,7 @@ class TestQfmJax(JaxTestCase):
         for name in ("qfm_label_constraint", "qfm_penalty_constraints"):
             expected = getattr(native, name)(native.surface.x, derivatives=1)
             actual = getattr(port, name)(port.surface.x, derivatives=1)
-            for a, e in zip(cast(tuple, actual), expected, strict=True):
-                _assert_pair(a, e)
+            _assert_pair(actual, expected)
 
     def test_jax_flux_feasible_start_preserves_label_arithmetic_and_status(self):
         """A JAX flux label preserves native feasible-start arithmetic and SLSQP status."""
@@ -363,10 +346,7 @@ class TestQfmJax(JaxTestCase):
         }:
             current.local_full_x *= 2
         for solver in (native, port):
-            start = np.asarray(solver.surface.x)
-            solver.surface.x = start + np.random.default_rng(1).normal(
-                0, 1e-3, start.shape
-            )
+            _perturb(solver, 1)
             solver.label = ToroidalFlux(
                 solver.surface,
                 JaxBiotSavart(solver.biotsavart.coils),
@@ -376,28 +356,21 @@ class TestQfmJax(JaxTestCase):
                 range="field period",
             )
             solver.targetlabel = np.float64(host_array(solver.label.J()))
-        self.assertTrue(
-            native.targetlabel == port.targetlabel,
-            "native.targetlabel == port.targetlabel",
-        )
+        self.assertEqual(native.targetlabel, port.targetlabel)
         start = np.array(native.surface.x, copy=True)
         # Warming preserves the same explicit-boundary contract under the guard.
         _evaluate(port)
         with disallow_host_transfers(), jax_compilations() as events:
             value, gradient = port.qfm_label_constraint(port.surface.x, derivatives=1)
-            self.assertTrue(value == 0, "value == 0")
+            self.assertEqual(value, 0)
             np.testing.assert_array_equal(gradient, np.zeros_like(gradient))
             actual = port.minimize_qfm(method="SLSQP", tol=1e-12, maxiter=1)
-        self.assertTrue(events == [], "events == []")
+        self.assertEqual(events, [])
         expected = native.minimize_qfm(method="SLSQP", tol=1e-12, maxiter=1)
-        self.assertTrue(
-            actual["success"] == expected["success"] == False,
-            'actual["success"] == expected["success"] == False',
-        )
-        self.assertTrue(
-            actual["info"].status == expected["info"].status == 6,
-            'actual["info"].status == expected["info"].status == 6',
-        )
+        self.assertEqual(actual["success"], expected["success"])
+        self.assertEqual(expected["success"], False)
+        self.assertEqual(actual["info"].status, expected["info"].status)
+        self.assertEqual(expected["info"].status, 6)
         np.testing.assert_array_equal(actual["s"].x, start)
         np.testing.assert_array_equal(expected["s"].x, start)
 
@@ -408,13 +381,13 @@ class TestQfmJax(JaxTestCase):
                 for derivatives in [0, 1]:
                     with self.subTest(
                         label_class=label_class, method=method, derivatives=derivatives
-                    ), self.case() as patches:
+                    ), self.case():
                         self._case_python_float_target_overflow_matches_native(
-                            label_class, method, derivatives, patches
+                            label_class, method, derivatives
                         )
 
     def _case_python_float_target_overflow_matches_native(
-        self, label_class, method, derivatives, patches
+        self, label_class, method, derivatives
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair(label_class=label_class)
@@ -427,15 +400,13 @@ class TestQfmJax(JaxTestCase):
         """NumPy targets retain native nonfinite scalar and derivative results."""
         for method in ["qfm_label_constraint", "qfm_penalty_constraints"]:
             for derivatives in [0, 1]:
-                with self.subTest(
-                    method=method, derivatives=derivatives
-                ), self.case() as patches:
+                with self.subTest(method=method, derivatives=derivatives), self.case():
                     self._case_numpy_float_target_keeps_native_nonfinite_results(
-                        method, derivatives, patches
+                        method, derivatives
                     )
 
     def _case_numpy_float_target_keeps_native_nonfinite_results(
-        self, method, derivatives, patches
+        self, method, derivatives
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair_with_nonzero_label_gradient()
@@ -445,22 +416,18 @@ class TestQfmJax(JaxTestCase):
                 native.surface.x, derivatives=derivatives
             )
             actual = getattr(port, method)(port.surface.x, derivatives=derivatives)
-        if derivatives:
-            for a, e in zip(cast(tuple, actual), expected, strict=True):
-                _assert_pair(a, e)
-        else:
-            _assert_pair(actual, expected)
+        _assert_pair(actual, expected)
 
     def test_shared_flux_field_with_short_point_buffer_raises_native_value_error(self):
         """Shared flux fields with incompatible QFM points raise the native reshape error."""
         for method in ["J", "dJ_by_dsurfacecoefficients"]:
-            with self.subTest(method=method), self.case() as patches:
+            with self.subTest(method=method), self.case():
                 self._case_shared_flux_field_with_short_point_buffer_raises_native_value_error(
-                    method, patches
+                    method
                 )
 
     def _case_shared_flux_field_with_short_point_buffer_raises_native_value_error(
-        self, method, patches
+        self, method
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair()
@@ -479,27 +446,20 @@ class TestQfmJax(JaxTestCase):
                 for point_count in [3, 9]:
                     with self.subTest(
                         method=method, derivatives=derivatives, point_count=point_count
-                    ), self.case() as patches:
+                    ), self.case():
                         self._case_independent_jax_flux_incompatible_points_raise_native_type_error(
-                            method, derivatives, point_count, patches
+                            method, derivatives, point_count
                         )
 
     def _case_independent_jax_flux_incompatible_points_raise_native_type_error(
-        self, method, derivatives, point_count, patches
+        self, method, derivatives, point_count
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair()
         for solver in (native, port):
             # Separate surface and field prevent the QFM callback from refreshing
             # the label's external buffer before its JAX-backed J() multiply.
-            label_surface = SurfaceRZFourier(
-                mpol=1,
-                ntor=1,
-                nfp=solver.surface.nfp,
-                quadpoints_phi=solver.surface.quadpoints_phi,
-                quadpoints_theta=solver.surface.quadpoints_theta,
-            )
-            label_surface.set_dofs(solver.surface.get_dofs())
+            label_surface = _label_surface(solver)
             label_field = JaxBiotSavart(solver.biotsavart.coils)
             solver.label = ToroidalFlux(label_surface, label_field, idx=0)
             label_field.set_points(
@@ -515,9 +475,8 @@ class TestQfmJax(JaxTestCase):
             ):
                 getattr(port, method)(port.surface.x, derivatives=derivatives)
         for solver in (native, port):
-            self.assertTrue(
-                solver.label.biotsavart.get_points_cart().shape == (point_count, 3),
-                "solver.label.biotsavart.get_points_cart().shape == (point_count, 3)",
+            self.assertEqual(
+                solver.label.biotsavart.get_points_cart().shape, (point_count, 3)
             )
 
     def test_new_values_and_full_solves_have_no_implicit_transfers_or_recompiles(self):
@@ -527,13 +486,13 @@ class TestQfmJax(JaxTestCase):
         ):
             with self.subTest(
                 case_id_0=case_id_0, parity_lane=parity_lane
-            ), self.case() as patches:
+            ), self.case():
                 self._case_new_values_and_full_solves_have_no_implicit_transfers_or_recompiles(
-                    parity_lane, patches
+                    parity_lane
                 )
 
     def _case_new_values_and_full_solves_have_no_implicit_transfers_or_recompiles(
-        self, parity_lane, patches
+        self, parity_lane
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         with parity_default_device(parity_lane):
@@ -558,13 +517,13 @@ class TestQfmJax(JaxTestCase):
                 )
                 port.minimize_qfm(method="LBFGS", maxiter=1)
                 port.minimize_qfm(method="SLSQP", maxiter=1)
-            self.assertTrue(events == [], "events == []")
+            self.assertEqual(events, [])
             native.surface.x = port.surface.x
             _assert_pair(
                 port.qfm_objective(port.surface.x),
                 native.qfm_objective(native.surface.x),
             )
-            self.assertTrue(np.isfinite(actual[0]), "np.isfinite(actual[0])")
+            self.assertTrue(np.isfinite(actual[0]))
             np.testing.assert_array_equal(host_array(qfm_residual(old_spec)), old_value)
 
     def test_public_label_target_and_copy_are_live(self):
@@ -579,8 +538,7 @@ class TestQfmJax(JaxTestCase):
         for solver in (port, copied):
             actual = solver.qfm_penalty_constraints(solver.surface.x, 1)
             expected = native.qfm_penalty_constraints(native.surface.x, 1)
-            for a, e in zip(cast(tuple, actual), expected, strict=True):
-                _assert_pair(a, e)
+            _assert_pair(actual, expected)
 
     def test_residual_field_replacement_is_live_on_a_shallow_copy(self):
         """Replacing a copied residual field changes values and gradients without stale snapshots."""
@@ -601,13 +559,9 @@ class TestQfmJax(JaxTestCase):
         for solver in (native, port):
             solver.surface.fix(solver.surface.local_dof_names[0])
         x = np.array(native.surface.x, copy=True)
-        for a, e in zip(
-            port.qfm_objective(x, 1), native.qfm_objective(x, 1), strict=True
-        ):
-            _assert_pair(a, e)
-        self.assertTrue(
-            port.qfm.dJ_by_dsurfacecoefficients().size == port.surface.get_dofs().size,
-            "port.qfm.dJ_by_dsurfacecoefficients().size == port.surface.get_dofs().size",
+        _assert_pair(port.qfm_objective(x, 1), native.qfm_objective(x, 1))
+        self.assertEqual(
+            port.qfm.dJ_by_dsurfacecoefficients().size, port.surface.get_dofs().size
         )
 
     def test_external_field_points_follow_native_evaluation_boundary(self):
@@ -629,12 +583,10 @@ class TestQfmJax(JaxTestCase):
         ):
             with self.subTest(
                 case_id_0=case_id_0, parity_lane=parity_lane
-            ), self.case() as patches:
-                self._case_jax_flux_label_uses_explicit_host_boundary(
-                    parity_lane, patches
-                )
+            ), self.case():
+                self._case_jax_flux_label_uses_explicit_host_boundary(parity_lane)
 
-    def _case_jax_flux_label_uses_explicit_host_boundary(self, parity_lane, patches):
+    def _case_jax_flux_label_uses_explicit_host_boundary(self, parity_lane):
         """Run one row with case-local objects released before runtime cleanup."""
         with parity_default_device(parity_lane):
             native, port = _pair(label_class=ToroidalFlux, cloned=True)
@@ -653,19 +605,15 @@ class TestQfmJax(JaxTestCase):
                         native.surface.x, derivatives
                     )
                     actual = port.qfm_label_constraint(port.surface.x, derivatives)
-                    if derivatives:
-                        for a, e in zip(cast(tuple, actual), expected, strict=True):
-                            _assert_pair(a, e)
-                    else:
-                        _assert_pair(actual, expected)
+                    _assert_pair(actual, expected)
 
     def test_nonfinite_residuals_are_not_sanitized(self):
         """Zero fields/normals, NaNs and infinities retain native nonfinite residual behavior."""
         for condition in ["zero_field", "zero_normal", "nan", "inf"]:
-            with self.subTest(condition=condition), self.case() as patches:
-                self._case_nonfinite_residuals_are_not_sanitized(condition, patches)
+            with self.subTest(condition=condition), self.case():
+                self._case_nonfinite_residuals_are_not_sanitized(condition)
 
-    def _case_nonfinite_residuals_are_not_sanitized(self, condition, patches):
+    def _case_nonfinite_residuals_are_not_sanitized(self, condition):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair()
         if condition == "zero_field":
@@ -694,48 +642,42 @@ class TestQfmJax(JaxTestCase):
         ]:
             with self.subTest(
                 targetlabel=targetlabel, constraint_weight=constraint_weight
-            ), self.case() as patches:
+            ), self.case():
                 self._case_nonfinite_numeric_operands_match_native(
-                    targetlabel, constraint_weight, patches
+                    targetlabel, constraint_weight
                 )
 
     def _case_nonfinite_numeric_operands_match_native(
-        self, targetlabel, constraint_weight, patches
+        self, targetlabel, constraint_weight
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair_with_nonzero_label_gradient()
         native.targetlabel = port.targetlabel = targetlabel
         with np.errstate(all="ignore"):
-            for a, e in zip(
+            _assert_pair(
                 port.qfm_penalty_constraints(port.surface.x, 1, constraint_weight),
                 native.qfm_penalty_constraints(native.surface.x, 1, constraint_weight),
-                strict=True,
-            ):
-                _assert_pair(a, e)
+            )
 
     def test_nonfinite_weight_at_exact_label_feasibility_keeps_native_nans(self):
         """A nonfinite coefficient times an exactly feasible label retains native NaNs."""
         for constraint_weight in [np.inf, np.nan]:
-            with self.subTest(
-                constraint_weight=constraint_weight
-            ), self.case() as patches:
+            with self.subTest(constraint_weight=constraint_weight), self.case():
                 self._case_nonfinite_weight_at_exact_label_feasibility_keeps_native_nans(
-                    constraint_weight, patches
+                    constraint_weight
                 )
 
     def _case_nonfinite_weight_at_exact_label_feasibility_keeps_native_nans(
-        self, constraint_weight, patches
+        self, constraint_weight
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, port = _pair()
         native.targetlabel = port.targetlabel = native.label.J()
         with np.errstate(all="ignore"):
-            for a, e in zip(
+            _assert_pair(
                 port.qfm_penalty_constraints(port.surface.x, 1, constraint_weight),
                 native.qfm_penalty_constraints(native.surface.x, 1, constraint_weight),
-                strict=True,
-            ):
-                _assert_pair(a, e)
+            )
 
     def test_invalid_derivative_method_and_flux_index_match_native(self):
         """Invalid orders, method names and flux indices raise native exception classes."""
@@ -760,12 +702,8 @@ class TestQfmJax(JaxTestCase):
             mock.patch.dict(os.environ, {"SIMSOPT_JAX_POINT_CHUNK_SIZE": "3"})
         )
         set_backend("jax", device="cpu", intent="fast")
-        for a, e in zip(port.qfm_objective(port.surface.x, 1), old, strict=True):
-            _assert_pair(a, e)
-        self.assertTrue(
-            get_field_kernel_tuning() != old_tuning,
-            "get_field_kernel_tuning() != old_tuning",
-        )
+        _assert_pair(port.qfm_objective(port.surface.x, 1), old)
+        self.assertNotEqual(get_field_kernel_tuning(), old_tuning)
 
     def test_solver_exception_keeps_last_callback_surface(self):
         """A callback exception leaves the mutable surface at its last native callback iterate."""
@@ -790,10 +728,7 @@ class TestQfmJax(JaxTestCase):
             with self.assertRaisesRegex(RuntimeError, "callback failed"):
                 solver.minimize_qfm(method="LBFGS")
             np.testing.assert_array_equal(solver.surface.x, visited[-1])
-            self.assertTrue(
-                np.linalg.norm(np.asarray(solver.surface.x) - start) > 0,
-                "np.linalg.norm(np.asarray(solver.surface.x) - start) > 0",
-            )
+            self.assertGreater(np.linalg.norm(np.asarray(solver.surface.x) - start), 0)
 
     def test_gradients_taylor_against_native_values(self):
         """QFM, label and penalty gradients converge with the native forward Taylor stencils."""
