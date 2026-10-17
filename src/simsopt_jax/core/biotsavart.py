@@ -26,8 +26,6 @@ from ._device_scalars import device_one as _device_one
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
     axis0_entries as _axis0_entries,
-    explicit_inv as _explicit_inv,
-    explicit_rsqrt as _explicit_rsqrt,
     eye as _eye,
     scalar_like as _scalar_like,
     zeros as _zeros,
@@ -378,8 +376,8 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
     r2 = _radius_squared(diff)
-    r_inv = _explicit_rsqrt(r2)
-    r_inv3 = r_inv * _explicit_inv(r2)
+    r_inv = lax.rsqrt(r2)
+    r_inv3 = r_inv * jnp.reciprocal(r2)
     cross = _cross_product(diff, gammadashs)
     return cross * r_inv3[..., None]
 
@@ -387,15 +385,15 @@ def _biot_savart_B_integrand(x, gammas, gammadashs):
 def _biot_savart_A_integrand(x, gammas, gammadashs):
     diff = gammas - x
     r2 = _radius_squared(diff)
-    r_inv = _explicit_rsqrt(r2)
+    r_inv = lax.rsqrt(r2)
     return gammadashs * r_inv[..., None]
 
 
 def _biot_savart_B_and_dB_integrand(x, gammas, gammadashs):
     diff = x - gammas
     r2 = _radius_squared(diff)
-    r_inv = _explicit_rsqrt(r2)
-    r_inv3 = r_inv * _explicit_inv(r2)
+    r_inv = lax.rsqrt(r2)
+    r_inv3 = r_inv * jnp.reciprocal(r2)
     r_inv4 = r_inv3 * r_inv
     norm = r2 * r_inv
 

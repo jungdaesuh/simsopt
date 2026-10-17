@@ -408,11 +408,11 @@ class TestStageTwo(JaxTestCase):
     def test_small_stage_two_run_follows_the_native_trajectory(self):
         """L-BFGS-B on the fused objective retraces the native run of the same problem.
 
-            Both runs start from the unperturbed coils with the upstream example weights.
-            Their gradients agree to round-off, which the first iterations amplify only
-            to about 1e-13 (20 iterations); later, line-search decisions let round-off
-            grow chaotically, so the comparison stops at 20 iterations.
-            """
+        Both runs start from the unperturbed coils with the upstream example weights.
+        Their gradients agree to round-off, which the first iterations amplify only
+        to about 1e-13 (20 iterations); later, line-search decisions let round-off
+        grow chaotically, so the comparison stops at 20 iterations.
+        """
         config = StageTwoObjectiveConfig(
             num_basecurves=_NCOILS,
             length_weight=1e-6,

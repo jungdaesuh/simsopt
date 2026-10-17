@@ -258,7 +258,7 @@ def _finite_build_config(base) -> StageTwoObjectiveConfig:
         num_basecurves=len(base),
         filaments_per_pack=_FILAMENTS,
         individual_length_weight=1e-1,
-        individual_length_targets=tuple(0.95 * CurveLength(curve).J() for curve in base),
+        individual_length_targets=tuple(0.95 * float(CurveLength(curve).J()) for curve in base),
         curve_curve_minimum_distance=0.6,
         curve_curve_weight=10.0,
         curve_curve_pairs="all",
