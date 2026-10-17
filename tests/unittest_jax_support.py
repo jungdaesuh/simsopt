@@ -55,11 +55,8 @@ class JaxTestCase(TestCase):
             yield patches
 
 
-try:
+with optional_jax_imports():
     from simsopt_jax.backend.dtypes import explicit_device_array
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 
 
 def _force_x64(jax_module) -> None:
@@ -309,3 +306,27 @@ def assert_matches_native(
     np.testing.assert_allclose(
         actual, expected, rtol=0.0, atol=rtol * reference, err_msg=f"{name} differs from native"
     )
+
+
+def assert_errors_shrink(
+    testcase: TestCase,
+    errors,
+    factor: float,
+    floor: float = 0.0,
+    msg: str | None = None,
+    *,
+    initial: float = np.inf,
+) -> None:
+    """Each error in ``errors`` is below ``factor`` times the one before it
+    (``initial`` before the first), or below ``floor`` when that is larger (a
+    Taylor test at halving steps)."""
+    previous = initial
+    for error in errors:
+        testcase.assertLess(error, max(floor, factor * previous), msg)
+        previous = error
+
+
+def scaled_direction(x0: np.ndarray, seed: int) -> np.ndarray:
+    """A seeded normal direction moving each entry of ``x0`` by a fraction of
+    its own size (of one, for entries smaller than one)."""
+    return parity_rng(seed).standard_normal(x0.size) * np.maximum(np.abs(x0), 1.0)
