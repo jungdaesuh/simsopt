@@ -17,9 +17,9 @@ from simsopt_jax.core.integral_bdotn import (
     fixed_surface_flux_integral_from_B,
 )
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec, make_fixed_surface_flux_spec
-from simsopt_jax.runtime.host_boundary import host_array
 
 from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
+from simsopt_jax_adapters.geo.curve_objectives import _host_float
 
 __all__ = ["JaxSquaredFlux"]
 
@@ -135,7 +135,7 @@ class JaxSquaredFlux(Optimizable):
             self.fixed_surface_flux_spec(),
             self.field.coil_set_spec().field_inputs(),
         )
-        return float(host_array(value, dtype=np.float64))
+        return _host_float(value)
 
     @derivative_dec
     def dJ(self):
