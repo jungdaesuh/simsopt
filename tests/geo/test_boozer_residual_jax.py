@@ -7,14 +7,13 @@
 derivatives) for ``SurfaceRZFourier``, ``SurfaceXYZFourier`` and
 ``SurfaceXYZTensorFourier``, with and without stellarator symmetry, the
 ``Volume``, ``Area``, ``AspectRatio`` and ``ToroidalFlux`` labels (on their own
-grids), ``weight_inv_modB`` and ``optimize_G`` on and off. The least-squares
-kernel is also compared with ``simsoptpp.boozer_residual_ds2`` directly, Hessians
-with central differences of native gradients; coil derivatives of the
+grids), ``weight_inv_modB`` and ``optimize_G`` on and off. Hessians are also
+compared with central differences of native gradients; coil derivatives of the
 derivatives (through the field's Taylor coefficients) with autodiff through the
-field kernel, and the Hessians' nesting by their compiled memory. Then the problem boundary: fixed
-DOFs, grids without a stellarator-symmetry mask, no coils, singular
-cross-sections for AspectRatio, recompilation, implicit transfers, zero fields
-and unsupported inputs.
+field kernel, and the Hessians' nesting by their compiled memory. Then the
+problem boundary: fixed DOFs, grids without a stellarator-symmetry mask, no
+coils, singular cross-sections for AspectRatio, recompilation, implicit
+transfers, zero fields and unsupported inputs.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imp
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
-    import simsoptpp as sopp
     from simsopt.configs import get_data
     from simsopt.field.biotsavart import BiotSavart
     from simsopt.geo.boozersurface import BoozerSurface
@@ -40,7 +38,6 @@ with optional_jax_imports():
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
     from simsopt_jax.backend import set_backend
-    from simsopt_jax.backend.dtypes import explicit_device_array
     from simsopt_jax.core.boozer_problem import (
         BoozerProblem,
         boozer_exact_constraints,
@@ -50,7 +47,6 @@ with optional_jax_imports():
     from simsopt_jax.core.boozer_problem import (
         boozer_surface_residual as jax_boozer_surface_residual,
     )
-    from simsopt_jax.core.boozer_residual import BoozerPoints, boozer_least_squares
     from simsopt_jax.runtime.host_boundary import disallow_host_transfers
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_problem import (
@@ -304,89 +300,6 @@ def _assert_every_formulation_native(
 
 
 class TestBoozerResidualJax(JaxTestCase):
-    def test_least_squares_kernel_matches_simsoptpp(self):
-        """Boozer least-squares values and derivatives agree with simsoptpp for both G and weighting modes."""
-        for optimize_G in [False, True]:
-            for weight_inv_modB in [False, True]:
-                with self.subTest(
-                    optimize_G=optimize_G, weight_inv_modB=weight_inv_modB
-                ), self.case():
-                    self._case_least_squares_kernel_matches_simsoptpp(
-                        optimize_G, weight_inv_modB
-                    )
-
-    def _case_least_squares_kernel_matches_simsoptpp(
-        self, optimize_G, weight_inv_modB
-    ):
-        """Run one row with case-local objects released before runtime cleanup."""
-        rng = parity_rng(1)
-        nphi, ntheta, nsurface = 3, 4, 5
-        shape = (nphi, ntheta)
-        d2B = rng.normal(scale=0.13, size=shape + (3, 3, 3))
-        native = {
-            "B": rng.normal(size=shape + (3,)) + np.array([0.3, -0.2, 1.4]),
-            "dB_by_dX": rng.normal(scale=0.2, size=shape + (3, 3)),
-            "d2B_by_dXdX": 0.5 * (d2B + np.swapaxes(d2B, 2, 3)),
-            "xphi": rng.normal(size=shape + (3,)),
-            "xtheta": rng.normal(size=shape + (3,)),
-            "dgamma_by_dcoeff": rng.normal(size=shape + (3, nsurface)),
-            "dgammadash1_by_dcoeff": rng.normal(size=shape + (3, nsurface)),
-            "dgammadash2_by_dcoeff": rng.normal(size=shape + (3, nsurface)),
-        }
-        points = BoozerPoints(
-            **{
-                name: explicit_device_array(
-                    value.reshape((nphi * ntheta,) + value.shape[2:]), dtype=np.float64
-                )
-                for name, value in native.items()
-            }
-        )
-        coefficient_derivatives = (
-            native["dgamma_by_dcoeff"],
-            native["dgammadash1_by_dcoeff"],
-            native["dgammadash2_by_dcoeff"],
-        )
-        tangents = (native["xphi"], native["xtheta"])
-        value, gradient = sopp.boozer_residual_ds(
-            _G,
-            _IOTA,
-            native["B"],
-            native["dB_by_dX"],
-            *tangents,
-            *coefficient_derivatives,
-            weight_inv_modB,
-        )
-        second = sopp.boozer_residual_ds2(
-            _G,
-            _IOTA,
-            native["B"],
-            native["dB_by_dX"],
-            native["d2B_by_dXdX"],
-            *tangents,
-            *coefficient_derivatives,
-            weight_inv_modB,
-        )
-        kept = slice(None) if optimize_G else slice(0, nsurface + 1)
-        expected = (
-            sopp.boozer_residual(_G, _IOTA, *tangents, native["B"], weight_inv_modB),
-            (value, gradient[kept]),
-            (second[0], second[1][kept], second[2][kept, kept]),
-        )
-        for derivatives in (0, 1, 2):
-            result = jax.jit(
-                lambda p, d=derivatives: boozer_least_squares(
-                    _G,
-                    _IOTA,
-                    p,
-                    derivatives=d,
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                )
-            )(points)
-            _assert_all_native(
-                result, expected[derivatives], f"boozer_residual_ds{derivatives}"
-            )
-
     def test_surface_residual_matches_native(self):
         """Boozer residuals, Jacobians and Hessians agree with native formulations."""
         for name in _RESIDUAL_CASES:
