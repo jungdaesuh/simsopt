@@ -30,17 +30,16 @@ with optional_jax_imports():
     )
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.objectives import JaxSquaredFlux
-    from geo.test_curve_objectives_jax import _TIE_CASES
+    from geo.test_curve_objectives_jax import _TIE_CASES, _circle
+    from objectives.test_squared_flux_jax import _surface
 
 
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 from scipy.optimize import minimize
 
 
-_QA_INPUT = Path(__file__).resolve().parents[1] / "test_files" / "input.LandremanPaul2021_QA"
 _NCOILS = 3
 # Thresholds that make every penalty active at the perturbed test state.
 if JAX_IMPORT_ERROR is None:
@@ -56,10 +55,6 @@ if JAX_IMPORT_ERROR is None:
         mean_squared_curvature_threshold=1.0,
         mean_squared_curvature_weight=1e-2,
     )
-
-
-def _surface() -> SurfaceRZFourier:
-    return SurfaceRZFourier.from_vmec_input(str(_QA_INPUT), range="half period", nphi=8, ntheta=9)
 
 
 def _coils(surface, *, perturb: bool = True, shared_dofs: bool = False) -> tuple[list, list]:
@@ -146,44 +141,37 @@ if JAX_IMPORT_ERROR is None:
     _values = jax.jit(fused_stage_two_values)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class TestStageTwo(JaxTestCase):
     def test_fused_objective_matches_native_composite(self):
-        """The fused value and gradient match the native composite with shared DOFs."""
-        for case_id_0, shared_dofs in zip(["symmetric", "shared_dofs"], [False, True], strict=True):
-            for case_id_1, (length_target, length_mode, msc_mode) in zip(["linear_length", "max_length_identity_msc", "identity_length"], [(None, "max", "max"), (5.0, "max", "identity"), (60.0, "identity", "max")], strict=True):
-                with self.subTest(case_id_0=case_id_0, shared_dofs=shared_dofs, case_id_1=case_id_1, length_target=length_target, length_mode=length_mode, msc_mode=msc_mode), self.case() as patches:
-                    self._case_fused_objective_matches_native_composite(shared_dofs, length_target, length_mode, msc_mode, patches)
+        """The fused value and gradient match the native composite with shared DOFs, every
+        length and curvature target mode, and absent or zero-weight terms."""
+        rows = [
+            (
+                f"{case_id_0}-{case_id_1}",
+                replace(
+                    _ACTIVE,
+                    length_target=length_target,
+                    length_target_mode=length_mode,
+                    mean_squared_curvature_target_mode=msc_mode,
+                ),
+                shared_dofs,
+            )
+            for case_id_0, shared_dofs in (("symmetric", False), ("shared_dofs", True))
+            for case_id_1, (length_target, length_mode, msc_mode) in (
+                ("linear_length", (None, "max", "max")),
+                ("max_length_identity_msc", (5.0, "max", "identity")),
+                ("identity_length", (60.0, "identity", "max")),
+            )
+        ] + [
+            (case_id, replace(_ACTIVE, curve_surface_weight=weight, curvature_weight=weight), False)
+            for case_id, weight in (("term_removed", None), ("zero_weight", 0.0))
+        ]
+        for case_id, config, shared_dofs in rows:
+            with self.subTest(case=case_id), self.case():
+                self._case_fused_objective_matches_native_composite(config, shared_dofs)
 
-    def _case_fused_objective_matches_native_composite(self, shared_dofs, length_target, length_mode, msc_mode, patches):
+    def _case_fused_objective_matches_native_composite(self, config, shared_dofs):
         """Run one row with case-local objects released before runtime cleanup."""
-        config = replace(
-            _ACTIVE,
-            length_target=length_target,
-            length_target_mode=length_mode,
-            mean_squared_curvature_target_mode=msc_mode,
-        )
         field, _, native, problem = _problem(config, shared_dofs=shared_dofs)
         value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
         np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=1e-14)
@@ -220,27 +208,13 @@ class TestStageTwo(JaxTestCase):
             float(gradient @ direction), float((plus - minus) / (2 * step)), rtol=1e-6
         )
 
-    def test_removed_and_zero_weight_terms_match_native(self):
-        """Absent and zero-weight terms preserve native composite values and gradients."""
-        for case_id_0, weight in zip(["term_removed", "zero_weight"], [None, 0.0], strict=True):
-            with self.subTest(case_id_0=case_id_0, weight=weight), self.case() as patches:
-                self._case_removed_and_zero_weight_terms_match_native(weight, patches)
-
-    def _case_removed_and_zero_weight_terms_match_native(self, weight, patches):
-        """Run one row with case-local objects released before runtime cleanup."""
-        config = replace(_ACTIVE, curve_surface_weight=weight, curvature_weight=weight)
-        field, _, native, problem = _problem(config)
-        value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
-        np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=1e-14)
-        np.testing.assert_allclose(np.asarray(gradient), _native_gradient(native, field), rtol=1e-11, atol=1e-13)
-
     def test_rebuilt_problem_with_new_weights_reuses_the_compiled_program(self):
         """Changing numeric weights reuses compilation and preserves native parity."""
         for case_id_0, length_weight in zip(["smaller", "zero", "integer_zero", "integer", "float32"], [1e-4, 0.0, 0, 2, np.float32(5e-4)], strict=True):
-            with self.subTest(case_id_0=case_id_0, length_weight=length_weight), self.case() as patches:
-                self._case_rebuilt_problem_with_new_weights_reuses_the_compiled_program(length_weight, patches)
+            with self.subTest(case_id_0=case_id_0, length_weight=length_weight), self.case():
+                self._case_rebuilt_problem_with_new_weights_reuses_the_compiled_program(length_weight)
 
-    def _case_rebuilt_problem_with_new_weights_reuses_the_compiled_program(self, length_weight, patches):
+    def _case_rebuilt_problem_with_new_weights_reuses_the_compiled_program(self, length_weight):
         """Run one row with case-local objects released before runtime cleanup."""
         field, flux, _, problem = _problem(_ACTIVE)
         traces = []
@@ -255,7 +229,7 @@ class TestStageTwo(JaxTestCase):
         lighter = replace(_ACTIVE, length_weight=length_weight)
         rebuilt = make_stage_two_problem(field, flux.fixed_surface_flux_spec(), lighter)
         value, gradient = value_and_grad(rebuilt, x)
-        self.assertTrue(len(traces) == 1, 'len(traces) == 1')
+        self.assertEqual(len(traces), 1)
         native = _native_composite(flux.surface, [c.curve for c in field.coils[:_NCOILS]], field.coils, lighter)
         np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(np.asarray(gradient), _native_gradient(native, field), rtol=1e-11, atol=1e-13)
@@ -277,7 +251,7 @@ class TestStageTwo(JaxTestCase):
         np.testing.assert_allclose(float(stale), float(before), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(np.asarray(gradient), _native_gradient(native, field), rtol=1e-11, atol=1e-13)
-        self.assertTrue(abs(float(value) - float(before)) > 1e-6 * abs(float(before)), 'abs(float(value) - float(before)) > 1e-6 * abs(float(before))')
+        self.assertGreater(abs(float(value) - float(before)), 1e-6 * abs(float(before)))
 
     def test_distance_terms_of_a_far_degenerate_coil_have_finite_zero_gradients(self):
         """A coil collapsed to a far point (zero tangents) adds nothing, not NaN gradients."""
@@ -301,10 +275,10 @@ class TestStageTwo(JaxTestCase):
             )
 
         value, (dgamma, dgammadash) = jax.value_and_grad(penalty, argnums=(0, 1))(gamma, gammadash)
-        self.assertTrue(float(value) > 0.0, 'float(value) > 0.0')
-        self.assertTrue(np.all(np.isfinite(dgamma)) and np.all(np.isfinite(dgammadash)), 'np.all(np.isfinite(dgamma)) and np.all(np.isfinite(dgammadash))')
-        self.assertTrue(not np.any(dgamma[2]) and not np.any(dgammadash[2]), 'not np.any(dgamma[2]) and not np.any(dgammadash[2])')
-        self.assertTrue(np.any(dgammadash[0]), 'np.any(dgammadash[0])')
+        self.assertGreater(float(value), 0.0)
+        self.assertTrue(np.all(np.isfinite(dgamma)) and np.all(np.isfinite(dgammadash)))
+        self.assertFalse(np.any(dgamma[2]) or np.any(dgammadash[2]))
+        self.assertTrue(np.any(dgammadash[0]))
 
     def test_fused_distance_candidates_at_the_threshold(self):
         """Off a tie the fused candidate choice is native's; at a tie it is one of the two."""
@@ -320,10 +294,8 @@ class TestStageTwo(JaxTestCase):
         and fused alike) and a non-candidate pair a finite zero gradient; the value is zero
         either way. A relative margin of 1e-9 moves the squared distance about 1e7 ulp off
         the squared threshold, where rounding cannot change the decision."""
-        origin_curve = CurveXYZFourier(8, 1)
-        point_curve = CurveXYZFourier(8, 1)
-        for name, value in zip(("xc(0)", "yc(0)", "zc(0)"), position, strict=True):
-            point_curve.set(name, value)
+        origin_curve = _circle((0.0, 0.0, 0.0), 0.0, numquadpoints=8)
+        point_curve = _circle(position, 0.0, numquadpoints=8)
         surface = SurfaceRZFourier.from_nphi_ntheta(nphi=4, ntheta=4)
         surface.local_full_x = np.zeros_like(surface.local_full_x)
         curves = [origin_curve, point_curve] if term == "curve_curve" else [point_curve]
@@ -437,11 +409,11 @@ class TestStageTwo(JaxTestCase):
             value, gradient = jax.device_get(_value_and_grad(problem, jax.device_put(x)))
             return float(value), gradient
 
-        self.assertTrue(native.dof_names == field.dof_names, 'native.dof_names == field.dof_names')
+        self.assertEqual(native.dof_names, field.dof_names)
         native_result = minimize(native_fun, x0, jac=True, method="L-BFGS-B", options=options, tol=1e-15)
         fused_result = minimize(fused_fun, x0, jac=True, method="L-BFGS-B", options=options, tol=1e-15)
-        self.assertTrue(native_result.fun < 0.5 * native_fun(x0)[0], 'native_result.fun < 0.5 * native_fun(x0)[0]')
-        self.assertTrue((fused_result.nit, fused_result.nfev) == (native_result.nit, native_result.nfev), '(fused_result.nit, fused_result.nfev) == (native_result.nit, native_result.nfev)')
+        self.assertLess(native_result.fun, 0.5 * native_fun(x0)[0])
+        self.assertEqual((fused_result.nit, fused_result.nfev), (native_result.nit, native_result.nfev))
         np.testing.assert_allclose(fused_result.fun, native_result.fun, rtol=1e-9)
         np.testing.assert_allclose(fused_result.x, native_result.x, rtol=1e-9, atol=1e-12)
 
