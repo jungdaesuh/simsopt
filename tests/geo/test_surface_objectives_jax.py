@@ -57,10 +57,12 @@ with optional_jax_imports():
 from unittest import mock
 
 from unittest_jax_support import (
+    assert_errors_shrink,
     assert_matches_native,
     jax_compilations,
     parity_default_device,
     parity_rng,
+    scaled_direction,
 )
 
 from collections.abc import Callable
@@ -71,6 +73,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from .surface_test_helpers import get_boozer_surface
+from .test_boozer_surface_jax import _G0
 
 
 _IOTA = -0.406
@@ -82,11 +85,6 @@ class _Problem:
     coils: list
     currents: list
     boozer: BoozerSurface | JaxBoozerSurface
-
-
-def _G0(nfp: int, base_currents) -> float:
-    current_sum = nfp * sum(abs(current.get_value()) for current in base_currents)
-    return 2.0 * np.pi * current_sum * (4 * np.pi * 10 ** (-7) / (2 * np.pi))
 
 
 def _problem(
@@ -258,13 +256,13 @@ class TestSurfaceObjectivesJax(JaxTestCase):
                     case_id_1=case_id_1,
                     boozer_type=boozer_type,
                     stellsym=stellsym,
-                ), self.case() as patches:
+                ), self.case():
                     self._case_ratio_and_partials_match_native(
-                        quasi_poloidal, boozer_type, stellsym, patches
+                        quasi_poloidal, boozer_type, stellsym
                     )
 
     def _case_ratio_and_partials_match_native(
-        self, quasi_poloidal, boozer_type, stellsym, patches
+        self, quasi_poloidal, boozer_type, stellsym
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native = _problem(False, boozer_type, stellsym=stellsym)
@@ -310,7 +308,7 @@ class TestSurfaceObjectivesJax(JaxTestCase):
                 jax_dcoils.field_inputs(), jax_dcoils.coil_index_lists()
             )(field),
         )
-        self.assertTrue(np.isnan(host_tree(value)), "np.isnan(host_tree(value))")
+        self.assertTrue(np.isnan(host_tree(value)))
         for name, actual, expected in (
             ("dJ/dsurface", jax_dsurface, dsurface),
             ("direct", jax_direct, direct),
@@ -332,9 +330,7 @@ class TestSurfaceObjectivesJax(JaxTestCase):
         problem.boozer.surface.x = np.zeros_like(problem.boozer.surface.x)
         # Native BoozerSurface does not depend on the surface: changing its
         # DOFs leaves the completed solve in force until a coil notification.
-        self.assertTrue(
-            not problem.boozer.need_to_run_code, "not problem.boozer.need_to_run_code"
-        )
+        self.assertFalse(problem.boozer.need_to_run_code)
         expected.recompute_bell()
         objective.recompute_bell()
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -357,10 +353,10 @@ class TestSurfaceObjectivesJax(JaxTestCase):
         ``BoozerSurface`` solved from the same start, and on the native surface
         itself (the objective also works with native solves)."""
         for name in _NATIVE_CASES:
-            with self.subTest(name=name), self.case() as patches:
-                self._case_objective_matches_native(name, patches)
+            with self.subTest(name=name), self.case():
+                self._case_objective_matches_native(name)
 
-    def _case_objective_matches_native(self, name, patches):
+    def _case_objective_matches_native(self, name):
         """Run one row with case-local objects released before runtime cleanup."""
         boozer_type, label, stellsym, kwargs = _NATIVE_CASES[name]
         native, jax_problem = (
@@ -385,10 +381,10 @@ class TestSurfaceObjectivesJax(JaxTestCase):
     def test_objective_matches_native_on_the_jax_surface(self):
         """The non-QS objective agrees with native when both use a JAX surface solve."""
         for name in _JAX_SURFACE_CASES:
-            with self.subTest(name=name), self.case() as patches:
-                self._case_objective_matches_native_on_the_jax_surface(name, patches)
+            with self.subTest(name=name), self.case():
+                self._case_objective_matches_native_on_the_jax_surface(name)
 
-    def _case_objective_matches_native_on_the_jax_surface(self, name, patches):
+    def _case_objective_matches_native_on_the_jax_surface(self, name):
         """Run one row with case-local objects released before runtime cleanup."""
         boozer_type, label, stellsym, kwargs = _JAX_SURFACE_CASES[name]
         problem = _problem(True, boozer_type, label, stellsym=stellsym)
@@ -402,37 +398,33 @@ class TestSurfaceObjectivesJax(JaxTestCase):
     def test_coil_gradient_is_the_derivative_through_re_solves(self):
         """Central differences of ``J`` through re-solves (``run_code`` from the
         solution) along a random direction over every free coil DOF, each moved by
-        a fraction of its own size."""
+        a fraction of its own size, and their convergence at halving steps."""
         for boozer_type, label in [("exact", "Volume"), ("ls", "ToroidalFlux")]:
-            with self.subTest(
-                boozer_type=boozer_type, label=label
-            ), self.case() as patches:
+            with self.subTest(boozer_type=boozer_type, label=label), self.case():
                 self._case_coil_gradient_is_the_derivative_through_re_solves(
-                    boozer_type, label, patches
+                    boozer_type, label
                 )
 
     def _case_coil_gradient_is_the_derivative_through_re_solves(
-        self, boozer_type, label, patches
+        self, boozer_type, label
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         problem = _problem(True, boozer_type, label)
         objective = _jax_objective(problem)
         x0 = np.asarray(objective.x, dtype=np.float64)
-        direction = parity_rng(11).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
+        direction = scaled_direction(x0, 11)
         adjoint = np.asarray(objective.dJ()) @ direction
         step = 1e-6
+        solution = problem.boozer.surface.get_dofs().copy()
+        solved_iota, solved_G = problem.boozer.res["iota"], problem.boozer.res["G"]
 
         def value(sign: float) -> float:
+            problem.boozer.surface.set_dofs(solution)
+            problem.boozer.res["iota"], problem.boozer.res["G"] = solved_iota, solved_G
             objective.x = x0 + sign * step * direction
-            self.assertTrue(
-                problem.boozer.need_to_run_code, "problem.boozer.need_to_run_code"
-            )
+            self.assertTrue(problem.boozer.need_to_run_code)
             J = float(np.asarray(objective.J()))
-            self.assertTrue(
-                problem.boozer.res["success"], 'problem.boozer.res["success"]'
-            )
+            self.assertTrue(problem.boozer.res["success"])
             return J
 
         central = (value(1.0) - value(-1.0)) / (2 * step)
@@ -441,6 +433,14 @@ class TestSurfaceObjectivesJax(JaxTestCase):
             abs(adjoint - central) <= 1e-7 * abs(central),
             f"adjoint {adjoint} != difference {central}",
         )
+
+        errors = []
+        # ``value`` reads ``step``, so the loop rebinds it.
+        for step in np.power(2.0, -np.arange(13, 19)):
+            errors.append(abs((value(1.0) - value(-1.0)) / (2 * step) - adjoint))
+        assert_errors_shrink(self, errors, 0.35, floor=1e-9, initial=1e9)
+        objective.x = x0
+        problem.boozer.surface.set_dofs(solution)
 
     def test_boozer_qa_first_iterations_match_native(self):
         """Three BFGS iterations of upstream's boozerQA.py (native defaults:
@@ -459,10 +459,9 @@ class TestSurfaceObjectivesJax(JaxTestCase):
             runs[False],
             runs[True],
         )
-        self.assertTrue(
-            jax_result.nit == native.nit == 3 and jax_result.nfev == native.nfev,
-            "jax_result.nit == native.nit == 3 and jax_result.nfev == native.nfev",
-        )
+        self.assertEqual(jax_result.nit, 3)
+        self.assertEqual(native.nit, 3)
+        self.assertEqual(jax_result.nfev, native.nfev)
         for k, (jax_eval, native_eval) in enumerate(
             zip(jax_evaluations, native_evaluations)
         ):
@@ -497,10 +496,8 @@ class TestSurfaceObjectivesJax(JaxTestCase):
             self.assertTrue(
                 not failed[2], "the one-step cap must trigger the real restore path"
             )
-            self.assertTrue(
-                value == 1e3 and np.asarray(gradient).shape == x0.shape,
-                "value == 1e3 and np.asarray(gradient).shape == x0.shape",
-            )
+            self.assertEqual(value, 1e3)
+            self.assertEqual(np.asarray(gradient).shape, x0.shape)
             np.testing.assert_array_equal(
                 failed[3], initial[3], err_msg="previous surface was not restored"
             )
@@ -567,24 +564,17 @@ class TestSurfaceObjectivesJax(JaxTestCase):
         changes the free gradient without dropping its partial derivative."""
         problem = _problem(True)
         expected, objective = _native_objective(problem), _jax_objective(problem)
-        self.assertTrue(
-            objective.surface.dofs is problem.boozer.surface.dofs,
-            "objective.surface.dofs is problem.boozer.surface.dofs",
-        )
+        self.assertIs(objective.surface.dofs, problem.boozer.surface.dofs)
         objective.dJ()
         problem.currents[0].fix_all()
         problem.currents[1].local_full_x = 1.001 * problem.currents[1].local_full_x
-        self.assertTrue(
-            problem.boozer.need_to_run_code, "problem.boozer.need_to_run_code"
-        )
-        self.assertTrue(
-            objective._J is None and objective._dJ is None,
-            "objective._J is None and objective._dJ is None",
-        )
+        self.assertTrue(problem.boozer.need_to_run_code)
+        self.assertIsNone(objective._J)
+        self.assertIsNone(objective._dJ)
         assert_matches_native(
             objective.J(), expected.J(), "J after a shared coil change"
         )
-        self.assertTrue(problem.boozer.res["success"], 'problem.boozer.res["success"]')
+        self.assertTrue(problem.boozer.res["success"])
         # The native decorator accepts ``partials``; its undecorated signature
         # does not express that keyword to the type checker.
         actual_partials = cast(Callable[..., Derivative], objective.dJ)(partials=True)
@@ -609,7 +599,8 @@ class TestSurfaceObjectivesJax(JaxTestCase):
     def test_coils_only_in_the_objective_field_are_parents(self):
         """A coil that ``bs`` holds and the Boozer surface's field does not is
         part of ``x``, invalidates ``J`` when it changes, and carries the direct
-        derivative in ``dJ`` (the surface does not depend on it, so no re-solve)."""
+        derivative in ``dJ`` (the surface does not depend on it, so no re-solve);
+        central differences converge to it at halving steps."""
         problem = _problem(True)
         ring = CurveXYZFourier(64, 1)
         ring_dofs = {"xc(1)": 2.5, "ys(1)": 2.5, "zc(0)": 0.4}
@@ -619,18 +610,13 @@ class TestSurfaceObjectivesJax(JaxTestCase):
             problem.boozer, JaxBiotSavart([*problem.coils, extra])
         )
         extra_names = set(extra.dof_names)
-        self.assertTrue(
-            extra_names <= set(objective.dof_names),
-            "extra_names <= set(objective.dof_names)",
-        )
+        self.assertLessEqual(extra_names, set(objective.dof_names))
         J0 = float(np.asarray(objective.J()))
         gradient = dict(
             zip(objective.dof_names, np.asarray(objective.dJ()), strict=True)
         )
         x0 = np.asarray(extra.x, dtype=np.float64)
-        direction = parity_rng(12).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
+        direction = scaled_direction(x0, 12)
         adjoint = sum(
             gradient[name] * d
             for name, d in zip(extra.dof_names, direction, strict=True)
@@ -639,24 +625,23 @@ class TestSurfaceObjectivesJax(JaxTestCase):
 
         def value(sign: float) -> float:
             extra.x = x0 + sign * step * direction
-            self.assertTrue(objective._J is None, "objective._J is None")
-            self.assertTrue(
-                not problem.boozer.need_to_run_code,
-                "not problem.boozer.need_to_run_code",
-            )
+            self.assertIsNone(objective._J)
+            self.assertFalse(problem.boozer.need_to_run_code)
             return float(np.asarray(objective.J()))
 
         central = (value(1.0) - value(-1.0)) / (2 * step)
-        self.assertTrue(central != 0.0, "central != 0.0")
+        self.assertNotEqual(central, 0.0)
         self.assertTrue(
             abs(adjoint - central) <= 1e-7 * abs(central),
             f"adjoint {adjoint} != difference {central}",
         )
+        errors = []
+        # ``value`` reads ``step``, so the loop rebinds it.
+        for step in np.power(2.0, -np.arange(13, 19)):
+            errors.append(abs((value(1.0) - value(-1.0)) / (2 * step) - adjoint))
+        assert_errors_shrink(self, errors, 0.35, floor=1e-9, initial=1e9)
         extra.x = x0
-        self.assertTrue(
-            float(np.asarray(objective.J())) == J0,
-            "float(np.asarray(objective.J())) == J0",
-        )
+        self.assertEqual(float(np.asarray(objective.J())), J0)
 
     def test_evaluation_preserves_the_fields_existing_points(self):
         """The documented difference from native: an objective does not change
@@ -687,10 +672,8 @@ class TestSurfaceObjectivesJax(JaxTestCase):
         with jax_compilations() as compilations:
             objective.J()
             objective.dJ()
-        self.assertTrue(
-            compilations == [], "new values retraced or recompiled a program"
-        )
-        self.assertTrue(problem.boozer.res["success"], 'problem.boozer.res["success"]')
+        self.assertEqual(compilations, [], "new values retraced or recompiled a program")
+        self.assertTrue(problem.boozer.res["success"])
 
     def test_evaluation_makes_no_implicit_transfers(self):
         """Evaluation uses explicit host/device transfers under the runtime transfer guard."""
@@ -699,10 +682,10 @@ class TestSurfaceObjectivesJax(JaxTestCase):
         ):
             with self.subTest(
                 case_id_0=case_id_0, parity_lane=parity_lane
-            ), self.case() as patches:
-                self._case_evaluation_makes_no_implicit_transfers(parity_lane, patches)
+            ), self.case():
+                self._case_evaluation_makes_no_implicit_transfers(parity_lane)
 
-    def _case_evaluation_makes_no_implicit_transfers(self, parity_lane, patches):
+    def _case_evaluation_makes_no_implicit_transfers(self, parity_lane):
         """Run one row with case-local objects released before runtime cleanup."""
         native = _problem(False)
         with parity_default_device(parity_lane):
@@ -750,107 +733,3 @@ class TestSurfaceObjectivesJax(JaxTestCase):
             )
         with self.assertRaisesRegex(TypeError, "JaxBiotSavart"):
             JaxNonQuasiSymmetricRatio(_problem(False, solve=False).boozer, bs)
-
-    def test_coil_gradient_taylor(self):
-        """Non-QS coil gradients converge through exact and flux-label penalty re-solves."""
-        for boozer_type, label in (("exact", "Volume"), ("ls", "ToroidalFlux")):
-            with self.subTest(boozer_type=boozer_type, label=label), self.case():
-                self._case_coil_gradient_taylor(boozer_type, label)
-
-    def _case_coil_gradient_taylor(self, boozer_type, label):
-        """Run one row with case-local objects released before runtime cleanup."""
-        problem = _problem(True, boozer_type, label)
-        objective = _jax_objective(problem)
-        x0 = np.asarray(objective.x, dtype=np.float64)
-        direction = parity_rng(11).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
-        adjoint = np.asarray(objective.dJ()) @ direction
-        step = 1e-6
-        solution = problem.boozer.surface.get_dofs().copy()
-        solved_iota, solved_G = problem.boozer.res["iota"], problem.boozer.res["G"]
-
-        def value(sign: float) -> float:
-            problem.boozer.surface.set_dofs(solution)
-            problem.boozer.res["iota"], problem.boozer.res["G"] = solved_iota, solved_G
-            objective.x = x0 + sign * step * direction
-            self.assertTrue(
-                problem.boozer.need_to_run_code, "problem.boozer.need_to_run_code"
-            )
-            J = float(np.asarray(objective.J()))
-            self.assertTrue(
-                problem.boozer.res["success"], 'problem.boozer.res["success"]'
-            )
-            return J
-
-        central = (value(1.0) - value(-1.0)) / (2 * step)
-        # Truncation and the re-solves' tolerances bound the agreement (measured below 1e-8 relative).
-        self.assertTrue(
-            abs(adjoint - central) <= 1e-7 * abs(central),
-            f"adjoint {adjoint} != difference {central}",
-        )
-
-        previous_error = 1e9
-        for step in np.power(2.0, -np.arange(13, 19)):
-            error = abs((value(1.0) - value(-1.0)) / (2 * step) - adjoint)
-            self.assertLess(error, max(1e-9, 0.35 * previous_error))
-            previous_error = error
-        objective.x = x0
-        problem.boozer.surface.set_dofs(solution)
-
-    def test_objective_only_coil_gradient_taylor(self):
-        """A shrinking-step Taylor check for a coil that ``bs`` holds and the Boozer surface's field does not is
-        part of ``x``, invalidates ``J`` when it changes, and carries the direct
-        derivative in ``dJ`` (the surface does not depend on it, so no re-solve)."""
-        problem = _problem(True)
-        ring = CurveXYZFourier(64, 1)
-        ring_dofs = {"xc(1)": 2.5, "ys(1)": 2.5, "zc(0)": 0.4}
-        ring.x = np.array([ring_dofs.get(name, 0.0) for name in ring.local_dof_names])
-        extra = Coil(ring, Current(2.0e4))
-        objective = JaxNonQuasiSymmetricRatio(
-            problem.boozer, JaxBiotSavart([*problem.coils, extra])
-        )
-        extra_names = set(extra.dof_names)
-        self.assertTrue(
-            extra_names <= set(objective.dof_names),
-            "extra_names <= set(objective.dof_names)",
-        )
-        J0 = float(np.asarray(objective.J()))
-        gradient = dict(
-            zip(objective.dof_names, np.asarray(objective.dJ()), strict=True)
-        )
-        x0 = np.asarray(extra.x, dtype=np.float64)
-        direction = parity_rng(12).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
-        adjoint = sum(
-            gradient[name] * d
-            for name, d in zip(extra.dof_names, direction, strict=True)
-        )
-        step = 1e-6
-
-        def value(sign: float) -> float:
-            extra.x = x0 + sign * step * direction
-            self.assertTrue(objective._J is None, "objective._J is None")
-            self.assertTrue(
-                not problem.boozer.need_to_run_code,
-                "not problem.boozer.need_to_run_code",
-            )
-            return float(np.asarray(objective.J()))
-
-        central = (value(1.0) - value(-1.0)) / (2 * step)
-        self.assertTrue(central != 0.0, "central != 0.0")
-        self.assertTrue(
-            abs(adjoint - central) <= 1e-7 * abs(central),
-            f"adjoint {adjoint} != difference {central}",
-        )
-        previous_error = 1e9
-        for step in np.power(2.0, -np.arange(13, 19)):
-            error = abs((value(1.0) - value(-1.0)) / (2 * step) - adjoint)
-            self.assertLess(error, max(1e-9, 0.35 * previous_error))
-            previous_error = error
-        extra.x = x0
-        self.assertTrue(
-            float(np.asarray(objective.J())) == J0,
-            "float(np.asarray(objective.J())) == J0",
-        )

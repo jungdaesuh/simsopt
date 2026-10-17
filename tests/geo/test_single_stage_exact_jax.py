@@ -48,10 +48,12 @@ with optional_jax_imports():
     from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
 
 from unittest_jax_support import (
+    assert_errors_shrink,
     assert_matches_native,
     jax_compilations,
     parity_default_device,
     parity_rng,
+    scaled_direction,
 )
 
 from copy import copy
@@ -141,9 +143,7 @@ def _radius_reduction_bound(surface):
     conditioning = np.mean(np.abs(volume)) / abs(np.mean(volume)) + np.mean(
         np.abs(section)
     ) / abs(np.mean(section))
-    unit_roundoff = np.finfo(np.float64).eps / 2
-    gamma_n = section.size * unit_roundoff / (1 - section.size * unit_roundoff)
-    return 2 * gamma_n * abs(surface.major_radius()) * conditioning
+    return 2 * _roundoff_gamma(section.size) * abs(surface.major_radius()) * conditioning
 
 
 def _roundoff_gamma(operations, dtype: DTypeLike = np.float64):
@@ -343,13 +343,13 @@ class TestSingleStageExactJax(JaxTestCase):
                     active_penalties=active_penalties,
                     case_id_1=case_id_1,
                     dropin=dropin,
-                ), self.case() as patches:
+                ), self.case():
                     self._case_value_gradient_and_solved_state_match_composition(
-                        quasi_poloidal, active_penalties, dropin, patches
+                        quasi_poloidal, active_penalties, dropin
                     )
 
     def _case_value_gradient_and_solved_state_match_composition(
-        self, quasi_poloidal, active_penalties, dropin, patches
+        self, quasi_poloidal, active_penalties, dropin
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         evaluator, boozer, objective, _ = _problem(
@@ -365,10 +365,8 @@ class TestSingleStageExactJax(JaxTestCase):
             result = evaluator.evaluate(x, state)
             objective.x = x
             expected_value = objective.J()
-            self.assertTrue(
-                boozer.res["success"] and result.success,
-                'boozer.res["success"] and result.success',
-            )
+            self.assertTrue(boozer.res["success"])
+            self.assertTrue(result.success)
             assert_matches_native(result.value, expected_value, "fused objective")
             native_inner = np.concatenate(
                 (boozer.surface.get_dofs(), [boozer.res["iota"], boozer.res["G"]])
@@ -496,9 +494,7 @@ class TestSingleStageExactJax(JaxTestCase):
         """The fused outer gradient agrees with finite differences through exact surface solves."""
         evaluator, _, _, _ = _problem(active_penalties=True)
         dofs = host_array(evaluator.initial_dofs)
-        direction = parity_rng(11).standard_normal(dofs.size) * np.maximum(
-            np.abs(dofs), 1
-        )
+        direction = scaled_direction(dofs, 11)
         initial = evaluator.evaluate(dofs, evaluator.initial_state)
         step = 1e-6
         plus = evaluator.evaluate(dofs + step * direction, initial.state)
@@ -509,9 +505,8 @@ class TestSingleStageExactJax(JaxTestCase):
         )
         plus2 = evaluator.evaluate(dofs + 2 * step * direction, initial.state)
         minus2 = evaluator.evaluate(dofs - 2 * step * direction, initial.state)
-        self.assertTrue(
-            plus2.success and minus2.success, "plus2.success and minus2.success"
-        )
+        self.assertTrue(plus2.success)
+        self.assertTrue(minus2.success)
         central = (8 * (plus.value - minus.value) - (plus2.value - minus2.value)) / (
             12 * step
         )
@@ -544,7 +539,7 @@ class TestSingleStageExactJax(JaxTestCase):
             not boozer.res["success"] and not result.success,
             "the real one-step cap must fail",
         )
-        self.assertTrue(result.value == 1e3, "result.value == 1e3")
+        self.assertEqual(result.value, 1e3)
         assert_matches_native(
             result.gradient, expected_gradient, "gradient at failed iterate"
         )
@@ -620,10 +615,10 @@ class TestSingleStageExactJax(JaxTestCase):
         ):
             with self.subTest(
                 case_id_0=case_id_0, parity_lane=parity_lane
-            ), self.case() as patches:
-                self._case_evaluation_makes_no_implicit_transfers(parity_lane, patches)
+            ), self.case():
+                self._case_evaluation_makes_no_implicit_transfers(parity_lane)
 
-    def _case_evaluation_makes_no_implicit_transfers(self, parity_lane, patches):
+    def _case_evaluation_makes_no_implicit_transfers(self, parity_lane):
         """Run one row with case-local objects released before runtime cleanup."""
         with parity_default_device(parity_lane):
             evaluator, _, objective, _ = _problem(active_penalties=True)
@@ -632,10 +627,8 @@ class TestSingleStageExactJax(JaxTestCase):
                 host_array(evaluator.initial_dofs), evaluator.initial_state
             )
             next_result = evaluator.evaluate(evaluator.initial_dofs, result.state)
-        self.assertTrue(
-            {device.platform for device in next_result.state.x.devices()}
-            == {parity_lane},
-            "{device.platform for device in next_result.state.x.devices()} == {parity_lane}",
+        self.assertEqual(
+            {device.platform for device in next_result.state.x.devices()}, {parity_lane}
         )
         assert_matches_native(result.value, objective.J(), "transfer-guard objective")
         assert_matches_native(
@@ -681,10 +674,9 @@ class TestSingleStageExactJax(JaxTestCase):
             )
             runs.append((result, evaluations))
         (native, native_evals), (fused_result, fused_evals) = runs
-        self.assertTrue(
-            native.nit == fused_result.nit == 3 and native.nfev == fused_result.nfev,
-            "native.nit == fused_result.nit == 3 and native.nfev == fused_result.nfev",
-        )
+        self.assertEqual(native.nit, 3)
+        self.assertEqual(fused_result.nit, 3)
+        self.assertEqual(native.nfev, fused_result.nfev)
         for index, (actual, expected) in enumerate(zip(fused_evals, native_evals)):
             assert_matches_native(
                 actual[0], expected[0], f"L-BFGS-B evaluation {index} value", 1e-10
@@ -732,15 +724,12 @@ class TestSingleStageExactJax(JaxTestCase):
             options={"maxiter": 3},
             tol=1e-15,
         )
-        self.assertTrue(
-            result.nit == 3 and result.nfev == len(evaluations),
-            "result.nit == 3 and result.nfev == len(evaluations)",
-        )
+        self.assertEqual(result.nit, 3)
+        self.assertEqual(result.nfev, len(evaluations))
 
     def test_zero_field_keeps_native_nonfinite_adjoint_error(self):
         """A zero field raises the native nonfinite-component adjoint error."""
         evaluator, boozer, _, _ = _problem()
-        dofs = host_array(evaluator.initial_dofs)
         # The free current entries can be identified independently from the
         # native graph; the first current is fixed and changed via a new snapshot.
         for coil in boozer.biotsavart.coils:
@@ -769,13 +758,13 @@ class TestSingleStageExactJax(JaxTestCase):
                     target=target,
                     case_id_1=case_id_1,
                     component=component,
-                ), self.case() as patches:
+                ), self.case():
                     self._case_infinite_penalty_target_keeps_native_value_and_gradient(
-                        target, component, patches
+                        target, component
                     )
 
     def _case_infinite_penalty_target_keeps_native_value_and_gradient(
-        self, target, component, patches
+        self, target, component
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         evaluator, _, objective, _ = _problem(active_penalties=True)
@@ -800,10 +789,9 @@ class TestSingleStageExactJax(JaxTestCase):
             expected_value = objective.J()
             expected_gradient = np.asarray(objective.dJ(), dtype=np.float64)
         result = evaluator.evaluate(evaluator.initial_dofs, evaluator.initial_state)
-        self.assertTrue(
-            result.success and result.value == expected_value == np.inf,
-            "result.success and result.value == expected_value == np.inf",
-        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.value, np.inf)
+        self.assertEqual(expected_value, np.inf)
         self.assertTrue(
             np.any(np.isinf(expected_gradient)),
             "native penalty must exercise infinite gradient entries",
@@ -920,17 +908,15 @@ class TestSingleStageExactJax(JaxTestCase):
         """The fused gradient converges from exact solves restarted at the same warm state."""
         evaluator, _, _, _ = _problem(active_penalties=True)
         dofs = host_array(evaluator.initial_dofs)
-        direction = parity_rng(11).standard_normal(dofs.size) * np.maximum(
-            np.abs(dofs), 1
-        )
+        direction = scaled_direction(dofs, 11)
         initial = evaluator.evaluate(dofs, evaluator.initial_state)
         self.assertTrue(initial.success)
         adjoint = initial.gradient @ direction
-        previous_error = 1e9
+        errors = []
         for step in np.power(2.0, -np.arange(13, 19)):
             plus = evaluator.evaluate(dofs + step * direction, initial.state)
             minus = evaluator.evaluate(dofs - step * direction, initial.state)
-            self.assertTrue(plus.success and minus.success)
-            error = abs((plus.value - minus.value) / (2 * step) - adjoint)
-            self.assertLess(error, max(1e-9, 0.35 * previous_error))
-            previous_error = error
+            self.assertTrue(plus.success)
+            self.assertTrue(minus.success)
+            errors.append(abs((plus.value - minus.value) / (2 * step) - adjoint))
+        assert_errors_shrink(self, errors, 0.35, floor=1e-9, initial=1e9)
