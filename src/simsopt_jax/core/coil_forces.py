@@ -25,7 +25,6 @@ import jax.numpy as jnp
 
 from simsopt.field.force import (
     _B_at_point_from_coil_set_pure,
-    _coil_coil_inductances_pure,
     _lorentz_force_density_pure,
     b2energy_pure,
     net_ext_fluxes_pure,
@@ -284,24 +283,6 @@ def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], down
     torques = jnp.cross(gammas - centers[:, None, :], forces) * arclengths[:, :, None]
     mean_torques = jnp.sum(torques, axis=1) / gammas.shape[1]
     return jnp.sum(jnp.linalg.norm(mean_torques, axis=-1) ** 2) * 1e-12
-
-
-def coil_inductances(gammas, gammadashs, regularizations, downsample: int):
-    """Native ``_coil_coil_inductances_pure``: the inductance matrix in henries.
-
-    Mutual terms use the unregularized kernel; the diagonal uses each coil's
-    regularization. The upstream kernel owns this arithmetic.
-
-    Args:
-        gammas: Array of shape (m, n, 3), coil positions in m.
-        gammadashs: Array of shape (m, n, 3), unit-period parameter derivatives in m.
-        regularizations: Array of shape (m,), cross-section regularization in m^2 from regularization_circ/regularization_rect.
-        downsample: int, positive static stride dividing every nonempty group quadrature count; validation belongs to callers.
-
-    Returns:
-        Array of shape (m, m): inductance matrix in H.
-    """
-    return _coil_coil_inductances_pure(gammas, gammadashs, downsample, regularizations)
 
 
 def b2energy(gammas, gammadashs, currents, regularizations, downsample: int):
