@@ -81,6 +81,20 @@ def _ncsx_biotsavart_parity_fixture():
     return bs, points_np, gammas_np, gds_np, currents_np
 
 
+def _native_taylor_fixture():
+    """Coil and points of the native ``tests/field/test_biotsavart.py`` Taylor tests."""
+    curve = CurveXYZFourier(200, 3)
+    coeffs = curve.dofs_matrix
+    coeffs[1][0] = 1.0
+    coeffs[1][1] = 0.5
+    coeffs[2][2] = 0.5
+    curve.set_dofs(np.concatenate(coeffs))
+    rng = np.random.default_rng(1)
+    points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+    points += 0.001 * (rng.random(points.shape) - 0.5)
+    return Coil(curve, Current(1e4)), points
+
+
 def _cart_points_to_cyl(points):
     return np.ascontiguousarray(
         np.stack(
@@ -377,6 +391,144 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
                     new_err = np.linalg.norm((plus - minus) / (2 * eps) - deriv)
                     self.assertLess(new_err, 0.3 * err)
                     err = new_err
+
+
+class TestJaxBiotSavartSpatialTaylor(JaxTestCase):
+    """Shrinking-step Taylor tests of the ``JaxBiotSavart`` spatial derivatives.
+
+    Mirrors the native ``tests/field/test_biotsavart.py`` checks on its coil
+    and points: steps ``0.5**i`` for ``i`` in ``5..9``, a one-sided difference
+    with error ratio 0.55 for first derivatives and a central difference of
+    the first derivative with error ratio 0.30 for second derivatives.
+    """
+
+    def _assert_spatial_taylor(self, value_name, derivative_name, *, central, ratio):
+        """Assert ``derivative[:, k]`` is the shrinking-step limit along ``e_k``."""
+        coil, points_np = _native_taylor_fixture()
+        bs_jax = JaxBiotSavart([coil])
+        bs_jax.set_points(points_np)
+        value0 = np.asarray(getattr(bs_jax, value_name)())
+        derivative = np.asarray(getattr(bs_jax, derivative_name)())
+        for k, direction in enumerate(np.eye(3)):
+            with self.subTest(direction=k):
+                expected = derivative[:, k]
+                err = 1e6
+                for i in range(5, 10):
+                    eps = 0.5**i
+                    bs_jax.set_points(points_np + eps * direction)
+                    plus = np.asarray(getattr(bs_jax, value_name)())
+                    if central:
+                        bs_jax.set_points(points_np - eps * direction)
+                        minus = np.asarray(getattr(bs_jax, value_name)())
+                        estimate = (plus - minus) / (2.0 * eps)
+                    else:
+                        estimate = (plus - value0) / eps
+                    new_err = np.linalg.norm(estimate - expected)
+                    self.assertLess(new_err, ratio * err)
+                    err = new_err
+
+    def test_dB_by_dX_taylor(self):
+        """dB_by_dX is the first-order shrinking-step limit of B along each axis."""
+        self._assert_spatial_taylor("B", "dB_by_dX", central=False, ratio=0.55)
+
+    def test_d2B_by_dXdX_taylor(self):
+        """d2B_by_dXdX is the central shrinking-step limit of dB_by_dX along each axis."""
+        self._assert_spatial_taylor("dB_by_dX", "d2B_by_dXdX", central=True, ratio=0.30)
+
+    def test_dA_by_dX_taylor(self):
+        """dA_by_dX is the first-order shrinking-step limit of A along each axis."""
+        self._assert_spatial_taylor("A", "dA_by_dX", central=False, ratio=0.55)
+
+    def test_d2A_by_dXdX_taylor(self):
+        """d2A_by_dXdX is the central shrinking-step limit of dA_by_dX along each axis."""
+        self._assert_spatial_taylor("dA_by_dX", "d2A_by_dXdX", central=True, ratio=0.30)
+
+
+# About 45 ulp. The measured worst case on these configurations is about
+# 2e-15 at the integrand and 1.4e-15 at the kernel.
+_ROUND_OFF = 1e-14
+
+
+class TestFusedBAndDBAutodiffReference(JaxTestCase):
+    def test_fused_B_and_dB_matches_autodiff_of_B(self):
+        """Claim: the hand-written fused B + dB/dX integrand, kept as a mirror of
+        native ``biot_savart_kernel`` because it is faster, equals the B integrand
+        and its ``jax.jacfwd`` in the evaluation point to round-off at every
+        quadrature node, and the tiled ``biot_savart_B_and_dB`` equals
+        ``biot_savart_B`` and its ``jax.jacfwd`` kernel ``biot_savart_dB_by_dX``.
+
+        Configurations: NCSX coils at points around the magnetic axis, at points
+        1-10 mm from a coil, and at points about 10 m away. Integrand errors are
+        relative to the node's term size, |gammadash| / r**2 for B and
+        |gammadash| / r**3 for dB, so cancellation in the cross product does not
+        inflate them; kernel errors are relative to the largest entry at each
+        point.
+        """
+        _bs, axis_points, gammas_np, gds_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
+        gammas = jnp.asarray(gammas_np)
+        gammadashs = jnp.asarray(gds_np)
+        currents = jnp.asarray(currents_np)
+        tangent = gds_np[0, 0] / np.linalg.norm(gds_np[0, 0])
+        offset = np.cross(tangent, [0.0, 0.0, 1.0])
+        offset /= np.linalg.norm(offset)
+        configurations = {
+            "around the axis": axis_points,
+            "near a coil": gammas_np[0, 0] + np.outer([1e-3, 3e-3, 1e-2], offset),
+            "far away": np.array([[10.0, 3.0, -2.0], [-7.0, 8.0, 5.0]]),
+        }
+
+        def B_integrand(x):
+            return core_biotsavart._biot_savart_B_integrand(x, gammas, gammadashs)
+
+        def autodiff_integrand(x):
+            # jacfwd yields [..., component, direction]; the fused integrand
+            # puts the derivative direction first.
+            return B_integrand(x), jnp.swapaxes(jax.jacfwd(B_integrand)(x), -1, -2)
+
+        def fused_integrand(x):
+            return core_biotsavart._biot_savart_B_and_dB_integrand(
+                x, gammas, gammadashs
+            )
+
+        for name, points_np in configurations.items():
+            with self.subTest(configuration=name):
+                points = jnp.asarray(points_np)
+                B_fused, dB_fused = jax.vmap(fused_integrand)(points)
+                B_auto, dB_auto = jax.vmap(autodiff_integrand)(points)
+                distance = np.linalg.norm(
+                    points_np[:, None, None, :] - gammas_np[None], axis=-1
+                )
+                B_scale = np.linalg.norm(gds_np, axis=-1)[None] / distance**2
+                B_error = np.max(np.abs(np.asarray(B_fused - B_auto)), axis=-1)
+                dB_error = np.max(np.abs(np.asarray(dB_fused - dB_auto)), axis=(-2, -1))
+                self.assertLess(np.max(B_error / B_scale), _ROUND_OFF)
+                self.assertLess(np.max(dB_error * distance / B_scale), _ROUND_OFF)
+
+                B_kernel, dB_kernel = core_biotsavart.biot_savart_B_and_dB(
+                    points, gammas, gammadashs, currents
+                )
+                B_reference = np.asarray(
+                    biot_savart_B(points, gammas, gammadashs, currents)
+                )
+                dB_reference = np.asarray(
+                    biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
+                )
+                self.assertLess(
+                    np.max(
+                        np.max(np.abs(np.asarray(B_kernel) - B_reference), axis=-1)
+                        / np.max(np.abs(B_reference), axis=-1)
+                    ),
+                    _ROUND_OFF,
+                )
+                self.assertLess(
+                    np.max(
+                        np.max(np.abs(np.asarray(dB_kernel) - dB_reference), axis=(-2, -1))
+                        / np.max(np.abs(dB_reference), axis=(-2, -1))
+                    ),
+                    _ROUND_OFF,
+                )
 
 
 class TestBiotSavartJaxCppCoilCurrentParity(JaxTestCase):
