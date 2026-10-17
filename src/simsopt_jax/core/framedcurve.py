@@ -19,9 +19,7 @@ __all__ = [
     "centroid_frame",
     "frenet_frame",
     "rotated_centroid_frame",
-    "rotated_centroid_frame_dash",
     "rotated_frenet_frame",
-    "rotated_frenet_frame_dash",
     "rotation_alpha",
     "rotation_alphadash",
 ]
@@ -205,108 +203,6 @@ def rotated_frenet_frame(
     alpha_jax = _as_jax_float64(alpha)
     nn, bb = _rotate_frame(n, b, alpha_jax)
     return t, nn, bb
-
-
-@jax.jit
-def rotated_centroid_frame_dash(
-    gamma: jax.Array,
-    gammadash: jax.Array,
-    gammadashdash: jax.Array,
-    alpha: jax.Array,
-    alphadash: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Return the parameter derivative of ``rotated_centroid_frame``.
-
-    The derivative is taken with respect to the curve parameter ``phi``.
-    It is built as the JVP of ``rotated_centroid_frame`` against the
-    tangent stack ``(gammadash, gammadashdash, alphadash)`` so it matches
-    the upstream lambda definition line-for-line.
-
-    Rotation uses n_rot = cos(alpha)*n - sin(alpha)*b and b_rot = sin(alpha)*n + cos(alpha)*b.
-
-    Args:
-        gamma (jax.Array): Cartesian curve positions, shape (Q, 3), in meters.
-        gammadash (jax.Array): First derivative with respect to the normalized curve
-            parameter, shape (Q, 3), in meters.
-        gammadashdash (jax.Array): Second parameter derivative, shape (Q, 3), in meters.
-        alpha (jax.Array): Normal/binormal rotation angles, shape (Q,), in radians.
-        alphadash (jax.Array): Angle derivative with respect to the normalized
-            parameter, shape (Q,), in radians.
-
-    Returns:
-        tuple[jax.Array, jax.Array, jax.Array]: Parameter derivatives of
-            tangent, normal and binormal, each shape (Q, 3), dimensionless per
-            unit normalized parameter.
-    """
-
-    def _frame(gamma_in, gammadash_in, alpha_in):
-        return rotated_centroid_frame(gamma_in, gammadash_in, alpha_in)
-
-    primals = (
-        _as_jax_float64(gamma),
-        _as_jax_float64(gammadash),
-        _as_jax_float64(alpha),
-    )
-    tangents = (
-        _as_jax_float64(gammadash),
-        _as_jax_float64(gammadashdash),
-        _as_jax_float64(alphadash),
-    )
-    _, frame_dash = jax.jvp(_frame, primals, tangents)
-    return frame_dash
-
-
-@jax.jit
-def rotated_frenet_frame_dash(
-    gamma: jax.Array,
-    gammadash: jax.Array,
-    gammadashdash: jax.Array,
-    gammadashdashdash: jax.Array,
-    alpha: jax.Array,
-    alphadash: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Return the parameter derivative of ``rotated_frenet_frame``.
-
-    Built as the JVP of ``rotated_frenet_frame`` against the tangent
-    stack ``(gammadash, gammadashdash, gammadashdashdash, alphadash)``.
-
-    Rotation uses n_rot = cos(alpha)*n - sin(alpha)*b and b_rot = sin(alpha)*n + cos(alpha)*b.
-
-    Args:
-        gamma (jax.Array): Cartesian curve positions, shape (Q, 3), in meters. Accepted
-            for API symmetry; the Frenet construction does not use positions.
-        gammadash (jax.Array): First derivative with respect to the normalized curve
-            parameter, shape (Q, 3), in meters.
-        gammadashdash (jax.Array): Second parameter derivative, shape (Q, 3), in meters.
-        gammadashdashdash (jax.Array): Third parameter derivative, shape (Q, 3), in
-            meters.
-        alpha (jax.Array): Normal/binormal rotation angles, shape (Q,), in radians.
-        alphadash (jax.Array): Angle derivative with respect to the normalized
-            parameter, shape (Q,), in radians.
-
-    Returns:
-        tuple[jax.Array, jax.Array, jax.Array]: Parameter derivatives of
-            tangent, normal and binormal, each shape (Q, 3), dimensionless per
-            unit normalized parameter.
-    """
-
-    def _frame(gamma_in, gammadash_in, gammadashdash_in, alpha_in):
-        return rotated_frenet_frame(gamma_in, gammadash_in, gammadashdash_in, alpha_in)
-
-    primals = (
-        _as_jax_float64(gamma),
-        _as_jax_float64(gammadash),
-        _as_jax_float64(gammadashdash),
-        _as_jax_float64(alpha),
-    )
-    tangents = (
-        _as_jax_float64(gammadash),
-        _as_jax_float64(gammadashdash),
-        _as_jax_float64(gammadashdashdash),
-        _as_jax_float64(alphadash),
-    )
-    _, frame_dash = jax.jvp(_frame, primals, tangents)
-    return frame_dash
 
 
 def _rotation_alpha_impl(dofs: jax.Array, points: jax.Array, order: int) -> jax.Array:

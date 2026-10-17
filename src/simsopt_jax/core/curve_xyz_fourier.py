@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from ._device_scalars import device_one, two_pi
+from ._device_scalars import device_one, placement_zero, two_pi
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
 )
@@ -16,9 +16,10 @@ def _mode_numbers(order, *, reference):
 
 
 def _constant_row(length: int, *, is_one: bool, reference):
-    one = device_one(reference)
-    zero = one - one
-    scalar = one if is_one else zero
+    # Nested curve derivatives concatenate this row's tangent with harmonics;
+    # it must be a placed array rather than stop_gradient's symbolic zero.
+    zero = placement_zero(reference)
+    scalar = device_one(reference) + zero if is_one else zero
     return jnp.broadcast_to(scalar, (1, int(length)))
 
 
