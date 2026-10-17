@@ -1,4 +1,4 @@
-"""Caller mutation cannot change PR 3's captured state or pending kernels."""
+"""Caller mutation cannot change captured JAX field state or pending kernels."""
 
 from __future__ import annotations
 

@@ -373,7 +373,7 @@ class TestStageTwoCoilTerms(JaxTestCase):
         np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=0.0)
         _assert_close(gradient, _native_gradient(native, field))
 
-    def test_coil_geometry_keeps_the_pr4_contract_and_geometry_adds_centerlines(self):
+    def test_coil_geometry_keeps_its_outputs_and_geometry_adds_centerlines(self):
         """``stage_two_coil_geometry`` returns ``(gamma, gammadash, gammadashdash, currents)``
         of every coil; ``stage_two_geometry`` adds the pack centerlines of finite build."""
         surface = _surface()
