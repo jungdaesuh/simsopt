@@ -14,9 +14,9 @@ Problems are upstream's (``tests/geo/surface_test_helpers.get_boozer_surface``
 and ``examples/2_Intermediate/boozerQA.py``): NCSX coils, BoozerExact
 ``mpol = ntor = 6`` on 13 x 13, BoozerLS ``mpol = ntor = 3`` on 20 x 20 with
 weight 100, iota -0.406. Exact solves use ``newton_tol = 1e-10``, above the
-residual's round-off floor (PR 8). Comparisons are against native objects on
-native surfaces where PR 8's adjoint is native's, and against native
-objectives on the same JAX surface where PR 8 deliberately differs (BoozerExact
+residual's round-off floor. Comparisons are against native objects on
+native surfaces where the JAX adjoint is native's, and against native
+objectives on the same JAX surface where the JAX adjoint deliberately differs (BoozerExact
 without stellarator symmetry, where native raises; BoozerLS with a
 ToroidalFlux label, where native's adjoint is not the derivative) or where the
 native and JAX solves differ by more than round-off (BoozerLS without
@@ -158,7 +158,7 @@ _NATIVE_CASES = {
 }
 
 
-# Native's objective on the same JAX surface is the reference where PR 8's adjoint deliberately
+# Native's objective on the same JAX surface is the reference where the JAX adjoint deliberately
 # differs from native's (BoozerExact without stellarator symmetry, a BoozerLS ToroidalFlux label)
 # and where the solves differ beyond round-off (BoozerLS without stellarator symmetry: the native
 # and JAX solves end on parametrizations of the surface 20 % apart in the DOFs along a near-null

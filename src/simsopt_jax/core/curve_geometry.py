@@ -533,10 +533,11 @@ def curve_gamma_and_gammadash_from_spec(spec: CurveSpec):
 def curve_length_from_dofs(spec: CurveSpec, dofs: jax.Array) -> jax.Array:
     """Native CurveLength from a curve spec and its full input DOFs.
 
-    Compose PR4 geometry with native's mean tangent norm. Different Fourier
-    summation orders can differ by a few ulps of length; a nearly active
-    quadratic length penalty propagates that scalar round-off to its gradient.
-    Zero tangents retain the undefined norm derivative, as natively.
+    Compose ``curve_gamma_and_gammadash_from_dofs`` with native's mean tangent
+    norm. Different Fourier summation orders can differ by a few ulps of
+    length; a nearly active quadratic length penalty propagates that scalar
+    round-off to its gradient. Zero tangents retain the undefined norm
+    derivative, as natively.
 
     Args:
         spec (CurveSpec): Immutable curve layout and quadrature grid in turns.

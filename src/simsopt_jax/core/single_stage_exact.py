@@ -2,7 +2,7 @@
 
 The objective is native NonQuasiSymmetricRatio plus identity quadratic
 penalties on iota and major radius and the upper quadratic penalty on total
-CurveLength. The exact Newton and residual coil VJP are PR8's kernels; this
+CurveLength. The exact Newton solve and residual coil VJP are ``boozer_solvers``' kernels; this
 module supplies their composition, not another solver or optimizer.
 
 All numeric settings, coil reconstruction templates and the last successful
@@ -54,9 +54,10 @@ class ExactSingleStageProblem:
 
     The length indices select original coil curves in the extraction snapshot
     (each occurrence contributes once). Fixed DOF templates and free-vector
-    mappings belong to PR3. Rebuild the snapshot when that layout, fixed values
-    or structural grids change; free values and numeric settings are traced.
-    G is always an explicit inner variable, as in native boozerQA.
+    mappings come from the ``CoilSetDofExtractionSpec``. Rebuild the snapshot
+    when that layout, fixed values or structural grids change; free values and
+    numeric settings are traced. G is always an explicit inner variable, as in
+    native boozerQA.
 
     Args:
         boozer (BoozerProblem): Surface, coil and label snapshot with native units and
@@ -174,8 +175,8 @@ def _major_radius(surface: SurfaceSpec) -> tuple[jax.Array, jax.Array]:
     The cylindrical-angle derivatives along the two surface tangents are
     forward-mode derivatives of ``atan2(y, x)``. The flag preserves native's
     error on an exactly singular finite map, where the cross-section area alone
-    could otherwise remain finite. Float64 underflow/overflow limits of PR6
-    surface geometry still apply.
+    could otherwise remain finite. Float64 underflow/overflow limits of
+    ``surface_geometry`` still apply.
     """
     gamma = surface_gamma(surface)
     xphi, xtheta = surface_gammadash1(surface), surface_gammadash2(surface)
