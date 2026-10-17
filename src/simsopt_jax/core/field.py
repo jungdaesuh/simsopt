@@ -16,6 +16,7 @@ from ._math_utils import (
     runtime_device_put,
 )
 from .biotsavart import (
+    _tree_add,
     biot_savart_A,
     biot_savart_B,
     biot_savart_B_and_dB,
@@ -62,7 +63,6 @@ __all__ = [
     "grouped_biot_savart_dB_by_dX_from_spec",
     "grouped_coil_set_spec_from_inputs",
     "grouped_coil_set_spec_from_lists",
-    "grouped_field_data_from_spec",
     "grouped_field_inputs_from_spec",
 ]
 
@@ -85,10 +85,6 @@ def _empty_grouped_field_result(points: jax.Array, kernel):
             _zeros_float64((point_count, 3, 3)),
         )
     raise ValueError(f"Unsupported grouped-field kernel: {kernel!r}")
-
-
-def _tree_add(left, right):
-    return jax.tree.map(lambda x, y: x + y, left, right)
 
 
 def _compute_group_inputs(points, gammas, gammadashs, currents):
@@ -397,22 +393,6 @@ def grouped_field_inputs_from_spec(
             shapes (C, Q, 3), (C, Q, 3), (C,).
     """
     return coil_spec.field_inputs()
-
-
-def grouped_field_data_from_spec(
-    coil_spec: GroupedCoilSetSpec,
-) -> tuple[tuple[object, object, object, list[int]], ...]:
-    """Extract grouped sampled field data from an immutable coil spec.
-
-    Args:
-        coil_spec (GroupedCoilSetSpec): Immutable geometry and currents grouped by
-            quadrature count.
-
-    Returns:
-        tuple[tuple]: One geometry/tangent/current triple of shapes (C, Q, 3),
-            (C, Q, 3), (C,) followed by an original index list per group.
-    """
-    return coil_spec.as_grouped_data()
 
 
 def grouped_biot_savart_B_from_spec(points: object, coil_spec: GroupedCoilSetSpec):

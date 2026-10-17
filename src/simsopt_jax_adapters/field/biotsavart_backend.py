@@ -786,7 +786,6 @@ class JaxBiotSavart(Optimizable):
         self._points_jax = None
         self._points_cyl_jax = None
         self._points_version = 0
-        self._dof_layout_version = 0
         self._free_dof_layout_ready = False
         self._suppress_dependency_coil_dof_state = False
         self._fixed_dofs_maybe_changed = False
@@ -805,12 +804,11 @@ class JaxBiotSavart(Optimizable):
     def update_free_dof_size_indices(self) -> None:
         """Refresh free-DOF layout and invalidate its captured extraction contract.
 
-        Free-DOF indices, extraction contracts and the layout version are updated.
+        Free-DOF indices and extraction contracts are updated.
         """
         super().update_free_dof_size_indices()
         self._local_free_positions_by_opt.clear()
         if self._free_dof_layout_ready:
-            self._dof_layout_version += 1
             self._rebuild_coil_dof_extraction_spec()
             self._captured_coil_state_fingerprint = (
                 self._current_captured_coil_state_fingerprint()
@@ -1138,16 +1136,6 @@ class JaxBiotSavart(Optimizable):
         if self._coil_dof_extraction_spec is not previous_spec:
             self.set_recompute_flag()
         return self._coil_dof_extraction_spec
-
-    @property
-    def dof_layout_version(self) -> int:
-        """Return the monotonic free/fixed DOF-layout version.
-
-        Returns:
-            int: Monotonic version incremented when the free/fixed layout is
-                rebuilt.
-        """
-        return self._dof_layout_version
 
     def _free_vector_dof_map_spec(self, opt, *, full_graph, separate_owners=False):
         if full_graph:
