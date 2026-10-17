@@ -23,16 +23,6 @@ from unittest import mock
 import os
 
 
-# ---------------------------------------------------------------------------
-# Pure composition: _xla_flags_with_cpu_compile_preset
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# CPU-scoped application: _apply_cpu_compile_preset_env
-# ---------------------------------------------------------------------------
-
-
 def _config(jax_platform):
     return BackendConfig(
         mode="jax_cpu_parity", backend="jax", jax_platform=jax_platform
