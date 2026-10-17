@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports, require_cuda
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -378,8 +378,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         which JAX would not choose in a CUDA process, host values are committed
         to the CPU.
         """
-        if not any(device.platform == "gpu" for device in jax.devices()):
-            self.skipTest("CUDA device required for the two-backend placement check")
+        require_cuda("CUDA device required for the two-backend placement check")
         environment = dict(os.environ)
         environment.update({"JAX_PLATFORMS": "cuda,cpu", "JAX_ENABLE_X64": "1"})
         completed = _run_placement_child("cuda_two_backend", environment)
@@ -387,8 +386,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
 
     def test_explicit_cross_backend_moves_pass_a_disallow_guard(self):
         """Under ``disallow_host_transfers``, explicit moves of a GPU array and a pytree to the CPU and back keep their values."""
-        if not any(device.platform == "gpu" for device in jax.devices()):
-            self.skipTest("CUDA device required for cross-backend placement")
+        require_cuda("CUDA device required for cross-backend placement")
         gpu = jax.devices("gpu")[0]
         cpu = jax.devices("cpu")[0]
         array = np.arange(5.0)
@@ -420,8 +418,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         self,
     ):
         """A jax-cpu policy in a CUDA process moves a committed GPU array to the CPU under a disallow guard."""
-        if not any(device.platform == "gpu" for device in jax.devices()):
-            self.skipTest("CUDA device required for cross-backend placement")
+        require_cuda("CUDA device required for cross-backend placement")
         gpu = jax.devices("gpu")[0]
         cpu = jax.devices("cpu")[0]
         values = np.arange(4.0)
@@ -434,8 +431,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
 
     def test_sharded_cross_backend_moves_pass_a_disallow_guard(self):
         """A GPU array moves to a two-CPU sharding and back under a disallow guard, values unchanged."""
-        if not any(device.platform == "gpu" for device in jax.devices()):
-            self.skipTest("CUDA device required for cross-backend placement")
+        require_cuda("CUDA device required for cross-backend placement")
         environment = dict(os.environ)
         environment.update(
             {

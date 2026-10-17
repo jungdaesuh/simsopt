@@ -148,6 +148,10 @@ def _xla_flag_value(token: str, flag_name: str) -> bool | None:
     return raw_value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+def _token_sets_flag(token: str, flag_name: str) -> bool:
+    return token == flag_name or token.startswith(f"{flag_name}=")
+
+
 def _split_xla_flag_tokens(xla_flags: str | None) -> tuple[str, ...]:
     # External-input parse contract: tokenize XLA_FLAGS env value via shlex.
     # The narrow ValueError catch is a boundary parser (malformed user input
@@ -175,7 +179,7 @@ def _xla_flags_enable_gpu_determinism(xla_flags: str | None) -> bool:
 def _xla_flags_include_stale_gpu_determinism(xla_flags: str | None) -> bool:
     for token in _split_xla_flag_tokens(xla_flags):
         if any(
-            token == flag_name or token.startswith(f"{flag_name}=")
+            _token_sets_flag(token, flag_name)
             for flag_name in _STALE_GPU_DETERMINISM_XLA_FLAGS
         ):
             return True
@@ -204,7 +208,7 @@ def _xla_flags_with_token(xla_flags: str | None, flag_name: str, token: str) -> 
     """
     stripped_xla_flags = "" if xla_flags is None else xla_flags.strip()
     if any(
-        existing == flag_name or existing.startswith(f"{flag_name}=")
+        _token_sets_flag(existing, flag_name)
         for existing in _split_xla_flag_tokens(xla_flags)
     ):
         return xla_flags or ""
@@ -352,10 +356,7 @@ def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
         if mode is None and _cached_field_kernel_tuning is not None:
             return _cached_field_kernel_tuning
         resolved_mode = _resolve_mode(mode)
-        tuning = _build_field_kernel_tuning(
-            resolved_mode,
-            get_backend_policy(resolved_mode),
-        )
+        tuning = _build_field_kernel_tuning(get_backend_policy(resolved_mode))
         if mode is None:
             _cached_field_kernel_tuning = tuning
         return tuning
@@ -511,10 +512,7 @@ def _select_initialized_jax_default_device(jax_module, config: BackendConfig) ->
     _raise_or_warn_runtime_issue(config, message)
 
 
-def _validate_cuda_parity_determinism_env(
-    config: BackendConfig,
-    policy: BackendPolicy,
-) -> None:
+def _validate_cuda_parity_determinism_env(config: BackendConfig) -> None:
     if config.jax_platform != "cuda":
         return
     xla_flags = os.environ.get(_XLA_FLAGS_ENV)
@@ -574,15 +572,10 @@ def _gpu_memory_runtime_env(
 
 
 def _gpu_memory_runtime_env_matches(config: BackendConfig) -> bool:
-    for name, expected in _gpu_memory_runtime_env(config):
-        actual = os.environ.get(name)
-        if expected is None:
-            if actual is not None:
-                return False
-            continue
-        if actual != expected:
-            return False
-    return True
+    return all(
+        os.environ.get(name) == expected
+        for name, expected in _gpu_memory_runtime_env(config)
+    )
 
 
 def _assert_jax_not_initialized_for_gpu_memory_config(config: BackendConfig) -> None:
@@ -752,7 +745,7 @@ def apply_jax_runtime_config() -> None:
     if config.backend != "jax":
         return
     policy = get_backend_policy(config.mode)
-    _validate_cuda_parity_determinism_env(config, policy)
+    _validate_cuda_parity_determinism_env(config)
     _apply_jax_gpu_memory_env(config)
     _apply_cpu_compile_preset_env(config, policy)
     _apply_cuda_autotuner_env(config)
@@ -866,10 +859,7 @@ def set_backend(
         _cached_backend_config = config
         _reset_backend_runtime_caches()
         for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
-            os.environ[env_name] = _runtime_env_value(
-                attribute_name,
-                getattr(config, attribute_name),
-            )
+            os.environ[env_name] = _runtime_env_value(getattr(config, attribute_name))
         _export_startup_jax_platforms(config)
         _apply_cuda_autotuner_env(config)
     if configure_runtime:

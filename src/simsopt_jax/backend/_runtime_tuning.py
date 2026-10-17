@@ -67,7 +67,7 @@ class FieldKernelTuning:
 
 
 def _point_chunk_size_default(chunk_policy: str) -> int:
-    return _POINT_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
+    return _POINT_CHUNK_SIZE_BY_POLICY[chunk_policy]
 
 
 def _static_chunk_sizes(mode: str, chunk_policy: str) -> dict[str, int]:
@@ -86,19 +86,16 @@ def _apply_chunk_env_overrides(chunk_sizes: dict[str, int]) -> dict[str, int]:
     return resolved
 
 
-def _build_field_kernel_tuning(
-    mode: str,
-    policy: BackendPolicy,
-) -> FieldKernelTuning:
+def _build_field_kernel_tuning(policy: BackendPolicy) -> FieldKernelTuning:
     chunk_sizes = _apply_chunk_env_overrides(
-        _static_chunk_sizes(mode, policy.chunk_policy)
+        _static_chunk_sizes(policy.mode, policy.chunk_policy)
     )
     effective_chunk_policy = policy.chunk_policy
     if policy.transfer_guard == "disallow":
         effective_chunk_policy = f"{policy.chunk_policy}_dense_audit"
         chunk_sizes = dict.fromkeys(chunk_sizes, 0)
     return FieldKernelTuning(
-        mode=mode,
+        mode=policy.mode,
         chunk_policy=effective_chunk_policy,
         coil_chunk_size=chunk_sizes["coil_chunk_size"],
         quadrature_block_size=chunk_sizes["quadrature_block_size"],

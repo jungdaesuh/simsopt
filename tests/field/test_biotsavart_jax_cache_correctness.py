@@ -72,11 +72,7 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         arrays, indices = pullback.d_coil_arrays, pullback.coil_indices
         field.coil_cotangents_to_derivative(arrays, indices)
         placements = []
-        materializations = []
-        metadata_placements = []
         put = jax.device_put
-        materialize = backend.host_array
-        place_metadata = backend._place_array_tree_on_device
 
         def counted_put(value, *args, **kwargs):
             placements.extend(
@@ -86,26 +82,18 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
             )
             return put(value, *args, **kwargs)
 
-        def counted_materialize(value, **kwargs):
-            materializations.append(1)
-            return materialize(value, **kwargs)
-
-        def counted_metadata(tree, device):
-            metadata_placements.append(1)
-            return place_metadata(tree, device)
-
         patches.enter_context(mock.patch.object(jax, "device_put", counted_put))
-        patches.enter_context(
-            mock.patch.object(backend, "host_array", counted_materialize)
+        materializations = patches.enter_context(
+            mock.patch.object(backend, "host_array", wraps=backend.host_array)
         )
-        patches.enter_context(
-            mock.patch.object(backend, "_place_array_tree_on_device", counted_metadata)
+        metadata_placements = patches.enter_context(
+            mock.patch.object(
+                backend,
+                "_place_array_tree_on_device",
+                wraps=backend._place_array_tree_on_device,
+            )
         )
         actual = field.coil_cotangents_to_derivative(arrays, indices)
-        print(
-            f"BF2: placements={len(placements)} bytes={sum(placements)} "
-            f"materializations={len(materializations)}"
-        )
         np.testing.assert_allclose(
             cast(np.ndarray, actual(field)),
             cast(np.ndarray, expected(native)),
@@ -114,10 +102,13 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         )
         # One free-vector H2D boundary (32 doubles), one packed D2H.
         self.assertTrue(
-            (len(placements), sum(placements), len(materializations)) == (1, 256, 1),
-            "(len(placements), sum(placements), len(materializations)) == (1, 256, 1)",
+            (len(placements), sum(placements), materializations.call_count)
+            == (1, 256, 1),
+            "(len(placements), sum(placements), materializations.call_count) == (1, 256, 1)",
         )
-        self.assertTrue(not metadata_placements, "not metadata_placements")
+        self.assertTrue(
+            not metadata_placements.called, "not metadata_placements.called"
+        )
 
     def test_packed_projection_preserves_distinct_owners_with_shared_dofs(self):
         """Packed projection retains independent writable native partials for distinct
@@ -209,27 +200,18 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         native.set_points(_POINTS)
         np.testing.assert_allclose(expected, native.B(), rtol=1e-12, atol=1e-14)
         spec = field.coil_dof_extraction_spec()
-        fingerprint_reads = []
-        fingerprint = field._current_captured_coil_state_fingerprint
-
-        def counted_fingerprint():
-            fingerprint_reads.append(1)
-            return fingerprint()
-
-        patches.enter_context(
+        fingerprint_reads = patches.enter_context(
             mock.patch.object(
-                field, "_current_captured_coil_state_fingerprint", counted_fingerprint
+                field,
+                "_current_captured_coil_state_fingerprint",
+                wraps=field._current_captured_coil_state_fingerprint,
             )
         )
         _CountedSample.copies.clear()
         for _ in range(10):
             np.testing.assert_allclose(np.asarray(field.B()), expected, rtol=0, atol=0)
-        print(
-            f"BF3: sample_copies={len(_CountedSample.copies)} "
-            f"bytes={sum(_CountedSample.copies)}"
-        )
         self.assertTrue(not _CountedSample.copies, "not _CountedSample.copies")
-        self.assertTrue(not fingerprint_reads, "not fingerprint_reads")
+        self.assertTrue(not fingerprint_reads.called, "not fingerprint_reads.called")
         self.assertTrue(
             field.coil_dof_extraction_spec() is spec,
             "field.coil_dof_extraction_spec() is spec",

@@ -90,44 +90,26 @@ _MODE_TO_RUNTIME = {
     "jax_gpu_fast": ("jax", "cuda"),
 }
 
-_NO_GPU_MEMORY_DEFAULTS = {
-    "xla_gpu_preallocate": None,
-    "xla_gpu_mem_fraction": None,
-    "xla_gpu_allocator": None,
-    "tf_gpu_allocator": None,
-}
-_GPU_MEMORY_MODE_DEFAULTS = {
-    "xla_gpu_preallocate": False,
-    "xla_gpu_mem_fraction": None,
-    "xla_gpu_allocator": None,
-    "tf_gpu_allocator": None,
-}
-
 _MODE_POLICY_DEFAULTS = {
     "native_cpu": {
         "parity_mode": False,
         "chunk_policy": "host_reference",
-        **_NO_GPU_MEMORY_DEFAULTS,
     },
     "jax_cpu_fast": {
         "parity_mode": False,
         "chunk_policy": "performance_tuned",
-        **_NO_GPU_MEMORY_DEFAULTS,
     },
     "jax_cpu_parity": {
         "parity_mode": True,
         "chunk_policy": "stable_default",
-        **_NO_GPU_MEMORY_DEFAULTS,
     },
     "jax_gpu_parity": {
         "parity_mode": True,
         "chunk_policy": "stable_default",
-        **_GPU_MEMORY_MODE_DEFAULTS,
     },
     "jax_gpu_fast": {
         "parity_mode": False,
         "chunk_policy": "performance_tuned",
-        **_GPU_MEMORY_MODE_DEFAULTS,
     },
 }
 
@@ -363,15 +345,6 @@ def _optional_nonneg_int_env(name: str) -> int | None:
     return value
 
 
-def _runtime_jax_platform_value(platform: str) -> str:
-    # Single canonical helper for lowering ``BackendConfig.jax_platform`` to the
-    # value JAX expects in ``JAX_PLATFORMS`` / ``jax.config["jax_platforms"]``.
-    # Currently identity (cpu/cuda already match upstream casing); kept as
-    # a single edit site so a future platform whose JAX name diverges from the
-    # simsopt mode token can be remapped here without touching call sites.
-    return platform
-
-
 _CUDA_WITH_CPU_FALLBACK_PLATFORMS = "cuda,cpu"
 
 
@@ -383,21 +356,21 @@ def _runtime_jax_platforms_value(platform: str, requested_platforms: str | None)
     (``requested_platforms``) lists cuda without cpu.
     """
     if platform != "cuda":
-        return _runtime_jax_platform_value(platform)
+        return platform
     requested_parts = (
         ()
         if requested_platforms is None
         else tuple(part.strip().lower() for part in requested_platforms.split(","))
     )
     if "cuda" in requested_parts and "cpu" not in requested_parts:
-        return _runtime_jax_platform_value(platform)
+        return platform
     return _CUDA_WITH_CPU_FALLBACK_PLATFORMS
 
 
 def _runtime_jax_backend_name(platform: str) -> str:
     if platform == "cuda":
         return "gpu"
-    return _runtime_jax_platform_value(platform)
+    return platform
 
 
 def _primary_jax_platform(platforms: str | None) -> str | None:
@@ -426,10 +399,6 @@ def _resolve_kwarg(
         if env_value is not None:
             return parse_env(env_value, env_name)
     return read_default()
-
-
-def _optional_bool_policy_default(value: object) -> bool | None:
-    return None if value is None else bool(value)
 
 
 def _debug_overlay_enabled() -> bool:
@@ -463,7 +432,6 @@ def _config_from_mode(
     mode = _validate_mode(mode)
     backend, jax_platform = _MODE_TO_RUNTIME[mode]
     debug_overlay = _debug_overlay_enabled()
-    defaults = _get_mode_policy_defaults(mode)
     if debug_overlay:
         resolved_debug_nans = True
         resolved_disable_jit = True
@@ -508,9 +476,8 @@ def _config_from_mode(
         parse_explicit=bool,
         env_names=(_GPU_PREALLOCATE_ENV,),
         parse_env=lambda value, source: _parse_bool_value(value, source=source),
-        read_default=lambda: _optional_bool_policy_default(
-            defaults["xla_gpu_preallocate"]
-        ),
+        # CUDA modes disable preallocation by default; CPU modes leave it unset.
+        read_default=lambda: False if jax_platform == "cuda" else None,
     )
     resolved_xla_gpu_mem_fraction = _resolve_kwarg(
         xla_gpu_mem_fraction,
@@ -523,9 +490,7 @@ def _config_from_mode(
             value,
             source=source,
         ),
-        read_default=lambda: _optional_float_policy_default(
-            defaults["xla_gpu_mem_fraction"]
-        ),
+        read_default=lambda: None,
     )
     resolved_xla_gpu_allocator = _resolve_kwarg(
         xla_gpu_allocator,
@@ -538,10 +503,7 @@ def _config_from_mode(
             value,
             source=source,
         ),
-        read_default=lambda: _validate_gpu_allocator(
-            defaults["xla_gpu_allocator"],
-            source=f"{mode}.xla_gpu_allocator",
-        ),
+        read_default=lambda: None,
     )
     resolved_tf_gpu_allocator = _resolve_kwarg(
         tf_gpu_allocator,
@@ -554,10 +516,7 @@ def _config_from_mode(
             value,
             source=source,
         ),
-        read_default=lambda: _validate_tf_gpu_allocator(
-            defaults["tf_gpu_allocator"],
-            source=f"{mode}.tf_gpu_allocator",
-        ),
+        read_default=lambda: None,
     )
     return BackendConfig(
         mode=mode,
@@ -579,12 +538,6 @@ def _get_mode_policy_defaults(mode: str) -> dict[str, object]:
     return _MODE_POLICY_DEFAULTS[_validate_mode(mode)]
 
 
-def _optional_float_policy_default(value: object) -> float | None:
-    if value is None:
-        return None
-    return float(cast(float | str, value))
-
-
 def _policy_from_config(config: BackendConfig) -> BackendPolicy:
     defaults = _get_mode_policy_defaults(config.mode)
     return BackendPolicy(
@@ -597,18 +550,11 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
     )
 
 
-def _runtime_env_value(attribute_name: str, value: object) -> str:
+def _runtime_env_value(value: object) -> str:
     if value is None:
         return ""
-    if attribute_name in {
-        "strict",
-        "debug_nans",
-        "disable_jit",
-        "xla_gpu_preallocate",
-    }:
-        return "1" if bool(value) else "0"
-    if attribute_name == "jax_platform":
-        return _runtime_jax_platform_value(str(value))
+    if isinstance(value, bool):
+        return "1" if value else "0"
     return str(value)
 
 

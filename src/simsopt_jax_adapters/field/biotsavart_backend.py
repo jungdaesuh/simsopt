@@ -162,12 +162,6 @@ def _cart_points_to_cyl(points_cart):
     )
 
 
-def _points_cyl_for_basis(points_cart, points_cyl):
-    if points_cyl is not None:
-        return points_cyl
-    return _cart_points_to_cyl(points_cart)
-
-
 @jax.jit
 def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     vectors = _as_jax_float64(vectors_cart)
@@ -241,9 +235,7 @@ def _per_coil_unit_field_with_batch_size(points, coil_set_spec, kernel, *, batch
             )
 
         if batch_size <= 0:
-            group_results = jax.vmap(
-                lambda gamma, gammadash: evaluate_single((gamma, gammadash))
-            )(compute_gammas, compute_gammadashs)
+            group_results = jax.vmap(evaluate_single)((compute_gammas, compute_gammadashs))
         else:
             group_results = jax.lax.map(
                 evaluate_single,
@@ -297,30 +289,6 @@ class BiotSavartFieldPullback:
 
     d_coil_arrays: tuple[tuple[jax.Array, jax.Array, jax.Array], ...]
     coil_indices: tuple[tuple[int, ...], ...]
-
-
-def _set_biot_savart_points(field, points):
-    # Field values are cached per point set, so the field owns its points: host
-    # inputs are mutable, and placement snapshots them at the shared boundary.
-    if isinstance(points, jax.Array):
-        points = jnp.array(points, copy=True)
-    field._points_jax = _as_jax_float64(points)
-    field._points_cyl_jax = None
-    field._invalidate_point_outputs()
-    return field
-
-
-def _set_biot_savart_points_cyl(field, points_cyl):
-    field._points_cyl_jax = _canonical_set_points_cyl(_as_jax_float64(points_cyl))
-    field._points_jax = _cyl_points_to_cart(field._points_cyl_jax)
-    field._invalidate_point_outputs()
-    return field
-
-
-def _get_biot_savart_points_cyl(field):
-    if field._points_cyl_jax is not None:
-        return host_array(field._points_cyl_jax, dtype=np.float64)
-    return host_array(_cart_points_to_cyl(field._points_jax), dtype=np.float64)
 
 
 def _owner_segments_from_free_positions(
@@ -385,16 +353,9 @@ def _jitted_coil_cotangents_to_owner_partials(
     )
 
 
-@partial(jax.jit, static_argnames=("coil_indices",))
-def _jitted_coil_cotangents_to_dofs_gradient(
-    coil_dof_extraction_spec,
-    d_coil_arrays,
-    coil_indices,
-    coil_dofs,
-):
-    return _extraction_input_cotangent(
-        coil_dof_extraction_spec, d_coil_arrays, coil_indices, coil_dofs,
-    )
+_jitted_coil_cotangents_to_dofs_gradient = jax.jit(
+    _extraction_input_cotangent, static_argnames=("coil_indices",),
+)
 
 
 def _canonical_coil_indices(coil_indices):
@@ -597,7 +558,7 @@ class JaxBiotSavart(Optimizable):
         """
         return _cart_vectors_to_cyl(
             self.B(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+            self._basis_points_cyl(),
         )
 
     def A_cyl(self):
@@ -609,7 +570,7 @@ class JaxBiotSavart(Optimizable):
         """
         return _cart_vectors_to_cyl(
             self.A(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+            self._basis_points_cyl(),
         )
 
     def GradAbsB_cyl(self):
@@ -621,7 +582,7 @@ class JaxBiotSavart(Optimizable):
         """
         return _cart_vectors_to_cyl(
             self.GradAbsB(),
-            _points_cyl_for_basis(self._points_jax, self._points_cyl_jax),
+            self._basis_points_cyl(),
         )
 
     def dB_by_dcoilcurrents(self, compute_derivatives=0):
@@ -1113,13 +1074,10 @@ class JaxBiotSavart(Optimizable):
                 ]
             )),
             tuple(
-                (source_start, source_end, owner_start + target_start, owner_start + target_end)
+                segment
                 for owner, (owner_start, _owner_end) in owner_slices.items()
                 if int(owner.local_dof_size) > 0
-                for source_start, source_end, target_start, target_end in
-                _owner_segments_from_free_positions(
-                    self._coil_dof_indices[owner][0], self._local_free_positions(owner),
-                )
+                for segment in self._free_owner_segments(owner, owner_start)
             ),
         )
 
@@ -1141,18 +1099,10 @@ class JaxBiotSavart(Optimizable):
         if full_graph:
             full_dofs, full_indices = _optimizable_dof_layout(opt, separate_owners=separate_owners)
             owner_segments = tuple(
-                (
-                    owner_start,
-                    owner_end,
-                    int(target_start + local_start),
-                    int(target_start + local_end),
-                )
+                segment
                 for dep_opt, (target_start, _target_end) in full_indices.items()
                 if int(dep_opt.local_dof_size) > 0
-                for owner_start, owner_end, local_start, local_end in
-                _owner_segments_from_free_positions(
-                    self._coil_dof_indices[dep_opt][0], self._local_free_positions(dep_opt),
-                )
+                for segment in self._free_owner_segments(dep_opt, target_start)
             )
             template_full_dofs = _as_jax_float64(full_dofs)
             return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
@@ -1161,12 +1111,22 @@ class JaxBiotSavart(Optimizable):
         if opt.local_dof_size == 0:
             return self._full_input_dof_map_spec(template_full_dofs, ())
 
-        owner_start, _owner_end = self._coil_dof_indices[opt]
-        owner_segments = _owner_segments_from_free_positions(
-            owner_start,
-            self._local_free_positions(opt),
+        return self._full_input_dof_map_spec(
+            template_full_dofs, self._free_owner_segments(opt),
         )
-        return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
+
+    def _free_owner_segments(self, opt, target_offset=0):
+        """Copy ranges from ``opt``'s free-vector slice to its full local DOFs.
+
+        Target bounds are shifted by ``target_offset``, the start of ``opt``'s
+        local full vector in the destination.
+        """
+        return tuple(
+            (owner_start, owner_end, int(target_offset + local_start), int(target_offset + local_end))
+            for owner_start, owner_end, local_start, local_end in _owner_segments_from_free_positions(
+                self._coil_dof_indices[opt][0], self._local_free_positions(opt),
+            )
+        )
 
     def _full_input_dof_map_spec(self, template_full_dofs, owner_segments):
         return make_optimizable_dof_map_spec(
@@ -1262,7 +1222,14 @@ class JaxBiotSavart(Optimizable):
             JaxBiotSavart object: This instance after replacing owned point
                 buffers and invalidating cached point outputs.
         """
-        return _set_biot_savart_points(self, points)
+        # Field values are cached per point set, so the field owns its points: host
+        # inputs are mutable, and placement snapshots them at the shared boundary.
+        if isinstance(points, jax.Array):
+            points = jnp.array(points, copy=True)
+        self._points_jax = _as_jax_float64(points)
+        self._points_cyl_jax = None
+        self._invalidate_point_outputs()
+        return self
 
     def set_points_cart(self, points):
         """Set evaluation points and invalidate cached field outputs.
@@ -1288,7 +1255,10 @@ class JaxBiotSavart(Optimizable):
             JaxBiotSavart object: This instance after replacing owned point
                 buffers and invalidating cached point outputs.
         """
-        return _set_biot_savart_points_cyl(self, points_cyl)
+        self._points_cyl_jax = _canonical_set_points_cyl(_as_jax_float64(points_cyl))
+        self._points_jax = _cyl_points_to_cart(self._points_cyl_jax)
+        self._invalidate_point_outputs()
+        return self
 
     def get_points_cart_ref(self):
         """Return the current JAX point buffer for point-preserving callers.
@@ -1316,7 +1286,13 @@ class JaxBiotSavart(Optimizable):
                 lengths in meters and angle in radians. Cartesian-derived phi is in
                 [0, 2*pi); explicitly set angles retain signed fmod values.
         """
-        return _get_biot_savart_points_cyl(self)
+        return host_array(self._basis_points_cyl(), dtype=np.float64)
+
+    def _basis_points_cyl(self):
+        """Explicitly set cylindrical points, else those derived from the Cartesian ones."""
+        if self._points_cyl_jax is not None:
+            return self._points_cyl_jax
+        return _cart_points_to_cyl(self._points_jax)
 
     def set_points_from_spec(self, field_eval_spec):
         """Set evaluation points from an immutable field-evaluation spec.
@@ -1331,7 +1307,7 @@ class JaxBiotSavart(Optimizable):
             JaxBiotSavart object: This instance after replacing owned point
                 buffers and invalidating cached point outputs.
         """
-        return _set_biot_savart_points(self, field_eval_spec.points)
+        return self.set_points(field_eval_spec.points)
 
     def field_eval_spec(self):
         """Build the immutable field-evaluation spec for the current points.

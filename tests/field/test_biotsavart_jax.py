@@ -44,22 +44,14 @@ if JAX_IMPORT_ERROR is None:
 _DIRECT_KERNEL_TOLS = {
     "rtol": 1e-10,
     "atol": 1e-12,
-    "requires_same_state": True,
-    "requires_direct_cpp_oracle": True,
-    "vector_parity_required": True,
 }
 
 
 _DERIVATIVE_HEAVY_TOLS = {
-    "scalar_value_rtol": 1e-10,
-    "scalar_value_atol": 1e-12,
     "first_derivative_rtol": 1e-08,
     "first_derivative_atol": 1e-10,
     "second_derivative_rtol": 1e-10,
     "second_derivative_atol": 1e-12,
-    "requires_same_input": True,
-    "requires_direct_cpp_oracle": True,
-    "fd_validation_secondary": True,
 }
 
 
@@ -144,89 +136,37 @@ def _assert_cylindrical_accessors_match_cpu(jax_field, cpu_field):
 class TestBiotSavartJaxCppParity(JaxTestCase):
     """Compare against the installed C++ simsoptpp kernel."""
 
-    def test_B_parity_ncsx(self):
-        """Native Biot-Savart parity on identical coils, points and cotangents."""
+    def test_kernel_parity_ncsx(self):
+        """Raw JAX kernels match native ``BiotSavart`` on the NCSX parity fixture."""
+        direct = (_DIRECT_KERNEL_TOLS["rtol"], _DIRECT_KERNEL_TOLS["atol"])
+        first_derivative = (
+            _DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            _DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+        for quantity, kernel, (rtol, atol) in (
+            ("B", biot_savart_B, direct),
+            ("A", biot_savart_A, direct),
+            ("dB_by_dX", biot_savart_dB_by_dX, first_derivative),
+            ("dA_by_dX", biot_savart_dA_by_dX, first_derivative),
+        ):
+            with self.subTest(quantity=quantity), self.case():
+                self._case_kernel_parity_ncsx(quantity, kernel, rtol, atol)
+
+    def _case_kernel_parity_ncsx(self, quantity, kernel, rtol, atol):
+        """Run one row with case-local objects released before runtime cleanup."""
         bs, points_np, gammas_np, gds_np, currents_np = (
             _ncsx_biotsavart_parity_fixture()
         )
-        B_ref = bs.B()
+        expected = getattr(bs, quantity)()
 
-        B_jax = biot_savart_B(
+        actual = kernel(
             jnp.array(points_np),
             jnp.array(gammas_np),
             jnp.array(gds_np),
             jnp.array(currents_np),
         )
 
-        np.testing.assert_allclose(
-            np.array(B_jax),
-            B_ref,
-            rtol=_DIRECT_KERNEL_TOLS["rtol"],
-            atol=_DIRECT_KERNEL_TOLS["atol"],
-        )
-
-    def test_A_parity_ncsx(self):
-        """Native Biot-Savart parity on identical coils, points and cotangents."""
-        bs, points_np, gammas_np, gds_np, currents_np = (
-            _ncsx_biotsavart_parity_fixture()
-        )
-        A_ref = bs.A()
-
-        A_jax = biot_savart_A(
-            jnp.array(points_np),
-            jnp.array(gammas_np),
-            jnp.array(gds_np),
-            jnp.array(currents_np),
-        )
-
-        np.testing.assert_allclose(
-            np.array(A_jax),
-            A_ref,
-            rtol=_DIRECT_KERNEL_TOLS["rtol"],
-            atol=_DIRECT_KERNEL_TOLS["atol"],
-        )
-
-    def test_dB_by_dX_parity_ncsx(self):
-        """The JAX spatial field Jacobian matches the native NCSX reference."""
-        bs, points_np, gammas_np, gds_np, currents_np = (
-            _ncsx_biotsavart_parity_fixture()
-        )
-        dB_ref = bs.dB_by_dX()
-
-        dB_jax = biot_savart_dB_by_dX(
-            jnp.array(points_np),
-            jnp.array(gammas_np),
-            jnp.array(gds_np),
-            jnp.array(currents_np),
-        )
-
-        np.testing.assert_allclose(
-            np.array(dB_jax),
-            dB_ref,
-            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
-            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
-        )
-
-    def test_dA_by_dX_kernel_parity_ncsx(self):
-        """``biot_savart_dA_by_dX`` matches ``BiotSavart.dA_by_dX()``."""
-        bs, points_np, gammas_np, gds_np, currents_np = (
-            _ncsx_biotsavart_parity_fixture()
-        )
-        dA_ref = bs.dA_by_dX()
-
-        dA_jax = biot_savart_dA_by_dX(
-            jnp.array(points_np),
-            jnp.array(gammas_np),
-            jnp.array(gds_np),
-            jnp.array(currents_np),
-        )
-
-        np.testing.assert_allclose(
-            np.array(dA_jax),
-            dA_ref,
-            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
-            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
-        )
+        np.testing.assert_allclose(np.array(actual), expected, rtol=rtol, atol=atol)
 
     def test_cylindrical_public_accessors_parity_ncsx(self):
         """``JaxBiotSavart`` owns cylindrical public accessors on its boundary."""
@@ -319,56 +259,35 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
                 ),
             )
 
-    def test_dA_by_dX_parity_ncsx(self):
-        """Native Biot-Savart parity on identical coils, points and cotangents."""
+    def test_adapter_derivative_parity_ncsx(self):
+        """``JaxBiotSavart`` spatial derivatives match native ``BiotSavart`` on the NCSX
+        parity fixture."""
+        first_derivative = (
+            _DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            _DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+        second_derivative = (
+            _DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+            _DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+        )
+        for quantity, (rtol, atol) in (
+            ("dA_by_dX", first_derivative),
+            ("d2B_by_dXdX", second_derivative),
+            ("d2A_by_dXdX", second_derivative),
+        ):
+            with self.subTest(quantity=quantity), self.case():
+                self._case_adapter_derivative_parity_ncsx(quantity, rtol, atol)
 
+    def _case_adapter_derivative_parity_ncsx(self, quantity, rtol, atol):
+        """Run one row with case-local objects released before runtime cleanup."""
         bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
-        dA_ref = bs.dA_by_dX()
+        expected = getattr(bs, quantity)()
 
         bs_jax = JaxBiotSavart(list(bs._coils))
         bs_jax.set_points(points_np)
-        dA_jax = bs_jax.dA_by_dX()
+        actual = getattr(bs_jax, quantity)()
 
-        np.testing.assert_allclose(
-            np.array(dA_jax),
-            dA_ref,
-            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
-            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
-        )
-
-    def test_d2B_by_dXdX_parity_ncsx(self):
-        """Native Biot-Savart parity on identical coils, points and cotangents."""
-
-        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
-        d2B_ref = bs.d2B_by_dXdX()
-
-        bs_jax = JaxBiotSavart(list(bs._coils))
-        bs_jax.set_points(points_np)
-        d2B_jax = bs_jax.d2B_by_dXdX()
-
-        np.testing.assert_allclose(
-            np.array(d2B_jax),
-            d2B_ref,
-            rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
-            atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
-        )
-
-    def test_d2A_by_dXdX_parity_ncsx(self):
-        """Native Biot-Savart parity on identical coils, points and cotangents."""
-
-        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
-        d2A_ref = bs.d2A_by_dXdX()
-
-        bs_jax = JaxBiotSavart(list(bs._coils))
-        bs_jax.set_points(points_np)
-        d2A_jax = bs_jax.d2A_by_dXdX()
-
-        np.testing.assert_allclose(
-            np.array(d2A_jax),
-            d2A_ref,
-            rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
-            atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
-        )
+        np.testing.assert_allclose(np.array(actual), expected, rtol=rtol, atol=atol)
 
     def test_GradAbsB_taylor_ncsx(self):
         """GradAbsB matches central differences of AbsB with second-order convergence
