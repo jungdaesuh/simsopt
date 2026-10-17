@@ -1,7 +1,7 @@
 """Backend mode validation, native x64/platform settings and the native jit device
 policy."""
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports, require_cuda
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -148,8 +148,8 @@ class TestNativeJaxDevice(JaxTestCase):
         self, device, platforms_after_import
     ):
         """Run one row with case-local objects released before runtime cleanup."""
-        if device == "gpu" and not any(d.platform == "gpu" for d in jax.devices()):
-            self.skipTest("CUDA JAX device required")
+        if device == "gpu":
+            require_cuda("CUDA JAX device required")
         _run_fresh_process(
             "set_backend_after_native_import.py",
             device,
@@ -177,8 +177,8 @@ class TestNativeJaxDevice(JaxTestCase):
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         tmp_path = Path(patches.enter_context(TemporaryDirectory()))
-        if device == "gpu" and not any(d.platform == "gpu" for d in jax.devices()):
-            self.skipTest("CUDA JAX device required")
+        if device == "gpu":
+            require_cuda("CUDA JAX device required")
         environment = _with_gpu_determinism(_fresh_environment())
         environment["SIMSOPT_JAX_COMPILATION_CACHE_DIR"] = str(
             tmp_path / "compilation-cache"
@@ -194,8 +194,8 @@ class TestNativeJaxDevice(JaxTestCase):
 
     def _run_platform_startup(self, scenario, jax_platforms, *, needs_cuda):
         """Run one ``set_backend_platform_startup.py`` scenario in a fresh process."""
-        if needs_cuda and not any(d.platform == "gpu" for d in jax.devices()):
-            self.skipTest("CUDA JAX device required")
+        if needs_cuda:
+            require_cuda("CUDA JAX device required")
         environment = _with_gpu_determinism(_fresh_environment())
         if jax_platforms is not None:
             environment["JAX_PLATFORMS"] = jax_platforms
@@ -227,8 +227,7 @@ class TestNativeJaxDevice(JaxTestCase):
 
     def test_native_jit_runs_on_cpu_with_cuda_default_in_fresh_process(self):
         """Under ``JAX_PLATFORMS=cuda,cpu`` native jitted kernels return CPU arrays."""
-        if not any(d.platform == "gpu" for d in jax.devices()):
-            self.skipTest("CUDA JAX device required")
+        require_cuda("CUDA JAX device required")
         environment = _with_gpu_determinism(_fresh_environment())
         environment["JAX_PLATFORMS"] = "cuda,cpu"
         _run_fresh_process("native_jit_device_policy.py", environment=environment)

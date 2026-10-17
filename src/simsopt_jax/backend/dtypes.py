@@ -116,8 +116,6 @@ def _array_like_dtype(value) -> np.dtype | None:
     dtype = getattr(value, "dtype", None)
     if dtype is not None:
         return np.dtype(dtype)
-    if isinstance(value, (np.ndarray, np.generic)):
-        return np.asarray(value).dtype
     if isinstance(value, (list, tuple)):
         if _contains_jax_leaves(value):
             return np.dtype(jnp.asarray(value).dtype)
@@ -265,11 +263,9 @@ def _device_put(
     )
     if _has_jax_array_value(value):
         array = jnp.asarray(snapshot_host_tree(value), dtype=resolved_dtype)
-    elif resolved_dtype is None:
-        array = np.asarray(value)
     else:
-        array = np.asarray(value, dtype=resolved_dtype)
-    array = snapshot_host_tree(array)
+        # One private C-contiguous copy, as ``snapshot_host_tree`` makes.
+        array = np.array(value, dtype=resolved_dtype, copy=True, order="C")
     if placement is None:
         return _unplaced_device_put(array)
     return _explicit_device_put(array, placement)
