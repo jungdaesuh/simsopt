@@ -55,11 +55,8 @@ class JaxTestCase(TestCase):
             yield patches
 
 
-try:
+with optional_jax_imports():
     from simsopt_jax.backend.dtypes import explicit_device_array
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 
 
 def _force_x64(jax_module) -> None:
