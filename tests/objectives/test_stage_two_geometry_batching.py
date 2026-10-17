@@ -168,6 +168,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
     def test_mixed_geometry_matches_scalar_with_distinct_grids_and_symmetries(
         self,
     ) -> None:
+        """Batched geometry matches per-curve evaluation for curves with different grids and symmetries."""
         extraction, parameters = _mixed_problem()
         actual = jax.jit(stage_two_coil_geometry)(extraction, parameters)
         expected = _scalar_geometry(extraction, parameters)
@@ -177,6 +178,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         self.assertFalse(np.allclose(actual[0][0], actual[0][1]))
 
     def test_mixed_geometry_gradients_and_hessian_vector_match_scalar(self) -> None:
+        """Gradients and Hessian-vector products of batched geometry match per-curve evaluation."""
         extraction, parameters = _mixed_problem()
 
         def batched(values: jax.Array) -> jax.Array:
@@ -198,6 +200,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         np.testing.assert_allclose(actual_hvp, expected_hvp, rtol=2e-10, atol=2e-9)
 
     def test_absent_source_indices_preserve_separate_curve_mappings(self) -> None:
+        """Coils without a shared source curve keep their own DOF mappings."""
         extraction, parameters = _mixed_problem()
         first = _with_curve_mapping(
             extraction.coils[0], extraction.coils[0].curve_map, None
@@ -211,6 +214,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         self.assertFalse(np.allclose(actual[0][0], actual[0][1]))
 
     def test_current_derivatives_do_not_couple_nonfinite_geometry(self) -> None:
+        """Infinite geometry tangents do not reach currents, and infinite current cotangents do not reach geometry DOFs."""
         extraction, parameters = _mixed_problem()
 
         def currents(values: jax.Array) -> jax.Array:
@@ -224,6 +228,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         np.testing.assert_array_equal(cotangent[:32], 0.0)
 
     def test_geometry_jvp_preserves_explicit_transfer_placement(self) -> None:
+        """The compiled geometry JVP runs with host-to-device transfers disallowed."""
         extraction, parameters = _mixed_problem()
         tangent = jnp.ones_like(parameters)
 
@@ -246,6 +251,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
             jax.block_until_ready(evaluate(extraction, parameters, tangent))
 
     def test_homogeneous_geometry_batches_fourier_dot_graph(self) -> None:
+        """Identical curve layouts share one batched Fourier contraction instead of one per curve."""
         extraction, parameters = _mixed_problem()
         first = extraction.coils[0]
         homogeneous = make_coil_set_dof_extraction_spec(
@@ -278,6 +284,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
     def test_compiled_current_derivatives_match_native_under_transfer_guard(
         self,
     ) -> None:
+        """Compiled coil currents and their JVP and VJP match native currents with transfers disallowed."""
         # Match the plain-current native fixture of the source eager AD oracle;
         # affine term assembly is a separate preexisting placement boundary.
         curves = create_equally_spaced_curves(
@@ -326,6 +333,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         np.testing.assert_allclose(parameter_cotangent, weights @ native_jacobian)
 
     def test_ordinary_geometry_eager_derivatives_match_native(self) -> None:
+        """Curve gamma, gammadash, gammadashdash and their JVPs and VJPs match native, with and without JIT."""
         curves = create_equally_spaced_curves(
             2, 2, True, R0=1.0, R1=0.25, order=1, numquadpoints=8
         )

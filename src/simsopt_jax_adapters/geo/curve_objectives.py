@@ -488,6 +488,8 @@ class JaxCurveCurveDistance(Optimizable):
         num_basecurves (int or None): leading base-curve count :math:`N_b`; default None. None or
             zero selects all curves, as native does.
         downsample (int): quadrature stride for both candidate search and penalty; default 1.
+            As in native, a stride that does not divide a curve's quadrature count is accepted
+            and samples that curve nonuniformly.
     """
 
     def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):
