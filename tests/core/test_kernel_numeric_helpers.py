@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -18,9 +18,6 @@ with optional_jax_imports():
 
 
 import numpy as np
-
-if JAX_IMPORT_ERROR is None:
-    jax.config.update("jax_enable_x64", True)
 
 
 class TestKernelNumericHelpers(JaxTestCase):
