@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import TypeAlias
 
 import numpy as np
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import jax
@@ -179,6 +179,13 @@ def _ordinary_stage_two_geometry(
     )
 
 
+if JAX_IMPORT_ERROR is None:
+    _GEOMETRY_FUNCTIONS: tuple[GeometryFunction, ...] = (
+        stage_two_coil_geometry,
+        _ordinary_stage_two_geometry,
+    )
+
+
 def _geometry_energy(geometry: tuple[jax.Array, ...]) -> jax.Array:
     # Nonlinear geometry and current terms exercise both first and second derivatives.
     return sum(
@@ -192,10 +199,16 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         self,
     ) -> None:
         """Batched geometry matches per-curve evaluation for curves with different grids and symmetries."""
-        for geometry_function in (
-            stage_two_coil_geometry,
-            _ordinary_stage_two_geometry,
-        ):
+        extraction, parameters = _mixed_problem()
+        expected = _scalar_geometry(extraction, parameters)
+        geometry = stage_two_geometry(extraction, parameters)
+        np.testing.assert_allclose(
+            geometry.centerline_gamma, expected[0], rtol=3e-13, atol=3e-12
+        )
+        np.testing.assert_allclose(
+            geometry.centerline_gammadash, expected[1], rtol=3e-13, atol=3e-12
+        )
+        for geometry_function in _GEOMETRY_FUNCTIONS:
             with self.subTest(geometry=geometry_function.__name__), self.case():
                 extraction, parameters = _mixed_problem()
                 actual = jax.jit(geometry_function)(extraction, parameters)
@@ -204,20 +217,10 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
                     np.testing.assert_allclose(value, reference, rtol=3e-13, atol=3e-12)
                 np.testing.assert_allclose(actual[3], (7.0, 0.1, -0.48, 7.0, -4.2))
                 self.assertFalse(np.allclose(actual[0][0], actual[0][1]))
-                geometry = stage_two_geometry(extraction, parameters)
-                np.testing.assert_allclose(
-                    geometry.centerline_gamma, expected[0], rtol=3e-13, atol=3e-12
-                )
-                np.testing.assert_allclose(
-                    geometry.centerline_gammadash, expected[1], rtol=3e-13, atol=3e-12
-                )
 
     def test_mixed_geometry_gradients_and_hessian_vector_match_scalar(self) -> None:
         """Gradients and Hessian-vector products of batched geometry match per-curve evaluation."""
-        for geometry_function in (
-            stage_two_coil_geometry,
-            _ordinary_stage_two_geometry,
-        ):
+        for geometry_function in _GEOMETRY_FUNCTIONS:
             with self.subTest(geometry=geometry_function.__name__), self.case():
                 self._case_mixed_geometry_gradients_and_hessian_vector_match_scalar(
                     geometry_function
@@ -248,10 +251,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
 
     def test_absent_source_indices_preserve_separate_curve_mappings(self) -> None:
         """Coils without a shared source curve keep their own DOF mappings."""
-        for geometry_function in (
-            stage_two_coil_geometry,
-            _ordinary_stage_two_geometry,
-        ):
+        for geometry_function in _GEOMETRY_FUNCTIONS:
             with self.subTest(geometry=geometry_function.__name__), self.case():
                 extraction, parameters = _mixed_problem()
                 first = _with_curve_mapping(
@@ -267,10 +267,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
 
     def test_current_derivatives_do_not_couple_nonfinite_geometry(self) -> None:
         """Infinite geometry tangents do not reach currents, and infinite current cotangents do not reach geometry DOFs."""
-        for geometry_function in (
-            stage_two_coil_geometry,
-            _ordinary_stage_two_geometry,
-        ):
+        for geometry_function in _GEOMETRY_FUNCTIONS:
             with self.subTest(geometry=geometry_function.__name__), self.case():
                 self._case_current_derivatives_do_not_couple_nonfinite_geometry(
                     geometry_function
@@ -293,10 +290,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
 
     def test_geometry_jvp_preserves_explicit_transfer_placement(self) -> None:
         """The compiled geometry JVP runs with host-to-device transfers disallowed."""
-        for geometry_function in (
-            stage_two_coil_geometry,
-            _ordinary_stage_two_geometry,
-        ):
+        for geometry_function in _GEOMETRY_FUNCTIONS:
             with self.subTest(geometry=geometry_function.__name__), self.case():
                 self._case_geometry_jvp_preserves_explicit_transfer_placement(
                     geometry_function
@@ -330,10 +324,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
 
     def test_homogeneous_geometry_batches_fourier_dot_graph(self) -> None:
         """Identical curve layouts share one batched Fourier contraction instead of one per curve."""
-        for geometry_function in (
-            stage_two_coil_geometry,
-            _ordinary_stage_two_geometry,
-        ):
+        for geometry_function in _GEOMETRY_FUNCTIONS:
             with self.subTest(geometry=geometry_function.__name__), self.case():
                 extraction, parameters = _mixed_problem()
                 first = extraction.coils[0]
@@ -371,10 +362,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         self,
     ) -> None:
         """Compiled coil currents and their JVP and VJP match native currents with transfers disallowed."""
-        for geometry_function in (
-            stage_two_coil_geometry,
-            _ordinary_stage_two_geometry,
-        ):
+        for geometry_function in _GEOMETRY_FUNCTIONS:
             with self.subTest(geometry=geometry_function.__name__), self.case():
                 # Match the plain-current native fixture of the source eager AD oracle;
                 # affine term assembly is a separate preexisting placement boundary.

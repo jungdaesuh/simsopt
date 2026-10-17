@@ -8,7 +8,6 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
-    from simsopt._core.derivative import Derivative
     from simsopt._core.optimizable import Optimizable
     from simsopt.field import Coil, Current, RegularizedCoil, coils_via_symmetries
     from simsopt.field.force import (
@@ -34,19 +33,16 @@ with optional_jax_imports():
         JaxSquaredMeanForce,
         JaxSquaredMeanTorque,
     )
+    from geo.test_curve_objectives_jax import _partials, _segment
 from unittest_jax_support import CompilationLog
 
 
 import logging
-from collections.abc import Callable
-from typing import cast
 
 import numpy as np
 
 
 _NCOILS = 2
-
-
 
 
 def _coils(*, shared_dofs: bool = False) -> tuple[list, list]:
@@ -107,10 +103,6 @@ def _objective_pairs(*, shared_dofs: bool = False) -> list[tuple[str, Optimizabl
     return pairs
 
 
-def _partials(objective: Optimizable) -> Derivative:
-    return cast(Callable[..., Derivative], objective.dJ)(partials=True)
-
-
 def _assert_matches_native(name: str, native: Optimizable, adapter: Optimizable) -> None:
     native_partials, adapter_partials = _partials(native), _partials(adapter)
     native_value = float(native.J())
@@ -148,16 +140,17 @@ def _assert_centered_taylor_ratio(objective: Optimizable, direction: np.ndarray,
     objective.x = x0
 
 
-
-
-
-
-
-
-
-
-
-
+def _assert_central_difference(objective: Optimizable, x0: np.ndarray, direction: np.ndarray, name: str = "") -> None:
+    """The directional derivative ``dJ() @ direction`` at ``x0`` matches a central difference of step 1e-7."""
+    step = 1e-7
+    objective.x = x0 + step * direction
+    plus = objective.J()
+    objective.x = x0 - step * direction
+    minus = objective.J()
+    objective.x = x0
+    np.testing.assert_allclose(
+        objective.dJ() @ direction, (plus - minus) / (2 * step), rtol=1e-6, err_msg=name
+    )
 
 
 def _scaled_ring(quadpoints, scale):
@@ -169,39 +162,21 @@ def _scaled_ring(quadpoints, scale):
     return curve
 
 
-def _assert_close_arrays(actual, expected, name: str) -> None:
+def _assert_close(actual, expected, name: str = "") -> None:
     expected = np.asarray(expected)
     np.testing.assert_allclose(
         np.asarray(actual), expected, rtol=1e-11, atol=1e-12 * np.max(np.abs(expected)), err_msg=name
     )
 
 
-
-
-def _segment(x_center, x_amplitude, numquadpoints=24):
-    """``x = x_center + x_amplitude cos(2 pi t)``, ``y = z = 0``: zero tangent at ``t = 0``."""
-    curve = CurveXYZFourier(numquadpoints, 1)
-    curve.set("xc(0)", x_center)
-    curve.set("xc(1)", x_amplitude)
-    return curve
-
-
-
-
-
-
-
-
-
-
 class TestForceJax(JaxTestCase):
     def test_squared_mean_objectives_integrate_without_length_normalization(self):
         """Squared-mean objectives square integrated force/torque, without dividing by coil length."""
         for case_id_0, torque in zip(["integrated_force", "integrated_torque"], [False, True], strict=True):
-            with self.subTest(case_id_0=case_id_0, torque=torque), self.case() as patches:
-                self._case_squared_mean_objectives_integrate_without_length_normalization(torque, patches)
+            with self.subTest(case_id_0=case_id_0, torque=torque), self.case():
+                self._case_squared_mean_objectives_integrate_without_length_normalization(torque)
 
-    def _case_squared_mean_objectives_integrate_without_length_normalization(self, torque, patches):
+    def _case_squared_mean_objectives_integrate_without_length_normalization(self, torque):
         """Run one row with case-local objects released before runtime cleanup."""
         targets, coils = _coils()
         target = targets[0]
@@ -226,20 +201,21 @@ class TestForceJax(JaxTestCase):
         integrated = np.mean(density * speed[:, None], axis=0)
         expected = np.dot(integrated, integrated)
         length = np.mean(speed)
-        self.assertTrue(expected > 0 and not np.isclose(length, 1.0), 'expected > 0 and not np.isclose(length, 1.0)')
+        self.assertGreater(expected, 0)
+        self.assertFalse(np.isclose(length, 1.0))
         np.testing.assert_allclose(objective.J(), expected, rtol=1e-12, atol=0.0)
-        self.assertTrue(not np.isclose(objective.J(), expected / length**2, rtol=1e-4, atol=0.0), 'not np.isclose(objective.J(), expected / length**2, rtol=1e-4, atol=0.0)')
+        self.assertFalse(np.isclose(objective.J(), expected / length**2, rtol=1e-4, atol=0.0))
 
     def test_force_objectives_match_native_values_gradients_and_partials(self):
         """Force objectives match native values, free gradients and fixed partials."""
         for case_id_0, shared_dofs in zip(["symmetric_copies", "shared_dofs_twin"], [False, True], strict=True):
-            with self.subTest(case_id_0=case_id_0, shared_dofs=shared_dofs), self.case() as patches:
-                self._case_force_objectives_match_native_values_gradients_and_partials(shared_dofs, patches)
+            with self.subTest(case_id_0=case_id_0, shared_dofs=shared_dofs), self.case():
+                self._case_force_objectives_match_native_values_gradients_and_partials(shared_dofs)
 
-    def _case_force_objectives_match_native_values_gradients_and_partials(self, shared_dofs, patches):
+    def _case_force_objectives_match_native_values_gradients_and_partials(self, shared_dofs):
         """Run one row with case-local objects released before runtime cleanup."""
         for name, native, adapter in _objective_pairs(shared_dofs=shared_dofs):
-            self.assertTrue(adapter.dof_names == native.dof_names, name)
+            self.assertEqual(adapter.dof_names, native.dof_names, name)
             _assert_matches_native(name, native, adapter)
 
     def test_force_gradients_match_central_differences(self):
@@ -248,15 +224,7 @@ class TestForceJax(JaxTestCase):
         for name, _, adapter in _objective_pairs(shared_dofs=True):
             x0 = np.array(adapter.x, dtype=float)
             direction = rng.standard_normal(x0.shape) * np.maximum(np.abs(x0), 1.0)
-            step = 1e-7
-            adapter.x = x0 + step * direction
-            plus = adapter.J()
-            adapter.x = x0 - step * direction
-            minus = adapter.J()
-            adapter.x = x0
-            np.testing.assert_allclose(
-                adapter.dJ() @ direction, (plus - minus) / (2 * step), rtol=1e-6, err_msg=name
-            )
+            _assert_central_difference(adapter, x0, direction, name)
 
     def test_force_objectives_follow_dof_and_downsample_changes_like_native(self):
         """DOFs and ``downsample`` are read at every evaluation, as native reads them."""
@@ -274,7 +242,7 @@ class TestForceJax(JaxTestCase):
         native = NetFluxes(target, sources, downsample=4)
         downsampled = JaxNetFluxes(target, sources, downsample=4)
         full = JaxNetFluxes(target, sources)
-        self.assertTrue(abs(downsampled.J() - full.J()) > 1e-6 * abs(full.J()), 'abs(downsampled.J() - full.J()) > 1e-6 * abs(full.J())')
+        self.assertGreater(abs(downsampled.J() - full.J()), 1e-6 * abs(full.J()))
         sampled_curve = CurveXYZFourier(
             np.asarray(target.curve.quadpoints)[::4], target.curve.order, dofs=target.curve.dofs
         )
@@ -288,15 +256,7 @@ class TestForceJax(JaxTestCase):
         np.testing.assert_allclose(downsampled.dJ(), expected, rtol=1e-14, atol=0.0)
         x0 = np.asarray(downsampled.x).copy()
         direction = np.random.default_rng(19).standard_normal(x0.shape) * np.maximum(np.abs(x0), 1.0)
-        step = 1e-7
-        downsampled.x = x0 + step * direction
-        plus = downsampled.J()
-        downsampled.x = x0 - step * direction
-        minus = downsampled.J()
-        downsampled.x = x0
-        np.testing.assert_allclose(
-            downsampled.dJ() @ direction, (plus - minus) / (2 * step), rtol=1e-6
-        )
+        _assert_central_difference(downsampled, x0, direction)
         _assert_matches_native("NetFluxes(explicit sampled target)", sampled, sampled_jax)
         _assert_matches_native("NetFluxes(downsample=4)", native, downsampled)
 
@@ -321,7 +281,7 @@ class TestForceJax(JaxTestCase):
         adapter = JaxLpCurveForce(targets, coils[:6], p=4)
         native.source_coils_coarse = adapter.source_coils_coarse = coils[3:5]
         _assert_matches_native("LpCurveForce, source_coils_coarse reassigned", native, adapter)
-        self.assertTrue(native.source_coils == adapter.source_coils, 'native.source_coils == adapter.source_coils')
+        self.assertEqual(native.source_coils, adapter.source_coils)
 
     def test_self_exclusion_keeps_the_singular_self_terms_out_of_the_gradient(self):
         """Two samples of one target lie 1e-10 apart per component, so the native distance
@@ -356,7 +316,7 @@ class TestForceJax(JaxTestCase):
             self.assertTrue(all(np.all(np.isfinite(g)) for g in native_gradient), name)
             np.testing.assert_allclose(float(value), float(native_value), rtol=1e-12, atol=0.0, err_msg=name)
             for actual, expected in zip(gradient, native_gradient, strict=True):
-                _assert_close_arrays(actual, expected, name)
+                _assert_close(actual, expected, name)
 
         # The same target through the public objectives: a perturbed curve on a zero
         # base curve has exactly the sampled geometry, and partials of the base DOFs.
@@ -394,12 +354,13 @@ class TestForceJax(JaxTestCase):
     def test_degenerate_coils_give_the_native_nans(self):
         """A target with a zero tangent gives native's NaN value and NaN gradient pattern."""
         _, coils = _coils()
-        degenerate = RegularizedCoil(_segment(1.0, 0.3), Current(1e5), regularization_circ(0.05))
+        degenerate = RegularizedCoil(_segment(1.0, 0.3, numquadpoints=24), Current(1e5), regularization_circ(0.05))
         for native, adapter in (
             (LpCurveForce([degenerate], coils, p=2), JaxLpCurveForce([degenerate], coils, p=2)),
             (SquaredMeanTorque([degenerate], coils), JaxSquaredMeanTorque([degenerate], coils)),
         ):
-            self.assertTrue(np.isnan(native.J()) and np.isnan(adapter.J()), 'np.isnan(native.J()) and np.isnan(adapter.J())')
+            self.assertTrue(np.isnan(native.J()))
+            self.assertTrue(np.isnan(adapter.J()))
             native_partials, adapter_partials = _partials(native), _partials(adapter)
             for owner, expected in native_partials.data.items():
                 expected = np.asarray(expected)
@@ -421,10 +382,10 @@ class TestForceJax(JaxTestCase):
         (lambda cls, targets, coils: cls(targets, [*coils, Coil(CurveXYZFourier(30, 2), Current(1.0))]),
          "same number of quadrature points"),
     ], strict=True):
-            with self.subTest(case_id_0=case_id_0, build=build, message=message), self.case() as patches:
-                self._case_construction_rejects_what_native_rejects(build, message, patches)
+            with self.subTest(case_id_0=case_id_0, build=build, message=message), self.case():
+                self._case_construction_rejects_what_native_rejects(build, message)
 
-    def _case_construction_rejects_what_native_rejects(self, build, message, patches):
+    def _case_construction_rejects_what_native_rejects(self, build, message):
         """Run one row with case-local objects released before runtime cleanup."""
         targets, coils = _coils()
         for cls in (LpCurveForce, JaxLpCurveForce):
@@ -471,13 +432,13 @@ class TestForceJax(JaxTestCase):
             second.J()
             second.dJ()
         compiles = [record.getMessage() for record in caplog.records if "Compiling" in record.getMessage()]
-        self.assertTrue(compiles == [], 'compiles == []')
+        self.assertEqual(compiles, [])
         caplog.clear()
         with jax.log_compiles():
             first.downsample = 2
             first.J()
         # Control: a new downsample changes the shapes and does compile.
-        self.assertTrue(any("Compiling" in record.getMessage() for record in caplog.records), 'any("Compiling" in record.getMessage() for record in caplog.records)')
+        self.assertTrue(any("Compiling" in record.getMessage() for record in caplog.records))
 
     def test_lp_force_gradient_taylor(self):
         """Regularized Lp force attains the native centered Taylor ratio bound."""

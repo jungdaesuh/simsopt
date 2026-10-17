@@ -34,7 +34,6 @@ with optional_jax_imports():
         CurveXYZFourier,
         LpCurveCurvature,
         MeanSquaredCurvature,
-        SurfaceRZFourier,
         create_equally_spaced_curves,
         create_multifilament_grid,
     )
@@ -56,24 +55,21 @@ with optional_jax_imports():
         JaxMeanSquaredCurvature,
     )
     from simsopt_jax_adapters.objectives import JaxSquaredFlux
+    from field.test_force_jax import _assert_close
+    from objectives.test_squared_flux_jax import _surface
+    from objectives.test_stage_two import _native_gradient, _objective, _value_and_grad
 
 
 from collections.abc import Callable
 from dataclasses import replace
-from pathlib import Path
 from typing import cast
 
 import numpy as np
 from scipy.optimize import minimize
 
 
-_QA_INPUT = Path(__file__).resolve().parents[1] / "test_files" / "input.LandremanPaul2021_QA"
 _NCOILS = 3
 _FILAMENTS = 4
-
-
-def _surface() -> SurfaceRZFourier:
-    return SurfaceRZFourier.from_vmec_input(str(_QA_INPUT), range="half period", nphi=8, ntheta=9)
 
 
 def _force_coils(surface, *, perturb: bool = True, shared_dofs: bool = False) -> list:
@@ -165,27 +161,11 @@ def _native_force_composite(surface, coils, config) -> Optimizable:
     )
 
 
-def _native_gradient(native: Optimizable, field: JaxBiotSavart) -> np.ndarray:
-    """The native gradient in the order of the field's free DOFs."""
-    return np.asarray(native.dJ(partials=True)(field))
-
-
-def _assert_close(actual, expected, name: str = "") -> None:
-    actual, expected = np.asarray(actual), np.asarray(expected)
-    np.testing.assert_allclose(
-        actual, expected, rtol=1e-11, atol=1e-12 * np.max(np.abs(expected)), err_msg=name
-    )
-
-
 if JAX_IMPORT_ERROR is None:
-    _value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
-    _objective = jax.jit(fused_stage_two_objective)
     _penalties_value_and_grad = jax.jit(
         jax.value_and_grad(lambda problem, x: fused_stage_two_values(problem, x)[2], argnums=1)
     )
-
-# Weights that give every term a visible share of the objective at the test state.
-if JAX_IMPORT_ERROR is None:
+    # Weights that give every term a visible share of the objective at the test state.
     _ALL_FORCE_TERMS = StageTwoObjectiveConfig(
         num_basecurves=_NCOILS,
         length_weight=1e-3,
@@ -219,10 +199,6 @@ def _force_problem(config, *, perturb=True, shared_dofs=False):
         regularizations=[coil.regularization for coil in coils],
     )
     return surface, coils, field, flux, problem
-
-
-
-
 
 
 def _finite_build(surface, frame: str, rotation_order: int | None, *, perturb: bool = True):
@@ -291,23 +267,11 @@ def _finite_build_problem(frame="centroid", rotation_order=1, *, perturb=True):
     return (field, flux, native, config, problem), (surface, base, centerlines, coils)
 
 
-
-
 def _native_in_field_order(native: Optimizable, field: JaxBiotSavart):
     """Map the field's free DOF vector onto the native composite's ordering."""
     assert sorted(native.dof_names) == sorted(field.dof_names)
     positions = {name: index for index, name in enumerate(field.dof_names)}
     return np.asarray([positions[name] for name in native.dof_names])
-
-
-
-
-
-
-
-
-
-
 
 
 def _run_both(native: Optimizable, field: JaxBiotSavart, problem, scale: float, options: dict):
@@ -330,8 +294,6 @@ def _run_both(native: Optimizable, field: JaxBiotSavart, problem, scale: float, 
     return native_fun(x0)[0], native_result, fused_result
 
 
-
-
 class TestStageTwoCoilTerms(JaxTestCase):
     def test_each_coil_term_matches_its_native_objective(self):
         """Each enabled fused coil term matches its native value and DOF gradient."""
@@ -345,27 +307,27 @@ class TestStageTwoCoilTerms(JaxTestCase):
         ("vacuum_energy_weight", {}),
         ("vacuum_energy_weight", {"force_downsample": 2}),
     ], strict=True):
-            with self.subTest(case_id_0=case_id_0, term=term, settings=settings), self.case() as patches:
-                self._case_each_coil_term_matches_its_native_objective(term, settings, patches)
+            with self.subTest(case_id_0=case_id_0, term=term, settings=settings), self.case():
+                self._case_each_coil_term_matches_its_native_objective(term, settings)
 
-    def _case_each_coil_term_matches_its_native_objective(self, term, settings, patches):
+    def _case_each_coil_term_matches_its_native_objective(self, term, settings):
         """Run one row with case-local objects released before runtime cleanup."""
         config = StageTwoObjectiveConfig(num_basecurves=_NCOILS, **{term: 1.0}, **settings)
         _, coils, field, _, problem = _force_problem(config)
         (native,) = [objective for weight, objective in _coil_terms(config, coils) if weight is not None]
         value, gradient = _penalties_value_and_grad(problem, jnp.asarray(field.x))
         native_value = float(native.J())
-        self.assertTrue(native_value > 0.0, 'native_value > 0.0')
+        self.assertGreater(native_value, 0.0)
         np.testing.assert_allclose(float(value), native_value, rtol=1e-12, atol=0.0)
         _assert_close(gradient, _native_gradient(native, field), term)
 
     def test_fused_force_objective_matches_native_composite(self):
         """Combined fused force terms match the native composite value and gradient."""
         for case_id_0, shared_dofs in zip(["symmetric", "shared_dofs"], [False, True], strict=True):
-            with self.subTest(case_id_0=case_id_0, shared_dofs=shared_dofs), self.case() as patches:
-                self._case_fused_force_objective_matches_native_composite(shared_dofs, patches)
+            with self.subTest(case_id_0=case_id_0, shared_dofs=shared_dofs), self.case():
+                self._case_fused_force_objective_matches_native_composite(shared_dofs)
 
-    def _case_fused_force_objective_matches_native_composite(self, shared_dofs, patches):
+    def _case_fused_force_objective_matches_native_composite(self, shared_dofs):
         """Run one row with case-local objects released before runtime cleanup."""
         surface, coils, field, _, problem = _force_problem(_ALL_FORCE_TERMS, shared_dofs=shared_dofs)
         native = _native_force_composite(surface, coils, _ALL_FORCE_TERMS)
@@ -405,10 +367,10 @@ class TestStageTwoCoilTerms(JaxTestCase):
     def test_fused_finite_build_matches_native_composite(self):
         """The fused objective and the drop-in JAX Optimizables on filament coils equal native."""
         for case_id_0, (frame, rotation_order) in zip(["centroid_frame_rotation", "frenet_frame_fixed"], [("centroid", 1), ("frenet", None)], strict=True):
-            with self.subTest(case_id_0=case_id_0, frame=frame, rotation_order=rotation_order), self.case() as patches:
-                self._case_fused_finite_build_matches_native_composite(frame, rotation_order, patches)
+            with self.subTest(case_id_0=case_id_0, frame=frame, rotation_order=rotation_order), self.case():
+                self._case_fused_finite_build_matches_native_composite(frame, rotation_order)
 
-    def _case_fused_finite_build_matches_native_composite(self, frame, rotation_order, patches):
+    def _case_fused_finite_build_matches_native_composite(self, frame, rotation_order):
         """Run one row with case-local objects released before runtime cleanup."""
         (field, flux, native, config, problem), (surface, base, centerlines, _) = (
             _finite_build_problem(frame, rotation_order)
@@ -470,7 +432,7 @@ class TestStageTwoCoilTerms(JaxTestCase):
         base_rebuilt = make_stage_two_problem(base_field, base_flux.fixed_surface_flux_spec(), base_changed)
         value, gradient = value_and_grad(rebuilt, x)
         base_value, base_gradient = value_and_grad(base_rebuilt, base_x)
-        self.assertTrue(len(traces) == 2, 'len(traces) == 2')
+        self.assertEqual(len(traces), 2)
         for current, native in (
             ((value, gradient, field), _native_force_composite(surface, coils, changed)),
             ((base_value, base_gradient, base_field), _native_finite_build(*base_case, base_changed)),
@@ -560,8 +522,8 @@ class TestStageTwoCoilTerms(JaxTestCase):
             ("forces", _run_both(native, field, problem, 1.0, options)),
             ("finite build", _run_both(base_native, base_field, base_problem, 1e-4, options)),
         ):
-            self.assertTrue(native_result.fun < 0.5 * initial, name)
-            self.assertTrue((fused_result.nit, fused_result.nfev) == (native_result.nit, native_result.nfev), name)
+            self.assertLess(native_result.fun, 0.5 * initial, name)
+            self.assertEqual((fused_result.nit, fused_result.nfev), (native_result.nit, native_result.nfev), name)
             np.testing.assert_allclose(fused_result.fun, native_result.fun, rtol=1e-9, err_msg=name)
             np.testing.assert_allclose(fused_result.x, native_result.x, rtol=1e-8, atol=1e-10, err_msg=name)
 
