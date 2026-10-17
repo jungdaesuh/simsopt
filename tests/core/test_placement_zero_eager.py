@@ -12,6 +12,7 @@ with optional_jax_imports():
 
 class TestPlacementZeroEager(JaxTestCase):
     def test_primal_tangent_and_transpose_stay_placed_without_jit(self) -> None:
+        """Eager value, JVP and VJP are +0.0 on the input's device and dtype for non-finite inputs and seeds."""
         references = (
             np.asarray(np.nan),
             np.asarray((1.0e308, 1.0e308)),
@@ -39,6 +40,7 @@ class TestPlacementZeroEager(JaxTestCase):
                         self.assertFalse(np.any(np.signbit(actual)))
 
     def test_nested_jvp_and_hvp_are_exact_zeros_without_jit(self) -> None:
+        """Second-order JVPs and Hessian-vector products are exact +0.0, with and without JIT."""
         reference = jax.device_put(np.asarray((np.nan, np.inf, 1.0e308)))
         direction = jax.device_put(np.asarray((np.inf, np.nan, -np.inf)))
         seed = jax.device_put(np.asarray(np.inf))
@@ -68,6 +70,7 @@ class TestPlacementZeroEager(JaxTestCase):
                     self.assertFalse(np.any(np.signbit(actual)))
 
     def test_batched_zero_has_exact_nonfinite_jvp_and_transpose(self) -> None:
+        """Under vmap, the value, JVP and VJP stay exact +0.0 for non-finite batches."""
         references = jax.device_put(np.asarray(((np.nan, np.inf), (1.0e308, 1.0e308))))
         direction = jax.device_put(np.full(references.shape, np.nan))
         seed = jax.device_put(np.full((references.shape[0],), np.inf))
@@ -85,6 +88,7 @@ class TestPlacementZeroEager(JaxTestCase):
     def test_finite_differences_agree_with_exact_zero_directional_derivative(
         self,
     ) -> None:
+        """Central differences of placement_zero are exactly zero at every step size."""
         reference = np.asarray((1.0, -2.0, 3.0))
         direction = np.asarray((0.5, 0.2, -0.3))
         for step in (1.0e-2, 1.0e-4, 1.0e-6):
