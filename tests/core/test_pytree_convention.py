@@ -43,9 +43,6 @@ ALIAS_NAMES = (
 )
 Violation = tuple[str, str, str, str]
 
-# Any exemption must match the exact occurrence multiset below.
-PENDING: tuple[Violation, ...] = ()
-
 
 class ConventionVisitor(ast.NodeVisitor):
     """Count prohibited references without interpreting aliases or scope bindings."""
@@ -197,42 +194,14 @@ class TestPytreeConvention(JaxTestCase):
         cls.repository_inspections = repository_inspections()
 
     def test_registration_and_record_convention(self):
-        """Repository pytree and record violations match the explicitly pending
-        occurrence inventory."""
+        """The repository has no pytree registration or record violations."""
         repository_inspections = self.repository_inspections
         actual = Counter(
             violation
             for visitor in repository_inspections
             for violation in visitor.violations
         )
-        expected = Counter(PENDING)
-        self.assertTrue(
-            actual == expected,
-            f"Unexpected occurrences: {dict(actual - expected)}; "
-            f"stale occurrences: {dict(expected - actual)}",
-        )
-
-    def test_pending_has_no_stale_entries(self):
-        """Pending convention exceptions still occur and cannot authorize
-        register_dataclass."""
-        repository_inspections = self.repository_inspections
-        actual = Counter(
-            violation
-            for visitor in repository_inspections
-            for violation in visitor.violations
-        )
-        self.assertTrue(not Counter(PENDING) - actual, "not Counter(PENDING) - actual")
-        self.assertTrue(
-            all(
-                kind in {"import", "registration", "namedtuple", "star-import"}
-                for _, _, kind, _ in PENDING
-            ),
-            'all( kind in {"import", "registration", "namedtuple", "star-import"} for _, _, kind, _ in PENDING )',
-        )
-        self.assertTrue(
-            all(name != "register_dataclass" for _, _, _, name in PENDING),
-            'all(name != "register_dataclass" for _, _, _, name in PENDING)',
-        )
+        self.assertTrue(not actual, f"Unexpected occurrences: {dict(actual)}")
 
     def test_guard_rejects_every_prohibited_reference(self):
         """The guard detects prohibited record and registration references in every

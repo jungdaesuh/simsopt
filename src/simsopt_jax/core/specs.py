@@ -15,14 +15,13 @@ from math import gcd
 from typing import Literal, TypeVar, Union
 
 import jax
-import numpy as np
 
 from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.runtime.host_boundary import host_value
 
 from ._math_utils import (
     as_jax_float64 as _as_float64_array,
-    runtime_device_put,
+    eye,
 )
 
 __all__ = [
@@ -440,15 +439,6 @@ class CoilGroupSpec:
         """
         return self.gammas, self.gammadashs, self.currents
 
-    def as_grouped_data(self) -> tuple[jax.Array, jax.Array, jax.Array, list[int]]:
-        """Return kernel inputs together with original coil indices.
-
-        Returns:
-            tuple: Stored arrays of shapes (C, Q, 3), (C, Q, 3), (C,), followed by
-                a new list[int] of original coil indices.
-        """
-        return self.gammas, self.gammadashs, self.currents, list(self.coil_indices)
-
 
 @pytree_dataclass(data=("groups",), meta=())
 class GroupedCoilSetSpec:
@@ -478,17 +468,6 @@ class GroupedCoilSetSpec:
                 matching row order.
         """
         return tuple(group.coil_indices for group in self.groups)
-
-    def as_grouped_data(
-        self,
-    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, list[int]], ...]:
-        """Return grouped kernel inputs and original coil indices.
-
-        Returns:
-            tuple[tuple]: Array triples of shapes (C, Q, 3), (C, Q, 3), (C,) and
-                new index lists, one tuple per group.
-        """
-        return tuple(group.as_grouped_data() for group in self.groups)
 
 
 RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
@@ -707,8 +686,8 @@ def make_oriented_curve_xyzfourier_spec(
 
     Returns:
         OrientedCurveXYZFourierSpec object: Frozen pytree payload; newly
-            converted array leaves retain their argument shape, use runtime
-            floating precision and snapshot host NumPy inputs.
+            converted array leaves retain their argument shape, use float64
+            and snapshot host NumPy inputs.
     """
     return OrientedCurveXYZFourierSpec(
         dofs=_as_float64_array(dofs),
@@ -775,8 +754,8 @@ def make_curve_xyzfouriersymmetries_spec(
 
     Returns:
         CurveXYZFourierSymmetriesSpec object: Frozen pytree payload; newly
-            converted array leaves retain their argument shape, use runtime
-            floating precision and snapshot host NumPy inputs.
+            converted array leaves retain their argument shape, use float64
+            and snapshot host NumPy inputs.
     """
     nfp_int = int(nfp)
     ntor_int = int(ntor)
@@ -1046,12 +1025,6 @@ def make_curve_filament_spec(
     )
 
 
-def _normalize_rotmat(rotmat: object | None) -> tuple[jax.Array, bool]:
-    if rotmat is None:
-        return runtime_device_put(np.eye(3, dtype=np.float64), dtype=np.float64), False
-    return _as_float64_array(rotmat), True
-
-
 def make_coil_symmetry_spec(
     *,
     rotmat: object | None = None,
@@ -1070,11 +1043,10 @@ def make_coil_symmetry_spec(
             leaves retain their argument shape, use float64 and
             snapshot host NumPy inputs.
     """
-    rotmat_jax, has_rotation = _normalize_rotmat(rotmat)
     return CoilSymmetrySpec(
-        rotmat=rotmat_jax,
+        rotmat=eye(3) if rotmat is None else _as_float64_array(rotmat),
         scale=float(scale),
-        has_rotation=has_rotation,
+        has_rotation=rotmat is not None,
     )
 
 
@@ -1139,8 +1111,8 @@ def make_coil_set_dof_extraction_spec(
 
     Returns:
         CoilSetDofExtractionSpec object: Frozen pytree payload; newly
-            converted array leaves retain their argument shape, use runtime
-            floating precision and snapshot host NumPy inputs.
+            converted array leaves retain their argument shape, use float64
+            and snapshot host NumPy inputs.
     """
     return CoilSetDofExtractionSpec(coils=tuple(coils))
 
@@ -1190,11 +1162,11 @@ def make_field_eval_spec(points: object) -> FieldEvalSpec:
     return FieldEvalSpec(points=_as_float64_array(points))
 
 
-def make_grouped_coil_set_spec(groups: Iterable[CoilGroupSpec | tuple[jax.Array, jax.Array, jax.Array, tuple[int, ...]]]) -> GroupedCoilSetSpec:
+def make_grouped_coil_set_spec(groups: Iterable[tuple[jax.Array, jax.Array, jax.Array, tuple[int, ...]]]) -> GroupedCoilSetSpec:
     """Build an immutable GroupedCoilSetSpec payload for JAX kernels.
 
     Args:
-        groups (Iterable[CoilGroupSpec or tuple]): Groups of geometry/current arrays
+        groups (Iterable[tuple]): Groups of geometry/current arrays
             with shapes (C, Q, 3), (C, Q, 3), (C,) and original coil-index tuples;
             quadrature count may vary between groups.
 
@@ -1203,18 +1175,9 @@ def make_grouped_coil_set_spec(groups: Iterable[CoilGroupSpec | tuple[jax.Array,
             array leaves retain their argument shape, use float64
             and snapshot host NumPy inputs.
     """
-    group_specs = []
-    for group in groups:
-        if isinstance(group, CoilGroupSpec):
-            group_specs.append(group)
-            continue
-        gammas, gammadashs, currents, coil_indices = group
-        group_specs.append(
-            make_coil_group_spec(
-                gammas,
-                gammadashs,
-                currents,
-                coil_indices,
-            )
+    return GroupedCoilSetSpec(
+        groups=tuple(
+            make_coil_group_spec(gammas, gammadashs, currents, coil_indices)
+            for gammas, gammadashs, currents, coil_indices in groups
         )
-    return GroupedCoilSetSpec(groups=tuple(group_specs))
+    )
