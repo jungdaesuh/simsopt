@@ -22,7 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from simsopt_jax.backend.runtime import get_runtime_jax_device
-from simsopt_jax.runtime.host_boundary import snapshot_host_tree
+from simsopt_jax.runtime.host_boundary import host_value, snapshot_host_tree
 
 __all__ = [
     "as_jax_array",
@@ -116,8 +116,6 @@ def _array_like_dtype(value) -> np.dtype | None:
     dtype = getattr(value, "dtype", None)
     if dtype is not None:
         return np.dtype(dtype)
-    if isinstance(value, (np.ndarray, np.generic)):
-        return np.asarray(value).dtype
     if isinstance(value, (list, tuple)):
         if _contains_jax_leaves(value):
             return np.dtype(jnp.asarray(value).dtype)
@@ -149,6 +147,54 @@ def _runtime_device_put_dtype(
             f"Floating dtype must be one of {(_FLOAT64.name,)}; got {resolved.name!r}."
         )
     return _FLOAT64
+
+
+def _placement_platforms(placement) -> frozenset[str]:
+    """Platforms an explicit placement (a device or a sharding) spans."""
+    devices = (
+        placement.device_set
+        if isinstance(placement, jax.sharding.Sharding)
+        else (placement,)
+    )
+    return frozenset(device.platform for device in devices)
+
+
+def _explicit_backend_hop(leaf, placement):
+    """The leaf to hand ``jax.device_put(leaf, placement)``.
+
+    JAX checks a ``device_put`` of an accelerator array to the CPU as an
+    implicit device-to-host copy, which a ``disallow`` transfer guard refuses
+    even though the caller asked for the move. A JAX array bound for another
+    backend, in either direction, is therefore gathered with an explicit
+    ``jax.device_get`` (``host_value``; every shard of a sharded array) and
+    placed from the host. Host leaves, tracers, leaves without a placement and moves within one
+    backend pass unchanged.
+    """
+    if placement is None or not isinstance(leaf, jax.Array) or _is_jax_tracer(leaf):
+        return leaf
+    leaf_platforms = frozenset(device.platform for device in leaf.devices())
+    if leaf_platforms == _placement_platforms(placement):
+        return leaf
+    return host_value(leaf)
+
+
+def _explicit_device_put_leaves(leaves: list, placements: list) -> list:
+    """``jax.device_put(leaves, placements)`` with cross-backend moves made explicit."""
+    return jax.device_put(
+        [
+            _explicit_backend_hop(leaf, placement)
+            for leaf, placement in zip(leaves, placements, strict=True)
+        ],
+        placements,
+    )
+
+
+def _explicit_device_put(value, placement):
+    """``jax.device_put(value, placement)`` with cross-backend moves made explicit."""
+    return jax.device_put(
+        jax.tree.map(lambda leaf: _explicit_backend_hop(leaf, placement), value),
+        placement,
+    )
 
 
 def _uncommitted_default_device():
@@ -187,18 +233,18 @@ def _unplaced_device_put(value):
     """
     runtime_device = get_runtime_jax_device()
     if runtime_device is None:
-        return jax.device_put(value)
+        return _explicit_device_put(value, None)
     default_device = _uncommitted_default_device()
     scoped = jax.config.values["jax_default_device"] is not None
     home = default_device if scoped else runtime_device
     if home != default_device:
-        return jax.device_put(value, runtime_device)
+        return _explicit_device_put(value, runtime_device)
     leaves, treedef = jax.tree.flatten(value)
     placements = [
         _unplaced_leaf_placement(leaf, home=home, runtime_device=runtime_device)
         for leaf in leaves
     ]
-    return jax.tree.unflatten(treedef, jax.device_put(leaves, placements))
+    return jax.tree.unflatten(treedef, _explicit_device_put_leaves(leaves, placements))
 
 
 def _device_put(
@@ -217,14 +263,12 @@ def _device_put(
     )
     if _has_jax_array_value(value):
         array = jnp.asarray(snapshot_host_tree(value), dtype=resolved_dtype)
-    elif resolved_dtype is None:
-        array = np.asarray(value)
     else:
-        array = np.asarray(value, dtype=resolved_dtype)
-    array = snapshot_host_tree(array)
+        # One private C-contiguous copy, as ``snapshot_host_tree`` makes.
+        array = np.array(value, dtype=resolved_dtype, copy=True, order="C")
     if placement is None:
         return _unplaced_device_put(array)
-    return jax.device_put(array, placement)
+    return _explicit_device_put(array, placement)
 
 
 def runtime_device_put(value, *, dtype=None, target=None, device=None) -> jax.Array:
@@ -286,7 +330,7 @@ def runtime_device_put_tree(
                 value,
             )
         return _unplaced_device_put(value)
-    return jax.device_put(value, placement)
+    return _explicit_device_put(value, placement)
 
 
 def _device_put_preserving_dtype(

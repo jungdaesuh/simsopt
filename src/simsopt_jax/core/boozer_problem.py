@@ -22,6 +22,18 @@ respect to all of them (native's ``dgamma_by_dcoeff`` convention). Arguments
 named as in native select the same outputs, with native's defaults; the
 penalty's ``constraint_weight`` is the problem's.
 
+Each formulation is one primal function of ``x`` (surface evaluation, field,
+residual, label, ``z(0, 0)``), and its derivatives are JAX transforms of it
+(:func:`~simsopt_jax.core.boozer_residual.residual_derivatives` and
+:func:`~simsopt_jax.core.boozer_residual.objective_derivatives`; the exact
+conditions are the gradient of the Lagrangian). For derivatives, the field is
+its Taylor model at the quadrature points
+(:func:`~simsopt_jax.core.boozer_residual.taylor_field`, coefficients from
+the fused ``B``/``dB/dX`` kernel and ``d2B/dXdX``) of the order requested:
+derivative outputs are exact at ``x`` and in the coils, but are not to be
+differentiated again in ``x``. Values evaluate the field itself, so they can
+be differentiated in ``x`` and the coils to any order.
+
 Every function is jitted with the problem and ``x`` as traced operands: new
 DOF, ``iota``, ``G``, coil, target and weight values reuse the compiled
 program, while ``derivatives``, ``optimize_G``, ``weight_inv_modB`` and the
@@ -37,6 +49,7 @@ finiteness (XLA on CPU flushes subnormal results to zero), and the limits of
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 from typing import Literal, cast
 
@@ -47,7 +60,12 @@ import numpy as np
 from simsopt_jax.pytree import pytree_dataclass
 
 from ._math_utils import as_jax_float64
-from .boozer_residual import BoozerPoints, boozer_least_squares, boozer_residual
+from .boozer_residual import (
+    boozer_point_residual,
+    objective_derivatives,
+    residual_derivatives,
+    taylor_field,
+)
 from .field import (
     grouped_biot_savart_A_from_spec,
     grouped_biot_savart_B_and_dB_from_spec,
@@ -197,43 +215,49 @@ def _split(problem: BoozerProblem, x: jax.Array, *, optimize_G: bool, multiplier
     return x[:nsurface], x[nsurface], G, x[expected - multipliers :]
 
 
-def _boozer_points(
-    problem: BoozerProblem, surface_dofs: jax.Array, derivatives: int
-) -> tuple[BoozerPoints, tuple[jax.Array, ...]]:
-    """The surface and field at the quadrature points, and ``z(0, 0)`` with,
-    for ``derivatives > 0``, its coefficient derivative."""
+def _geometry(problem: BoozerProblem, surface_dofs: jax.Array):
+    spec = surface_spec_with_dofs(problem.surface, surface_dofs)
+    return surface_gamma(spec), surface_gammadash1(spec), surface_gammadash2(spec)
 
-    def positions(dofs):
-        spec = surface_spec_with_dofs(problem.surface, dofs)
-        return surface_gamma(spec), surface_gammadash1(spec), surface_gammadash2(spec)
 
-    gamma, xphi, xtheta = positions(surface_dofs)
-    flat = gamma.reshape(-1, 3)
-    if derivatives == 0:
-        points = BoozerPoints(
-            B=cast(jax.Array, grouped_biot_savart_B_from_spec(flat, problem.coils)),
-            xphi=xphi.reshape(-1, 3),
-            xtheta=xtheta.reshape(-1, 3),
-        )
-        return points, (gamma[0, 0, 2],)
-    nsurface = surface_dofs.shape[0]
-    dgamma, dxphi, dxtheta = jax.jacfwd(positions)(surface_dofs)
-    B, dB = grouped_biot_savart_B_and_dB_from_spec(flat, problem.coils)
-    points = BoozerPoints(
-        B=B,
-        xphi=xphi.reshape(-1, 3),
-        xtheta=xtheta.reshape(-1, 3),
-        dB_by_dX=dB,
-        d2B_by_dXdX=(
-            cast(jax.Array, grouped_biot_savart_d2B_by_dXdX_from_spec(flat, problem.coils))
-            if derivatives == 2
-            else None
-        ),
-        dgamma_by_dcoeff=dgamma.reshape(-1, 3, nsurface),
-        dgammadash1_by_dcoeff=dxphi.reshape(-1, 3, nsurface),
-        dgammadash2_by_dcoeff=dxtheta.reshape(-1, 3, nsurface),
+def _field(coils: GroupedCoilSetSpec, order: int) -> Callable[[jax.Array], jax.Array]:
+    """``B`` at flattened points: the Biot-Savart field itself for ``order``
+    0, else its Taylor model of that order at the points
+    (:func:`~simsopt_jax.core.boozer_residual.taylor_field`), so derivatives
+    in the points up to ``order`` need no derivative of the field kernel."""
+    if order == 0:
+        return lambda points: cast(jax.Array, grouped_biot_savart_B_from_spec(points, coils))
+
+    def coefficients_at(expansion):
+        coefficients = tuple(grouped_biot_savart_B_and_dB_from_spec(expansion, coils))
+        if order == 2:
+            coefficients += (
+                cast(jax.Array, grouped_biot_savart_d2B_by_dXdX_from_spec(expansion, coils)),
+            )
+        return coefficients
+
+    return partial(taylor_field, coefficients_at)
+
+
+def _boozer_terms(
+    problem: BoozerProblem,
+    x: jax.Array,
+    *,
+    optimize_G: bool,
+    multipliers: int,
+    order: int,
+    weight_inv_modB: bool,
+) -> tuple[jax.Array, jax.Array]:
+    """The Boozer residual ``(3 npoints,)`` and ``z(0, 0)`` at ``x``, with the
+    field of :func:`_field` of ``order``: the primal that the formulations'
+    derivatives in ``x`` transform."""
+    surface_dofs, iota, G, _ = _split(problem, x, optimize_G=optimize_G, multipliers=multipliers)
+    gamma, xphi, xtheta = _geometry(problem, surface_dofs)
+    B = _field(problem.coils, order)(gamma.reshape(-1, 3))
+    residual = boozer_point_residual(
+        G, iota, B, xphi.reshape(-1, 3), xtheta.reshape(-1, 3), weight_inv_modB=weight_inv_modB
     )
-    return points, (gamma[0, 0, 2], dgamma[0, 0, 2])
+    return residual, gamma[0, 0, 2]
 
 
 def _aspect_ratio(spec: SurfaceSpec) -> jax.Array:
@@ -266,25 +290,29 @@ def _label_value(label: BoozerLabelSpec, coils: GroupedCoilSetSpec, surface_dofs
     return jnp.sum(potential * surface_gammadash2(spec)[label.idx]) / gamma.shape[1]
 
 
-def _label_derivatives(
-    problem: BoozerProblem, surface_dofs: jax.Array, order: int
-) -> tuple[jax.Array, ...]:
-    """The label and, up to ``order``, its gradient and Hessian."""
-    label = partial(_label_value, problem.label, problem.coils)
-    if order == 0:
-        return (label(surface_dofs),)
-    value, gradient = jax.value_and_grad(label)(surface_dofs)
-    if order == 1:
-        return value, gradient
-    return value, gradient, jax.hessian(label)(surface_dofs)
+def _label_residual(problem: BoozerProblem, x: jax.Array) -> jax.Array:
+    """``label - targetlabel`` at the surface DOFs that lead ``x``."""
+    nsurface = surface_get_dofs(problem.surface).shape[0]
+    return _label_value(problem.label, problem.coils, x[:nsurface]) - problem.targetlabel
 
 
-def _pad(vector: jax.Array, size: int) -> jax.Array:
-    return jnp.pad(vector, (0, size - vector.shape[0]))
-
-
-def _pad_square(matrix: jax.Array, size: int) -> jax.Array:
-    return jnp.pad(matrix, ((0, size - matrix.shape[0]), (0, size - matrix.shape[1])))
+def _penalty_terms(
+    problem: BoozerProblem, x: jax.Array, *, optimize_G: bool, weight_inv_modB: bool, order: int
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """The penalty's Boozer residual, ``sqrt(w) (label - target)`` and
+    ``sqrt(w) z(0, 0)`` at ``x``."""
+    if problem.constraint_weight is None:
+        raise ValueError("the penalty formulation needs the problem's constraint_weight.")
+    residual, z = _boozer_terms(
+        problem,
+        x,
+        optimize_G=optimize_G,
+        multipliers=0,
+        order=order,
+        weight_inv_modB=weight_inv_modB,
+    )
+    sqrt_weight = jnp.sqrt(problem.constraint_weight)
+    return residual, sqrt_weight * _label_residual(problem, x), sqrt_weight * z
 
 
 _STATIC_OPTIONS = ("derivatives", "optimize_G", "weight_inv_modB")
@@ -321,16 +349,18 @@ def boozer_surface_residual(
             tesla squared meters, or tesla meters when weighted; derivative units follow
             x.
     """
-    surface_dofs, iota, G, _ = _split(problem, x, optimize_G=optimize_G, multipliers=0)
-    points, _ = _boozer_points(problem, surface_dofs, derivatives)
-    return boozer_residual(
-        G,
-        iota,
-        points,
-        derivatives=derivatives,
-        optimize_G=optimize_G,
-        weight_inv_modB=weight_inv_modB,
-    )
+
+    def residual(point):
+        return _boozer_terms(
+            problem,
+            point,
+            optimize_G=optimize_G,
+            multipliers=0,
+            order=derivatives,
+            weight_inv_modB=weight_inv_modB,
+        )[0]
+
+    return residual_derivatives(residual, x, derivatives)
 
 
 @partial(jax.jit, static_argnames=_STATIC_OPTIONS)
@@ -364,40 +394,20 @@ def boozer_penalty_constraints(
             with shapes (), (nx,), (nx, nx). The Boozer term is divided by 3 * npoints;
             units follow the residual and native constraint coefficient.
     """
-    if problem.constraint_weight is None:
-        raise ValueError("the penalty formulation needs the problem's constraint_weight.")
-    surface_dofs, iota, G, _ = _split(problem, x, optimize_G=optimize_G, multipliers=0)
-    points, z = _boozer_points(problem, surface_dofs, derivatives)
-    nresiduals = 3 * points.B.shape[0]
-    boozer = boozer_least_squares(
-        G,
-        iota,
-        points,
-        derivatives=derivatives,
-        optimize_G=optimize_G,
-        weight_inv_modB=weight_inv_modB,
-    )
-    boozer = tuple(term / nresiduals for term in boozer)
-    label = _label_derivatives(problem, surface_dofs, derivatives)
-    sqrt_weight = jnp.sqrt(problem.constraint_weight)
-    label_residual = sqrt_weight * (label[0] - problem.targetlabel)
-    z_residual = sqrt_weight * z[0]
-    value = boozer[0] + 0.5 * label_residual**2 + 0.5 * z_residual**2
-    if derivatives == 0:
-        return value
-    nx = x.shape[0]
-    dlabel_residual = sqrt_weight * _pad(label[1], nx)
-    dz_residual = sqrt_weight * _pad(z[1], nx)
-    gradient = boozer[1] + label_residual * dlabel_residual + z_residual * dz_residual
-    if derivatives == 1:
-        return value, gradient
-    hessian = (
-        boozer[2]
-        + jnp.outer(dlabel_residual, dlabel_residual)
-        + jnp.outer(dz_residual, dz_residual)
-        + label_residual * _pad_square(sqrt_weight * label[2], nx)
-    )
-    return value, gradient, hessian
+
+    def penalty(point):
+        residual, label_residual, z_residual = _penalty_terms(
+            problem,
+            point,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            order=derivatives,
+        )
+        boozer = 0.5 * jnp.sum(residual * residual) / residual.shape[0]
+        return boozer + 0.5 * label_residual**2 + 0.5 * z_residual**2
+
+    result = objective_derivatives(penalty, x, derivatives)
+    return result[0] if derivatives == 0 else result
 
 
 @partial(jax.jit, static_argnames=("derivatives", "optimize_G"))
@@ -428,31 +438,31 @@ def boozer_exact_constraints(
             constraints, shape (nx + 2,), optionally with Jacobian (nx + 2, nx + 2);
             rows have their native stationarity and constraint units.
     """
-    surface_dofs, iota, G, multipliers = _split(
-        problem, xl, optimize_G=optimize_G, multipliers=2
-    )
-    points, z = _boozer_points(problem, surface_dofs, derivatives + 1)
-    boozer = boozer_least_squares(
-        G,
-        iota,
-        points,
-        derivatives=derivatives + 1,
-        optimize_G=optimize_G,
-        weight_inv_modB=False,
-    )
-    label = _label_derivatives(problem, surface_dofs, derivatives + 1)
     nx = xl.shape[0] - 2
-    dlabel, dz = _pad(label[1], nx), _pad(z[1], nx)
-    stationarity = boozer[1] - multipliers[0] * dlabel - multipliers[1] * dz
-    res = jnp.concatenate((stationarity, jnp.stack((label[0] - problem.targetlabel, z[0]))))
+
+    def lagrangian(x, multipliers):
+        residual, z = _boozer_terms(
+            problem,
+            jnp.concatenate((x, multipliers)),
+            optimize_G=optimize_G,
+            multipliers=2,
+            order=derivatives + 1,
+            weight_inv_modB=False,
+        )
+        return (
+            0.5 * jnp.sum(residual * residual)
+            - multipliers[0] * _label_residual(problem, x)
+            - multipliers[1] * z
+        )
+
+    def conditions(point):
+        stationarity, constraints = jax.grad(lagrangian, argnums=(0, 1))(point[:nx], point[nx:])
+        return jnp.concatenate((stationarity, -constraints))
+
     if derivatives == 0:
-        return res
-    hessian = boozer[2] - multipliers[0] * _pad_square(label[2], nx)
-    constraints = jnp.stack((dlabel, dz))
-    dres = jnp.block(
-        [[hessian, -constraints.T], [constraints, jnp.zeros((2, 2), constraints.dtype)]]
-    )
-    return res, dres
+        return conditions(xl)
+    value, jacobian = residual_derivatives(conditions, xl, derivatives)
+    return value, jacobian
 
 
 @partial(jax.jit, static_argnames=("derivatives",))
@@ -486,17 +496,21 @@ def boozer_exact_residual(
         raise RuntimeError(
             "Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier"
         )
-    surface_dofs, iota, G, _ = _split(problem, x, optimize_G=True, multipliers=0)
-    points, z = _boozer_points(problem, surface_dofs, derivatives)
-    boozer = boozer_residual(
-        G, iota, points, derivatives=derivatives, optimize_G=True, weight_inv_modB=False
-    )
-    label = _label_derivatives(problem, surface_dofs, derivatives)
     axis = not problem.surface.stellsym
-    b = jnp.concatenate(
-        (boozer[0][residual_rows], jnp.stack((label[0] - problem.targetlabel, z[0]))[: 1 + axis])
-    )
+
+    def system(point):
+        residual, z = _boozer_terms(
+            problem,
+            point,
+            optimize_G=True,
+            multipliers=0,
+            order=derivatives,
+            weight_inv_modB=False,
+        )
+        constraints = jnp.stack((_label_residual(problem, point), z))[: 1 + axis]
+        return jnp.concatenate((residual[residual_rows], constraints))
+
     if derivatives == 0:
-        return b
-    tail = jnp.stack((_pad(label[1], x.shape[0]), _pad(z[1], x.shape[0])))[: 1 + axis]
-    return b, jnp.concatenate((boozer[1][residual_rows], tail))
+        return system(x)
+    value, jacobian = residual_derivatives(system, x, derivatives)
+    return value, jacobian

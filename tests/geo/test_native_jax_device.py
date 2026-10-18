@@ -1,7 +1,7 @@
-"""Backend mode validation, native x64/platform settings and C++ curve length host
-ownership."""
+"""Backend mode validation, native x64/platform settings and the native jit device
+policy."""
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports, require_cuda
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -14,6 +14,9 @@ from pathlib import Path
 import os
 import subprocess
 import sys
+from unittest.mock import patch
+
+import numpy as np
 
 
 def _fresh_environment():
@@ -46,7 +49,8 @@ def _run_fresh_process(script, *arguments, environment):
     )
 
 
-from simsopt.geo import CurveLength, create_equally_spaced_curves
+from simsopt.geo.config import parameters
+from simsopt.geo.jit import jit, native_jax_device
 
 
 class TestNativeJaxDevice(JaxTestCase):
@@ -144,8 +148,8 @@ class TestNativeJaxDevice(JaxTestCase):
         self, device, platforms_after_import
     ):
         """Run one row with case-local objects released before runtime cleanup."""
-        if device == "gpu" and not any(d.platform == "gpu" for d in jax.devices()):
-            self.skipTest("CUDA JAX device required")
+        if device == "gpu":
+            require_cuda("CUDA JAX device required")
         _run_fresh_process(
             "set_backend_after_native_import.py",
             device,
@@ -155,8 +159,7 @@ class TestNativeJaxDevice(JaxTestCase):
 
     def test_native_stage_two_with_explicit_platforms_in_fresh_process(self):
         """Native stage II after ``set_backend``; ``gpu-no-platform-env`` exports no
-        JAX platform variable, so ``simsopt.geo`` sets ``cpu`` before ``set_backend``
-        and native length kernels run on CUDA alone."""
+        JAX platform variable, so ``simsopt.geo`` sets ``cpu`` before ``set_backend``."""
         for case_id_0, (device, jax_platforms) in zip(
             ["cpu", "gpu-cuda-cpu-platforms", "gpu-no-platform-env"],
             [("cpu", "cpu"), ("gpu", "cuda,cpu"), ("gpu", None)],
@@ -174,31 +177,77 @@ class TestNativeJaxDevice(JaxTestCase):
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         tmp_path = Path(patches.enter_context(TemporaryDirectory()))
-        if device == "gpu" and not any(d.platform == "gpu" for d in jax.devices()):
-            self.skipTest("CUDA JAX device required")
+        if device == "gpu":
+            require_cuda("CUDA JAX device required")
         environment = _with_gpu_determinism(_fresh_environment())
         environment["SIMSOPT_JAX_COMPILATION_CACHE_DIR"] = str(
             tmp_path / "compilation-cache"
         )
         if jax_platforms is not None:
             environment["JAX_PLATFORMS"] = jax_platforms
-        native_platform = "gpu" if jax_platforms is None else "cpu"
         _run_fresh_process(
             "native_stage_two.py",
             device,
-            native_platform,
             jax_platforms or "",
             environment=environment,
         )
 
-    def test_curve_length_preserves_incremental_arclength_derivative(self):
-        """CurveLength retains its upstream dJ_dl callable and exact mean gradient."""
-        curve = create_equally_spaced_curves(
-            1, 1, False, R0=1.0, R1=0.5, order=2, numquadpoints=32,
-        )[0]
-        length = CurveLength(curve)
-        arclength = curve.incremental_arclength()
-        self.assertTrue(callable(length.dJ_dl))
-        self.assertTrue(jax.numpy.array_equal(
-            length.dJ_dl(arclength), jax.numpy.full_like(arclength, 1.0 / arclength.size),
-        ))
+    def _run_platform_startup(self, scenario, jax_platforms, *, needs_cuda):
+        """Run one ``set_backend_platform_startup.py`` scenario in a fresh process."""
+        if needs_cuda:
+            require_cuda("CUDA JAX device required")
+        environment = _with_gpu_determinism(_fresh_environment())
+        if jax_platforms is not None:
+            environment["JAX_PLATFORMS"] = jax_platforms
+        _run_fresh_process(
+            "set_backend_platform_startup.py", scenario, environment=environment
+        )
+
+    def test_gpu_selected_at_startup_also_starts_the_cpu_in_fresh_process(self):
+        """Without ``JAX_PLATFORMS``, a GPU selection starts CUDA as default and the CPU for native kernels."""
+        self._run_platform_startup("gpu_at_startup", None, needs_cuda=True)
+
+    def test_selections_after_initialization_keep_the_platforms_in_fresh_process(self):
+        """Under ``cuda,cpu``, CPU-then-GPU selections after initialization keep native kernels and platforms."""
+        self._run_platform_startup(
+            "cpu_then_gpu_after_initialization", "cuda,cpu", needs_cuda=True
+        )
+
+    def test_explicit_cuda_platforms_start_cuda_alone_in_fresh_process(self):
+        """An explicit ``JAX_PLATFORMS=cuda`` starts only CUDA, and native kernels fall back to it."""
+        self._run_platform_startup("explicit_cuda_only", "cuda", needs_cuda=True)
+
+    def test_cpu_selected_before_initialization_keeps_cuda_off_in_fresh_process(self):
+        """A CPU selection before initialization starts only the CPU, also under ``cuda,cpu``."""
+        for jax_platforms in (None, "cuda,cpu"):
+            with self.subTest(jax_platforms=jax_platforms), self.case():
+                self._run_platform_startup(
+                    "cpu_before_initialization", jax_platforms, needs_cuda=False
+                )
+
+    def test_native_jit_runs_on_cpu_with_cuda_default_in_fresh_process(self):
+        """Under ``JAX_PLATFORMS=cuda,cpu`` native jitted kernels return CPU arrays."""
+        require_cuda("CUDA JAX device required")
+        environment = _with_gpu_determinism(_fresh_environment())
+        environment["JAX_PLATFORMS"] = "cuda,cpu"
+        _run_fresh_process("native_jit_device_policy.py", environment=environment)
+
+    def test_native_jit_wrapper_preserves_results(self):
+        """The native ``jit`` wrapper returns ``jax.jit``'s result on ``native_jax_device()``."""
+
+        def scaled_norm(x, scale):
+            """Scaled Euclidean norm."""
+            return scale * jax.numpy.linalg.norm(x)
+
+        # Upstream geo tests disable jit at import; this check needs it enabled.
+        self.patches.enter_context(patch.dict(parameters, {"jit": True}))
+        x = np.linspace(0.0, 1.0, 7)
+        wrapped = jit(scaled_norm, static_argnums=1)
+        result = wrapped(x, 2.0)
+        np.testing.assert_array_equal(
+            result, jax.jit(scaled_norm, static_argnums=1)(x, 2.0)
+        )
+        self.assertEqual(result.devices(), {native_jax_device()})
+        self.assertIs(wrapped.__wrapped__, scaled_norm)
+        self.assertEqual(wrapped.__name__, scaled_norm.__name__)
+        self.assertEqual(wrapped.__doc__, scaled_norm.__doc__)

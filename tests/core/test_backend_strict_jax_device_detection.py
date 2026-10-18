@@ -5,24 +5,36 @@
    errors.
 2. ``test_field_kernel_tuning_*`` — GPU modes use their static tiling without
    probing devices or external tools; environment overrides still apply.
+3. ``test_set_backend_*`` / ``test_default_device_*`` — in an initialized
+   process ``set_backend(device=...)`` makes an initialized platform JAX's
+   default device, and still warns (or raises) for one JAX never initialized.
 """
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import (
+    JaxTestCase,
+    jax_runtime_isolation,
+    optional_jax_imports,
+)
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
+    import jax.extend.backend
+    import jax.numpy as jnp
     import simsopt_jax.backend.runtime as runtime_module
     from simsopt_jax.backend.runtime import (
         BackendPolicy,
         FieldKernelTuning,
         _config_from_mode,
         _policy_from_config,
+        _select_initialized_jax_default_device,
         get_field_kernel_tuning,
         get_runtime_jax_device,
+        set_backend,
     )
+    from simsopt_jax_adapters.field import JaxBiotSavart
 from unittest import mock
 import os
 
@@ -30,6 +42,12 @@ import os
 import subprocess
 import sys
 import types
+import warnings
+
+import numpy as np
+
+from simsopt.field import Coil, Current
+from simsopt.geo import create_equally_spaced_curves
 
 
 def _policy_for_mode(mode: str) -> BackendPolicy:
@@ -47,6 +65,45 @@ def _fake_jax(jax_platforms, local_devices):
         config=types.SimpleNamespace(jax_platforms=jax_platforms),
         local_devices=local_devices,
     )
+
+
+class _FakeDevice:
+    def __init__(self, platform: str) -> None:
+        self.platform = platform
+
+
+class _FakeJaxConfig:
+    """Records ``jax_default_device`` updates the way ``jax.config`` applies them."""
+
+    def __init__(self, jax_default_device) -> None:
+        self.jax_default_device = jax_default_device
+        self.updates: list[tuple[str, object]] = []
+
+    def update(self, name: str, value) -> None:
+        self.updates.append((name, value))
+        setattr(self, name, value)
+
+
+def _fake_initialized_jax(*, default_backend, selected, devices_by_platform):
+    """An initialized JAX with the given default backend, selection and platforms."""
+    return types.SimpleNamespace(
+        config=_FakeJaxConfig(selected),
+        default_backend=lambda: default_backend,
+        extend=types.SimpleNamespace(
+            backend=types.SimpleNamespace(backends=lambda: dict(devices_by_platform))
+        ),
+        devices=lambda platform: devices_by_platform[platform],
+    )
+
+
+def _jax_biotsavart_B() -> jax.Array:
+    """B of a fresh two-coil ``JaxBiotSavart`` at two off-axis points."""
+    curves = create_equally_spaced_curves(
+        2, 1, stellsym=False, R0=1.0, R1=0.5, order=2, numquadpoints=16
+    )
+    field = JaxBiotSavart([Coil(curve, Current(1.0e5)) for curve in curves])
+    field.set_points(np.array([[1.1, 0.0, 0.1], [0.9, 0.2, -0.1]]))
+    return field.B()
 
 
 class TestBackendStrictJaxDeviceDetection(JaxTestCase):
@@ -267,3 +324,100 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
         self.assertTrue(
             get_runtime_jax_device() is None, "get_runtime_jax_device() is None"
         )
+
+    def test_default_device_rules_for_an_initialized_process(self):
+        """Keep a matching default, clear a stale selection, else select the initialized platform."""
+        cpu, gpu = _FakeDevice("cpu"), _FakeDevice("gpu")
+        both = {"cuda": [gpu], "cpu": [cpu]}
+        rows = [
+            ("default matches", "jax_cpu_fast", "cpu", None, []),
+            ("selection matches", "jax_cpu_fast", "gpu", cpu, []),
+            ("selection by name", "jax_gpu_fast", "cpu", "gpu", []),
+            (
+                "stale selection",
+                "jax_gpu_fast",
+                "gpu",
+                cpu,
+                [("jax_default_device", None)],
+            ),
+            (
+                "initialized cpu",
+                "jax_cpu_fast",
+                "gpu",
+                None,
+                [("jax_default_device", cpu)],
+            ),
+            (
+                "initialized cuda",
+                "jax_gpu_parity",
+                "cpu",
+                None,
+                [("jax_default_device", gpu)],
+            ),
+        ]
+        for name, mode, default_backend, selected, expected in rows:
+            with self.subTest(name), self.case():
+                fake_jax = _fake_initialized_jax(
+                    default_backend=default_backend,
+                    selected=selected,
+                    devices_by_platform=both,
+                )
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", RuntimeWarning)
+                    _select_initialized_jax_default_device(
+                        fake_jax, _config_from_mode(mode, strict=True)
+                    )
+                self.assertEqual(fake_jax.config.updates, expected)
+
+    def test_default_device_for_a_never_initialized_platform_warns_or_raises(self):
+        """A platform JAX never initialized warns, and raises in strict and GPU parity modes."""
+        rows = [
+            ("jax_gpu_fast", False, False),
+            ("jax_gpu_fast", True, True),
+            ("jax_gpu_parity", False, True),
+        ]
+        for mode, strict, raises in rows:
+            with self.subTest(mode=mode, strict=strict), self.case():
+                fake_jax = _fake_initialized_jax(
+                    default_backend="cpu",
+                    selected=None,
+                    devices_by_platform={"cpu": [_FakeDevice("cpu")]},
+                )
+                config = _config_from_mode(mode, strict=strict)
+                expected = "Requested JAX platform 'cuda'.*default backend is 'cpu'"
+                if raises:
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        _select_initialized_jax_default_device(fake_jax, config)
+                else:
+                    with self.assertWarnsRegex(RuntimeWarning, expected):
+                        _select_initialized_jax_default_device(fake_jax, config)
+                self.assertEqual(fake_jax.config.updates, [])
+
+    def test_set_backend_moves_new_arrays_and_fields_between_initialized_platforms(
+        self,
+    ):
+        """With CUDA and CPU initialized, set_backend(device=...) moves arrays and B between them."""
+        initialized = jax.extend.backend.backends()
+        if "cpu" not in initialized or not {"cuda", "gpu"} & set(initialized):
+            self.skipTest("CUDA and CPU JAX backends required for platform selection")
+        gpu = jax.devices("gpu")[0]
+        cpu = jax.devices("cpu")[0]
+        self.assertEqual(jax.default_backend(), "gpu")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            set_backend("jax", device="cpu")
+        self.assertEqual(jax.config.values["jax_default_device"], cpu)
+        self.assertEqual(jnp.zeros(3).devices(), {cpu})
+        self.assertEqual(_jax_biotsavart_B().devices(), {cpu})
+
+        set_backend("jax", device="gpu")
+        self.assertIsNone(jax.config.values["jax_default_device"])
+        self.assertEqual(jnp.zeros(3).devices(), {gpu})
+        self.assertEqual(_jax_biotsavart_B().devices(), {gpu})
+
+    def test_runtime_isolation_restores_the_default_device(self):
+        """``jax_runtime_isolation`` puts ``jax_default_device`` back after a case selects one."""
+        with jax_runtime_isolation():
+            jax.config.update("jax_default_device", jax.devices("cpu")[0])
+        self.assertIsNone(jax.config.values["jax_default_device"])
