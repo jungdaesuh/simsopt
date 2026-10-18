@@ -23,10 +23,14 @@ _TreeT = TypeVar("_TreeT")
 def disallow_host_transfers() -> Iterator[None]:
     """Refuse IMPLICIT host-to-device transfers for the duration of the block.
 
-    That refusal holds on every backend.  Explicit ``device_put``/``device_get``
-    always pass, and on CPU -- verified on jax 0.10.0, where no copy actually
-    happens -- implicit device-to-host (``np.sum(x)``, ``x.tolist()``) passes
-    too.
+    That refusal holds on every backend.  Explicit ``device_get`` passes, and so
+    does an explicit ``device_put`` of host values, within one backend, or from
+    the CPU to an accelerator.  JAX checks a ``device_put`` of an accelerator
+    array to the CPU as an implicit device-to-host copy and refuses it; the
+    placement helpers in ``simsopt_jax.backend.dtypes`` gather such arrays with
+    ``device_get`` first, so their explicit placements pass.  On CPU --
+    verified on jax 0.10.0, where no copy actually happens -- implicit
+    device-to-host (``np.sum(x)``, ``x.tolist()``) passes too.
 
     Returns:
         contextlib.AbstractContextManager[None] object: Scoped transfer guard
