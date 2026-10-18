@@ -630,15 +630,11 @@ class JaxBoozerSurface(Optimizable):
                 f"||residual||_inf = {np.linalg.norm(res['residual'], ord=np.inf):.3e}",
                 flush=True,
             )
-        self.res = res
-        self.need_to_run_code = False
-        return res
+        return self._store(res, iota, G, with_surface=True)
 
 
-def _coil_derivative(booz_surf: JaxBoozerSurface, cotangents) -> Derivative:
-    return booz_surf.biotsavart.coil_cotangents_to_derivative(
-        cotangents.field_inputs(), cotangents.coil_index_lists()
-    )
+def _coil_derivative(field: JaxBiotSavart, cotangents) -> Derivative:
+    return field.coil_cotangents_to_derivative(cotangents.field_inputs(), cotangents.coil_index_lists())
 
 
 class JaxBoozerResidual(Optimizable):
@@ -754,7 +750,7 @@ class JaxBoozerResidual(Optimizable):
             boozer_problem(self.biotsavart, self.in_surface, booz_surf.label, booz_surf.targetlabel, self.constraint_weight),
             surface=surface_spec_from_surface(self.surface),
         )
-        x = np.concatenate((self.surface.get_dofs(), [iota] if G is None else [iota, G]))
+        x = booz_surf._decision_vector(iota, G)
         value, dJ_dx, dJ_dcoils = boozer_residual_objective(
             problem, _place(x, problem), optimize_G=G is not None, weight_inv_modB=weight_inv_modB
         )
@@ -762,9 +758,7 @@ class JaxBoozerResidual(Optimizable):
 
         P, L, U = res["PLU"]
         adj = forward_backward(P, L, U, host_tree(dJ_dx))
-        explicit = self.biotsavart.coil_cotangents_to_derivative(
-            dJ_dcoils.field_inputs(), dJ_dcoils.coil_index_lists()
-        )
+        explicit = _coil_derivative(self.biotsavart, dJ_dcoils)
         self._dJ = explicit - res["vjp"](adj, booz_surf, iota, G)
 
 
@@ -776,7 +770,7 @@ def _exact_coil_vjp(lm, booz_surf: JaxBoozerSurface, iota, G) -> Derivative:
     x = booz_surf._decision_vector(iota, G)
     rows = boozer_exact_residual_rows(booz_surf.surface, problem.targetlabel)
     return _coil_derivative(
-        booz_surf, boozer_exact_residual_coil_vjp(problem, _place(x, problem), rows, _place(lm, problem))
+        booz_surf.biotsavart, boozer_exact_residual_coil_vjp(problem, _place(x, problem), rows, _place(lm, problem))
     )
 
 
@@ -789,7 +783,7 @@ def _penalty_coil_vjp(
     ``G``'s coil dependence that native drops (see the module docstring)."""
     problem = booz_surf._problem(constraint_weight)
     return _coil_derivative(
-        booz_surf,
+        booz_surf.biotsavart,
         boozer_penalty_coil_vjp(
             problem,
             _place(booz_surf._decision_vector(iota, G), problem),

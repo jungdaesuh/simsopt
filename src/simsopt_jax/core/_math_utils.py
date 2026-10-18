@@ -20,8 +20,6 @@ __all__ = [
     "as_jax_float64",
     "as_jax_int32",
     "axis0_entries",
-    "explicit_inv",
-    "explicit_rsqrt",
     "eye",
     "iter_axis0_entries",
     "pad_axis",
@@ -167,55 +165,3 @@ def eye(size: int, dtype=jnp.float64) -> jax.Array:
         np.eye(int(size), dtype=np.dtype(dtype)),
         dtype=dtype,
     )
-
-
-def _explicit_inv_impl(x):
-    return jnp.divide(scalar_like(x, 1.0), x)
-
-
-@jax.custom_jvp
-def explicit_inv(x):
-    """Evaluate the elementwise reciprocal with an explicit custom JVP.
-
-    Args:
-        x (jax.Array): Floating input of arbitrary shape.
-
-    Returns:
-        jax.Array: Same shape as x containing 1/x; the JVP is -x_dot/x**2 and
-            singularities are not regularized.
-    """
-    return _explicit_inv_impl(x)
-
-
-@explicit_inv.defjvp
-def _explicit_inv_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_inv_impl(x)
-    tangent_out = jnp.negative(x_dot * primal_out * primal_out)
-    return primal_out, tangent_out
-
-
-def _explicit_rsqrt_impl(x):
-    return jnp.divide(scalar_like(x, 1.0), jnp.sqrt(x))
-
-
-@jax.custom_jvp
-def explicit_rsqrt(x):
-    """Evaluate the elementwise reciprocal square root with an explicit custom JVP.
-
-    Args:
-        x (jax.Array): Floating input of arbitrary shape.
-
-    Returns:
-        jax.Array: Same shape as x containing 1/sqrt(x); the JVP is
-            -0.5*x_dot/(x*sqrt(x)) and singularities are not regularized.
-    """
-    return _explicit_rsqrt_impl(x)
-
-
-@explicit_rsqrt.defjvp
-def _explicit_rsqrt_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_rsqrt_impl(x)
-    tangent_out = x_dot * scalar_like(x, -0.5) / (x * jnp.sqrt(x))
-    return primal_out, tangent_out

@@ -198,21 +198,6 @@ def _assert_dof_round_trip(curve, *, seed: int) -> None:
     _assert_spec_geometry_matches_native(curve, updated_spec)
 
 
-# ---------------------------------------------------------------------------
-# CurveHelical
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# CurvePlanarFourier
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# CurveRZFourier
-# ---------------------------------------------------------------------------
-
-
 class TestCurveSubclassesParity(JaxTestCase):
     def test_curve_helical_pure_kernel_matches_native_position(self):
         """Helical pure JAX positions match native curve evaluation."""

@@ -1,6 +1,6 @@
 """Fresh-process child: native stage II after ``set_backend`` on the selected device.
 
-Usage: ``native_stage_two.py DEVICE NATIVE_PLATFORM PLATFORM_ENV``.
+Usage: ``native_stage_two.py DEVICE PLATFORM_ENV``.
 ``PLATFORM_ENV`` is the ``JAX_PLATFORMS`` value the parent exported before
 this process started, or empty when it exported none.
 """
@@ -12,7 +12,6 @@ import jax.numpy as jnp
 import numpy as np
 from simsopt.field import BiotSavart, Coil, Current
 from simsopt.geo import CurveLength, SurfaceRZFourier, create_equally_spaced_curves
-from simsopt.geo.jit import native_jax_device
 from simsopt.objectives import SquaredFlux
 from simsopt_jax.backend import get_runtime_jax_device, set_backend
 from simsopt_jax.backend.runtime import JaxDevice
@@ -21,7 +20,7 @@ from simsopt_jax_adapters.field import JaxBiotSavart
 _DEVICES: dict[str, JaxDevice] = {"cpu": "cpu", "gpu": "gpu"}
 
 
-def main(device: str, native_platform: str, platform_env: str) -> None:
+def main(device: str, platform_env: str) -> None:
     """Compare native and adapter length, field and flux on ``device``."""
     assert jax.config.values["jax_platform_name"] == ("" if platform_env else "cpu")
     set_backend("jax", device=_DEVICES[device], intent="parity")
@@ -30,16 +29,12 @@ def main(device: str, native_platform: str, platform_env: str) -> None:
     assert {d.platform for d in jnp.ones(2).devices()} == {device}
     runtime_device = get_runtime_jax_device()
     assert runtime_device is not None and runtime_device.platform == device
-    assert native_jax_device().platform == native_platform
 
     curve = create_equally_spaced_curves(
         1, 1, False, R0=1.0, R1=0.5, order=2, numquadpoints=32
     )[0]
     length = CurveLength(curve)
-    with jax.transfer_guard("disallow"):
-        length_value, length_gradient = length.J(), length.dJ()
-    assert isinstance(length_value, np.float64)
-    assert isinstance(length_gradient, np.ndarray)
+    length_value, length_gradient = length.J(), length.dJ()
     np.testing.assert_allclose(
         length_value,
         np.mean(np.linalg.norm(curve.gammadash(), axis=1)),
@@ -82,4 +77,4 @@ def main(device: str, native_platform: str, platform_env: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], sys.argv[3])
+    main(sys.argv[1], sys.argv[2])

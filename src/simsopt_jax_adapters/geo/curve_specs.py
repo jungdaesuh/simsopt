@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-from typing import cast
 from simsopt_jax.core.specs import CurveSpec
 
 from simsopt.geo.curvehelical import CurveHelical
@@ -35,32 +34,7 @@ from simsopt_jax_adapters.geo.curve_contract import (
 __all__ = [
     "adapter_curve_dof_mode",
     "curve_spec_from_adapter_curve",
-    "supports_adapter_curve_spec",
 ]
-
-
-def supports_adapter_curve_spec(curve: object) -> bool:
-    """Check whether a curve can supply an immutable adapter geometry spec.
-
-    Args:
-        curve (object): Curve to inspect for supported native type or a callable to_spec
-            method.
-
-    Returns:
-        bool: Whether the adapter recognizes a supported curve representation.
-    """
-    return isinstance(
-        curve,
-        (
-            CurveXYZFourier,
-            CurveXYZFourierSymmetries,
-            CurveHelical,
-            CurvePlanarFourier,
-            CurveRZFourier,
-            CurvePerturbed,
-            CurveFilament,
-        ),
-    ) or callable(getattr(curve, "to_spec", None))
 
 
 def curve_spec_from_adapter_curve(curve, *, separate_owners: bool = False) -> CurveSpec:
@@ -118,10 +92,6 @@ def curve_spec_from_adapter_curve(curve, *, separate_owners: bool = False) -> Cu
         return _curve_perturbed_spec_from_curve(curve, separate_owners=separate_owners)
     if isinstance(curve, CurveFilament):
         return _curve_filament_spec_from_curve(curve, separate_owners=separate_owners)
-
-    to_spec = getattr(curve, "to_spec", None)
-    if callable(to_spec):
-        return cast(CurveSpec, to_spec())
 
     return _pure_curve_spec_from_curve(curve)
 
