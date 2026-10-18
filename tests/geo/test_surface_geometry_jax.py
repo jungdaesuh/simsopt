@@ -14,7 +14,16 @@ surfaces.
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
+from unittest_jax_support import (
+    JAX_IMPORT_ERROR,
+    JaxTestCase,
+    host_array,
+    jax_compilations,
+    optional_jax_imports,
+    parity_default_device,
+    parity_rng,
+    place_float64,
+)
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -40,30 +49,12 @@ with optional_jax_imports():
     from simsopt_jax.runtime.host_boundary import disallow_host_transfers
     from simsopt_jax_adapters.geo import surface_spec_from_surface
 
-from unittest_jax_support import (
-    host_array,
-    jax_compilations,
-    parity_default_device,
-    parity_rng,
-    place_float64,
-)
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import cast
 
 import numpy as np
-
-
-if JAX_IMPORT_ERROR is None:
-    _NativeSurface = SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier
-if JAX_IMPORT_ERROR is None:
-    _Kernel = Callable[[SurfaceSpec], jax.Array]
-if JAX_IMPORT_ERROR is None:
-    _Transform = Callable[
-        [Callable[[jax.Array], jax.Array]], Callable[[jax.Array], jax.Array]
-    ]
 
 
 @dataclass(frozen=True)
@@ -77,7 +68,39 @@ class _Case:
     clamped_dims: tuple[bool, bool, bool] = (False, False, False)
 
 
+def _second_jacobian(
+    function: Callable[[jax.Array], jax.Array],
+) -> Callable[[jax.Array], jax.Array]:
+    return jax.jacfwd(jax.jacfwd(function))
+
+
+# Native coefficient VJP -> the native quantity it pulls back through.
+_VJPS = {
+    f"d{name}_by_dcoeff_vjp": name
+    for name in ("gamma", "gammadash1", "gammadash2", "normal")
+}
+# Native clamped second derivatives truncate nfp / 2 and 1 / 2 to integers
+# (simsoptpp/surfacexyztensorfourier.h); the clamped tests check these against
+# differences of native first derivatives instead.
+_NATIVE_CLAMPED_SECOND_DERIVATIVES = frozenset(
+    {
+        "gammadash1dash1",
+        "gammadash2dash2",
+        "dgammadash1dash1_by_dcoeff",
+        "dgammadash2dash2_by_dcoeff",
+    }
+)
+_RTOL = 1e-12
+_ATOL = 1e-12
+
+
 if JAX_IMPORT_ERROR is None:
+    _NativeSurface = SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier
+    _Kernel = Callable[[SurfaceSpec], jax.Array]
+    _Transform = Callable[
+        [Callable[[jax.Array], jax.Array]], Callable[[jax.Array], jax.Array]
+    ]
+
     _CASES = {
         "rz-stellsym-nfp1-full-torus": _Case(SurfaceRZFourier, True, 1, "full torus"),
         "rz-stellsym-nfp3-field-period": _Case(
@@ -116,11 +139,9 @@ if JAX_IMPORT_ERROR is None:
             clamped_dims=(False, True, True),
         ),
     }
-if JAX_IMPORT_ERROR is None:
     _CLAMPED_CASES = [name for name, case in _CASES.items() if any(case.clamped_dims)]
 
-# Native method name -> JAX kernel, by the naming rule surface_<native name>.
-if JAX_IMPORT_ERROR is None:
+    # Native method name -> JAX kernel, by the naming rule surface_<native name>.
     _VALUES: dict[str, _Kernel] = {
         name: getattr(surface_geometry, f"surface_{name}")
         for name in (
@@ -137,15 +158,7 @@ if JAX_IMPORT_ERROR is None:
         )
     }
 
-
-def _second_jacobian(
-    function: Callable[[jax.Array], jax.Array],
-) -> Callable[[jax.Array], jax.Array]:
-    return jax.jacfwd(jax.jacfwd(function))
-
-
-# Native coefficient derivative -> (the native quantity it differentiates, JAX transform).
-if JAX_IMPORT_ERROR is None:
+    # Native coefficient derivative -> (the native quantity it differentiates, JAX transform).
     _DERIVATIVES: dict[str, tuple[str, _Transform]] = {
         **{
             f"d{name}_by_dcoeff": (name, jax.jacfwd)
@@ -158,27 +171,6 @@ if JAX_IMPORT_ERROR is None:
         "dvolume_by_dcoeff": ("volume", jax.grad),
         "d2volume_by_dcoeffdcoeff": ("volume", jax.hessian),
     }
-# Native coefficient VJP -> the native quantity it pulls back through.
-_VJPS = {
-    f"d{name}_by_dcoeff_vjp": name
-    for name in ("gamma", "gammadash1", "gammadash2", "normal")
-}
-# Native clamped second derivatives truncate nfp / 2 and 1 / 2 to integers
-# (simsoptpp/surfacexyztensorfourier.h); the clamped tests check these against
-# differences of native first derivatives instead.
-_NATIVE_CLAMPED_SECOND_DERIVATIVES = frozenset(
-    {
-        "gammadash1dash1",
-        "gammadash2dash2",
-        "dgammadash1dash1_by_dcoeff",
-        "dgammadash2dash2_by_dcoeff",
-    }
-)
-_RTOL = 1e-12
-_ATOL = 1e-12
-
-
-if JAX_IMPORT_ERROR is None:
 
     @partial(jax.jit, static_argnums=(0, 1))
     def _coefficient_derivative(
@@ -189,9 +181,6 @@ if JAX_IMPORT_ERROR is None:
             surface_get_dofs(spec)
         )
 
-
-if JAX_IMPORT_ERROR is None:
-
     @partial(jax.jit, static_argnums=0)
     def _coefficient_vjp(
         quantity: str, spec: SurfaceSpec, cotangent: jax.Array
@@ -200,6 +189,12 @@ if JAX_IMPORT_ERROR is None:
             surface_quantity_of_dofs(_VALUES[quantity], spec), surface_get_dofs(spec)
         )
         return pullback(cotangent)[0]
+
+    class _SurfaceRZFourierSubclass(SurfaceRZFourier):
+        pass
+
+    class _SurfaceXYZTensorFourierSubclass(SurfaceXYZTensorFourier):
+        pass
 
 
 def _evaluate(name: str, spec: SurfaceSpec) -> jax.Array:
@@ -344,18 +339,6 @@ def _singular_surface(singularity: str) -> SurfaceRZFourier:
     else:
         surface.set_rc(1, 1, 0.02 * scale)
     return surface
-
-
-if JAX_IMPORT_ERROR is None:
-
-    class _SurfaceRZFourierSubclass(SurfaceRZFourier):
-        pass
-
-
-if JAX_IMPORT_ERROR is None:
-
-    class _SurfaceXYZTensorFourierSubclass(SurfaceXYZTensorFourier):
-        pass
 
 
 class TestSurfaceGeometryJax(JaxTestCase):
@@ -767,49 +750,31 @@ class TestSurfaceGeometryJax(JaxTestCase):
         """Clamped second derivatives converge from native first derivatives on shifted grids."""
         for case in _CLAMPED_CASES:
             with self.subTest(case=case), self.case():
-                self._case_clamped_second_derivatives_taylor(case)
-
-    def _case_clamped_second_derivatives_taylor(self, case):
-        surface = _surface(case)
-        spec = surface_spec_from_surface(surface)
-        phi = np.asarray(surface.quadpoints_phi)
-        theta = np.asarray(surface.quadpoints_theta)
-        for second, first, axis in (
-            ("gammadash1dash1", "gammadash1", 0),
-            ("gammadash1dash2", "gammadash1", 1),
-            ("gammadash2dash2", "gammadash2", 1),
-        ):
-            analytic = host_array(_evaluate(second, spec))
-            value = _native(surface, first)
-            previous_error = 1e6
-            for step in np.power(2.0, -np.arange(10, 15)):
-                shifted = _surface(
+                self._assert_grid_taylor(
                     case,
-                    quadpoints_phi=phi + (step if axis == 0 else 0),
-                    quadpoints_theta=theta + (step if axis == 1 else 0),
+                    (
+                        ("gammadash1dash1", "gammadash1", 0),
+                        ("gammadash1dash2", "gammadash1", 1),
+                        ("gammadash2dash2", "gammadash2", 1),
+                    ),
                 )
-                error = np.linalg.norm(
-                    (_native(shifted, first) - value) / step - analytic
-                )
-                self.assertLess(error, 0.55 * previous_error, second)
-                previous_error = error
 
     def test_first_derivatives_taylor(self):
         """First angle derivatives converge from native positions on shifted grids."""
         for case in _CASES:
             with self.subTest(case=case), self.case():
-                self._case_first_derivatives_taylor(case)
+                self._assert_grid_taylor(
+                    case, (("gammadash1", "gamma", 0), ("gammadash2", "gamma", 1))
+                )
 
-    def _case_first_derivatives_taylor(self, case):
+    def _assert_grid_taylor(self, case, triples):
+        """Each ``(derivative, value, axis)`` converges from native ``value`` on grids shifted along ``axis``."""
         surface = _surface(case)
         spec = surface_spec_from_surface(surface)
         phi = np.asarray(surface.quadpoints_phi)
         theta = np.asarray(surface.quadpoints_theta)
-        for first, value_name, axis in (
-            ("gammadash1", "gamma", 0),
-            ("gammadash2", "gamma", 1),
-        ):
-            analytic = host_array(_evaluate(first, spec))
+        for derivative, value_name, axis in triples:
+            analytic = host_array(_evaluate(derivative, spec))
             value = _native(surface, value_name)
             previous_error = 1e6
             for step in np.power(2.0, -np.arange(10, 15)):
@@ -821,5 +786,5 @@ class TestSurfaceGeometryJax(JaxTestCase):
                 error = np.linalg.norm(
                     (_native(shifted, value_name) - value) / step - analytic
                 )
-                self.assertLess(error, 0.55 * previous_error, first)
+                self.assertLess(error, 0.55 * previous_error, derivative)
                 previous_error = error
