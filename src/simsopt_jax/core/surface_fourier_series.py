@@ -1,14 +1,18 @@
 """Coefficient series of the native Fourier surface classes, from their specs.
 
-:func:`_rotating_frame_derivative` differentiates a surface's components
+:func:`_rotating_frame_components` evaluates a surface's components
 ``(xhat, yhat, z)`` in the frame that turns with the toroidal angle
 (``x = xhat cos(phi) - yhat sin(phi)``, ``y = xhat sin(phi) + yhat cos(phi)``;
 ``SurfaceRZFourier`` has ``xhat = r``, ``yhat = 0``), summing exactly the
 coefficient entries the native class sums: ``SurfaceRZFourier`` drops ``rs``
 and ``zc`` when stellarator symmetric, ``SurfaceXYZFourier`` sums all six
 arrays, ``SurfaceXYZTensorFourier`` skips the stellarator-symmetry entries it
-holds no DOF for. :func:`surface_get_dofs` and :func:`surface_spec_with_dofs`
-are native ``get_dofs`` and ``set_dofs``.
+holds no DOF for. The components take the toroidal and poloidal angles
+``phi`` and ``theta`` in radians as arguments, so that
+:mod:`simsopt_jax.core.surface_geometry` takes the angle derivatives as JAX
+forward-mode derivatives in those angles.
+:func:`surface_get_dofs` and :func:`surface_spec_with_dofs` are native
+``get_dofs`` and ``set_dofs``.
 
 ``SurfaceXYZTensorFourier`` clamping multiplies the cosine-cosine block of a
 clamped component by ``sin(nfp phi / 2)**2 + sin(theta / 2)**2``. Native
@@ -21,7 +25,6 @@ and ``gammadash2dash2`` are not the derivatives of its ``gammadash1`` and
 from __future__ import annotations
 
 from dataclasses import replace
-from math import comb
 
 import jax
 import jax.numpy as jnp
@@ -40,109 +43,93 @@ __all__ = [
     "surface_spec_with_dofs",
 ]
 
-_TWO_PI = 2.0 * np.pi
-# Phases p of f_p(a) = cos(a + p pi / 2): f_0 = cos, f_3 = sin, d f_p / da = f_{p+1}.
-_COSINE = 0
-_SINE = 3
-
-
-def _phase_sign(phase: int) -> float:
-    """``f_phase = sign * (cos if phase is even else sin)``."""
-    return 1.0 if phase % 4 in (0, 3) else -1.0
-
 
 def _angle_difference_series(
     spec: SurfaceRZFourierSpec | SurfaceXYZFourierSpec,
+    phi: jax.Array,
+    theta: jax.Array,
     coefficients: jax.Array,
-    phase: int,
-    phi_order: int,
-    theta_order: int,
+    sine: bool,
 ) -> jax.Array:
-    """``d^(phi_order + theta_order) / dphi^phi_order dtheta^theta_order`` of
-    ``sum_{m,n} coefficients[m, n + ntor] f_phase(m theta - nfp n phi)``.
+    """``sum_{m,n} coefficients[m, n + ntor] f(m theta - nfp n phi)``, ``f`` the
+    sine if ``sine`` else the cosine.
 
-    The angles ``phi = 2 pi quadpoints_phi`` and ``theta = 2 pi
-    quadpoints_theta`` are in radians; the result has shape ``(nphi,
-    ntheta)``. Each derivative multiplies a mode by ``m`` (theta) or
-    ``-nfp n`` (phi) and advances its phase; the angle difference expands
-    into separate theta and phi tables.
+    The angles ``phi``, shape ``(nphi,)``, and ``theta``, shape ``(ntheta,)``,
+    are in radians; the result has shape ``(nphi, ntheta)``. The angle
+    difference expands into separate theta and phi tables.
     """
     mpol, ntor = coefficients.shape[0] - 1, (coefficients.shape[1] - 1) // 2
     m = np.arange(mpol + 1, dtype=np.float64)
     nfp_n = spec.nfp * np.arange(-ntor, ntor + 1, dtype=np.float64)
-    phase = (phase + phi_order + theta_order) % 4
-    weights = (
-        _phase_sign(phase) * m[:, None] ** theta_order * (-nfp_n)[None, :] ** phi_order
-    )
-    weighted = coefficients * weights
 
-    theta = _TWO_PI * spec.quadpoints_theta
-    phi = _TWO_PI * spec.quadpoints_phi
     cos_theta = jnp.cos(theta[:, None] * m[None, :])
     sin_theta = jnp.sin(theta[:, None] * m[None, :])
     cos_phi = jnp.cos(phi[:, None] * nfp_n[None, :])
     sin_phi = jnp.sin(phi[:, None] * nfp_n[None, :])
     # cos(a - b) = cos a cos b + sin a sin b; sin(a - b) = sin a cos b - cos a sin b.
-    if phase % 2 == 0:
-        return cos_phi @ (cos_theta @ weighted).T + sin_phi @ (sin_theta @ weighted).T
-    return cos_phi @ (sin_theta @ weighted).T - sin_phi @ (cos_theta @ weighted).T
+    if sine:
+        return (
+            cos_phi @ (sin_theta @ coefficients).T
+            - sin_phi @ (cos_theta @ coefficients).T
+        )
+    return (
+        cos_phi @ (cos_theta @ coefficients).T + sin_phi @ (sin_theta @ coefficients).T
+    )
 
 
 def _series_pair(
     spec: SurfaceRZFourierSpec | SurfaceXYZFourierSpec,
+    phi: jax.Array,
+    theta: jax.Array,
     cosine: jax.Array,
     sine: jax.Array,
-    phi_order: int,
-    theta_order: int,
 ) -> jax.Array:
     return _angle_difference_series(
-        spec, cosine, _COSINE, phi_order, theta_order
-    ) + _angle_difference_series(spec, sine, _SINE, phi_order, theta_order)
+        spec, phi, theta, cosine, False
+    ) + _angle_difference_series(spec, phi, theta, sine, True)
 
 
 def _rz_fourier_components(
-    spec: SurfaceRZFourierSpec, phi_order: int, theta_order: int
+    spec: SurfaceRZFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, None, jax.Array]:
     if spec.stellsym:
         return (
-            _angle_difference_series(spec, spec.rc, _COSINE, phi_order, theta_order),
+            _angle_difference_series(spec, phi, theta, spec.rc, False),
             None,
-            _angle_difference_series(spec, spec.zs, _SINE, phi_order, theta_order),
+            _angle_difference_series(spec, phi, theta, spec.zs, True),
         )
     return (
-        _series_pair(spec, spec.rc, spec.rs, phi_order, theta_order),
+        _series_pair(spec, phi, theta, spec.rc, spec.rs),
         None,
-        _series_pair(spec, spec.zc, spec.zs, phi_order, theta_order),
+        _series_pair(spec, phi, theta, spec.zc, spec.zs),
     )
 
 
 def _xyz_fourier_components(
-    spec: SurfaceXYZFourierSpec, phi_order: int, theta_order: int
+    spec: SurfaceXYZFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     return (
-        _series_pair(spec, spec.xc, spec.xs, phi_order, theta_order),
-        _series_pair(spec, spec.yc, spec.ys, phi_order, theta_order),
-        _series_pair(spec, spec.zc, spec.zs, phi_order, theta_order),
+        _series_pair(spec, phi, theta, spec.xc, spec.xs),
+        _series_pair(spec, phi, theta, spec.yc, spec.ys),
+        _series_pair(spec, phi, theta, spec.zc, spec.zs),
     )
 
 
-def _harmonic_basis(
-    quadpoints: jax.Array, count: int, frequency: int, order: int
-) -> jax.Array:
-    """``d^order / da^order`` of the native tensor basis at ``a = 2 pi quadpoints``.
+def _harmonic_basis(angles: jax.Array, count: int, frequency: int) -> jax.Array:
+    """The native tensor basis at the angles ``a`` in radians.
 
     The basis is ``1, cos(k a), ..., cos(count k a), sin(k a), ...,
     sin(count k a)`` with ``k = frequency``; shape ``(npoints, 2 count + 1)``.
     """
-    angles = _TWO_PI * quadpoints
     cosine_modes = frequency * np.arange(count + 1, dtype=np.float64)
     sine_modes = frequency * np.arange(1, count + 1, dtype=np.float64)
-    blocks = []
-    for modes, phase in ((cosine_modes, _COSINE + order), (sine_modes, _SINE + order)):
-        trig = jnp.cos if phase % 2 == 0 else jnp.sin
-        weights = _phase_sign(phase) * modes**order
-        blocks.append(weights[None, :] * trig(angles[:, None] * modes[None, :]))
-    return jnp.concatenate(blocks, axis=1)
+    return jnp.concatenate(
+        (
+            jnp.cos(angles[:, None] * cosine_modes[None, :]),
+            jnp.sin(angles[:, None] * sine_modes[None, :]),
+        ),
+        axis=1,
+    )
 
 
 def _tensor_keep_masks(
@@ -160,35 +147,23 @@ def _tensor_keep_masks(
     return keep_x, ~keep_x, ~keep_x
 
 
-def _clamping_derivative(
-    spec: SurfaceXYZTensorFourierSpec, phi_order: int, theta_order: int
+def _clamping_factor(
+    spec: SurfaceXYZTensorFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> jax.Array:
-    """``d^(phi_order + theta_order)`` of ``sin(nfp phi / 2)**2 + sin(theta / 2)**2``.
-
-    Broadcastable to ``(nphi, ntheta)``; mixed derivatives vanish.
-    """
-    half_phi = spec.nfp * (_TWO_PI * spec.quadpoints_phi) / 2.0
-    half_theta = (_TWO_PI * spec.quadpoints_theta) / 2.0
-    sin_phi, cos_phi = jnp.sin(half_phi)[:, None], jnp.cos(half_phi)[:, None]
-    sin_theta, cos_theta = jnp.sin(half_theta)[None, :], jnp.cos(half_theta)[None, :]
-    derivatives = {
-        (0, 0): sin_phi * sin_phi + sin_theta * sin_theta,
-        (1, 0): spec.nfp * cos_phi * sin_phi,
-        (2, 0): spec.nfp * (spec.nfp / 2.0) * (cos_phi * cos_phi - sin_phi * sin_phi),
-        (0, 1): cos_theta * sin_theta,
-        (0, 2): 0.5 * (cos_theta * cos_theta - sin_theta * sin_theta),
-    }
-    return derivatives[(phi_order, theta_order)]
+    """``sin(nfp phi / 2)**2 + sin(theta / 2)**2``, shape ``(nphi, ntheta)``."""
+    sin_phi = jnp.sin(spec.nfp * phi / 2.0)[:, None]
+    sin_theta = jnp.sin(theta / 2.0)[None, :]
+    return sin_phi * sin_phi + sin_theta * sin_theta
 
 
 def _xyz_tensor_fourier_components(
-    spec: SurfaceXYZTensorFourierSpec, phi_order: int, theta_order: int
+    spec: SurfaceXYZTensorFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     mpol, ntor = (spec.xcs.shape[0] - 1) // 2, (spec.xcs.shape[1] - 1) // 2
+    phi_basis = _harmonic_basis(phi, ntor, spec.nfp)
+    theta_basis = _harmonic_basis(theta, mpol, 1)
 
-    def series(coefficients: jax.Array, phi_order: int, theta_order: int) -> jax.Array:
-        phi_basis = _harmonic_basis(spec.quadpoints_phi, ntor, spec.nfp, phi_order)
-        theta_basis = _harmonic_basis(spec.quadpoints_theta, mpol, 1, theta_order)
+    def series(coefficients: jax.Array) -> jax.Array:
         return (phi_basis @ coefficients.T) @ theta_basis.T
 
     clamped_block = np.zeros(spec.xcs.shape, dtype=bool)
@@ -199,37 +174,28 @@ def _xyz_tensor_fourier_components(
     ):
         summed = jnp.where(keep, coefficients, 0.0)
         if not clamped:
-            components.append(series(summed, phi_order, theta_order))
+            components.append(series(summed))
             continue
-        # Leibniz rule for the clamping factor times the cosine-cosine block.
-        block = jnp.where(clamped_block, summed, 0.0)
-        terms = [series(jnp.where(clamped_block, 0.0, summed), phi_order, theta_order)]
-        for factor_phi in range(phi_order + 1):
-            for factor_theta in range(theta_order + 1):
-                if factor_phi and factor_theta:
-                    continue
-                weight = comb(phi_order, factor_phi) * comb(theta_order, factor_theta)
-                terms.append(
-                    weight
-                    * _clamping_derivative(spec, factor_phi, factor_theta)
-                    * series(block, phi_order - factor_phi, theta_order - factor_theta)
-                )
-        components.append(sum(terms))
+        components.append(
+            series(jnp.where(clamped_block, 0.0, summed))
+            + _clamping_factor(spec, phi, theta)
+            * series(jnp.where(clamped_block, summed, 0.0))
+        )
     return tuple(components)
 
 
-def _rotating_frame_derivative(
-    spec: SurfaceSpec, phi_order: int, theta_order: int
+def _rotating_frame_components(
+    spec: SurfaceSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, jax.Array | None, jax.Array]:
-    """``d^(phi_order + theta_order) / dphi^phi_order dtheta^theta_order`` of
-    ``(xhat, yhat, z)`` in radians, each ``(nphi, ntheta)``; ``yhat`` is
-    ``None`` for ``SurfaceRZFourier``. Orders up to 2 in each angle.
+    """``(xhat, yhat, z)`` at the toroidal angles ``phi``, shape ``(nphi,)``,
+    and poloidal angles ``theta``, shape ``(ntheta,)``, in radians; each is
+    ``(nphi, ntheta)``, and ``yhat`` is ``None`` for ``SurfaceRZFourier``.
     """
     if isinstance(spec, SurfaceRZFourierSpec):
-        return _rz_fourier_components(spec, phi_order, theta_order)
+        return _rz_fourier_components(spec, phi, theta)
     if isinstance(spec, SurfaceXYZFourierSpec):
-        return _xyz_fourier_components(spec, phi_order, theta_order)
-    return _xyz_tensor_fourier_components(spec, phi_order, theta_order)
+        return _xyz_fourier_components(spec, phi, theta)
+    return _xyz_tensor_fourier_components(spec, phi, theta)
 
 
 # The arrays holding the native DOFs of the angle-difference series, in
