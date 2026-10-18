@@ -11,7 +11,6 @@ with optional_jax_imports():
     from simsopt_jax.core import coil_specs_from_dof_extraction_spec
     from simsopt_jax_adapters.field.biotsavart_backend import (
         JaxBiotSavart,
-        _dof_map_cotangent_to_owner_gradient,
         _owner_segments_from_free_positions,
     )
 
@@ -189,8 +188,8 @@ class TestCoilDofExtractionSegments(JaxTestCase):
             'text.count("stablehlo.dot_general") == 2',
         )
 
-    def test_gradient_through_the_mapping_matches_the_manual_cotangent(self):
-        """Autodiff and manual extraction-map cotangents match the native setter-derived
+    def test_gradient_through_the_mapping_matches_the_native_selection(self):
+        """Autodiff extraction-map cotangents match the native setter-derived
         selection gradient bitwise."""
         coil_graph = self.coil_graph
         curves, _currents, bs_jax, oracle = coil_graph
@@ -210,16 +209,6 @@ class TestCoilDofExtractionSegments(JaxTestCase):
             jax.grad(weighted_curve_dofs)(jnp.asarray(free_dofs))
         )
 
-        manual_gradient = np.zeros(bs_jax.dof_size)
-        for coil_spec, weight in zip(spec.coils, weights):
-            manual_gradient += np.asarray(
-                _dof_map_cotangent_to_owner_gradient(
-                    coil_spec.curve_map,
-                    jnp.asarray(weight),
-                    jnp.asarray(free_dofs),
-                )
-            )
-
         selection = np.zeros((bs_jax.dof_size, sum(w.size for w in weights)))
         oracle.x = np.zeros(bs_jax.dof_size)
         baseline = np.concatenate([np.asarray(curve.local_full_x) for curve in curves])
@@ -236,8 +225,4 @@ class TestCoilDofExtractionSegments(JaxTestCase):
         self.assertTrue(
             np.array_equal(_bits(autodiff_gradient), _bits(expected_gradient)),
             "np.array_equal(_bits(autodiff_gradient), _bits(expected_gradient))",
-        )
-        self.assertTrue(
-            np.array_equal(_bits(manual_gradient), _bits(expected_gradient)),
-            "np.array_equal(_bits(manual_gradient), _bits(expected_gradient))",
         )

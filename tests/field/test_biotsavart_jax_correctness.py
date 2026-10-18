@@ -1,6 +1,6 @@
 """Native regression oracles for the JaxBiotSavart correctness review."""
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, aligned_host_copy, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -153,7 +153,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             plus, _ = _jax_filament_geometry(frame, quadpoints + step)
             minus, _ = _jax_filament_geometry(frame, quadpoints - step)
             next_error = np.linalg.norm((plus - minus) / (2 * step) - gammadash)
-            print(f"R10 {frame.__name__} step={step:.3e}: error={next_error:.3e}")
             self.assertLess(next_error, 0.3 * error)
             error = next_error
         native = _filament(frame, quadpoints)
@@ -213,9 +212,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         flat = adapter.coil_cotangents_to_dofs_gradient(
             pullback.d_coil_arrays, pullback.coil_indices
         )
-        print(
-            f"R9 {quantity} scale={scale}: adapter={actual[0]:.16g} flat={float(flat[0]):.16g} native={expected[0]:.16g} fd={finite_difference:.16g}"
-        )
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(flat, expected, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(actual, finite_difference, rtol=1e-9, atol=1e-14)
@@ -265,9 +261,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         )
         derivative = _vjp(adapter, quantity, _cotangent(quantity))
         actual = cast(Derivative, derivative(adapter, as_derivative=True))
-        print(
-            f"R5 {quantity} {fixed}: current={cast(np.ndarray, actual.data[current])[0]:.16g}/{cast(np.ndarray, expected.data[current])[0]:.16g} curve[0]={cast(np.ndarray, actual.data[curve])[0]:.16g}/{cast(np.ndarray, expected.data[curve])[0]:.16g}"
-        )
         for owner in expected.data:
             np.testing.assert_allclose(
                 actual.data[owner],
@@ -309,9 +302,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         adapter.set_points(_POINTS)
         expected = native.B()
         actual = np.asarray(adapter.B())
-        print(
-            f"R6 replicas={replicas}: native_delta={np.max(np.abs(expected - before)):.16g} adapter_delta={np.max(np.abs(actual - before)):.16g} error={np.max(np.abs(actual - expected)):.16g}"
-        )
         self.assertTrue(
             np.max(np.abs(expected - before)) > 1e-6,
             "np.max(np.abs(expected - before)) > 1e-6",
@@ -327,19 +317,13 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
     def test_cartesian_points_are_owned_snapshots(self):
         """Mutating caller-owned Cartesian points leaves the adapter points and cached
         field equal to native snapshots."""
-        storage = np.empty(_POINTS.size + 8, dtype=np.float64)
-        offset = (-storage.ctypes.data % 64) // storage.itemsize
-        points = storage[offset : offset + _POINTS.size].reshape(_POINTS.shape)
-        points[:] = _POINTS
+        points = aligned_host_copy(_POINTS)
         coils = [Coil(_curves()[0], Current(1e5))]
         native = BiotSavart(coils).set_points(points)
         adapter = JaxBiotSavart(coils).set_points(points)
         adapter.B()
         points[:] += 0.3
         actual = adapter.get_points_cart()
-        print(
-            f"R8 point_error={np.max(np.abs(actual - native.get_points_cart())):.16g} field_error={np.max(np.abs(np.asarray(adapter.B()) - native.B())):.16g}"
-        )
         np.testing.assert_array_equal(actual, native.get_points_cart())
         np.testing.assert_allclose(adapter.B(), native.B(), rtol=1e-12, atol=1e-14)
 
@@ -366,9 +350,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             filename = tmp_path / (name + ".json")
             field.save(filename, fmt="json")
             loaded = load(filename)
-            print(
-                f"R4 {coordinates} {name}: restored_points={restored.get_points_cart().tolist()}"
-            )
             for result in (restored, loaded):
                 np.testing.assert_array_equal(result.get_points_cart(), expected_points)
                 np.testing.assert_allclose(
@@ -395,9 +376,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             actual, expected = (
                 np.asarray(getattr(adapter, quantity)()),
                 getattr(native, quantity)(),
-            )
-            print(
-                f"R7 stellsym={stellsym} {quantity}: error={np.max(np.abs(actual - expected)):.16g}"
             )
             np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-13)
             np.testing.assert_allclose(

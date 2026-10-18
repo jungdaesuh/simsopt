@@ -6,7 +6,7 @@ its recompute mechanism (DOF setters, fix/unfix, resample) and every point or
 backend change must retire that state; native BiotSavart is the oracle.
 """
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, aligned_host_copy, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -71,28 +71,13 @@ def _assert_field_matches_native(field, native):
 
 
 def _count_coil_state_builds(patches):
-    builds = []
-    build = backend._jitted_coil_set_spec_from_extraction_spec
-
-    def counted_build(extraction_spec, coil_dofs):
-        builds.append(1)
-        return build(extraction_spec, coil_dofs)
-
-    patches.enter_context(
+    return patches.enter_context(
         mock.patch.object(
-            backend, "_jitted_coil_set_spec_from_extraction_spec", counted_build
+            backend,
+            "_jitted_coil_set_spec_from_extraction_spec",
+            wraps=backend._jitted_coil_set_spec_from_extraction_spec,
         )
     )
-    return builds
-
-
-def _aligned_copy(points):
-    """A C-contiguous, 64-byte-aligned copy, which CPU JAX placement aliases instead of copying."""
-    raw = np.empty(points.size + 8)
-    offset = (-raw.ctypes.data % 64) // raw.itemsize
-    aligned = raw[offset : offset + points.size].reshape(points.shape)
-    aligned[...] = points
-    return aligned
 
 
 class TestBiotsavartJaxStateCache(JaxTestCase):
@@ -105,16 +90,11 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
             coils_via_symmetries(curves, [Current(1e5) for _ in curves], 2, True)
         )
         builds = _count_coil_state_builds(patches)
-        B_evaluations = []
-        grouped_B = backend.grouped_biot_savart_B_from_spec
-
-        def counted_grouped_B(points, coil_set_spec):
-            B_evaluations.append(1)
-            return grouped_B(points, coil_set_spec)
-
-        patches.enter_context(
+        B_evaluations = patches.enter_context(
             mock.patch.object(
-                backend, "grouped_biot_savart_B_from_spec", counted_grouped_B
+                backend,
+                "grouped_biot_savart_B_from_spec",
+                wraps=backend.grouped_biot_savart_B_from_spec,
             )
         )
 
@@ -126,14 +106,14 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
         field.dB_by_dcoilcurrents()
         field.coil_set_spec()
         self.assertTrue(
-            (len(builds), len(B_evaluations)) == (1, 1),
+            (builds.call_count, B_evaluations.call_count) == (1, 1),
             "repeated evaluations at an unchanged coil-DOF state rebuilt the coil "
-            f"spec {len(builds)} times and B {len(B_evaluations)} times",
+            f"spec {builds.call_count} times and B {B_evaluations.call_count} times",
         )
 
         field.x = field.x + 1e-3
         _assert_field_matches_native(field, native)
-        self.assertTrue(len(builds) == 2, "len(builds) == 2")
+        self.assertTrue(builds.call_count == 2, "builds.call_count == 2")
 
     def test_per_current_outputs_reuse_arrays_and_follow_every_state_change(self):
         """Per-current outputs return independent lists, reuse array identities and
@@ -383,11 +363,11 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
         builds = _count_coil_state_builds(patches)
         field.B()
         field.B()
-        self.assertTrue(len(builds) == 1, "len(builds) == 1")
+        self.assertTrue(builds.call_count == 1, "builds.call_count == 1")
 
         invalidate_backend_cache()
         _assert_field_matches_native(field, native)
-        self.assertTrue(len(builds) == 2, "len(builds) == 2")
+        self.assertTrue(builds.call_count == 2, "builds.call_count == 2")
 
     def test_owner_updates_fingerprint_fixed_dofs_once(self):
         """Each owner update notifies the field; fixed DOFs are compared once, at the next read."""
@@ -396,16 +376,11 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
         field, native = _fields([Coil(curve, Current(1e5)) for curve in curves])
         curves[0].fix(0)
         _assert_field_matches_native(field, native)
-        reads = []
-        fingerprint = field._current_captured_coil_state_fingerprint
-
-        def counted_fingerprint():
-            reads.append(1)
-            return fingerprint()
-
-        patches.enter_context(
+        reads = patches.enter_context(
             mock.patch.object(
-                field, "_current_captured_coil_state_fingerprint", counted_fingerprint
+                field,
+                "_current_captured_coil_state_fingerprint",
+                wraps=field._current_captured_coil_state_fingerprint,
             )
         )
         for curve in curves:
@@ -413,7 +388,8 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
         field.B()
         field.B_vjp(_COTANGENT)(field)
         self.assertTrue(
-            len(reads) == 1, f"{len(reads)} fixed-DOF fingerprints for one evaluation"
+            reads.call_count == 1,
+            f"{reads.call_count} fixed-DOF fingerprints for one evaluation",
         )
         _assert_field_matches_native(field, native)
 
@@ -421,7 +397,7 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
         """Editing the caller's buffer after set_points moves neither the points nor B."""
         curves = _base_curves()
         field, native = _fields([Coil(curve, Current(1e5)) for curve in curves])
-        buffer = _aligned_copy(_POINTS)
+        buffer = aligned_host_copy(_POINTS)
         points = jnp.asarray(buffer)
         if next(iter(points.devices())).platform == "cpu":
             self.assertTrue(
