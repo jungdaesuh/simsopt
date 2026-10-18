@@ -91,7 +91,6 @@ class TestBiotsavartJaxContract(JaxTestCase):
         """Run one row with case-local objects released before runtime cleanup."""
         patches.enter_context(mock.patch.dict(os.environ))
         os.environ.pop("SIMSOPT_JAX_TRANSFER_GUARD", None)
-        patches.enter_context(mock.patch.dict(os.environ))
         os.environ.pop("SIMSOPT_DEBUG", None)
         config = set_backend(
             "jax",

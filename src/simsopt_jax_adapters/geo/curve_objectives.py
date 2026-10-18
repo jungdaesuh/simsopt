@@ -82,13 +82,6 @@ def _curve_position_samples(curve, downsample=1):
     return gamma if downsample == 1 else gamma[::downsample]
 
 
-def _add_curve_vjp(buffer, values, downsample):
-    if downsample == 1:
-        buffer += values
-    else:
-        buffer[::downsample] += values
-
-
 def _sum_curve_vjp_contributions(curves, dgamma_vjps, dgammadash_vjps):
     return sum(
         curve.dgamma_by_dcoeff_vjp(dgamma_vjp)
@@ -119,18 +112,13 @@ def _quadrature_classes(sample_counts: tuple[int, ...]) -> tuple[tuple[int, ...]
     return tuple(tuple(members) for members in members_by_count.values())
 
 
-def _class_stacked_geometry(curves, class_members, downsample):
-    """Return device stacks of sampled ``gamma``/``gammadash`` per quadrature class."""
+def _class_stacked_geometry(curves, class_members):
+    """Return device stacks of full-grid ``gamma``/``gammadash`` per quadrature class."""
 
     def _stack(samples):
         return tuple(
             _as_jax_float64(
-                np.stack(
-                    [
-                        host_array(samples(curves[index]), dtype=np.float64)[::downsample]
-                        for index in members
-                    ]
-                )
+                np.stack([host_array(samples(curves[index]), dtype=np.float64) for index in members])
             )
             for members in class_members
         )
@@ -169,20 +157,26 @@ def _distance_operand_key(curves, candidate_key: tuple[object, ...]) -> tuple[ob
     )
 
 
-def _class_geometry_derivative(curves, class_members, class_dgammas, class_dgammadashes, downsample):
-    """Scatter per-class geometry cotangents back to the curves' coefficient derivatives."""
+def _class_geometry_derivative(curves, class_members, class_dgammas, class_dgammadashes):
+    """Pull full-grid per-class geometry cotangents back to the curves' coefficient derivatives.
+
+    Every curve is one row of exactly one class, so the rows only need unstacking.
+    """
     class_dgammas, class_dgammadashes = host_tree(
         (class_dgammas, class_dgammadashes), dtype=np.float64
     )
-    dgamma_buffers = [np.zeros_like(curve.gamma()) for curve in curves]
-    dgammadash_buffers = [np.zeros_like(curve.gammadash()) for curve in curves]
-    for members, dgammas, dgammadashes in zip(
-        class_members, class_dgammas, class_dgammadashes
-    ):
-        for row, index in enumerate(members):
-            _add_curve_vjp(dgamma_buffers[index], dgammas[row], downsample)
-            _add_curve_vjp(dgammadash_buffers[index], dgammadashes[row], downsample)
-    return _sum_curve_vjp_contributions(curves, dgamma_buffers, dgammadash_buffers)
+    rows = {
+        index: (dgammas[row], dgammadashes[row])
+        for members, dgammas, dgammadashes in zip(
+            class_members, class_dgammas, class_dgammadashes, strict=True
+        )
+        for row, index in enumerate(members)
+    }
+    return _sum_curve_vjp_contributions(
+        curves,
+        [rows[index][0] for index in range(len(curves))],
+        [rows[index][1] for index in range(len(curves))],
+    )
 
 
 class JaxCurveLength(Optimizable):
@@ -429,11 +423,17 @@ def _flags(values) -> jax.Array:
     return _as_jax_array(np.asarray(values, dtype=bool), dtype=jnp.bool_)
 
 
-def _curve_pair_penalty_total(class_gammas, class_gammadashes, minimum_distance, batch_candidates, plan):
+def _curve_pair_penalty_total(
+    class_gammas, class_gammadashes, minimum_distance, batch_candidates, plan, downsample
+):
     """Sum the curve-curve penalty over every pair of ``plan``, one vmap per batch.
 
+    The class stacks hold full quadrature grids; every ``downsample``-th point
+    enters the penalty, so the gradient is on the full grids.
     ``batch_candidates[b][k]`` is the native candidate decision of pair ``k`` of batch ``b``.
     """
+    class_gammas = tuple(gammas[:, ::downsample] for gammas in class_gammas)
+    class_gammadashes = tuple(gammadashes[:, ::downsample] for gammadashes in class_gammadashes)
     batched_kernel = jax.vmap(
         curve_curve_distance_penalty_pure, in_axes=(0, 0, 0, 0, None, 0)
     )
@@ -455,9 +455,9 @@ def _curve_pair_penalty_total(class_gammas, class_gammadashes, minimum_distance,
     return total
 
 
-_curve_pair_penalty = jax.jit(_curve_pair_penalty_total, static_argnames=("plan",))
+_curve_pair_penalty = jax.jit(_curve_pair_penalty_total, static_argnames=("plan", "downsample"))
 _curve_pair_penalty_grad = jax.jit(
-    jax.grad(_curve_pair_penalty_total, argnums=(0, 1)), static_argnames=("plan",)
+    jax.grad(_curve_pair_penalty_total, argnums=(0, 1)), static_argnames=("plan", "downsample")
 )
 
 
@@ -488,6 +488,8 @@ class JaxCurveCurveDistance(Optimizable):
         num_basecurves (int or None): leading base-curve count :math:`N_b`; default None. None or
             zero selects all curves, as native does.
         downsample (int): quadrature stride for both candidate search and penalty; default 1.
+            As in native, a stride that does not divide a curve's quadrature count is accepted
+            and samples that curve nonuniformly.
     """
 
     def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):
@@ -526,14 +528,11 @@ class JaxCurveCurveDistance(Optimizable):
         cached = self._distance_snapshot
         if cached is not None and cached.key == key:
             return cached
-        samples = self._samples()
         plan = _curve_pair_plan(
-            tuple(int(sample.shape[0]) for sample in samples), self.num_basecurves
+            tuple(int(curve.gamma().shape[0]) for curve in self.curves), self.num_basecurves
         )
         selected = set(candidate_snapshot.candidates)
-        class_gammas, class_gammadashes = _class_stacked_geometry(
-            self.curves, plan.class_members, self.downsample
-        )
+        class_gammas, class_gammadashes = _class_stacked_geometry(self.curves, plan.class_members)
         batch_candidates = tuple(
             _flags([pair in selected for pair in batch.pairs]) for batch in plan.batches
         )
@@ -570,7 +569,9 @@ class JaxCurveCurveDistance(Optimizable):
             float: objective value in m^4.
         """
         plan, operands = self._operands()
-        return _host_float(_curve_pair_penalty(*operands, plan=plan))
+        return _host_float(
+            _curve_pair_penalty(*operands, plan=plan, downsample=self.downsample)
+        )
 
     @derivative_dec
     def dJ(self):
@@ -583,13 +584,11 @@ class JaxCurveCurveDistance(Optimizable):
             Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
         """
         plan, operands = self._operands()
-        class_dgammas, class_dgammadashes = _curve_pair_penalty_grad(*operands, plan=plan)
+        class_dgammas, class_dgammadashes = _curve_pair_penalty_grad(
+            *operands, plan=plan, downsample=self.downsample
+        )
         return _class_geometry_derivative(
-            self.curves,
-            plan.class_members,
-            class_dgammas,
-            class_dgammadashes,
-            self.downsample,
+            self.curves, plan.class_members, class_dgammas, class_dgammadashes
         )
 
     return_fn_map = {"J": J, "dJ": dJ}
@@ -689,9 +688,7 @@ class JaxCurveSurfaceDistance(Optimizable):
             tuple(int(curve.gamma().shape[0]) for curve in self.curves)
         )
         selected = {i for i, _ in candidate_snapshot.candidates}
-        class_gammas, class_gammadashes = _class_stacked_geometry(
-            self.curves, class_members, 1
-        )
+        class_gammas, class_gammadashes = _class_stacked_geometry(self.curves, class_members)
         operands = (
             class_gammas,
             class_gammadashes,
@@ -745,7 +742,7 @@ class JaxCurveSurfaceDistance(Optimizable):
         class_members, operands = self._operands()
         class_dgammas, class_dgammadashes = _curve_surface_penalty_grad(*operands)
         return _class_geometry_derivative(
-            self.curves, class_members, class_dgammas, class_dgammadashes, 1
+            self.curves, class_members, class_dgammas, class_dgammadashes
         )
 
     return_fn_map = {"J": J, "dJ": dJ}

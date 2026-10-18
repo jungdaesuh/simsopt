@@ -37,31 +37,12 @@ import numpy as np
 from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
 
 
-_DIRECT_KERNEL = {
-    "rtol": 1e-10,
-    "atol": 1e-12,
-    "requires_same_state": True,
-    "requires_direct_cpp_oracle": True,
-    "vector_parity_required": True,
-}
-_DIRECT_RTOL = _DIRECT_KERNEL["rtol"]
-_DIRECT_ATOL = _DIRECT_KERNEL["atol"]
-
-_DERIV_HEAVY = {
-    "scalar_value_rtol": 1e-10,
-    "scalar_value_atol": 1e-12,
-    "first_derivative_rtol": 1e-08,
-    "first_derivative_atol": 1e-10,
-    "second_derivative_rtol": 1e-06,
-    "second_derivative_atol": 1e-08,
-    "requires_same_input": True,
-    "requires_direct_cpp_oracle": True,
-    "fd_validation_secondary": True,
-}
-_DERIV_RTOL = _DERIV_HEAVY["first_derivative_rtol"]
-_DERIV_ATOL = _DERIV_HEAVY["first_derivative_atol"]
-_SECOND_DERIV_RTOL = _DERIV_HEAVY["second_derivative_rtol"]
-_SECOND_DERIV_ATOL = _DERIV_HEAVY["second_derivative_atol"]
+_DIRECT_RTOL = 1e-10
+_DIRECT_ATOL = 1e-12
+_DERIV_RTOL = 1e-08
+_DERIV_ATOL = 1e-10
+_SECOND_DERIV_RTOL = 1e-06
+_SECOND_DERIV_ATOL = 1e-08
 
 
 _NQUADPOINTS = 64
@@ -430,16 +411,12 @@ class TestCurvexyzfouriersymmetriesSpecJax(JaxTestCase):
 
     def test_named_geometry_vjp_wrappers_match_cpu_derivatives(self):
         """Named geometry VJP wrappers match CPU derivative tensor contractions."""
-        for case_id_0, (term_name, vjp_fn, derivative_method) in zip(
-            [name for name, _fn, _method in _CURVE_VJP_CASES],
-            _CURVE_VJP_CASES,
-            strict=True,
-        ):
+        for term_name, vjp_fn, derivative_method in _CURVE_VJP_CASES:
             for case_id_1, stellsym in zip(
                 ["stellsym=True", "stellsym=False"], [True, False], strict=True
             ):
                 with self.subTest(
-                    case_id_0=case_id_0,
+                    case_id_0=term_name,
                     term_name=term_name,
                     vjp_fn=vjp_fn,
                     derivative_method=derivative_method,
