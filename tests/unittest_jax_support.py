@@ -16,6 +16,7 @@ JAX_IMPORT_ERROR: str | None = None
 try:
     import simsopt_jax  # noqa: F401
     import jax
+    import jax.extend.backend
 except ImportError as error:
     JAX_IMPORT_ERROR = str(error)
 
@@ -31,7 +32,11 @@ def optional_jax_imports() -> Iterator[None]:
 
 
 with optional_jax_imports():
-    from simsopt_jax.backend.runtime import apply_cuda_xla_flag_pins
+    from simsopt_jax.backend.runtime import (
+        apply_cuda_xla_flag_pins,
+        invalidate_backend_cache,
+    )
+    from simsopt_jax.runtime.host_boundary import host_array as _host_array
 
 
 @skipIf(JAX_IMPORT_ERROR is not None, JAX_IMPORT_ERROR or "")
@@ -54,11 +59,8 @@ class JaxTestCase(TestCase):
             yield patches
 
 
-try:
+with optional_jax_imports():
     from simsopt_jax.backend.dtypes import explicit_device_array
-except ImportError:
-    if JAX_IMPORT_ERROR is None:
-        raise
 
 
 def _force_x64(jax_module) -> None:
@@ -71,9 +73,16 @@ def _force_x64(jax_module) -> None:
 # probes devices (lane availability) at collection, before any test installs a
 # backend config, so the CUDA autotuner pins must already be in the environment
 # here; both are inert on the CPU backend.
+#
+# Every configured platform is initialized here, once, before any case runs.
+# ``set_backend(device=...)`` narrows ``jax_platforms``; if a case did that
+# before the process first touched a device, JAX would initialize only that
+# platform, and the others would stay missing for the rest of the process even
+# after ``jax_runtime_isolation`` restores the configuration.
 if JAX_IMPORT_ERROR is None:
     apply_cuda_xla_flag_pins()
     _force_x64(jax)
+    jax.extend.backend.backends()
 
 _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
@@ -109,39 +118,9 @@ _JAX_RUNTIME_CONFIG_DEFAULTS = {
     "jax_platforms": None,
     "jax_platform_name": "",
     "jax_compilation_cache_dir": None,
+    "jax_default_device": None,
 }
 _PARITY_SEED_BASE = 1729
-
-
-def _require_jax():
-    return jax
-
-
-def _loaded_backend_module():
-    module = sys.modules.get("simsopt_jax.backend")
-    if module is not None and hasattr(module, "invalidate_backend_cache"):
-        return module
-    return None
-
-
-def _loaded_jax_core_module():
-    module = sys.modules.get("simsopt_jax.core")
-    if module is not None and hasattr(module, "invalidate_kernel_cache"):
-        return module
-    return None
-
-
-def _invalidate_loaded_kernel_cache() -> None:
-    jax_core_module = _loaded_jax_core_module()
-    if jax_core_module is not None:
-        jax_core_module.invalidate_kernel_cache()
-
-
-def _invalidate_loaded_backend_state() -> None:
-    backend_module = _loaded_backend_module()
-    if backend_module is not None:
-        backend_module.invalidate_backend_cache()
-    _invalidate_loaded_kernel_cache()
 
 
 def _snapshot_loaded_jax_runtime_config() -> dict[str, object]:
@@ -180,10 +159,10 @@ def jax_runtime_isolation():
         # LIFO cleanup restores state before clearing compiled executables.
         cleanup.callback(gc.collect)
         cleanup.callback(jax.clear_caches)
-        cleanup.callback(_invalidate_loaded_backend_state)
+        cleanup.callback(invalidate_backend_cache)
         cleanup.callback(_restore_loaded_jax_runtime_config, jax_config_snapshot)
         cleanup.callback(_restore_backend_runtime_env, env_snapshot)
-        _invalidate_loaded_backend_state()
+        invalidate_backend_cache()
         yield
 
 
@@ -196,40 +175,51 @@ def parity_rng(seed: int = 0) -> np.random.RandomState:
 
 
 def _parity_device_for_lane(jax_module, lane: str):
+    """First device of the lane's platform among every initialized backend.
+
+    ``jax.devices()`` lists only the default backend, so the lookup walks each
+    initialized platform; a process with both CUDA and CPU runs both lanes.
+    """
     if lane not in {"cpu", "gpu"}:
         raise ValueError(f"Unknown parity lane {lane!r}; expected 'cpu' or 'gpu'.")
-    for device in jax_module.devices():
-        if device.platform == lane:
-            return device
+    for platform in jax_module.extend.backend.backends():
+        for device in jax_module.devices(platform):
+            if device.platform == lane:
+                return device
     if lane == "gpu":
         raise SkipTest("CUDA GPU not available")
-    if lane == "cpu":
-        raise SkipTest("CPU JAX backend not available")
+    raise SkipTest("CPU JAX backend not available")
 
 
 @contextmanager
 def parity_default_device(lane: str):
-    jax_module = _require_jax()
-    with jax_module.default_device(_parity_device_for_lane(jax_module, lane)):
+    with jax.default_device(_parity_device_for_lane(jax, lane)):
         yield
 
 
-def _block_until_ready(value, *, jax_module):
-    return jax_module.tree.map(
-        lambda leaf: (
-            leaf.block_until_ready() if isinstance(leaf, jax_module.Array) else leaf
-        ),
-        value,
-    )
+def require_cuda(reason: str) -> None:
+    """Skip the calling test unless the default JAX backend has a CUDA device."""
+    if not any(device.platform == "gpu" for device in jax.devices()):
+        raise SkipTest(reason)
 
 
-def host_materialize(value):
-    jax_module = _require_jax()
-    return jax_module.device_get(_block_until_ready(value, jax_module=jax_module))
+def aligned_host_copy(values, *, misaligned: bool = False) -> np.ndarray:
+    """Float64 C-contiguous copy of ``values`` on a 64-byte boundary.
+
+    CPU JAX placement aliases such a buffer instead of copying it;
+    ``misaligned=True`` starts it one element past the boundary, which JAX copies.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    storage = np.empty(values.size + 8, dtype=np.float64)
+    offset = (-storage.ctypes.data % 64) // storage.itemsize + int(misaligned)
+    array = storage[offset : offset + values.size].reshape(values.shape)
+    array[...] = values
+    return array
 
 
-def host_array(value, *, dtype=None):
-    return np.asarray(host_materialize(value), dtype=dtype)
+def host_array(value, *, dtype=None) -> np.ndarray:
+    """Defined without JAX so test modules import it outside ``optional_jax_imports``."""
+    return _host_array(value, dtype=dtype)
 
 
 class CompilationLog(logging.Handler):
@@ -244,20 +234,6 @@ class CompilationLog(logging.Handler):
 
     def clear(self) -> None:
         self.records.clear()
-
-
-@contextmanager
-def compilation_logs() -> Iterator[CompilationLog]:
-    """Capture DEBUG records and restore the logger and handler on every exit."""
-    logger = logging.getLogger("jax._src.compiler")
-    handler = CompilationLog()
-    with ExitStack() as cleanup:
-        cleanup.callback(logger.setLevel, logger.level)
-        cleanup.callback(logger.removeHandler, handler)
-        cleanup.callback(handler.close)
-        logger.setLevel(logging.DEBUG)
-        logger.addHandler(handler)
-        yield handler
 
 
 def place_float64(values, reference: jax.Array) -> jax.Array:
