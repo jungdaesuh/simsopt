@@ -10,7 +10,6 @@ with optional_jax_imports():
     import jax
     import jax.numpy as jnp
     import simsoptpp as sopp
-    from simsopt._core.derivative import Derivative
     from simsopt._core.optimizable import Optimizable
     from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
     from simsopt.geo import CurveXYZFourier, SurfaceRZFourier, create_equally_spaced_curves
@@ -18,6 +17,7 @@ with optional_jax_imports():
     from simsopt_jax.core.integral_bdotn import integral_BdotN
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.objectives import JaxSquaredFlux
+    from geo.test_curve_objectives_jax import _partials
 
 
 from collections.abc import Callable
@@ -67,10 +67,6 @@ def _target(surface, kind: str):
     return 0.05 * np.sin(np.linspace(0.0, 3.0, nphi * ntheta)).reshape((nphi, ntheta))
 
 
-def _partials(objective: Optimizable) -> Derivative:
-    return cast(Callable[..., Derivative], objective.dJ)(partials=True)
-
-
 def _gradient(objective: Optimizable) -> np.ndarray:
     """The free-DOF gradient ``dJ()``."""
     return cast(Callable[[], np.ndarray], objective.dJ)()
@@ -83,24 +79,6 @@ def _objectives(definition, target_kind="none", *, shared_dofs=False):
     native = SquaredFlux(surface, BiotSavart(coils), target=target, definition=definition)
     adapter = JaxSquaredFlux(surface, JaxBiotSavart(coils), target=target, definition=definition)
     return surface, native, adapter
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 class TestSquaredFluxJax(JaxTestCase):
@@ -142,10 +120,10 @@ class TestSquaredFluxJax(JaxTestCase):
         """All flux definitions and target forms match the native C++ integral."""
         for case_id_0, (target_kind, empty) in zip(["zero_target", "array_target", "empty_target"], [("none", False), ("array", False), ("none", True)], strict=True):
             for definition in _DEFINITIONS:
-                with self.subTest(case_id_0=case_id_0, target_kind=target_kind, empty=empty, definition=definition), self.case() as patches:
-                    self._case_integral_bdotn_matches_cpp(target_kind, empty, definition, patches)
+                with self.subTest(case_id_0=case_id_0, target_kind=target_kind, empty=empty, definition=definition), self.case():
+                    self._case_integral_bdotn_matches_cpp(target_kind, empty, definition)
 
-    def _case_integral_bdotn_matches_cpp(self, target_kind, empty, definition, patches):
+    def _case_integral_bdotn_matches_cpp(self, target_kind, empty, definition):
         """Run one row with case-local objects released before runtime cleanup."""
         rng = np.random.default_rng(5)
         B = rng.standard_normal((6, 7, 3))
@@ -161,10 +139,10 @@ class TestSquaredFluxJax(JaxTestCase):
         """Zero normals and zero fields give the C++ nan/inf (or value), not a masked result."""
         for case in ["zero_normal", "zero_field"]:
             for definition in _DEFINITIONS:
-                with self.subTest(case=case, definition=definition), self.case() as patches:
-                    self._case_integral_bdotn_singular_inputs_match_cpp(case, definition, patches)
+                with self.subTest(case=case, definition=definition), self.case():
+                    self._case_integral_bdotn_singular_inputs_match_cpp(case, definition)
 
-    def _case_integral_bdotn_singular_inputs_match_cpp(self, case, definition, patches):
+    def _case_integral_bdotn_singular_inputs_match_cpp(self, case, definition):
         """Run one row with case-local objects released before runtime cleanup."""
         rng = np.random.default_rng(6)
         B = rng.standard_normal((6, 7, 3))
@@ -176,24 +154,25 @@ class TestSquaredFluxJax(JaxTestCase):
             B[:] = 0.0
         expected = sopp.integral_BdotN(B, target, normal, definition)
         actual = float(integral_BdotN(jnp.asarray(B), jnp.asarray(target), jnp.asarray(normal), definition))
-        self.assertTrue(case == "zero_field" and definition == "quadratic flux" or not np.isfinite(expected), 'case == "zero_field" and definition == "quadratic flux" or not np.isfinite(expected)')
+        if not (case == "zero_field" and definition == "quadratic flux"):
+            self.assertFalse(np.isfinite(expected))
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
 
     def test_squared_flux_matches_native_value_gradient_and_partials(self):
         """Squared flux matches native values, free gradients and fixed partials."""
         for case_id_0, (target_kind, shared_dofs) in zip(["symmetric_coils", "target_and_shared_dofs"], [("none", False), ("array", True)], strict=True):
             for definition in _DEFINITIONS:
-                with self.subTest(case_id_0=case_id_0, target_kind=target_kind, shared_dofs=shared_dofs, definition=definition), self.case() as patches:
-                    self._case_squared_flux_matches_native_value_gradient_and_partials(target_kind, shared_dofs, definition, patches)
+                with self.subTest(case_id_0=case_id_0, target_kind=target_kind, shared_dofs=shared_dofs, definition=definition), self.case():
+                    self._case_squared_flux_matches_native_value_gradient_and_partials(target_kind, shared_dofs, definition)
 
-    def _case_squared_flux_matches_native_value_gradient_and_partials(self, target_kind, shared_dofs, definition, patches):
+    def _case_squared_flux_matches_native_value_gradient_and_partials(self, target_kind, shared_dofs, definition):
         """Run one row with case-local objects released before runtime cleanup."""
         _, native, adapter = _objectives(definition, target_kind, shared_dofs=shared_dofs)
-        self.assertTrue(adapter.dof_names == native.dof_names, 'adapter.dof_names == native.dof_names')
+        self.assertEqual(adapter.dof_names, native.dof_names)
         np.testing.assert_allclose(adapter.J(), native.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(_gradient(adapter), _gradient(native), rtol=1e-11, atol=1e-13)
         native_partials, adapter_partials = _partials(native), _partials(adapter)
-        self.assertTrue(set(adapter_partials.data) == set(native_partials.data), 'set(adapter_partials.data) == set(native_partials.data)')
+        self.assertEqual(set(adapter_partials.data), set(native_partials.data))
         for owner, expected in native_partials.data.items():
             # Fixed DOFs keep their partials, as in the native Derivative.
             np.testing.assert_allclose(
@@ -204,10 +183,10 @@ class TestSquaredFluxJax(JaxTestCase):
     def test_squared_flux_gradient_matches_central_differences(self):
         """Squared-flux gradients agree with independent central differences."""
         for definition in _DEFINITIONS:
-            with self.subTest(definition=definition), self.case() as patches:
-                self._case_squared_flux_gradient_matches_central_differences(definition, patches)
+            with self.subTest(definition=definition), self.case():
+                self._case_squared_flux_gradient_matches_central_differences(definition)
 
-    def _case_squared_flux_gradient_matches_central_differences(self, definition, patches):
+    def _case_squared_flux_gradient_matches_central_differences(self, definition):
         """Run one row with case-local objects released before runtime cleanup."""
         _, _, adapter = _objectives(definition, "array", shared_dofs=True)
         x0 = np.array(adapter.x, dtype=float)
@@ -241,7 +220,7 @@ class TestSquaredFluxJax(JaxTestCase):
             adapter.target, adapter.definition = target.copy(), definition
             np.testing.assert_allclose(adapter.J(), native.J(), rtol=1e-12, atol=1e-14, err_msg=definition)
             np.testing.assert_allclose(_gradient(adapter), _gradient(native), rtol=1e-11, atol=1e-13, err_msg=definition)
-            self.assertTrue(adapter.fixed_surface_flux_spec().definition == definition, 'adapter.fixed_surface_flux_spec().definition == definition')
+            self.assertEqual(adapter.fixed_surface_flux_spec().definition, definition)
         native.target *= 3.0
         adapter.target *= 3.0
         np.testing.assert_allclose(adapter.J(), native.J(), rtol=1e-12, atol=1e-14)
