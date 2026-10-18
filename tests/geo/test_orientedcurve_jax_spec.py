@@ -17,15 +17,8 @@ with optional_jax_imports():
 import numpy as np
 
 
-_DIRECT_KERNEL = {
-    "rtol": 1e-10,
-    "atol": 1e-12,
-    "requires_same_state": True,
-    "requires_direct_cpp_oracle": True,
-    "vector_parity_required": True,
-}
-_RTOL = _DIRECT_KERNEL["rtol"]
-_ATOL = _DIRECT_KERNEL["atol"]
+_RTOL = 1e-10
+_ATOL = 1e-12
 
 
 def _oriented_curve_numpy(dofs: np.ndarray, quadpoints: np.ndarray, order: int):

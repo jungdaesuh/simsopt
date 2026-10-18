@@ -167,7 +167,7 @@ else:
 # fact that Optimizable objects with J() and dJ() functions can be
 # multiplied by scalars and added:
 JF = Jf \
-    + LENGTH_PEN * cast(Optimizable, sum(QuadraticPenalty(Jls[i], Jls[i].J(), "max") for i in range(len(base_curves)))) \
+    + LENGTH_PEN * cast(Optimizable, sum(QuadraticPenalty(Jls[i], float(Jls[i].J()), "max") for i in range(len(base_curves)))) \
     + DIST_PEN * Jdist
 
 def stage_two_problem():
@@ -176,7 +176,7 @@ def stage_two_problem():
         num_basecurves=ncoils,
         filaments_per_pack=nfil,
         individual_length_weight=LENGTH_PEN,
-        individual_length_targets=tuple(J.J() for J in Jls),
+        individual_length_targets=tuple(float(J.J()) for J in Jls),
         curve_curve_minimum_distance=DIST_MIN,
         curve_curve_weight=DIST_PEN,
         curve_curve_pairs="all",
