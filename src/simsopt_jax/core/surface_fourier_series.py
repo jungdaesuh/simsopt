@@ -156,6 +156,39 @@ def _clamping_factor(
     return sin_phi * sin_phi + sin_theta * sin_theta
 
 
+def _compensated_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+    """Two-dimensional product with rounded terms and Neumaier accumulation.
+
+    Barriers preserve correction operands under compilation; JAX differentiates
+    the primal scan. Correction applies only to finite totals; nonfinite totals
+    retain their IEEE class. Experimental tradeoff, not a correctly-rounded dot.
+    """
+    initial = jnp.zeros(
+        (left.shape[0], right.shape[1]), dtype=jnp.result_type(left, right)
+    )
+
+    def accumulate(
+        carry: tuple[jax.Array, jax.Array],
+        factors: tuple[jax.Array, jax.Array],
+    ) -> tuple[tuple[jax.Array, jax.Array], None]:
+        total, correction = carry
+        column, row = factors
+        term = jax.lax.optimization_barrier(column[:, None] * row[None, :])
+        updated = total + term
+        total, term, updated = jax.lax.optimization_barrier((total, term, updated))
+        error = jnp.where(
+            jnp.abs(total) >= jnp.abs(term),
+            (total - updated) + term,
+            (term - updated) + total,
+        )
+        return (updated, correction + error), None
+
+    (total, correction), _ = jax.lax.scan(
+        accumulate, (initial, initial), (left.T, right), unroll=4
+    )
+    return total + jnp.where(jnp.isfinite(total), correction, 0.0)
+
+
 def _xyz_tensor_fourier_components(
     spec: SurfaceXYZTensorFourierSpec, phi: jax.Array, theta: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -164,7 +197,9 @@ def _xyz_tensor_fourier_components(
     theta_basis = _harmonic_basis(theta, mpol, 1)
 
     def series(coefficients: jax.Array) -> jax.Array:
-        return (phi_basis @ coefficients.T) @ theta_basis.T
+        return _compensated_matmul(
+            _compensated_matmul(phi_basis, coefficients.T), theta_basis.T
+        )
 
     clamped_block = np.zeros(spec.xcs.shape, dtype=bool)
     clamped_block[: mpol + 1, : ntor + 1] = True
