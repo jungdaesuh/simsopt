@@ -39,6 +39,7 @@ from .specs import (
     RotationSpec,
     ZeroRotationSpec,
 )
+from .surface_geometry import _norm
 
 __all__ = [
     "curve_gamma_and_gammadash_from_dofs",
@@ -48,6 +49,7 @@ __all__ = [
     "curve_gammadash_vjp_from_dofs",
     "curve_gammadashdash_vjp_from_dofs",
     "curve_gammadashdashdash_vjp_from_dofs",
+    "curve_length_from_dofs",
     "curve_pullback_from_dofs",
     "curve_spec_from_curve",
     "curve_spec_with_dofs",
@@ -492,6 +494,28 @@ def curve_gamma_and_gammadash_from_spec(spec: CurveSpec):
             derivative(s), each shape (Q, 3), in meters.
     """
     return curve_gamma_and_gammadash_from_dofs(spec, spec.dofs)
+
+
+def curve_length_from_dofs(spec: CurveSpec, dofs: jax.Array) -> jax.Array:
+    """Native CurveLength from a curve spec and its full input DOFs.
+
+    Compose ``curve_gamma_and_gammadash_from_dofs`` with native's mean tangent
+    norm. Different Fourier summation orders can differ by a few ulps of
+    length; a nearly active quadratic length penalty propagates that scalar
+    round-off to its gradient. Zero tangents retain the undefined norm
+    derivative, as natively.
+
+    Args:
+        spec (CurveSpec): Immutable curve layout and quadrature grid in turns.
+        dofs (jax.Array): Shape (ndofs,) full native curve coefficients, including fixed
+            DOFs; position coefficients are in meters.
+
+    Returns:
+        jax.Array: Scalar shape () mean tangent magnitude in meters, using the native
+            full-turn quadrature convention.
+    """
+    _, tangent = curve_gamma_and_gammadash_from_dofs(spec, dofs)
+    return jnp.mean(_norm(tangent))
 
 
 def curve_gamma_and_gammadash_from_dofs(
