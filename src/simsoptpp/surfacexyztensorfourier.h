@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 #include "surface.h"
 
 template<class Array>
@@ -125,19 +127,22 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
                 double phi  = 2*M_PI*quadpoints_phi[k1];
                 for (int k2 = 0; k2 < numquadpoints_theta; ++k2) {
                     double theta  = 2*M_PI*quadpoints_theta[k2];
-                    double xhat = 0;
-                    double yhat = 0;
-                    double z = 0;
+                    CompensatedSum xhat_sum;
+                    CompensatedSum yhat_sum;
+                    CompensatedSum z_sum;
                     for (int m = 0; m <= 2*mpol; ++m) {
                         for (int n = 0; n <= 2*ntor; ++n) {
-                            xhat += get_coeff(0, m, n) * basis_fun(0, n, k1, m, k2);
-                            yhat += get_coeff(1, m, n) * basis_fun(1, n, k1, m, k2);
-                            z += get_coeff(2, m, n) * basis_fun(2, n, k1, m, k2);
+                            xhat_sum.add(get_coeff(0, m, n) * basis_fun(0, n, k1, m, k2));
+                            yhat_sum.add(get_coeff(1, m, n) * basis_fun(1, n, k1, m, k2));
+                            z_sum.add(get_coeff(2, m, n) * basis_fun(2, n, k1, m, k2));
                             //xhat += get_coeff(0, m, n) * basis_fun(0, n, phi, m, theta);
                             //yhat += get_coeff(1, m, n) * basis_fun(1, n, phi, m, theta);
                             //z += get_coeff(2, m, n) * basis_fun(2, n, phi, m, theta);
                         }
                     }
+                    double xhat = xhat_sum.value();
+                    double yhat = yhat_sum.value();
+                    double z = z_sum.value();
                     data(k1, k2, 0) = xhat * cos(phi) - yhat * sin(phi);
                     data(k1, k2, 1) = xhat * sin(phi) + yhat * cos(phi);
                     data(k1, k2, 2) = z;
@@ -175,18 +180,18 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
                 double cosphi = cos(phi);
                 for (int k2 = 0; k2 < numquadpoints_theta; ++k2) {
                     double theta  = 2*M_PI*quadpoints_theta[k2];
-                    double xhat = 0;
-                    double yhat = 0;
-                    double xhatdash = 0;
-                    double yhatdash = 0;
-                    double zdash = 0;
+                    CompensatedSum xhat_sum;
+                    CompensatedSum yhat_sum;
+                    CompensatedSum xhatdash_sum;
+                    CompensatedSum yhatdash_sum;
+                    CompensatedSum zdash_sum;
                     for (int m = 0; m <= 2*mpol; ++m) {
                         for (int n = 0; n <= 2*ntor; ++n) {
-                            xhat += get_coeff(0, m, n) * basis_fun(0, n, k1, m, k2);
-                            yhat += get_coeff(1, m, n) * basis_fun(1, n, k1, m, k2);
-                            xhatdash += get_coeff(0, m, n) * basis_fun_dphi(0, n, k1, m, k2);
-                            yhatdash += get_coeff(1, m, n) * basis_fun_dphi(1, n, k1, m, k2);
-                            zdash += get_coeff(2, m, n) * basis_fun_dphi(2, n, k1, m, k2);
+                            xhat_sum.add(get_coeff(0, m, n) * basis_fun(0, n, k1, m, k2));
+                            yhat_sum.add(get_coeff(1, m, n) * basis_fun(1, n, k1, m, k2));
+                            xhatdash_sum.add(get_coeff(0, m, n) * basis_fun_dphi(0, n, k1, m, k2));
+                            yhatdash_sum.add(get_coeff(1, m, n) * basis_fun_dphi(1, n, k1, m, k2));
+                            zdash_sum.add(get_coeff(2, m, n) * basis_fun_dphi(2, n, k1, m, k2));
                             //xhat += get_coeff(0, m, n) * basis_fun(0, n, phi, m, theta);
                             //yhat += get_coeff(1, m, n) * basis_fun(1, n, phi, m, theta);
                             //xhatdash += get_coeff(0, m, n) * basis_fun_dphi(0, n, phi, m, theta);
@@ -194,6 +199,11 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
                             //zdash += get_coeff(2, m, n) * basis_fun_dphi(2, n, phi, m, theta);
                         }
                     }
+                    double xhat = xhat_sum.value();
+                    double yhat = yhat_sum.value();
+                    double xhatdash = xhatdash_sum.value();
+                    double yhatdash = yhatdash_sum.value();
+                    double zdash = zdash_sum.value();
                     double xdash = xhatdash * cosphi - yhatdash * sinphi - xhat * sinphi - yhat * cosphi;
                     double ydash = xhatdash * sinphi + yhatdash * cosphi + xhat * cosphi - yhat * sinphi;
                     data(k1, k2, 0) = 2*M_PI*xdash;
@@ -213,19 +223,22 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
                     double theta  = 2*M_PI*quadpoints_theta[k2];
                     double xhat = 0;
                     double yhat = 0;
-                    double xhatdash = 0;
-                    double yhatdash = 0;
-                    double zdash = 0;
+                    CompensatedSum xhatdash_sum;
+                    CompensatedSum yhatdash_sum;
+                    CompensatedSum zdash_sum;
                     for (int m = 0; m <= 2*mpol; ++m) {
                         for (int n = 0; n <= 2*ntor; ++n) {
-                            xhatdash += get_coeff(0, m, n) * basis_fun_dtheta(0, n, k1, m, k2);
-                            yhatdash += get_coeff(1, m, n) * basis_fun_dtheta(1, n, k1, m, k2);
-                            zdash += get_coeff(2, m, n) * basis_fun_dtheta(2, n, k1, m, k2);
+                            xhatdash_sum.add(get_coeff(0, m, n) * basis_fun_dtheta(0, n, k1, m, k2));
+                            yhatdash_sum.add(get_coeff(1, m, n) * basis_fun_dtheta(1, n, k1, m, k2));
+                            zdash_sum.add(get_coeff(2, m, n) * basis_fun_dtheta(2, n, k1, m, k2));
                             //xhatdash += get_coeff(0, m, n) * basis_fun_dtheta(0, n, phi, m, theta);
                             //yhatdash += get_coeff(1, m, n) * basis_fun_dtheta(1, n, phi, m, theta);
                             //zdash += get_coeff(2, m, n) * basis_fun_dtheta(2, n, phi, m, theta);
                         }
                     }
+                    double xhatdash = xhatdash_sum.value();
+                    double yhatdash = yhatdash_sum.value();
+                    double zdash = zdash_sum.value();
                     double xdash = xhatdash * cosphi - yhatdash * sinphi;
                     double ydash = xhatdash * sinphi + yhatdash * cosphi;
                     data(k1, k2, 0) = 2*M_PI*xdash;
@@ -598,6 +611,32 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
         }
 
     private:
+
+        // Point-local compensation for the existing ordered FP64 term stream.
+        // Reset the correction when a partial total is nonfinite, preserving
+        // legacy NaN/Inf and transient-overflow propagation.
+        class CompensatedSum {
+            double sum = 0.;
+            double correction = 0.;
+
+        public:
+            void add(double term) {
+                double next = sum + term;
+                if (std::isfinite(next)) {
+                    if (std::abs(sum) >= std::abs(term))
+                        correction += (sum - next) + term;
+                    else
+                        correction += (term - next) + sum;
+                } else {
+                    correction = 0.;
+                }
+                sum = next;
+            }
+
+            double value() const {
+                return sum + correction;
+            }
+        };
 
         void build_cache() {
             cache_basis_fun_phi = xt::zeros<double>({numquadpoints_phi, 2*ntor+1});
