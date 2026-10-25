@@ -44,9 +44,8 @@ class TestGroupedCoilSetSpec(JaxTestCase):
         np.testing.assert_array_equal(group.gammas, [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]])
         np.testing.assert_array_equal(group.gammadashs, [[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]])
         np.testing.assert_array_equal(group.currents, [13.0])
-        self.assertEqual(group.gammas.dtype, np.dtype("float64"))
-        self.assertEqual(group.gammadashs.dtype, np.dtype("float64"))
-        self.assertEqual(group.currents.dtype, np.dtype("float64"))
+        for array in (group.gammas, group.gammadashs, group.currents):
+            self.assertEqual(array.dtype, np.dtype("float64"))
 
     def test_mixed_one_pass_generator_preserves_order(self):
         """A mixed generator is consumed once without dropping or reordering groups."""
