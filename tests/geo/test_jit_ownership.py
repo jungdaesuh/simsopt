@@ -11,16 +11,7 @@ import numpy as np
 import simsopt.geo.jit as jit_module
 from simsopt.geo.config import parameters
 from simsopt.geo.jit import jit
-
-
-def aligned_array(size):
-    """Pinned CPU/JAX fixture aligned to expose a possible zero-copy input path."""
-    storage = np.empty(size + 8, dtype=np.float64)
-    offset = (-storage.ctypes.data % 64) // storage.itemsize
-    values = storage[offset : offset + size]
-    values[:] = np.arange(1, size + 1, dtype=np.float64)
-    return values
-
+from unittest_jax_support import aligned_host_copy
 
 Arrays = namedtuple("Arrays", ["first", "rest"])
 
@@ -37,6 +28,38 @@ def _static_array():
     constant = np.array([3.0]).view(HashableArray)
     constant.flags.writeable = False
     return constant
+
+
+def _positional_adder(traced):
+    def add_static(value, constant):
+        traced.append(constant)
+        return value + constant[0]
+
+    return add_static
+
+
+def _variadic_adder(traced):
+    def add_last(value, *constants):
+        traced.append(constants[-1])
+        return value + constants[0] + constants[-1][0]
+
+    return add_last
+
+
+def _keyword_only_adder(traced):
+    def add_static(value, *, options):
+        traced.append(options)
+        return value + options[0][0]
+
+    return add_static
+
+
+def positional(wrapped, static):
+    return wrapped(2.0, static)
+
+
+def keyword(wrapped, static):
+    return wrapped(2.0, constant=static)
 
 
 class IndexSelector:
@@ -96,11 +119,9 @@ class JitOwnershipTests(unittest.TestCase):
         x = np.ones(4)
         fake_compile = mock.Mock(side_effect=lambda fun, **kwargs: fun)
         context = mock.Mock(side_effect=lambda device: nullcontext())
-        with mock.patch.dict(parameters, {"jit": True}), mock.patch.object(
-            jit_module, "jaxjit", fake_compile
-        ), mock.patch.object(
-            jit_module, "native_jax_device", return_value=device_sentinel
-        ), mock.patch.object(jit_module.jax, "default_device", context):
+        with mock.patch.dict(parameters, {"jit": True}), mock.patch.object(jit_module, "jaxjit", fake_compile), \
+                mock.patch.object(jit_module, "native_jax_device", return_value=device_sentinel), \
+                mock.patch.object(jit_module.jax, "default_device", context):
             wrapped = jit_module.jit(lambda a, marker: (a, marker), static_argnums=(1,))
             held, marker = wrapped(x, static_sentinel)
         x[:] = 5
@@ -110,37 +131,22 @@ class JitOwnershipTests(unittest.TestCase):
         self.assertEqual(fake_compile.call_args.kwargs, {"static_argnums": (1,)})
 
     def test_real_jax_outputs_keep_call_time_values_after_input_mutation(self):
-        """Even ready identity outputs cannot retain a mutable native input alias."""
-        for use_jit in (True, False):
-            with self.subTest(jit=use_jit), mock.patch.dict(
-                parameters, {"jit": use_jit}
-            ):
-                wrapped = jit_module.jit(lambda values: jnp.asarray(values))
-                values = aligned_array(16)
-                expected = values.copy()
-                held = wrapped(values).block_until_ready()
-                values[:] = -7.0
-                np.testing.assert_array_equal(held, expected)
-                self.assertEqual(held.devices(), {jit_module.native_jax_device()})
+        """Even ready identity outputs of bare, nested and keyword arrays own their values."""
 
-    def test_real_jax_nested_and_keyword_arrays_keep_owned_values(self):
-        def identities(bundle, *, other):
-            return jnp.asarray(bundle[0]["arrays"][0]), jnp.asarray(other["value"])
+        def identities(values, bundle, *, other):
+            return jnp.asarray(values), jnp.asarray(bundle[0]["arrays"][0]), jnp.asarray(other["value"])
 
         for use_jit in (True, False):
-            with self.subTest(jit=use_jit), mock.patch.dict(
-                parameters, {"jit": use_jit}
-            ):
+            with self.subTest(jit=use_jit), mock.patch.dict(parameters, {"jit": use_jit}):
                 wrapped = jit_module.jit(identities)
-                x, y = aligned_array(8), aligned_array(16)
-                expected_x, expected_y = x.copy(), y.copy()
-                held_x, held_y = wrapped([{"arrays": (x,)}], other={"value": y})
-                held_x.block_until_ready()
-                held_y.block_until_ready()
-                x[:] = -3.0
-                y[:] = -4.0
-                np.testing.assert_array_equal(held_x, expected_x)
-                np.testing.assert_array_equal(held_y, expected_y)
+                inputs = [aligned_host_copy(np.arange(1.0, n + 1.0)) for n in (16, 8, 16)]
+                expected = [values.copy() for values in inputs]
+                held = jax.block_until_ready(wrapped(inputs[0], [{"arrays": (inputs[1],)}], other={"value": inputs[2]}))
+                for values in inputs:
+                    values[:] = -7.0
+                for actual, values in zip(held, expected):
+                    np.testing.assert_array_equal(actual, values)
+                self.assertEqual(held[0].devices(), {jit_module.native_jax_device()})
 
     def test_real_jax_static_arguments_and_wraps_metadata_are_preserved(self):
         def powers(values, order, *, scale):
@@ -148,9 +154,7 @@ class JitOwnershipTests(unittest.TestCase):
             return scale * jnp.sum(values**order)
 
         with mock.patch.dict(parameters, {"jit": True}):
-            wrapped = jit_module.jit(
-                powers, static_argnums=(1,), static_argnames=("scale",)
-            )
+            wrapped = jit_module.jit(powers, static_argnums=(1,), static_argnames=("scale",))
         values = np.array([1.0, 2.0, 3.0])
         result = wrapped(values, 3, scale=0.5)
         self.assertEqual(float(result), 18.0)
@@ -162,30 +166,14 @@ class JitOwnershipTests(unittest.TestCase):
     def test_tracers_grad_hessian_nested_jit_and_vmap_preserve_derivatives(self):
         values = np.linspace(0.25, 1.0, 4)
         for use_jit in (True, False):
-            with self.subTest(jit=use_jit), mock.patch.dict(
-                parameters, {"jit": use_jit}
-            ):
+            with self.subTest(jit=use_jit), mock.patch.dict(parameters, {"jit": use_jit}):
                 wrapped = jit_module.jit(lambda x: jnp.sum(x**3))
-                np.testing.assert_allclose(
-                    jax.grad(wrapped)(values), 3 * values**2, rtol=1e-14, atol=0
-                )
-                np.testing.assert_allclose(
-                    jax.jacfwd(jax.grad(wrapped))(values),
-                    np.diag(6 * values),
-                    rtol=1e-14,
-                    atol=0,
-                )
+                np.testing.assert_allclose(jax.grad(wrapped)(values), 3 * values**2, rtol=1e-14, atol=0)
+                np.testing.assert_allclose(jax.jacfwd(jax.grad(wrapped))(values), np.diag(6 * values), rtol=1e-14, atol=0)
                 nested = jax.jit(jax.grad(wrapped))
-                np.testing.assert_allclose(
-                    nested(values), 3 * values**2, rtol=1e-14, atol=0
-                )
+                np.testing.assert_allclose(nested(values), 3 * values**2, rtol=1e-14, atol=0)
                 batch = np.stack([values, 2 * values])
-                np.testing.assert_allclose(
-                    jax.vmap(wrapped)(batch),
-                    np.sum(batch**3, axis=1),
-                    rtol=1e-14,
-                    atol=0,
-                )
+                np.testing.assert_allclose(jax.vmap(wrapped)(batch), np.sum(batch**3, axis=1), rtol=1e-14, atol=0)
 
     def test_plain_builtin_mappings_preserve_key_order_and_factory(self):
         mappings: list[dict[object, np.ndarray | list[float]]] = [
@@ -208,63 +196,29 @@ class JitOwnershipTests(unittest.TestCase):
                     np.testing.assert_array_equal(copied[key], mapping[key])
         self.assertIs(identity(mappings[-1]).default_factory, list)
 
-    def test_scalar_array_static_selector_uses_index_protocol(self):
+    def test_explicit_statics_without_signature(self):
         with mock.patch.dict(parameters, {"jit": True}):
-            wrapped = jit(
-                lambda values, offset: values + offset,
-                static_argnums=np.array(1, dtype=np.int64),
-            )
-        np.testing.assert_array_equal(wrapped(jnp.array([3.0]), 2), [5.0])
+            attribute = jit(getattr, static_argnums=1)
+            minimum = jit(min, static_argnums=(0, 1))
+        self.assertEqual(tuple(int(item) for item in attribute(jnp.array([3.0, 4.0]), "shape")), (2,))
+        self.assertEqual(int(minimum(3, 2)), 2)
 
-    def test_custom_static_selector_uses_index_protocol(self):
-        with mock.patch.dict(parameters, {"jit": True}):
-            wrapped = jit(
-                lambda values, offset: values + offset, static_argnums=IndexSelector()
-            )
-        np.testing.assert_array_equal(wrapped(jnp.array([3.0]), 2), [5.0])
-
-    def test_getattr_retains_explicit_static_without_signature(self):
-        with mock.patch.dict(parameters, {"jit": True}):
-            wrapped = jit(getattr, static_argnums=1)
-        self.assertEqual(
-            tuple(int(item) for item in wrapped(jnp.array([3.0, 4.0]), "shape")), (2,)
-        )
-
-    def test_min_retains_explicit_statics_without_signature(self):
-        with mock.patch.dict(parameters, {"jit": True}):
-            wrapped = jit(min, static_argnums=(0, 1))
-        self.assertEqual(int(wrapped(3, 2)), 2)
-
-    def test_frozen_dictionary_is_an_opaque_leaf_without_hooks(self):
-        incoming = FrozenDictionary({"entry": np.array([3.0])})
+    def test_unregistered_dictionaries_are_opaque_leaves_without_hooks(self):
         with mock.patch.dict(parameters, {"jit": False}):
             wrapped = jit(lambda values: values)
-        self.assertIs(wrapped(incoming), incoming)
-        np.testing.assert_array_equal(wrapped(incoming)["entry"], [3.0])
-        self.assertEqual(incoming.setter_calls, 0)
-
-    def test_transform_dictionary_is_an_opaque_leaf_without_hooks(self):
-        incoming = TransformDictionary({"entry": np.array([3.0])})
-        with mock.patch.dict(parameters, {"jit": False}):
-            wrapped = jit(lambda values: values)
-        self.assertIs(wrapped(incoming), incoming)
-        np.testing.assert_array_equal(wrapped(incoming)["entry"], [3.0])
-        self.assertEqual(incoming.setter_calls, 0)
-
-    def test_opaque_userdict_identity_and_contents_are_retained(self):
-        incoming = UserDict({"entry": np.array([3.0])})
-        with mock.patch.dict(parameters, {"jit": False}):
-            wrapped = jit(lambda values: values)
-        self.assertIs(wrapped(incoming), incoming)
-        self.assertIs(wrapped(incoming)["entry"], incoming["entry"])
+        for kind in (FrozenDictionary, TransformDictionary, UserDict):
+            with self.subTest(kind=kind.__name__):
+                incoming = kind({"entry": np.array([3.0])})
+                self.assertIs(wrapped(incoming), incoming)
+                self.assertIs(wrapped(incoming)["entry"], incoming["entry"])
+                np.testing.assert_array_equal(wrapped(incoming)["entry"], [3.0])
+                self.assertEqual(getattr(incoming, "setter_calls", 0), 0)
 
     def test_registered_custom_pytree_snapshots_dynamic_numpy_leaves(self):
         for use_jit in (False, True):
-            with self.subTest(jit=use_jit), mock.patch.dict(
-                parameters, {"jit": use_jit}
-            ):
+            with self.subTest(jit=use_jit), mock.patch.dict(parameters, {"jit": use_jit}):
                 wrapped = jit(lambda container: jnp.asarray(container.values))
-                incoming = RegisteredArrays(aligned_array(16))
+                incoming = RegisteredArrays(aligned_host_copy(np.arange(1.0, 17.0)))
                 expected = incoming.values.copy()
                 held = wrapped(incoming).block_until_ready()
                 incoming.values[:] = -7
@@ -298,114 +252,42 @@ class JitOwnershipTests(unittest.TestCase):
         np.testing.assert_array_equal(result.mask, [False, True])
         self.assertEqual(result.sum(), 4.0)
 
-    def test_static_array_identity_and_compilation_cache(self):
-        """Static NumPy objects retain identity for tracing and repeated cache hits."""
-        for options in (
-            {"static_argnums": 1},
-            {"static_argnums": (1,)},
-            {"static_argnums": np.int64(1)},
-            {"static_argnames": "constant"},
-        ):
-            for keyword in (False, True):
-                with self.subTest(options=options, keyword=keyword):
-                    traced_constants = []
-
-                    def add_static(value, constant):
-                        traced_constants.append(constant)
-                        return value + constant[0]
-
-                    constant = _static_array()
-                    with mock.patch.dict(parameters, {"jit": True}):
-                        wrapped = jit(add_static, **options)
-                    for _ in range(3):
-                        result = (
-                            wrapped(2.0, constant=constant)
-                            if keyword
-                            else wrapped(2.0, constant)
-                        )
-                        self.assertEqual(float(result), 5.0)
-                    self.assertEqual(len(traced_constants), 1)
-                    self.assertIs(traced_constants[0], constant)
-
-    def test_explicit_static_selectors_keep_actual_call_positioning(self):
-        """Explicit selectors do not infer the other selector or bind keyword calls."""
-        for options, keyword, is_static in (
-            ({"static_argnums": 1, "static_argnames": ()}, False, True),
-            ({"static_argnums": 1, "static_argnames": ()}, True, False),
-            ({"static_argnums": (), "static_argnames": "constant"}, False, False),
-            ({"static_argnums": (), "static_argnames": "constant"}, True, True),
-            ({"static_argnums": -1}, False, True),
-            ({"static_argnums": -1}, True, False),
-        ):
-            with self.subTest(options=options, keyword=keyword):
-                traced_constants = []
-
-                def add_static(value, constant):
-                    traced_constants.append(constant)
-                    return value + constant[0]
-
-                constant = _static_array()
-                with mock.patch.dict(parameters, {"jit": True}):
-                    wrapped = jit(add_static, **options)
-                for _ in range(3):
-                    result = (
-                        wrapped(2.0, constant=constant)
-                        if keyword
-                        else wrapped(2.0, constant)
-                    )
-                    self.assertEqual(float(result), 5.0)
-                self.assertEqual(len(traced_constants), 1)
-                self.assertEqual(traced_constants[0] is constant, is_static)
-
-    def test_negative_static_index_in_variadic_call(self):
-        traced_constants = []
-
-        def add_last(value, *constants):
-            traced_constants.append(constants[-1])
-            return value + constants[0] + constants[-1][0]
-
-        constant = _static_array()
+    def assert_traced_once(self, make, options, call, static, expected=5.0, is_static=True):
+        """Three calls trace once; ``is_static`` says whether tracing saw ``static`` itself."""
+        traced = []
         with mock.patch.dict(parameters, {"jit": True}):
-            wrapped = jit(add_last, static_argnums=-1)
+            wrapped = jit(make(traced), **options)
         for _ in range(3):
-            self.assertEqual(float(wrapped(2.0, 4.0, constant)), 9.0)
-        self.assertEqual(len(traced_constants), 1)
-        self.assertIs(traced_constants[0], constant)
+            self.assertEqual(float(call(wrapped, static)), expected)
+        self.assertEqual(len(traced), 1)
+        self.assertEqual(traced[0] is static, is_static)
 
-    def test_static_selector_iterators_are_consumed_once(self):
-        for options in (
-            {"static_argnums": iter((1,))},
-            {"static_argnames": iter(("constant",))},
-        ):
-            with self.subTest(option=next(iter(options))):
-                traced_constants = []
-
-                def add_static(value, constant):
-                    traced_constants.append(constant)
-                    return value + constant[0]
-
-                constant = _static_array()
-                with mock.patch.dict(parameters, {"jit": True}):
-                    wrapped = jit(add_static, **options)
-                for _ in range(3):
-                    self.assertEqual(float(wrapped(2.0, constant)), 5.0)
-                self.assertEqual(len(traced_constants), 1)
-                self.assertIs(traced_constants[0], constant)
-
-    def test_keyword_only_static_subtree_is_not_copied(self):
-        traced_options = []
-
-        def add_static(value, *, options):
-            traced_options.append(options)
-            return value + options[0][0]
-
-        options = (_static_array(),)
-        with mock.patch.dict(parameters, {"jit": True}):
-            wrapped = jit(add_static, static_argnames=("options",))
-        for _ in range(3):
-            self.assertEqual(float(wrapped(2.0, options=options)), 5.0)
-        self.assertEqual(len(traced_options), 1)
-        self.assertIs(traced_options[0], options)
+    def test_static_selectors_keep_identity_cache_and_actual_call_positioning(self):
+        """Static NumPy objects keep identity and cache hits; explicit selectors
+        do not infer the other selector or bind keyword calls."""
+        inferred = ({"static_argnums": 1}, {"static_argnums": (1,)}, {"static_argnums": np.int64(1)},
+                    {"static_argnums": np.array(1, dtype=np.int64)}, {"static_argnums": IndexSelector()},
+                    {"static_argnames": "constant"})
+        cases = [
+            *((options, call, True) for options in inferred for call in (positional, keyword)),
+            ({"static_argnums": 1, "static_argnames": ()}, positional, True),
+            ({"static_argnums": 1, "static_argnames": ()}, keyword, False),
+            ({"static_argnums": (), "static_argnames": "constant"}, positional, False),
+            ({"static_argnums": (), "static_argnames": "constant"}, keyword, True),
+            ({"static_argnums": -1}, positional, True),
+            ({"static_argnums": -1}, keyword, False),
+            ({"static_argnums": iter((1,))}, positional, True),
+            ({"static_argnames": iter(("constant",))}, positional, True),
+        ]
+        for options, call, is_static in cases:
+            with self.subTest(options=options, call=call.__name__):
+                self.assert_traced_once(_positional_adder, options, call, _static_array(), is_static=is_static)
+        with self.subTest("negative index in a variadic call"):
+            self.assert_traced_once(_variadic_adder, {"static_argnums": -1},
+                                    lambda wrapped, static: wrapped(2.0, 4.0, static), _static_array(), expected=9.0)
+        with self.subTest("keyword-only static subtree is not copied"):
+            self.assert_traced_once(_keyword_only_adder, {"static_argnames": ("options",)},
+                                    lambda wrapped, static: wrapped(2.0, options=static), (_static_array(),))
 
     def test_jax_input_donation_is_preserved(self):
         with mock.patch.dict(parameters, {"jit": True}):

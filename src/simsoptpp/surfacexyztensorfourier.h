@@ -221,8 +221,6 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
                 double cosphi = cos(phi);
                 for (int k2 = 0; k2 < numquadpoints_theta; ++k2) {
                     double theta  = 2*M_PI*quadpoints_theta[k2];
-                    double xhat = 0;
-                    double yhat = 0;
                     CompensatedSum xhatdash_sum;
                     CompensatedSum yhatdash_sum;
                     CompensatedSum zdash_sum;
@@ -612,9 +610,9 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
 
     private:
 
-        // Point-local compensation for the existing ordered FP64 term stream.
-        // Reset the correction when a partial total is nonfinite, preserving
-        // legacy NaN/Inf and transient-overflow propagation.
+        // Point-local Neumaier compensation for the existing ordered FP64 term
+        // stream. A nonfinite partial total stays nonfinite, so value() returns
+        // it uncorrected, preserving legacy NaN/Inf and transient-overflow results.
         class CompensatedSum {
             double sum = 0.;
             double correction = 0.;
@@ -622,19 +620,15 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
         public:
             void add(double term) {
                 double next = sum + term;
-                if (std::isfinite(next)) {
-                    if (std::abs(sum) >= std::abs(term))
-                        correction += (sum - next) + term;
-                    else
-                        correction += (term - next) + sum;
-                } else {
-                    correction = 0.;
-                }
+                if (std::abs(sum) >= std::abs(term))
+                    correction += (sum - next) + term;
+                else
+                    correction += (term - next) + sum;
                 sum = next;
             }
 
             double value() const {
-                return sum + correction;
+                return std::isfinite(sum) ? sum + correction : sum;
             }
         };
 
