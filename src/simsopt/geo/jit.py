@@ -32,6 +32,15 @@ def _owned(value):
     return value.copy(order="K") if isinstance(value, np.ndarray) else value
 
 
+def _owned_tree(value):
+    # Bare arrays are the common leaf case; skip pytree traversal for them.
+    if type(value) is np.ndarray:
+        return value.copy(order="K")
+    if isinstance(value, jax.Array):
+        return value
+    return jax.tree_util.tree_map(_owned, value)
+
+
 def _owned_plain_leaf(value):
     if type(value) in (dict, defaultdict, OrderedDict):
         # These built-in containers have known copy/setitem contracts.
@@ -73,23 +82,16 @@ def _static_arguments(fun, options):
             signature = inspect.signature(fun)
         except (TypeError, ValueError):
             signature = None
-        signature_parameters = (
-            () if signature is None else tuple(signature.parameters.items())
-        )
-        if signature is not None and argnames is not None:
-            argnums = tuple(
-                i
-                for i, (name, param) in enumerate(signature_parameters)
+        if signature is not None:
+            positional = {
+                i: name
+                for i, (name, param) in enumerate(signature.parameters.items())
                 if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
-                and name in argnames
-            )
-        elif signature is not None and argnums is not None:
-            argnames = tuple(
-                name
-                for i, (name, param) in enumerate(signature_parameters)
-                if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
-                and i in argnums
-            )
+            }
+            if argnames is not None:
+                argnums = tuple(i for i, name in positional.items() if name in argnames)
+            elif argnums is not None:
+                argnames = tuple(name for i, name in positional.items() if i in argnums)
     return frozenset(argnums or ()), frozenset(argnames or ()), compile_options
 
 
@@ -130,16 +132,18 @@ def jit(fun, **args):
                 *tuple(_snapshot_plain(value) for value in fun_args),
                 **{name: _snapshot_plain(value) for name, value in fun_kwargs.items()},
             )
-        fun_args = tuple(
-            value
-            if i in static_argnums or i - len(fun_args) in static_argnums
-            else jax.tree_util.tree_map(_owned, value)
-            for i, value in enumerate(fun_args)
-        )
+        if static_argnums:
+            count = len(fun_args)
+            fun_args = tuple(
+                value
+                if i in static_argnums or i - count in static_argnums
+                else _owned_tree(value)
+                for i, value in enumerate(fun_args)
+            )
+        else:
+            fun_args = tuple(map(_owned_tree, fun_args))
         fun_kwargs = {
-            name: value
-            if name in static_argnames
-            else jax.tree_util.tree_map(_owned, value)
+            name: value if name in static_argnames else _owned_tree(value)
             for name, value in fun_kwargs.items()
         }
         with jax.default_device(native_jax_device()):
