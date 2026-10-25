@@ -1,4 +1,4 @@
-"""Unittest-discoverable IEEE and finite-AD witnesses for experimental R2."""
+"""IEEE special-value and finite-difference checks for the compensated JAX surface primal."""
 
 from __future__ import annotations
 
@@ -43,15 +43,21 @@ _PUBLIC_CASES = (
 )
 
 
-def _polynomial(value: jax.Array) -> jax.Array:
-    left = jnp.stack(
+def _cancellation_terms(value: jax.Array, pad: int = 0) -> jax.Array:
+    """Row ``[2**54, value**2, -2**54]`` followed by ``pad`` zeros."""
+    return jnp.stack(
         (
             jnp.asarray(2**54, dtype=jnp.float64),
             value * value,
             jnp.asarray(-(2**54), dtype=jnp.float64),
+            *(jnp.zeros_like(value) for _ in range(pad)),
         )
     )[None, :]
-    return _compensated_matmul(left, jnp.ones((3, 1), dtype=jnp.float64))[0, 0]
+
+
+def _polynomial(value: jax.Array) -> jax.Array:
+    ones = jnp.ones((3, 1), dtype=jnp.float64)
+    return _compensated_matmul(_cancellation_terms(value), ones)[0, 0]
 
 
 def _tensor_spec(zcs: jax.Array) -> SurfaceXYZTensorFourierSpec:
@@ -71,21 +77,10 @@ def _tensor_spec(zcs: jax.Array) -> SurfaceXYZTensorFourierSpec:
 
 
 def _public_polynomial(value: jax.Array) -> jax.Array:
-    coefficients = jnp.stack(
-        (
-            jnp.asarray(2**54, dtype=jnp.float64),
-            value * value,
-            jnp.asarray(-(2**54), dtype=jnp.float64),
-            jnp.zeros_like(value),
-            jnp.zeros_like(value),
-        )
-    )[None, :]
-    return surface_gamma(_tensor_spec(coefficients))[0, 0, 2]
+    return surface_gamma(_tensor_spec(_cancellation_terms(value, pad=2)))[0, 0, 2]
 
 
 class CompensatedPrimalSemanticsTests(JaxTestCase):
-    """Four unittest methods, fifteen isolated logical subtest cases."""
-
     def _assert_fp64(self, *arrays: jax.Array) -> None:
         self.assertTrue(jax.config.x64_enabled)
         for array in arrays:
@@ -108,8 +103,7 @@ class CompensatedPrimalSemanticsTests(JaxTestCase):
         np.testing.assert_array_equal(host_array(actual), [[expected]])
 
     def test_nonzero_helper_jvp_reverse_and_hvp(self) -> None:
-        with self.subTest(case="helper-polynomial-ad"), self.case():
-            self._check_polynomial(_polynomial)
+        self._check_polynomial(_polynomial)
 
     def _check_polynomial(self, polynomial: Callable[[jax.Array], jax.Array]) -> None:
         # Exact real polynomial v**2 gives value/JVP/gradient/HVP 9,6,6,2 at 3.
@@ -142,5 +136,4 @@ class CompensatedPrimalSemanticsTests(JaxTestCase):
         np.testing.assert_array_equal(host_array(actual), [[[0.0, 0.0, expected_z]]])
 
     def test_nonzero_public_tensor_jvp_reverse_and_hvp(self) -> None:
-        with self.subTest(case="public-polynomial-ad"), self.case():
-            self._check_polynomial(_public_polynomial)
+        self._check_polynomial(_public_polynomial)
