@@ -146,7 +146,9 @@ class JitOwnershipTests(unittest.TestCase):
                     values[:] = -7.0
                 for actual, values in zip(held, expected):
                     np.testing.assert_array_equal(actual, values)
-                self.assertEqual(held[0].devices(), {jit_module.native_jax_device()})
+                # With jit disabled, fun runs in the caller's device context.
+                device = jit_module.native_jax_device() if use_jit else jnp.asarray(0.0).device
+                self.assertEqual(held[0].devices(), {device})
 
     def test_real_jax_static_arguments_and_wraps_metadata_are_preserved(self):
         def powers(values, order, *, scale):
