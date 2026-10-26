@@ -9,6 +9,7 @@ curvature. Every term uses the formula of its native objective.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Integral
@@ -35,6 +36,8 @@ from simsopt_jax.core.field import coil_specs_from_dof_extraction_spec
 from simsopt_jax.core.integral_bdotn import fixed_surface_flux_integral_from_B
 from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
+    CurveSpec,
+    CurveXYZFourierSpec,
     FixedSurfaceFluxSpec,
     apply_coil_symmetry,
 )
@@ -369,6 +372,58 @@ def stage_two_geometric_penalty(
     return result
 
 
+def _ordinary_curve_geometry(
+    curves: Sequence[CurveSpec],
+) -> dict[int, tuple[jax.Array, ...]]:
+    """Evaluate unique curves by identity, batching compatible XYZ Fourier specs.
+
+    Only static layouts are grouped; each curve retains its own quadrature
+    values. Other curve kinds use their existing geometry evaluator unchanged.
+    """
+    geometry_by_curve: dict[int, tuple[jax.Array, ...]] = {}
+    fourier_groups: dict[
+        tuple[int, tuple[int, ...], str, tuple[int, ...], str],
+        list[tuple[int, CurveXYZFourierSpec]],
+    ] = {}
+    unique_curves = {id(curve): curve for curve in curves}
+    for curve_id, curve in unique_curves.items():
+        if type(curve) is CurveXYZFourierSpec:
+            key = (
+                curve.order,
+                curve.dofs.shape,
+                str(curve.dofs.dtype),
+                curve.quadpoints.shape,
+                str(curve.quadpoints.dtype),
+            )
+            fourier_groups.setdefault(key, []).append((curve_id, curve))
+        else:
+            geometry_by_curve[curve_id] = curve_geometry_from_dofs(curve, curve.dofs)
+    for group in fourier_groups.values():
+        batched_curve = CurveXYZFourierSpec(
+            dofs=jnp.stack(tuple(curve.dofs for _, curve in group)),
+            quadpoints=jnp.stack(tuple(curve.quadpoints for _, curve in group)),
+            order=group[0][1].order,
+        )
+        batched_geometry = jax.vmap(curve_geometry_from_dofs)(
+            batched_curve, batched_curve.dofs
+        )
+        # Static splitting avoids dynamic-slice scalar operands during eager
+        # linearization under the strict device-transfer guard.
+        gamma_parts, dash_parts, dashdash_parts = (
+            jax.lax.split(component, (1,) * len(group), axis=0)
+            for component in batched_geometry
+        )
+        for (curve_id, _), gamma, dash, dashdash in zip(
+            group, gamma_parts, dash_parts, dashdash_parts, strict=True
+        ):
+            geometry_by_curve[curve_id] = (
+                jax.lax.squeeze(gamma, (0,)),
+                jax.lax.squeeze(dash, (0,)),
+                jax.lax.squeeze(dashdash, (0,)),
+            )
+    return geometry_by_curve
+
+
 def stage_two_coil_geometry(
     extraction: CoilSetDofExtractionSpec,
     parameters: jax.Array,
@@ -388,14 +443,11 @@ def stage_two_coil_geometry(
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
     geometry: list[tuple[jax.Array, jax.Array, jax.Array, jax.Array]] = []
-    geometry_by_curve: dict[int, tuple[jax.Array, ...]] = {}
+    geometry_by_curve = _ordinary_curve_geometry(
+        tuple(coil.curve for coil in coil_specs)
+    )
     for coil_spec in coil_specs:
-        curve_id = id(coil_spec.curve)
-        curve_geometry = geometry_by_curve.get(curve_id)
-        if curve_geometry is None:
-            curve_geometry = curve_geometry_from_dofs(coil_spec.curve, coil_spec.curve.dofs)
-            geometry_by_curve[curve_id] = curve_geometry
-        gamma, gammadash, gammadashdash = curve_geometry
+        gamma, gammadash, gammadashdash = geometry_by_curve[id(coil_spec.curve)]
         gamma, gammadash, current = apply_coil_symmetry(
             gamma,
             gammadash,
