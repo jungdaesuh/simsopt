@@ -58,7 +58,6 @@ _CS_THRESHOLD = 0.4
 _CURVATURE_THRESHOLD = 1.0
 
 
-
 _DISTANCE_CHILD_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fresh_process", "distance_adapters.py")
 
 
@@ -74,8 +73,13 @@ def _distance_child_environment():
     return environment
 
 
-
-
+def _run_child(scenario, kind, **environment):
+    """Run one scenario of the fresh-process child script with extra environment variables."""
+    return subprocess.run(
+        (sys.executable, _DISTANCE_CHILD_SCRIPT, scenario, kind),
+        env={**_distance_child_environment(), **environment},
+        capture_output=True, text=True, timeout=300,
+    )
 
 
 def _surface() -> SurfaceRZFourier:
@@ -179,14 +183,6 @@ def _assert_matches_native_including_nans(
         )
 
 
-
-
-
-
-
-
-
-
 def _segment(x_center, x_amplitude, numquadpoints=15):
     """``x = x_center + x_amplitude cos(2 pi t)``, ``y = z = 0``: zero tangent at ``t = 0``."""
     curve = CurveXYZFourier(numquadpoints, 1)
@@ -205,22 +201,6 @@ def _circle(center, radius, numquadpoints=20):
     return curve
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Minimum distances at which the squared distance of the two points rounds to the
 # squared threshold: with and without fused multiply-adds the candidate test
 # differs in the last bit (both directions).
@@ -229,9 +209,15 @@ _TIE_CASES = (
     ((0.1, 0.4, 0.1), 0.42426406871192857),
 )
 
-
-
-
+# Native Taylor test of each penalty: (centered stencil, direction scale, stop exponent, error ratio bound).
+_TAYLOR_SETTINGS = {
+    "CurveLength": (False, 1e-3, 15, 0.55),
+    "LpCurveCurvature": (False, 1e-2, 15, 0.55),
+    "MeanSquaredCurvature": (True, 1e-1, 10, 0.3),
+    "CurveCurveDistance": (False, 1e-3, 12, 0.6),
+    "CurveCurveDistance(downsample=2)": (False, 1e-3, 12, 0.6),
+    "CurveSurfaceDistance": (False, 1e-3, 12, 0.6),
+}
 
 
 class TestCurveObjectivesJax(JaxTestCase):
@@ -318,71 +304,54 @@ class TestCurveObjectivesJax(JaxTestCase):
                 for case_id_2, kernel in zip(["curve_curve", "curve_surface"], [
     curve_curve_distance_penalty_pure, curve_surface_distance_penalty_pure,
 ], strict=True):
-                    with self.subTest(misaligned=misaligned, case_id_1=case_id_1, operand_index=operand_index, case_id_2=case_id_2, kernel=kernel), self.case() as patches:
-                        self._case_distance_kernels_snapshot_numpy_before_pending_evaluation(misaligned, operand_index, kernel, patches)
+                    with self.subTest(misaligned=misaligned, case_id_1=case_id_1, operand_index=operand_index, case_id_2=case_id_2, kernel=kernel), self.case():
+                        self._case_distance_kernels_snapshot_numpy_before_pending_evaluation(misaligned, operand_index, kernel)
 
-    def _case_distance_kernels_snapshot_numpy_before_pending_evaluation(self, misaligned, operand_index, kernel, patches):
+    def _case_distance_kernels_snapshot_numpy_before_pending_evaluation(self, misaligned, operand_index, kernel):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
+        gate = make_execution_gate()
         host_inputs = [
             _host_array((32, 3), misaligned=misaligned) for _ in range(4)
         ]
         host_inputs[2] += 0.2
         inputs: list[np.ndarray | jax.Array] = list(host_inputs)
         expected = np.asarray(kernel(*inputs, 0.5, True)).copy()
-        self.assertTrue(expected > 0, 'expected > 0')
+        self.assertGreater(expected, 0)
         gate_index = 1 if operand_index == 0 else 0
-        gate = execution_gate
         for index in range(4):
             if index != operand_index:
                 inputs[index] = jnp.asarray(inputs[index])
         gate(inputs[gate_index]).block_until_ready()
         inputs[gate_index] = gate(inputs[gate_index])
         result = kernel(*inputs, 0.5, True)
-        self.assertTrue(not result.is_ready(), "distance evaluation finished before caller mutation")
+        self.assertFalse(result.is_ready(), "distance evaluation finished before caller mutation")
         host_inputs[operand_index][:] = -7.0
         np.testing.assert_array_equal(result.block_until_ready(), expected)
 
     def test_shortest_distance_before_backend_configuration_keeps_jax_uninitialized(self):
         """Shortest-distance queries match native without initializing a JAX backend."""
         for kind in ["curve_curve", "curve_surface"]:
-            with self.subTest(kind=kind), self.case() as patches:
-                self._case_shortest_distance_before_backend_configuration_keeps_jax_uninitialized(kind, patches)
-
-    def _case_shortest_distance_before_backend_configuration_keeps_jax_uninitialized(self, kind, patches):
-        """Run one row with case-local objects released before runtime cleanup."""
-        completed = subprocess.run(
-            (sys.executable, _DISTANCE_CHILD_SCRIPT, "uninitialized", kind), env=_distance_child_environment(),
-            capture_output=True, text=True, timeout=300,
-        )
-        self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
+            with self.subTest(kind=kind), self.case():
+                completed = _run_child("uninitialized", kind)
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_distance_operand_cache_follows_default_device_scopes(self):
         """Changing default devices replaces operands while reusing host candidates."""
         for kind in ["curve_curve", "curve_surface"]:
-            with self.subTest(kind=kind), self.case() as patches:
-                self._case_distance_operand_cache_follows_default_device_scopes(kind, patches)
-
-    def _case_distance_operand_cache_follows_default_device_scopes(self, kind, patches):
-        """Run one row with case-local objects released before runtime cleanup."""
-        environment = _distance_child_environment()
-        environment["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
-        completed = subprocess.run(
-            (sys.executable, _DISTANCE_CHILD_SCRIPT, "device_scopes", kind), env=environment,
-            capture_output=True, text=True, timeout=300,
-        )
-        self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
+            with self.subTest(kind=kind), self.case():
+                completed = _run_child("device_scopes", kind, XLA_FLAGS="--xla_force_host_platform_device_count=2")
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_penalties_match_native_values_gradients_and_partials(self):
         """Geometry penalties match native values, free gradients and fixed partials."""
         for case_id_0, shared_curve in zip(["symmetric_copies", "shared_dofs_twin"], [False, True], strict=True):
-            with self.subTest(case_id_0=case_id_0, shared_curve=shared_curve), self.case() as patches:
-                self._case_penalties_match_native_values_gradients_and_partials(shared_curve, patches)
+            with self.subTest(case_id_0=case_id_0, shared_curve=shared_curve), self.case():
+                self._case_penalties_match_native_values_gradients_and_partials(shared_curve)
 
-    def _case_penalties_match_native_values_gradients_and_partials(self, shared_curve, patches):
+    def _case_penalties_match_native_values_gradients_and_partials(self, shared_curve):
         """Run one row with case-local objects released before runtime cleanup."""
         for name, native, adapter in _all_objectives(shared_curve=shared_curve):
-            self.assertTrue(adapter.dof_names == native.dof_names, name)
+            self.assertEqual(adapter.dof_names, native.dof_names, name)
             _assert_matches_native_including_nans(name, native, adapter, active=True)
 
     def test_penalty_gradients_match_central_differences(self):
@@ -409,26 +378,27 @@ class TestCurveObjectivesJax(JaxTestCase):
 
     def test_curve_surface_distance_depends_on_curves_only(self):
         """Curve-surface distance exposes curve dependencies and excludes surface DOFs."""
-        base, curves = _curves()
+        _, curves = _curves()
         surface = _surface()
         native = CurveSurfaceDistance(curves, surface, _CS_THRESHOLD)
         adapter = JaxCurveSurfaceDistance(curves, surface, _CS_THRESHOLD)
         surface_names = set(surface.dof_names)
-        self.assertTrue(adapter.dof_names == native.dof_names, 'adapter.dof_names == native.dof_names')
-        self.assertTrue(surface_names and not surface_names & set(adapter.dof_names), 'surface_names and not surface_names & set(adapter.dof_names)')
-        self.assertTrue(all(owner is not surface for owner in _partials(adapter).data), 'all(owner is not surface for owner in _partials(adapter).data)')
+        self.assertEqual(adapter.dof_names, native.dof_names)
+        self.assertTrue(surface_names)
+        self.assertFalse(surface_names & set(adapter.dof_names))
+        self.assertTrue(all(owner is not surface for owner in _partials(adapter).data))
 
     def test_shortest_distances_match_native(self):
         """Native scans all pairs only when no selected pair is a candidate.
 
-            The close pair (2, 1) is outside the pairs ``j < num_basecurves = 1``: it
-            sets the shortest distance only when the selected pairs are all far.
-            """
+        The close pair (2, 1) is outside the pairs ``j < num_basecurves = 1``: it
+        sets the shortest distance only when the selected pairs are all far.
+        """
         for case_id_0, threshold in zip(["no_candidates", "candidates"], [0.1, 5.0], strict=True):
-            with self.subTest(case_id_0=case_id_0, threshold=threshold), self.case() as patches:
-                self._case_shortest_distances_match_native(threshold, patches)
+            with self.subTest(case_id_0=case_id_0, threshold=threshold), self.case():
+                self._case_shortest_distances_match_native(threshold)
 
-    def _case_shortest_distances_match_native(self, threshold, patches):
+    def _case_shortest_distances_match_native(self, threshold):
         """Run one row with case-local objects released before runtime cleanup."""
         curves = [_circle((0.0, 0.0, 0.0), 1.0), _circle((5.0, 0.0, 0.0), 1.0),
                   _circle((5.0, 0.0, 0.01), 1.0)]
@@ -443,7 +413,8 @@ class TestCurveObjectivesJax(JaxTestCase):
             np.testing.assert_allclose(adapter.shortest_distance(), native.shortest_distance(), rtol=1e-14)
         expected_curve_distance = 0.01 if threshold == 0.1 else pairs[0][0].shortest_distance()
         np.testing.assert_allclose(pairs[0][1].shortest_distance(), expected_curve_distance, rtol=1e-12)
-        self.assertTrue(threshold == 0.1 or pairs[0][1].shortest_distance() > 1.0, 'threshold == 0.1 or pairs[0][1].shortest_distance() > 1.0')
+        if threshold != 0.1:
+            self.assertGreater(pairs[0][1].shortest_distance(), 1.0)
 
     def test_curve_curve_distance_follows_num_basecurves(self):
         """The base-curve count selects the same curve pairs as native."""
@@ -456,7 +427,20 @@ class TestCurveObjectivesJax(JaxTestCase):
         # Native refreshes its candidate pairs only after a DOF change.
         native.recompute_bell()
         _assert_matches_native_including_nans("num_basecurves=3", native, adapter, active=True)
-        self.assertTrue(adapter.J() > value, 'adapter.J() > value')
+        self.assertGreater(adapter.J(), value)
+
+    def test_downsampled_distance_of_grids_with_one_sampled_count_matches_native(self):
+        """Grids of 24 and 23 points both give 12 samples at stride 2; gradients reach every point.
+
+        The adapter stacks full grids and samples inside the differentiated program,
+        so the two grids are separate classes while native evaluates the same samples.
+        """
+        base, curves = _curves()
+        odd_twin = CurveXYZFourier(np.linspace(0, 1, 23, endpoint=False) + 0.013, 3, dofs=base[1].dofs)
+        curves = curves + [odd_twin]
+        native = CurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base), downsample=2)
+        adapter = JaxCurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base), downsample=2)
+        _assert_matches_native_including_nans("downsample=2 with 24- and 23-point grids", native, adapter, active=True)
 
     def test_distance_evaluations_share_one_native_candidate_search(self):
         """Value, gradient and shortest-distance calls reuse one native search."""
@@ -468,18 +452,11 @@ class TestCurveObjectivesJax(JaxTestCase):
         """Run one row with case-local objects released before runtime cleanup."""
         base, curves = _curves()
         name, native, adapter = _distance_objectives(curves, _surface(), len(base))[objective_index]
-        searches = []
-        search = adapter._candidates
-
-        def counted_search(samples):
-            searches.append(None)
-            return search(samples)
-
-        patches.enter_context(mock.patch.object(adapter, "_candidates", counted_search))
+        search = patches.enter_context(mock.patch.object(adapter, "_candidates", wraps=adapter._candidates))
         for _ in range(2):
             _assert_matches_native_including_nans(name, native, adapter, active=True)
             np.testing.assert_allclose(adapter.shortest_distance(), native.shortest_distance(), rtol=1e-14)
-        self.assertTrue(len(searches) == 1, 'len(searches) == 1')
+        self.assertEqual(search.call_count, 1)
 
     def test_curve_curve_snapshot_follows_geometry_parameters_and_placement(self):
         """Geometry, distance settings and placement changes invalidate curve operands."""
@@ -492,14 +469,7 @@ class TestCurveObjectivesJax(JaxTestCase):
         base, curves = _curves()
         adapter = JaxCurveCurveDistance(curves, _CC_THRESHOLD, num_basecurves=len(base))
         adapter.J()
-        searches = []
-        search = adapter._candidates
-
-        def counted_search(samples):
-            searches.append(None)
-            return search(samples)
-
-        patches.enter_context(mock.patch.object(adapter, "_candidates", counted_search))
+        search = patches.enter_context(mock.patch.object(adapter, "_candidates", wraps=adapter._candidates))
         if change == "free_dofs":
             base[0].x = np.asarray(base[0].x) + 0.01
         elif change == "fixed_dofs":
@@ -515,7 +485,7 @@ class TestCurveObjectivesJax(JaxTestCase):
         else:
             set_backend("jax", device="cpu", intent="fast")
         value, gradient, shortest = adapter.J(), adapter.dJ(), adapter.shortest_distance()
-        self.assertTrue(len(searches) == (0 if change == "backend" else 1), 'len(searches) == (0 if change == "backend" else 1)')
+        self.assertEqual(search.call_count, 0 if change == "backend" else 1)
         fresh = JaxCurveCurveDistance(
             curves, adapter.minimum_distance, adapter.num_basecurves, adapter.downsample,
         )
@@ -537,14 +507,7 @@ class TestCurveObjectivesJax(JaxTestCase):
         surface = _surface()
         adapter = JaxCurveSurfaceDistance(curves, surface, _CS_THRESHOLD)
         adapter.J()
-        searches = []
-        search = adapter._candidates
-
-        def counted_search(samples):
-            searches.append(None)
-            return search(samples)
-
-        patches.enter_context(mock.patch.object(adapter, "_candidates", counted_search))
+        search = patches.enter_context(mock.patch.object(adapter, "_candidates", wraps=adapter._candidates))
         if change == "surface_dofs":
             surface.set_rc(1, 0, 0.35)
         elif change == "surface_grid":
@@ -559,7 +522,7 @@ class TestCurveObjectivesJax(JaxTestCase):
         else:
             adapter.minimum_distance = 0.3
         value, gradient, shortest = adapter.J(), adapter.dJ(), adapter.shortest_distance()
-        self.assertTrue(len(searches) == (0 if change in ("normal_only", "tangent_only") else 1), 'len(searches) == (0 if change in ("normal_only", "tangent_only") else 1)')
+        self.assertEqual(search.call_count, 0 if change in ("normal_only", "tangent_only") else 1)
         fresh = JaxCurveSurfaceDistance(curves, adapter.surface, adapter.minimum_distance)
         np.testing.assert_array_equal(value, fresh.J())
         # A stale cache would be off by O(1); GPU reductions are not bitwise run to run, so the
@@ -620,23 +583,23 @@ class TestCurveObjectivesJax(JaxTestCase):
              JaxCurveSurfaceDistance([on_sample], surface, 0.1)),
         )
         for name, native, adapter in cases:
-            self.assertTrue(not np.all(np.isfinite(native.dJ())), f"{name}: the case must be singular natively")
+            self.assertFalse(np.all(np.isfinite(native.dJ())), f"{name}: the case must be singular natively")
             _assert_matches_native_including_nans(name, native, adapter)
 
     def test_distance_candidates_at_the_threshold_are_the_native_ones(self):
         """At a tie the candidate decision is ``simsoptpp``'s own, so the evaluated set,
         and with it the finite-zero or NaN gradient of these constant curves, is native's."""
         for case_id_0, (position, minimum_distance) in zip(["tie_a", "tie_b"], _TIE_CASES, strict=True):
-            with self.subTest(case_id_0=case_id_0, position=position, minimum_distance=minimum_distance), self.case() as patches:
-                self._case_distance_candidates_at_the_threshold_are_the_native_ones(position, minimum_distance, patches)
+            with self.subTest(case_id_0=case_id_0, position=position, minimum_distance=minimum_distance), self.case():
+                self._case_distance_candidates_at_the_threshold_are_the_native_ones(position, minimum_distance)
 
-    def _case_distance_candidates_at_the_threshold_are_the_native_ones(self, position, minimum_distance, patches):
+    def _case_distance_candidates_at_the_threshold_are_the_native_ones(self, position, minimum_distance):
         """Run one row with case-local objects released before runtime cleanup."""
         origin_curve = _circle((0.0, 0.0, 0.0), 0.0, numquadpoints=8)
         point_curve = _circle(position, 0.0, numquadpoints=8)
         origin_surface = SurfaceRZFourier.from_nphi_ntheta(nphi=4, ntheta=4)
         origin_surface.local_full_x = np.zeros_like(origin_surface.local_full_x)
-        self.assertTrue(not np.any(origin_surface.gamma()), 'not np.any(origin_surface.gamma())')
+        self.assertFalse(np.any(origin_surface.gamma()))
         cases = (
             ("CurveCurveDistance", CurveCurveDistance([origin_curve, point_curve], minimum_distance),
              JaxCurveCurveDistance([origin_curve, point_curve], minimum_distance)),
@@ -665,23 +628,20 @@ class TestCurveObjectivesJax(JaxTestCase):
 
     def test_penalty_gradients_taylor(self):
         """Active geometry penalties attain native shrinking-step convergence rates."""
-        for index in range(6):
-            with self.subTest(objective_index=index), self.case():
-                self._case_penalty_gradients_taylor(index)
+        for name in _TAYLOR_SETTINGS:
+            with self.subTest(objective=name), self.case():
+                self._case_penalty_gradients_taylor(name)
 
-    def _case_penalty_gradients_taylor(self, index):
+    def _case_penalty_gradients_taylor(self, name):
         """Use the native stencil, step interval and ratio bound for each penalty."""
-        name, _, adapter = _all_objectives(shared_curve=True)[index]
+        adapter = {key: objective for key, _, objective in _all_objectives(shared_curve=True)}[name]
+        centered, scale, stop, bound = _TAYLOR_SETTINGS[name]
         x0 = np.array(adapter.x, dtype=float)
-        centered = index == 2
-        scale = 1e-1 if centered else (1e-2 if index == 1 else 1e-3)
         direction = scale * np.random.RandomState(1).uniform(size=x0.shape)
         derivative = adapter.dJ() @ direction
         initial = adapter.J()
         self.assertGreater(abs(derivative), 1e-10, name)
         previous_error = 1e6
-        stop = 10 if centered else (12 if index >= 3 else 15)
-        bound = 0.3 if centered else (0.6 if index >= 3 else 0.55)
         for exponent in range(5, stop):
             step = 0.5 ** exponent
             adapter.x = x0 + step * direction

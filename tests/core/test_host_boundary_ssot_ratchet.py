@@ -9,8 +9,10 @@ own block and no further.
 
 The owner tests exercise the owners only, so a census also scans
 ``src/simsopt_jax`` and ``src/simsopt_jax_adapters`` for direct calls of the
-explicit JAX transfer and readiness primitives (which the strict guard does not
-refuse) and admits them only inside the owner functions listed in
+explicit JAX transfer and readiness primitives (which the strict guard lets
+through, except a ``device_put`` from an accelerator to the CPU, which the
+placement owners gather to the host first) and admits them only inside the
+owner functions listed in
 ``_TRANSFER_OWNER_FUNCTIONS``. Owners are keyed by file and qualified function
 name, never by line, so edits inside an owner do not disturb the census.
 """
@@ -65,9 +67,8 @@ _OTHER_VALUE = ""
 # entry whose function no longer calls a primitive fails as stale.
 _TRANSFER_OWNER_FUNCTIONS = frozenset(
     {
-        "src/simsopt_jax/backend/dtypes.py::_device_put",
-        "src/simsopt_jax/backend/dtypes.py::_unplaced_device_put",
-        "src/simsopt_jax/backend/dtypes.py::runtime_device_put_tree",
+        "src/simsopt_jax/backend/dtypes.py::_explicit_device_put",
+        "src/simsopt_jax/backend/dtypes.py::_explicit_device_put_leaves",
         "src/simsopt_jax/runtime/host_boundary.py::allow_host_transfers",
         "src/simsopt_jax/runtime/host_boundary.py::block_until_ready",
         "src/simsopt_jax/runtime/host_boundary.py::disallow_host_transfers",
