@@ -36,6 +36,7 @@ __all__ = [
     "biot_savart_B_vjp",
     "biot_savart_dB_by_dX",
     "biot_savart_d2B_by_dXdX",
+    "biot_savart_d2B_by_dXdX_vjp",
     "biot_savart_B_and_dB",
     "biot_savart_A",
     "biot_savart_dA_by_dX",
@@ -54,6 +55,7 @@ def _read_tuning_config() -> tuple:
     """Return ``(coil_chunk_size, quadrature_block_size, point_chunk_size)``.
 
     The forward and pullback kernel factories are keyed on these values.
+    The Hessian VJP reads its independent runtime tile.
     Resolves the backend config once to avoid repeated mode/policy lookups.
     """
     fkt = get_field_kernel_tuning()
@@ -679,6 +681,165 @@ def _get_B_vjp_kernel():
     return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
 
 
+# The six symmetric direction pairs ``(j, k)``, ``j <= k``, of a Hessian seed.
+_SYMMETRIC_DIRECTION_PAIRS = ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))
+
+
+def _symmetric_hessian_seed(vgradgrad):
+    """Restack ``vgradgrad[p, j, k, c]`` onto the six pairs ``j <= k``.
+
+    Mixed partials commute, so ``W[j, k] + W[k, j]`` weights each off-diagonal
+    pair once. This linear restack is the only seed preprocessing.
+    """
+    return jnp.stack(
+        [
+            vgradgrad[:, j, k] if j == k else vgradgrad[:, j, k] + vgradgrad[:, k, j]
+            for j, k in _SYMMETRIC_DIRECTION_PAIRS
+        ],
+        axis=1,
+    )
+
+
+def _pair_B_components(x, gamma, gammadash, current, quadrature_count):
+    """One coil node's ``B`` contribution at one point, on scalar components.
+
+    ``(mu0 / 4 pi) I (gamma - x) x gamma' / (Q |gamma - x|^3)``, with JAX's
+    built-in ``lax.rsqrt`` so every derivative uses JAX's own rules.
+    """
+    d0, d1, d2 = gamma[0] - x[0], gamma[1] - x[1], gamma[2] - x[2]
+    r_inv = lax.rsqrt(d0 * d0 + d1 * d1 + d2 * d2)
+    weight = (_MU0_OVER_4PI / quadrature_count) * current * (r_inv * r_inv * r_inv)
+    return (
+        (d1 * gammadash[2] - d2 * gammadash[1]) * weight,
+        (d2 * gammadash[0] - d0 * gammadash[2]) * weight,
+        (d0 * gammadash[1] - d1 * gammadash[0]) * weight,
+    )
+
+
+def _replace_scalar(values, index, value):
+    return tuple(value if position == index else values[position] for position in range(len(values)))
+
+
+def _scalar_partial(fn, values, index):
+    """``(fn(values), d fn / d values[index])`` by one ``jax.jvp`` in that scalar."""
+    return jax.jvp(
+        lambda value: fn(_replace_scalar(values, index, value)),
+        (values[index],),
+        (jnp.ones_like(values[index]),),
+    )
+
+
+def _scalar_second_partial(fn, values, j, k):
+    return jax.jvp(
+        lambda value: _scalar_partial(fn, _replace_scalar(values, j, value), k)[1],
+        (values[j],),
+        (jnp.ones_like(values[j]),),
+    )[1]
+
+
+def _pair_hessian_contraction(seed, x, local, quadrature_count):
+    """``sum_{j<=k, c} seed[jk, c] d_j d_k B_c`` for one (point, coil node) pair."""
+    gamma, gammadash, current = local[0:3], local[3:6], local[6]
+
+    def field(y):
+        return _pair_B_components(y, gamma, gammadash, current, quadrature_count)
+
+    return sum(
+        seed[pair, 0] * second[0] + seed[pair, 1] * second[1] + seed[pair, 2] * second[2]
+        for pair, second in enumerate(
+            _scalar_second_partial(field, x, j, k) for j, k in _SYMMETRIC_DIRECTION_PAIRS
+        )
+    )
+
+
+def _pair_hessian_pullback(seed, x0, x1, x2, g0, g1, g2, t0, t1, t2, current, *, quadrature_count):
+    """Seven forward ``jax.jvp`` of the pair contraction, one per local scalar."""
+    local = (g0, g1, g2, t0, t1, t2, current)
+
+    def contraction(values):
+        return _pair_hessian_contraction(seed, (x0, x1, x2), values, quadrature_count)
+
+    return tuple(_scalar_partial(contraction, local, index)[1] for index in range(7))
+
+
+@lru_cache(maxsize=64)
+def _make_d2B_vjp_kernel(hessian_vjp_point_cs):
+    """Build the compiled autodiff gradgradB pullback, tiled over points.
+
+    Every derivative value comes from ``jax.jvp`` with JAX's built-in rules.
+    Per (point, coil node) pair, the ``B`` integrand is written on scalar
+    components; the seed is contracted first with the second partials along
+    the six symmetric direction pairs (nested ``jax.jvp``), and that scalar is
+    differentiated with respect to the pair's seven local scalars (node
+    position, tangent and coil current) by seven forward ``jax.jvp``. The
+    scalar layout lets JAX propagate symbolic zero tangents. ``jax.vmap``
+    maps the pairs; each point tile is summed before the next starts, so live
+    intermediates scale with ``hessian_vjp_point_cs`` times the coil nodes
+    (about 220 bytes per pair), independent of npoints. A nonpositive
+    ``hessian_vjp_point_cs`` takes all points in one tile. Inputs are
+    converted to float64, the runtime precision.
+    """
+    chunk_size = hessian_vjp_point_cs
+
+    def float64_kernel(points, vgradgrad, gammas, gammadashs, currents):
+        quadrature_count = gammas.shape[1]
+        pair_pullback = jax.vmap(
+            lambda *args: _pair_hessian_pullback(*args, quadrature_count=quadrature_count),
+            in_axes=(None, None, None, None, 0, 0, 0, 0, 0, 0, None),
+        )
+        coil_pullback = jax.vmap(pair_pullback, in_axes=(None,) * 4 + (0,) * 7)
+        point_pullback = jax.vmap(coil_pullback, in_axes=(0,) * 4 + (None,) * 7)
+
+        def tile_node_sums(tile_points, tile_seed):
+            derivatives = point_pullback(
+                tile_seed,
+                tile_points[:, 0], tile_points[:, 1], tile_points[:, 2],
+                gammas[..., 0], gammas[..., 1], gammas[..., 2],
+                gammadashs[..., 0], gammadashs[..., 1], gammadashs[..., 2],
+                currents,
+            )
+            sums = tuple(jnp.sum(derivative, axis=0) for derivative in derivatives)
+            return jnp.stack(sums[0:3], axis=-1), jnp.stack(sums[3:6], axis=-1), sums[6]
+
+        point_count = points.shape[0]
+        if point_count == 0:
+            return jax.tree.map(jnp.zeros_like, (gammas, gammadashs, currents))
+        seed = _symmetric_hessian_seed(vgradgrad)
+        if chunk_size <= 0 or point_count <= chunk_size:
+            node_sums = tile_node_sums(points, seed)
+        else:
+            full_chunk_count, tail_size = divmod(point_count, chunk_size)
+
+            def tile_at(start):
+                return tile_node_sums(
+                    _slice_point_chunk(points, start, chunk_size),
+                    _slice_point_chunk(seed, start, chunk_size),
+                )
+
+            node_sums = lax.fori_loop(
+                1,
+                full_chunk_count,
+                lambda chunk_index, sums: _tree_add(sums, tile_at(chunk_index * chunk_size)),
+                tile_at(0),
+            )
+            if tail_size:
+                tail_start = full_chunk_count * chunk_size
+                node_sums = _tree_add(
+                    node_sums, tile_node_sums(points[tail_start:], seed[tail_start:]),
+                )
+        dgammas, dgammadashs, dcurrent_nodes = node_sums
+        return dgammas, dgammadashs, _pairwise_sum_axis(dcurrent_nodes, axis=1)
+
+    def kernel(points, vgradgrad, gammas, gammadashs, currents):
+        return float64_kernel(*(
+            jnp.asarray(value, dtype=jnp.float64)
+            for value in (points, vgradgrad, gammas, gammadashs, currents)
+        ))
+
+    kernel.__name__ = "biotsavart_d2B_vjp"
+    return jax.jit(kernel)
+
+
 def invalidate_kernel_cache() -> None:
     """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
@@ -687,6 +848,7 @@ def invalidate_kernel_cache() -> None:
     """
     _make_kernel.cache_clear()
     _make_B_vjp_kernel.cache_clear()
+    _make_d2B_vjp_kernel.cache_clear()
 
 
 register_backend_cache_clear(invalidate_kernel_cache)
@@ -792,6 +954,49 @@ def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
         gammadashs,
         currents,
     )
+
+
+def biot_savart_d2B_by_dXdX_vjp(points, vgradgrad, gammas, gammadashs, currents):
+    """Pull back a magnetic-field Hessian seed to coil geometry and currents.
+
+    Contracts ``vgradgrad[p, i, j, c]`` with ``d_i d_j B_c(points[p])``.
+    The seed need not be symmetric. The pullback is JAX autodiff only, with
+    JAX's built-in derivative rules and no hand-derived terms or custom
+    derivative rules, so it is an independent, mechanically derived reference
+    for hand-derived pullbacks such as the C++ one in upstream simsopt PR #649.
+    For each (point, coil node) pair, nested ``jax.jvp`` give the second
+    partials of that node's ``B`` contribution along the six symmetric
+    direction pairs, contracted with the seed; seven forward ``jax.jvp``
+    differentiate that scalar with respect to the node position, tangent and
+    coil current. Pairs are summed over tiles of
+    ``hessian_vjp_point_chunk_size`` points (see
+    :class:`~simsopt_jax.backend.runtime.FieldKernelTuning`); the points
+    themselves are held fixed.
+
+    Args:
+        points (jax.Array or numpy.ndarray): Cartesian positions of shape
+            ``(npoints, 3)``, in meters.
+        vgradgrad (jax.Array or numpy.ndarray): Hessian cotangent of shape
+            ``(npoints, 3, 3, 3)`` in ``[point, d1, d2, component]`` order.
+            For a scalar objective with units U, the seed has units U m²/T.
+        gammas (jax.Array or numpy.ndarray): Coil positions of shape
+            ``(ncoils, nquad, 3)``, in meters.
+        gammadashs (jax.Array or numpy.ndarray): Coil tangents of shape
+            ``(ncoils, nquad, 3)``, in meters per unit dimensionless curve
+            parameter; quadrature uses uniformly spaced nodes on [0, 1).
+        currents (jax.Array or numpy.ndarray): Coil currents of shape
+            ``(ncoils,)``, in amperes.
+
+    Returns:
+        tuple[jax.Array, jax.Array, jax.Array]: Cotangents of ``gammas``,
+            ``gammadashs`` and ``currents``, with their respective input shapes
+            ``(ncoils, nquad, 3)``, ``(ncoils, nquad, 3)`` and ``(ncoils,)``.
+            For an objective in U, geometry cotangents have units U/m and current
+            cotangents have units U/A.
+    """
+    inputs = snapshot_host_tree((points, vgradgrad, gammas, gammadashs, currents))
+    tuning = get_field_kernel_tuning()
+    return _make_d2B_vjp_kernel(tuning.hessian_vjp_point_chunk_size)(*inputs)
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
