@@ -1162,22 +1162,28 @@ def make_field_eval_spec(points: object) -> FieldEvalSpec:
     return FieldEvalSpec(points=_as_float64_array(points))
 
 
-def make_grouped_coil_set_spec(groups: Iterable[tuple[jax.Array, jax.Array, jax.Array, tuple[int, ...]]]) -> GroupedCoilSetSpec:
+def make_grouped_coil_set_spec(
+    groups: Iterable[CoilGroupSpec | tuple[object, object, object, tuple[int, ...]]],
+) -> GroupedCoilSetSpec:
     """Build an immutable GroupedCoilSetSpec payload for JAX kernels.
 
     Args:
-        groups (Iterable[tuple]): Groups of geometry/current arrays
+        groups (Iterable[CoilGroupSpec or tuple]): Existing specs or geometry/current arrays
             with shapes (C, Q, 3), (C, Q, 3), (C,) and original coil-index tuples;
             quadrature count may vary between groups.
 
     Returns:
-        GroupedCoilSetSpec object: Frozen pytree payload; newly converted
-            array leaves retain their argument shape, use float64
+        GroupedCoilSetSpec object: Frozen pytree payload retaining supplied specs;
+            newly converted array leaves retain their argument shape, use float64
             and snapshot host NumPy inputs.
     """
-    return GroupedCoilSetSpec(
-        groups=tuple(
+    group_specs: list[CoilGroupSpec] = []
+    for group in groups:
+        if isinstance(group, CoilGroupSpec):
+            group_specs.append(group)
+            continue
+        gammas, gammadashs, currents, coil_indices = group
+        group_specs.append(
             make_coil_group_spec(gammas, gammadashs, currents, coil_indices)
-            for gammas, gammadashs, currents, coil_indices in groups
         )
-    )
+    return GroupedCoilSetSpec(groups=tuple(group_specs))
