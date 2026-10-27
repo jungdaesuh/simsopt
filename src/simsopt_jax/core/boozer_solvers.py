@@ -11,10 +11,14 @@ program (a ``lax.while_loop`` on the problem's device):
   shifted by ``stab``, refined once the gradient norm is below ``1e-9``;
 - :func:`boozer_penalty_gauss_newton` is the damped Gauss-Newton of
   ``minimize_boozer_penalty_constraints_ls(method='manual')`` on
-  :func:`boozer_penalty_residual`.
+  :func:`boozer_penalty_residual`;
+- :func:`boozer_penalty_bfgs` and :func:`boozer_penalty_lbfgsb` are the SciPy
+  BFGS and L-BFGS-B of ``minimize_boozer_penalty_constraints_LBFGS`` on
+  :func:`boozer_penalty_constraints`, as
+  :mod:`simsopt_jax.core.quasi_newton` runs them.
 
-The stopping tests are native's, including how a NaN norm ends them, and so
-is the ``norm`` whose ``norm <= tol`` is native's ``success``. ``tol``,
+The Newton-type stopping tests are native's, including how a NaN norm ends
+them, and so is the ``norm`` whose ``norm <= tol`` is native's ``success``. ``tol``,
 ``maxiter`` and ``stab`` are float64 operands (``maxiter`` may be ``inf``),
 so new values reuse the program. Where native's ``np.linalg.solve`` raises
 ``LinAlgError`` (an exactly zero LU pivot of a finite matrix), the loop stops
@@ -53,6 +57,7 @@ from .boozer_problem import (
     boozer_penalty_residual,
     boozer_surface_residual,
 )
+from .quasi_newton import QuasiNewtonResult, minimize_bfgs, minimize_lbfgsb
 from .specs import GroupedCoilSetSpec
 
 __all__ = [
@@ -61,8 +66,10 @@ __all__ = [
     "BoozerPenaltyNewtonResult",
     "boozer_exact_newton",
     "boozer_exact_residual_coil_vjp",
+    "boozer_penalty_bfgs",
     "boozer_penalty_coil_vjp",
     "boozer_penalty_gauss_newton",
+    "boozer_penalty_lbfgsb",
     "boozer_penalty_newton",
     "boozer_residual_objective",
 ]
@@ -398,6 +405,92 @@ def boozer_penalty_gauss_newton(
         proceed, step, initial
     )
     return BoozerGaussNewtonResult(x, residual, gradient, normal_matrix, iterations, norm, singular)
+
+
+def _penalty_value_and_grad(problem: BoozerProblem, optimize_G: bool, weight_inv_modB: bool):
+    """The penalty's value and gradient in ``x``, as native hands them to SciPy."""
+    return partial(
+        boozer_penalty_constraints,
+        problem,
+        derivatives=1,
+        optimize_G=optimize_G,
+        weight_inv_modB=weight_inv_modB,
+    )
+
+
+@partial(jax.jit, static_argnames=("optimize_G", "weight_inv_modB"))
+def boozer_penalty_bfgs(
+    problem: BoozerProblem,
+    x: jax.Array,
+    gtol: jax.Array,
+    maxiter: jax.Array,
+    *,
+    optimize_G: bool,
+    weight_inv_modB: bool,
+) -> QuasiNewtonResult:
+    """Native ``minimize_boozer_penalty_constraints_LBFGS(limited_memory=False)``
+    from ``x``: SciPy's BFGS on :func:`boozer_penalty_constraints` with ``gtol``
+    and ``maxiter`` (:func:`~simsopt_jax.core.quasi_newton.minimize_bfgs`).
+
+    Args:
+        problem (BoozerProblem): Surface, coil and label snapshot with native units and
+            DOF ordering.
+        x (jax.Array): Shape (nx,) vector [all surface DOFs in meters, dimensionless
+            iota, optional G in tesla meters]; nx = nsurface + 1 + int(optimize_G).
+        gtol (jax.Array): Scalar shape () bound on the gradient's infinity norm.
+        maxiter (jax.Array): Scalar shape () float64 iteration cap, which may be
+            infinite.
+        optimize_G (bool): Include G as the last decision variable; otherwise use mu0
+            times the sum of absolute coil currents.
+        weight_inv_modB (bool): Divide each point's Boozer residual by the field
+            magnitude in teslas.
+
+    Returns:
+        QuasiNewtonResult: SciPy's result fields; ``message`` indexes
+            :data:`~simsopt_jax.core.quasi_newton.BFGS_MESSAGES`.
+    """
+    return minimize_bfgs(_penalty_value_and_grad(problem, optimize_G, weight_inv_modB), x, gtol, maxiter)
+
+
+@partial(jax.jit, static_argnames=("maxcor", "optimize_G", "weight_inv_modB"))
+def boozer_penalty_lbfgsb(
+    problem: BoozerProblem,
+    x: jax.Array,
+    ftol: jax.Array,
+    gtol: jax.Array,
+    maxiter: jax.Array,
+    *,
+    maxcor: int,
+    optimize_G: bool,
+    weight_inv_modB: bool,
+) -> QuasiNewtonResult:
+    """Native ``minimize_boozer_penalty_constraints_LBFGS(limited_memory=True)``
+    from ``x``: SciPy's L-BFGS-B without bounds on
+    :func:`boozer_penalty_constraints`
+    (:func:`~simsopt_jax.core.quasi_newton.minimize_lbfgsb`).
+
+    Args:
+        problem (BoozerProblem): Surface, coil and label snapshot with native units and
+            DOF ordering.
+        x (jax.Array): Shape (nx,) vector [all surface DOFs in meters, dimensionless
+            iota, optional G in tesla meters]; nx = nsurface + 1 + int(optimize_G).
+        ftol (jax.Array): Scalar shape () relative reduction tolerance of the penalty.
+        gtol (jax.Array): Scalar shape () bound on the gradient's infinity norm.
+        maxiter (jax.Array): Scalar shape () float64 iteration cap, which may be
+            infinite.
+        maxcor (int): Corrections held.
+        optimize_G (bool): Include G as the last decision variable; otherwise use mu0
+            times the sum of absolute coil currents.
+        weight_inv_modB (bool): Divide each point's Boozer residual by the field
+            magnitude in teslas.
+
+    Returns:
+        QuasiNewtonResult: SciPy's result fields; ``message`` indexes
+            :data:`~simsopt_jax.core.quasi_newton.LBFGSB_MESSAGES`.
+    """
+    return minimize_lbfgsb(
+        _penalty_value_and_grad(problem, optimize_G, weight_inv_modB), x, ftol, gtol, maxiter, maxcor=maxcor
+    )
 
 
 @jax.jit

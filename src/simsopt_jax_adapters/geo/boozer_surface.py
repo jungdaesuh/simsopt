@@ -29,9 +29,12 @@ such as ``Iotas``, ``MajorRadius``, ``NonQuasiSymmetricRatio`` and
 
 Each solve evaluates the formulations of :mod:`simsopt_jax.core.boozer_problem`
 for the current surface, coils, label, target and weight: the Newton-type
-loops of :mod:`simsopt_jax.core.boozer_solvers` run on the device in one
-program, BFGS/L-BFGS-B and ``least_squares`` are SciPy's (as natively) over
-the jitted value and gradient. Results are native's: NumPy arrays, the
+loops of :mod:`simsopt_jax.core.boozer_solvers`, and SciPy's BFGS and
+L-BFGS-B as :mod:`simsopt_jax.core.quasi_newton` ports them, run on the
+device, each in one program (the ``host_bfgs`` option runs SciPy's own on
+the host over the jitted value and gradient instead, as natively);
+``least_squares`` is SciPy's (as natively) over the jitted residuals and
+Jacobian. Results are native's: NumPy arrays, the
 solution in ``surface``, host ``PLU`` factors and a ``vjp`` that returns the
 coil ``Derivative``. Like native ``BoozerSurface``, an instance mutates its
 surface and ``res`` and belongs to one thread.
@@ -76,7 +79,7 @@ from typing import cast
 import jax
 import numpy as np
 from scipy.linalg import lu
-from scipy.optimize import OptimizeResult, least_squares, minimize
+from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, least_squares, minimize
 
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
@@ -93,10 +96,18 @@ from simsopt_jax.core.boozer_problem import (
 from simsopt_jax.core.boozer_solvers import (
     boozer_exact_newton,
     boozer_exact_residual_coil_vjp,
+    boozer_penalty_bfgs,
     boozer_penalty_coil_vjp,
     boozer_penalty_gauss_newton,
+    boozer_penalty_lbfgsb,
     boozer_penalty_newton,
     boozer_residual_objective,
+)
+from simsopt_jax.core.quasi_newton import (
+    BFGS_MESSAGES,
+    LBFGSB_MESSAGES,
+    LbfgsbCorrections,
+    QuasiNewtonResult,
 )
 from simsopt_jax.runtime.host_boundary import host_tree
 from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
@@ -118,6 +129,7 @@ _DEFAULT_OPTIONS = MappingProxyType(
                 "bfgs_maxiter": 1500,
                 "limited_memory": False,
                 "weight_inv_modB": True,
+                "host_bfgs": False,
             }
         ),
     }
@@ -131,6 +143,33 @@ _least_squares = cast(Callable[..., OptimizeResult], least_squares)
 def _place(values, problem: BoozerProblem) -> jax.Array:
     """``values`` as float64 on the problem's device."""
     return explicit_device_array(np.asarray(values, dtype=np.float64), dtype=np.float64, reference=problem.targetlabel)
+
+
+def _optimize_result(result: QuasiNewtonResult, messages: tuple[str, ...]) -> OptimizeResult:
+    """SciPy's ``OptimizeResult`` of a device solve, on the host, with SciPy's
+    fields in SciPy's order: BFGS's or L-BFGS-B's (whose ``hess_inv`` is an
+    ``LbfgsInvHessProduct``)."""
+    result = host_tree(result)
+    status = int(result.status)
+    fields = {
+        "fun": float(result.fun),
+        "jac": result.jac,
+        "nfev": int(result.nfev),
+        "njev": int(result.njev),
+        "status": status,
+        "success": status == 0,
+        "message": messages[int(result.message)],
+        "x": result.x,
+        "nit": int(result.iterations),
+    }
+    if isinstance(result.hess_inv, LbfgsbCorrections):
+        count = int(result.hess_inv.count)
+        fields["hess_inv"] = LbfgsInvHessProduct(result.hess_inv.s[:count], result.hess_inv.y[:count])
+        order = ("fun", "jac", "nfev", "njev", "nit", "status", "message", "x", "success", "hess_inv")
+    else:
+        fields["hess_inv"] = result.hess_inv
+        order = ("fun", "jac", "hess_inv", "nfev", "njev", "status", "success", "message", "x", "nit")
+    return OptimizeResult({key: fields[key] for key in order})
 
 
 def _solution(x: np.ndarray, optimize_G: bool):
@@ -201,7 +240,10 @@ class JaxBoozerSurface(Optimizable):
         options (dict | None): Native solver options overriding the defaults for the
             selected formulation (``verbose`` True, ``newton_tol`` 1e-13 for BoozerExact
             or 1e-11 for BoozerLS, ``newton_maxiter`` 40, ``bfgs_tol`` 1e-10, ``bfgs_maxiter`` 1500,
-            ``limited_memory`` False, ``weight_inv_modB`` True); default None uses the defaults.
+            ``limited_memory`` False, ``weight_inv_modB`` True, and the JAX option
+            ``host_bfgs`` False: True runs BoozerLS's BFGS or L-BFGS-B with SciPy on the
+            host, as natively, instead of its port on the device); default None uses the
+            defaults.
 
     The label must be one of the four classes above; with ``G=None`` in :meth:`run_code` the coil
     currents must be fixed, as natively. ``minimize_boozer_exact_constraints_newton`` is not provided.
@@ -279,6 +321,7 @@ class JaxBoozerSurface(Optimizable):
             verbose=self.options["verbose"],
             limited_memory=self.options["limited_memory"],
             weight_inv_modB=self.options["weight_inv_modB"],
+            host_bfgs=self.options["host_bfgs"],
         )
         self.need_to_run_code = True
         return self.minimize_boozer_penalty_constraints_newton(
@@ -329,13 +372,16 @@ class JaxBoozerSurface(Optimizable):
         limited_memory=True,
         weight_inv_modB=True,
         verbose=False,
+        host_bfgs=False,
     ):
-        """Native's: SciPy BFGS (or L-BFGS-B) on the penalty.
+        """Native's: SciPy's BFGS (or L-BFGS-B) on the penalty, by default as
+        :mod:`simsopt_jax.core.quasi_newton` runs it on the device; ``info`` is
+        SciPy's ``OptimizeResult`` with SciPy's fields.
 
         Args:
-            tol (float): SciPy gradient stopping tolerance (gtol), also relative objective
+            tol (float): Gradient stopping tolerance (SciPy's gtol), also relative objective
                 stopping tolerance (ftol) for L-BFGS-B; default 1e-3.
-            maxiter (int | float): Maximum SciPy iterations; default 1000.
+            maxiter (int | float): Maximum iterations; default 1000.
             constraint_weight (float): Native penalty coefficient for the squared label and
                 z constraints; default 1.0.
             iota (float): Initial dimensionless rotational transform; default 0.0.
@@ -345,6 +391,8 @@ class JaxBoozerSurface(Optimizable):
             weight_inv_modB (bool): Divide each point's Boozer residual by the field
                 magnitude in teslas; default True.
             verbose (bool): Print the native-style solver summary; default False.
+            host_bfgs (bool): Run SciPy's solver on the host over the jitted value and
+                gradient, as natively; default False.
 
         Returns:
             dict: Cached or newly stored native-style result, including value, gradient,
@@ -354,24 +402,53 @@ class JaxBoozerSurface(Optimizable):
             return self.res
         optimize_G = G is not None
         problem = self._problem(constraint_weight)
-
-        def penalty(x):
-            return host_tree(
-                boozer_penalty_constraints(
-                    problem,
-                    _place(x, problem),
-                    derivatives=1,
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                )
-            )
+        x = self._decision_vector(iota, G)
 
         method = "L-BFGS-B" if limited_memory else "BFGS"
         options = {"maxiter": maxiter, "gtol": tol}
         if limited_memory:
             options["maxcor"] = 200
             options["ftol"] = tol
-        res = minimize(penalty, self._decision_vector(iota, G), jac=True, method=method, options=options)
+        if host_bfgs:
+
+            def penalty(x):
+                return host_tree(
+                    boozer_penalty_constraints(
+                        problem,
+                        _place(x, problem),
+                        derivatives=1,
+                        optimize_G=optimize_G,
+                        weight_inv_modB=weight_inv_modB,
+                    )
+                )
+
+            res = minimize(penalty, x, jac=True, method=method, options=options)
+        elif limited_memory:
+            res = _optimize_result(
+                boozer_penalty_lbfgsb(
+                    problem,
+                    _place(x, problem),
+                    _place(options["ftol"], problem),
+                    _place(options["gtol"], problem),
+                    _place(options["maxiter"], problem),
+                    maxcor=options["maxcor"],
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                LBFGSB_MESSAGES,
+            )
+        else:
+            res = _optimize_result(
+                boozer_penalty_bfgs(
+                    problem,
+                    _place(x, problem),
+                    _place(options["gtol"], problem),
+                    _place(options["maxiter"], problem),
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                BFGS_MESSAGES,
+            )
 
         resdict = {
             "fun": res.fun,
