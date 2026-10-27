@@ -16,7 +16,10 @@ explicit ToroidalFlux and current-derived ``G`` terms that native misses,
 checked through re-solves. Then: settings
 read at every solve, no recompilation for new values, no implicit transfers,
 the documented differences (fixed DOFs, the BoozerExact adjoint without
-stellarator symmetry) and unsupported inputs.
+stellarator symmetry) and unsupported inputs. BFGS and L-BFGS-B run SciPy's
+algorithms on the device by default; the ``host_bfgs`` option runs SciPy
+itself on the jitted penalty, as before, and the device programs' scratch
+memory is the penalty's plus their quasi-Newton state.
 
 Tolerances sit above round-off: iterates and arrays agree to 1e-12 of the
 largest native entry (measured worst 2e-13, coil gradients of the objectives)
@@ -54,8 +57,12 @@ with optional_jax_imports():
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
     from simsopt.objectives.utilities import forward_backward
-    from simsopt_jax.core.boozer_problem import boozer_penalty_residual
-    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
+    from simsopt_jax.core.boozer_problem import (
+        boozer_penalty_constraints,
+        boozer_penalty_residual,
+    )
+    from simsopt_jax.core.boozer_solvers import boozer_penalty_bfgs, boozer_penalty_lbfgsb
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_tree
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_problem import boozer_problem
     from simsopt_jax_adapters.geo import boozer_surface as jax_boozer_surface
@@ -82,12 +89,16 @@ from unittest import mock
 from typing import cast
 
 import numpy as np
+from scipy.optimize import minimize
 
 
 _IOTA = -0.406
 _RTOL = 1e-12
 _RTOL_NONSYM = 1e-9
 _WEIGHT = 100.0
+# Scratch bytes the device quasi-Newton loops may add to the penalty's for their
+# vectors and scalars, beyond their matrices.
+_QUASI_NEWTON_SLACK = 2**20
 
 
 @dataclass
@@ -500,29 +511,39 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
 
     def test_ls_run_code_matches_native(self):
-        """BFGS, then the penalty Newton. Near convergence BFGS's last line
-        searches follow round-off (its iteration count can differ by one or two),
-        so the polished solution, the Newton step count and flags are compared."""
-        for case_id_0, optimize_G in zip(
-            ["G", "G-from-currents"], [True, False], strict=True
-        ):
-            for case_id_1, weight_inv_modB in zip(
-                ["weighted", "unweighted"], [True, False], strict=True
+        """BFGS (or L-BFGS-B), then the penalty Newton. Near convergence the
+        quasi-Newton walk's last line searches follow round-off (its iteration
+        count can differ by one or two), so the polished solution, the Newton
+        step count and flags are compared."""
+        for limited_memory in (False, True):
+            for case_id_0, optimize_G in zip(
+                ["G", "G-from-currents"], [True, False], strict=True
             ):
-                with self.subTest(
-                    case_id_0=case_id_0,
-                    optimize_G=optimize_G,
-                    case_id_1=case_id_1,
-                    weight_inv_modB=weight_inv_modB,
-                ), self.case():
-                    self._case_ls_run_code_matches_native(
-                        optimize_G, weight_inv_modB
-                    )
+                for case_id_1, weight_inv_modB in zip(
+                    ["weighted", "unweighted"], [True, False], strict=True
+                ):
+                    with self.subTest(
+                        limited_memory=limited_memory,
+                        case_id_0=case_id_0,
+                        optimize_G=optimize_G,
+                        case_id_1=case_id_1,
+                        weight_inv_modB=weight_inv_modB,
+                    ), self.case():
+                        self._case_ls_run_code_matches_native(
+                            optimize_G, weight_inv_modB, limited_memory
+                        )
 
-    def _case_ls_run_code_matches_native(self, optimize_G, weight_inv_modB):
+    def _case_ls_run_code_matches_native(self, optimize_G, weight_inv_modB, limited_memory):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = _pair(
-            "ls", optimize_G=optimize_G, weight_inv_modB=weight_inv_modB
+            "ls",
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            options={
+                "verbose": False,
+                "weight_inv_modB": weight_inv_modB,
+                "limited_memory": limited_memory,
+            },
         )
         native_res = native.boozer.run_code(_IOTA, G=native.G0)
         jax_res = jax_problem.boozer.run_code(_IOTA, G=jax_problem.G0)
@@ -574,7 +595,21 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
         self.assertFalse(native_res["success"])
         self.assertEqual(native_res["iter"], maxiter)
-        self.assertEqual(jax_res["info"].nfev, native_res["info"].nfev)
+        self.assertEqual(
+            tuple(jax_res["info"][key] for key in ("nfev", "njev", "status", "message")),
+            tuple(native_res["info"][key] for key in ("nfev", "njev", "status", "message")),
+        )
+        # info is SciPy's OptimizeResult: its fields in its order, hess_inv
+        # included. The steps carry the iterates' difference, and H magnifies
+        # it (measured 2.1e-11 for sk, 6.3e-11 for H, of the largest entry).
+        self.assertEqual(list(jax_res["info"]), list(native_res["info"]))
+        jax_hess, native_hess = jax_res["info"].hess_inv, native_res["info"].hess_inv
+        self.assertIs(type(jax_hess), type(native_hess))
+        if limited_memory:
+            assert_matches_native(jax_hess.sk, native_hess.sk, "L-BFGS-B hess_inv sk", 1e-10)
+            assert_matches_native(jax_hess.yk, native_hess.yk, "L-BFGS-B hess_inv yk", 1e-10)
+        else:
+            assert_matches_native(jax_hess, native_hess, "BFGS hess_inv", 5e-10)
         _assert_same_solve(
             jax_problem, native, jax_res, native_res, ("fun",), "BFGS", rtol=1e-11
         )
@@ -584,6 +619,125 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
         self.assertIs(jax_res["s"], jax_problem.boozer.surface)
         self.assertFalse(jax_problem.boozer.need_to_run_code)
+
+    def test_host_bfgs_runs_scipy_on_the_jitted_penalty(self):
+        """With ``host_bfgs``, BFGS and L-BFGS-B are SciPy's on the jitted
+        penalty, the path before the device port, bit for bit; ``run_code``
+        takes the option from ``options``."""
+        for limited_memory in (False, True):
+            with self.subTest(limited_memory=limited_memory), self.case():
+                self._case_host_bfgs_runs_scipy_on_the_jitted_penalty(limited_memory)
+
+    def _case_host_bfgs_runs_scipy_on_the_jitted_penalty(self, limited_memory):
+        """Run one row with case-local objects released before runtime cleanup."""
+        maxiter, tol = 20, 1e-10
+        jax_problem = _problem(
+            True,
+            "ls",
+            options={
+                "verbose": False,
+                "weight_inv_modB": False,
+                "limited_memory": limited_memory,
+                "host_bfgs": True,
+                "bfgs_maxiter": maxiter,
+                "bfgs_tol": tol,
+                "newton_maxiter": 0,
+            },
+        )
+        boozer = jax_problem.boozer
+        start = boozer.surface.get_dofs()
+        problem = boozer_problem(
+            boozer.biotsavart, boozer.surface, boozer.label, boozer.targetlabel, _WEIGHT
+        )
+
+        def penalty(x):
+            return host_tree(
+                boozer_penalty_constraints(
+                    problem,
+                    place_float64(x, problem.targetlabel),
+                    derivatives=1,
+                    optimize_G=True,
+                    weight_inv_modB=False,
+                )
+            )
+
+        options = {"maxiter": maxiter, "gtol": tol}
+        if limited_memory:
+            options.update(maxcor=200, ftol=tol)
+        expected = minimize(
+            penalty,
+            np.concatenate((start, [_IOTA, jax_problem.G0])),
+            jac=True,
+            method="L-BFGS-B" if limited_memory else "BFGS",
+            options=options,
+        )
+        res = boozer.minimize_boozer_penalty_constraints_LBFGS(
+            tol=tol,
+            maxiter=maxiter,
+            constraint_weight=_WEIGHT,
+            iota=_IOTA,
+            G=jax_problem.G0,
+            limited_memory=limited_memory,
+            weight_inv_modB=False,
+            host_bfgs=True,
+        )
+        for key in ("x", "fun", "jac", "nit", "nfev", "njev", "status", "message"):
+            np.testing.assert_array_equal(
+                res["info"][key], expected[key], err_msg=f"host_bfgs {key} differs from SciPy's"
+            )
+        # run_code reads the option; without Newton steps it ends at SciPy's endpoint.
+        boozer.surface.set_dofs(start)
+        boozer.recompute_bell()
+        boozer.run_code(_IOTA, G=jax_problem.G0)
+        np.testing.assert_array_equal(
+            boozer.surface.get_dofs(), expected.x[:-2], err_msg="run_code did not run SciPy"
+        )
+
+    def test_device_quasi_newton_scratch_is_the_penalty_plus_its_state(self):
+        """The compiled BFGS and L-BFGS-B loops need the scratch memory of the
+        penalty's value and gradient plus their state: BFGS's inverse Hessian
+        and its update (measured 2 n^2 doubles on the CPU, 1.2 n^2 on the GPU,
+        n = 75), L-BFGS-B's corrections and their small matrices (measured 3.8
+        MB on the CPU at maxcor 200), never a multiple of the penalty's."""
+        for parity_lane in ("cpu", "gpu"):
+            with self.subTest(parity_lane=parity_lane), self.case():
+                self._case_device_quasi_newton_scratch_is_the_penalty_plus_its_state(parity_lane)
+
+    def _case_device_quasi_newton_scratch_is_the_penalty_plus_its_state(self, parity_lane):
+        """Run one row with case-local objects released before runtime cleanup."""
+        with parity_default_device(parity_lane):
+            jax_problem = _problem(True, "ls")
+            boozer = jax_problem.boozer
+            problem = boozer_problem(
+                boozer.biotsavart, boozer.surface, boozer.label, boozer.targetlabel, _WEIGHT
+            )
+            x = place_float64(
+                np.concatenate((boozer.surface.get_dofs(), [_IOTA, jax_problem.G0])),
+                problem.targetlabel,
+            )
+            scalar = place_float64(1.0, problem.targetlabel)
+            options = {"optimize_G": True, "weight_inv_modB": False}
+
+            def scratch(lowered):
+                return lowered.compile().memory_analysis().temp_size_in_bytes
+
+            penalty = scratch(boozer_penalty_constraints.lower(problem, x, derivatives=1, **options))
+            bfgs = scratch(boozer_penalty_bfgs.lower(problem, x, scalar, scalar, **options))
+            maxcor = 200
+            lbfgsb = scratch(
+                boozer_penalty_lbfgsb.lower(problem, x, scalar, scalar, scalar, maxcor=maxcor, **options)
+            )
+        n, double = x.shape[0], 8
+        self.assertLessEqual(
+            bfgs,
+            penalty + 3 * n * n * double + _QUASI_NEWTON_SLACK,
+            f"BFGS scratch {bfgs} B exceeds the penalty's {penalty} B plus 3 n^2 doubles",
+        )
+        self.assertLessEqual(
+            lbfgsb,
+            penalty + 2 * (2 * maxcor * n + 8 * maxcor**2) * double + _QUASI_NEWTON_SLACK,
+            f"L-BFGS-B scratch {lbfgsb} B exceeds the penalty's {penalty} B plus its memory",
+        )
 
     def test_penalty_newton_matches_native(self):
         """From a BFGS iterate; ``stab`` shifts the Hessian of each step but not
@@ -1446,15 +1600,17 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 G=exact_problem.G0,
             )
             Iotas(exact).dJ()
-            start = ls.minimize_boozer_penalty_constraints_LBFGS(
-                tol=1e-10,
-                maxiter=settings["maxiter"],
-                constraint_weight=settings["weight"],
-                iota=settings["iota"],
-                G=ls_problem.G0,
-                limited_memory=False,
-                weight_inv_modB=False,
-            )
+            for limited_memory in (True, False):
+                ls.recompute_bell()
+                start = ls.minimize_boozer_penalty_constraints_LBFGS(
+                    tol=1e-10,
+                    maxiter=settings["maxiter"],
+                    constraint_weight=settings["weight"],
+                    iota=settings["iota"],
+                    G=ls_problem.G0,
+                    limited_memory=limited_memory,
+                    weight_inv_modB=False,
+                )
             for method in ("manual", "lm"):
                 ls.recompute_bell()
                 ls.minimize_boozer_penalty_constraints_ls(
