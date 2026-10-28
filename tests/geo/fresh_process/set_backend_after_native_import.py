@@ -15,7 +15,8 @@ from simsopt_jax.backend import set_backend
 from simsopt_jax.backend.runtime import JaxDevice
 
 _DEVICES: dict[str, JaxDevice] = {"cpu": "cpu", "gpu": "gpu"}
-_JAX_PLATFORMS = {"cpu": "cpu", "gpu": "cuda"}
+# Selecting CUDA also starts the CPU, where native jitted kernels run.
+_JAX_PLATFORMS = {"cpu": "cpu", "gpu": "cuda,cpu"}
 
 
 def main(device: str, platforms_after_import: str) -> None:

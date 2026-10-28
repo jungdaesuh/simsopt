@@ -7,12 +7,13 @@
 derivatives) for ``SurfaceRZFourier``, ``SurfaceXYZFourier`` and
 ``SurfaceXYZTensorFourier``, with and without stellarator symmetry, the
 ``Volume``, ``Area``, ``AspectRatio`` and ``ToroidalFlux`` labels (on their own
-grids), ``weight_inv_modB`` and ``optimize_G`` on and off. The analytic kernels
-are also compared with ``simsoptpp.boozer_residual_ds2`` directly, Hessians
-with central differences of native gradients. Then the problem boundary: fixed
-DOFs, grids without a stellarator-symmetry mask, no coils, singular
-cross-sections for AspectRatio, recompilation, implicit transfers, zero fields
-and unsupported inputs.
+grids), ``weight_inv_modB`` and ``optimize_G`` on and off. Hessians are also
+compared with central differences of native gradients; coil derivatives of the
+derivatives (through the field's Taylor coefficients) with autodiff through the
+field kernel, and the Hessians' nesting by their compiled memory. Then the
+problem boundary: fixed DOFs, grids without a stellarator-symmetry mask, no
+coils, singular cross-sections for AspectRatio, recompilation, implicit
+transfers, zero fields and unsupported inputs.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imp
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
-    import simsoptpp as sopp
     from simsopt.configs import get_data
     from simsopt.field.biotsavart import BiotSavart
     from simsopt.geo.boozersurface import BoozerSurface
@@ -37,7 +37,7 @@ with optional_jax_imports():
     from simsopt.geo.surfacerzfourier import SurfaceRZFourier
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-    from simsopt_jax.backend.dtypes import explicit_device_array
+    from simsopt_jax.backend import set_backend
     from simsopt_jax.core.boozer_problem import (
         BoozerProblem,
         boozer_exact_constraints,
@@ -47,7 +47,6 @@ with optional_jax_imports():
     from simsopt_jax.core.boozer_problem import (
         boozer_surface_residual as jax_boozer_surface_residual,
     )
-    from simsopt_jax.core.boozer_residual import BoozerPoints, boozer_least_squares
     from simsopt_jax.runtime.host_boundary import disallow_host_transfers
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_problem import (
@@ -56,6 +55,7 @@ with optional_jax_imports():
     )
 
 from unittest_jax_support import (
+    assert_errors_shrink,
     assert_matches_native,
     host_array,
     jax_compilations,
@@ -71,7 +71,6 @@ import numpy as np
 
 if JAX_IMPORT_ERROR is None:
     _NativeSurface = SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier
-if JAX_IMPORT_ERROR is None:
     _SURFACE_CLASSES = {
         "rz": SurfaceRZFourier,
         "xyz": SurfaceXYZFourier,
@@ -196,9 +195,6 @@ def _assert_all_native(actual, expected, name: str) -> None:
         assert_matches_native(a, e, f"{name}[{order}]")
 
 
-# --- the analytic kernels against simsoptpp -----------------------------------------
-
-
 # --- the four formulations against native ----------------------------------------
 
 
@@ -304,96 +300,13 @@ def _assert_every_formulation_native(
 
 
 class TestBoozerResidualJax(JaxTestCase):
-    def test_least_squares_kernel_matches_simsoptpp(self):
-        """Boozer least-squares values and derivatives agree with simsoptpp for both G and weighting modes."""
-        for optimize_G in [False, True]:
-            for weight_inv_modB in [False, True]:
-                with self.subTest(
-                    optimize_G=optimize_G, weight_inv_modB=weight_inv_modB
-                ), self.case() as patches:
-                    self._case_least_squares_kernel_matches_simsoptpp(
-                        optimize_G, weight_inv_modB, patches
-                    )
-
-    def _case_least_squares_kernel_matches_simsoptpp(
-        self, optimize_G, weight_inv_modB, patches
-    ):
-        """Run one row with case-local objects released before runtime cleanup."""
-        rng = parity_rng(1)
-        nphi, ntheta, nsurface = 3, 4, 5
-        shape = (nphi, ntheta)
-        d2B = rng.normal(scale=0.13, size=shape + (3, 3, 3))
-        native = {
-            "B": rng.normal(size=shape + (3,)) + np.array([0.3, -0.2, 1.4]),
-            "dB_by_dX": rng.normal(scale=0.2, size=shape + (3, 3)),
-            "d2B_by_dXdX": 0.5 * (d2B + np.swapaxes(d2B, 2, 3)),
-            "xphi": rng.normal(size=shape + (3,)),
-            "xtheta": rng.normal(size=shape + (3,)),
-            "dgamma_by_dcoeff": rng.normal(size=shape + (3, nsurface)),
-            "dgammadash1_by_dcoeff": rng.normal(size=shape + (3, nsurface)),
-            "dgammadash2_by_dcoeff": rng.normal(size=shape + (3, nsurface)),
-        }
-        points = BoozerPoints(
-            **{
-                name: explicit_device_array(
-                    value.reshape((nphi * ntheta,) + value.shape[2:]), dtype=np.float64
-                )
-                for name, value in native.items()
-            }
-        )
-        coefficient_derivatives = (
-            native["dgamma_by_dcoeff"],
-            native["dgammadash1_by_dcoeff"],
-            native["dgammadash2_by_dcoeff"],
-        )
-        tangents = (native["xphi"], native["xtheta"])
-        value, gradient = sopp.boozer_residual_ds(
-            _G,
-            _IOTA,
-            native["B"],
-            native["dB_by_dX"],
-            *tangents,
-            *coefficient_derivatives,
-            weight_inv_modB,
-        )
-        second = sopp.boozer_residual_ds2(
-            _G,
-            _IOTA,
-            native["B"],
-            native["dB_by_dX"],
-            native["d2B_by_dXdX"],
-            *tangents,
-            *coefficient_derivatives,
-            weight_inv_modB,
-        )
-        kept = slice(None) if optimize_G else slice(0, nsurface + 1)
-        expected = (
-            sopp.boozer_residual(_G, _IOTA, *tangents, native["B"], weight_inv_modB),
-            (value, gradient[kept]),
-            (second[0], second[1][kept], second[2][kept, kept]),
-        )
-        for derivatives in (0, 1, 2):
-            result = jax.jit(
-                lambda p, d=derivatives: boozer_least_squares(
-                    _G,
-                    _IOTA,
-                    p,
-                    derivatives=d,
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                )
-            )(points)
-            _assert_all_native(
-                result, expected[derivatives], f"boozer_residual_ds{derivatives}"
-            )
-
     def test_surface_residual_matches_native(self):
         """Boozer residuals, Jacobians and Hessians agree with native formulations."""
         for name in _RESIDUAL_CASES:
-            with self.subTest(name=name), self.case() as patches:
-                self._case_surface_residual_matches_native(name, patches)
+            with self.subTest(name=name), self.case():
+                self._case_surface_residual_matches_native(name)
 
-    def _case_surface_residual_matches_native(self, name, patches):
+    def _case_surface_residual_matches_native(self, name):
         """Run one row with case-local objects released before runtime cleanup."""
         case = _RESIDUAL_CASES[name]
         setup = _setup(case.surface, case.stellsym, case.label, case.clamped)
@@ -425,10 +338,10 @@ class TestBoozerResidualJax(JaxTestCase):
         """Value, gradient and Hessian at two constraint weights. Their difference
         isolates the label and ``z(0, 0)`` penalties, compared on their own scale."""
         for name in _PENALTY_CASES:
-            with self.subTest(name=name), self.case() as patches:
-                self._case_penalty_constraints_match_native(name, patches)
+            with self.subTest(name=name), self.case():
+                self._case_penalty_constraints_match_native(name)
 
-    def _case_penalty_constraints_match_native(self, name, patches):
+    def _case_penalty_constraints_match_native(self, name):
         """Run one row with case-local objects released before runtime cleanup."""
         case = _PENALTY_CASES[name]
         setup = _setup(case.surface, case.stellsym, case.label)
@@ -477,10 +390,10 @@ class TestBoozerResidualJax(JaxTestCase):
         isolates the label and ``z(0, 0)`` derivatives, and the constraint rows and
         columns are compared on their own scale."""
         for name in _EXACT_CONSTRAINT_CASES:
-            with self.subTest(name=name), self.case() as patches:
-                self._case_exact_constraints_match_native(name, patches)
+            with self.subTest(name=name), self.case():
+                self._case_exact_constraints_match_native(name)
 
-    def _case_exact_constraints_match_native(self, name, patches):
+    def _case_exact_constraints_match_native(self, name):
         """Run one row with case-local objects released before runtime cleanup."""
         case = _EXACT_CONSTRAINT_CASES[name]
         setup = _setup(case.surface, case.stellsym, case.label)
@@ -540,10 +453,10 @@ class TestBoozerResidualJax(JaxTestCase):
             ):
                 with self.subTest(
                     label=label, case_id_1=case_id_1, stellsym=stellsym
-                ), self.case() as patches:
-                    self._case_exact_residual_matches_native(label, stellsym, patches)
+                ), self.case():
+                    self._case_exact_residual_matches_native(label, stellsym)
 
-    def _case_exact_residual_matches_native(self, label, stellsym, patches):
+    def _case_exact_residual_matches_native(self, label, stellsym):
         """Run one row with case-local objects released before runtime cleanup."""
         setup = _setup("tensor", stellsym, label)
         native_boozer = _native_boozer(setup)
@@ -601,14 +514,25 @@ class TestBoozerResidualJax(JaxTestCase):
         # The Boozer rows dominate the norm of the whole system, so the label row
         # gets its own convergence check.
         label_row = rows.size
-        previous_error = previous_label_error = 1e9
-        for step in np.power(2.0, -np.arange(7, 20)):
-            difference = (system(x + step * direction) - base) / step
-            error = np.linalg.norm(difference - analytic)
-            label_error = abs(difference[label_row] - analytic[label_row])
-            self.assertLess(error, 0.55 * previous_error)
-            self.assertLess(label_error, 0.55 * previous_label_error)
-            previous_error, previous_label_error = error, label_error
+        differences = [
+            (system(x + step * direction) - base) / step
+            for step in np.power(2.0, -np.arange(7, 20))
+        ]
+        assert_errors_shrink(
+            self,
+            [np.linalg.norm(difference - analytic) for difference in differences],
+            0.55,
+            initial=1e9,
+        )
+        assert_errors_shrink(
+            self,
+            [
+                abs(difference[label_row] - analytic[label_row])
+                for difference in differences
+            ],
+            0.55,
+            initial=1e9,
+        )
         if not stellsym:
             # z(0, 0) is linear in the surface DOFs, so a forward difference equals
             # the Jacobian row up to the round-off of subtracting two z values.
@@ -740,8 +664,10 @@ class TestBoozerResidualJax(JaxTestCase):
                 "AspectRatio penalty is not finite",
             )
 
-    def test_hessians_match_central_differences_of_native_derivatives(self):
-        """Penalty and residual Hessians agree with central differences of native derivatives."""
+    def test_hessians_match_differences_of_native_derivatives(self):
+        """Penalty and residual Hessians agree with central differences of native
+        gradients and Jacobians, and forward differences converge to them at
+        shrinking steps."""
         setup = _setup("xyz", False, "toroidal_flux")
         native_boozer = _native_boozer(setup, 5.0)
         problem = boozer_problem(
@@ -778,14 +704,6 @@ class TestBoozerResidualJax(JaxTestCase):
                 optimize_G=True,
             )[2]
         )
-        differences = (
-            native_gradient(x + step * direction)
-            - native_gradient(x - step * direction)
-        ) / (2 * step)
-        assert_matches_native(
-            hessian @ direction, differences, "penalty Hessian", rtol=1e-7
-        )
-
         residual_hessians = host_array(
             jax_boozer_surface_residual(
                 problem,
@@ -794,13 +712,26 @@ class TestBoozerResidualJax(JaxTestCase):
                 optimize_G=True,
             )[2]
         )
-        differences = (
-            native_jacobian(x + step * direction)
-            - native_jacobian(x - step * direction)
-        ) / (2 * step)
-        assert_matches_native(
-            residual_hessians @ direction, differences, "residual Hessians", rtol=1e-7
-        )
+        for name, function, analytic in (
+            ("penalty Hessian", native_gradient, hessian @ direction),
+            ("residual Hessians", native_jacobian, residual_hessians @ direction),
+        ):
+            differences = (
+                function(x + step * direction) - function(x - step * direction)
+            ) / (2 * step)
+            assert_matches_native(analytic, differences, name, rtol=1e-7)
+            base = function(x)
+            assert_errors_shrink(
+                self,
+                [
+                    np.linalg.norm((function(x + h * direction) - base) / h - analytic)
+                    for h in np.power(2.0, -np.arange(7, 20))
+                ],
+                0.55,
+                msg=name,
+                initial=1e9,
+            )
+        setup.surface.set_dofs(x[:-2])
 
     def test_fixed_surface_dofs_leave_the_derivatives_unchanged(self):
         """Derivatives are with respect to all surface DOFs, fixed ones included,
@@ -865,16 +796,15 @@ class TestBoozerResidualJax(JaxTestCase):
         )
         with jax_compilations() as compilations:
             second_results = _evaluate_every_formulation(second, x, xl)
-        self.assertTrue(
-            compilations == [], "new values retraced or recompiled a formulation"
+        self.assertEqual(
+            compilations, [], "new values retraced or recompiled a formulation"
         )
         _assert_every_formulation_native(second_results, setup, 40.0, x, xl)
-        self.assertTrue(
-            not np.allclose(
+        self.assertFalse(
+            np.allclose(
                 host_array(first_results["penalty"][0]),
                 host_array(second_results["penalty"][0]),
-            ),
-            'not np.allclose(host_array(first_results["penalty"][0]), host_array(second_results["penalty"][0]))',
+            )
         )
 
     def test_formulations_make_no_implicit_transfers(self):
@@ -890,13 +820,13 @@ class TestBoozerResidualJax(JaxTestCase):
                     parity_lane=parity_lane,
                     case_id_1=case_id_1,
                     stellsym=stellsym,
-                ), self.case() as patches:
+                ), self.case():
                     self._case_formulations_make_no_implicit_transfers(
-                        parity_lane, stellsym, patches
+                        parity_lane, stellsym
                     )
 
     def _case_formulations_make_no_implicit_transfers(
-        self, parity_lane, stellsym, patches
+        self, parity_lane, stellsym
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         setup = _setup("tensor", stellsym, "toroidal_flux")
@@ -951,19 +881,16 @@ class TestBoozerResidualJax(JaxTestCase):
             devices = {
                 device for leaf in jax.tree.leaves(results) for device in leaf.devices()
             }
-            self.assertTrue(
-                devices == problem.targetlabel.devices(),
-                "devices == problem.targetlabel.devices()",
-            )
+            self.assertEqual(devices, problem.targetlabel.devices())
 
     def test_zero_field_gives_the_native_values(self):
         """With every current zero, the weighted residual is 0/0 at every point:
         native and JAX return the same NaN pattern; unweighted values agree."""
         for weight_inv_modB in [False, True]:
-            with self.subTest(weight_inv_modB=weight_inv_modB), self.case() as patches:
-                self._case_zero_field_gives_the_native_values(weight_inv_modB, patches)
+            with self.subTest(weight_inv_modB=weight_inv_modB), self.case():
+                self._case_zero_field_gives_the_native_values(weight_inv_modB)
 
-    def _case_zero_field_gives_the_native_values(self, weight_inv_modB, patches):
+    def _case_zero_field_gives_the_native_values(self, weight_inv_modB):
         """Run one row with case-local objects released before runtime cleanup."""
         setup = _setup("tensor", False, "volume")
         for current in setup.currents:
@@ -986,16 +913,14 @@ class TestBoozerResidualJax(JaxTestCase):
             np.testing.assert_array_equal(
                 np.isnan(actual), np.isnan(native), err_msg=f"NaN pattern [{order}]"
             )
-            self.assertTrue(
-                np.all(np.isnan(native)) == weight_inv_modB,
-                "np.all(np.isnan(native)) == weight_inv_modB",
-            )
+            self.assertEqual(np.all(np.isnan(native)), weight_inv_modB)
             finite = np.isfinite(native)
-            np.testing.assert_allclose(
+            assert_matches_native(
                 actual[finite],
                 native[finite],
-                rtol=0.0,
-                atol=_RTOL * np.max(np.abs(native[finite]), initial=1.0),
+                f"zero-field penalty[{order}]",
+                rtol=_RTOL,
+                scale=np.max(np.abs(native[finite]), initial=1.0),
             )
 
     def test_problem_boundary_refuses_unsupported_inputs(self):
@@ -1018,9 +943,7 @@ class TestBoozerResidualJax(JaxTestCase):
             )
 
         exact = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
-        self.assertTrue(
-            exact.constraint_weight is None, "exact.constraint_weight is None"
-        )
+        self.assertIsNone(exact.constraint_weight)
         x = place_float64(_decision(setup.surface, False), exact.targetlabel)
         with self.assertRaisesRegex(ValueError, "constraint_weight"):
             boozer_penalty_constraints(exact, x)
@@ -1041,59 +964,193 @@ class TestBoozerResidualJax(JaxTestCase):
                 replace(exact, constraint_weight=exact.targetlabel), x, optimize_G=True
             )
 
-    def test_hessians_taylor(self):
-        """Boozer Hessians converge from native gradients and Jacobians at shrinking steps."""
-        setup = _setup("xyz", False, "toroidal_flux")
-        native = _native_boozer(setup, 5.0)
+    def test_penalty_gradient_taylor(self):
+        """The penalty gradient matches forward differences of the penalty at shrinking
+        steps, as native ``test_boozer_penalty_constraints_gradient`` checks."""
+        for name in _PENALTY_CASES:
+            with self.subTest(name=name), self.case():
+                self._case_penalty_gradient_taylor(name)
+
+    def _case_penalty_gradient_taylor(self, name):
+        """Run one row with case-local objects released before runtime cleanup."""
+        case = _PENALTY_CASES[name]
+        setup = _setup(case.surface, case.stellsym, case.label)
+        problem = boozer_problem(
+            setup.field, setup.surface, setup.label, setup.target, 11.1232
+        )
+        x = _decision(setup.surface, case.optimize_G)
+        direction = parity_rng(1).uniform(size=x.size) - 0.5
+
+        def penalty(at, derivatives=0):
+            return boozer_penalty_constraints(
+                problem,
+                place_float64(at, problem.targetlabel),
+                derivatives=derivatives,
+                optimize_G=case.optimize_G,
+                weight_inv_modB=case.weight_inv_modB,
+            )
+
+        base, gradient = (host_array(output) for output in penalty(x, derivatives=1))
+        analytic = gradient @ direction
+        assert_errors_shrink(
+            self,
+            [
+                abs((host_array(penalty(x + step * direction)) - base) / step - analytic)
+                / abs(analytic)
+                for step in np.power(2.0, -np.arange(7, 20))
+            ],
+            0.55,
+            initial=1e9,
+        )
+
+    def test_exact_constraints_jacobian_taylor(self):
+        """The Jacobian of the BoozerExact optimality conditions matches forward
+        differences of ``res`` at shrinking steps, as native
+        ``test_boozer_constrained_jacobian`` checks, with nonzero multipliers."""
+        for name in _EXACT_CONSTRAINT_CASES:
+            with self.subTest(name=name), self.case():
+                self._case_exact_constraints_jacobian_taylor(name)
+
+    def _case_exact_constraints_jacobian_taylor(self, name):
+        """Run one row with case-local objects released before runtime cleanup."""
+        case = _EXACT_CONSTRAINT_CASES[name]
+        setup = _setup(case.surface, case.stellsym, case.label)
+        problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
+        xl = _decision(setup.surface, case.optimize_G, (0.37, -0.23))
+        direction = parity_rng(1).uniform(size=xl.size) - 0.5
+
+        def constraints(at, derivatives=0):
+            return boozer_exact_constraints(
+                problem,
+                place_float64(at, problem.targetlabel),
+                derivatives=derivatives,
+                optimize_G=case.optimize_G,
+            )
+
+        base, jacobian = (
+            host_array(output) for output in constraints(xl, derivatives=1)
+        )
+        analytic = jacobian @ direction
+        assert_errors_shrink(
+            self,
+            [
+                np.linalg.norm(
+                    (host_array(constraints(xl + step * direction)) - base) / step
+                    - analytic
+                )
+                for step in np.power(2.0, -np.arange(7, 20))
+            ],
+            0.55,
+            initial=1e9,
+        )
+
+    def test_coil_derivatives_through_the_taylor_model_match_the_field(self):
+        """Coil derivatives of the residual Jacobian, the penalty gradient and
+        Hessian and the BoozerExact Jacobian, which see the coils through the
+        field's Taylor coefficients, equal those of the same derivatives taken
+        through the field kernel itself."""
+        setup = _setup("tensor", False, "toroidal_flux")
         problem = boozer_problem(
             setup.field, setup.surface, setup.label, setup.target, 5.0
         )
-        x = _decision(setup.surface, True)
-        direction = parity_rng(2).standard_normal(x.size)
-        hessian = host_array(
-            boozer_penalty_constraints(
-                problem,
-                place_float64(x, problem.targetlabel),
-                derivatives=2,
-                optimize_G=True,
-            )[2]
-        )
-        residual_hessians = host_array(
-            jax_boozer_surface_residual(
-                problem,
-                place_float64(x, problem.targetlabel),
-                derivatives=2,
-                optimize_G=True,
-            )[2]
-        )
+        x = place_float64(_decision(setup.surface, False), problem.targetlabel)
+        exact_x = place_float64(_decision(setup.surface, True), problem.targetlabel)
+        rows = boozer_exact_residual_rows(setup.surface)
 
-        def gradient(at):
-            return native.boozer_penalty_constraints_vectorized(
-                at.copy(),
-                derivatives=1,
-                constraint_weight=5.0,
-                optimize_G=True,
+        def penalty(coils, point, derivatives):
+            return boozer_penalty_constraints(
+                replace(problem, coils=coils), point, derivatives=derivatives
+            )
+
+        def residual(coils, point, derivatives):
+            return jax_boozer_surface_residual(
+                replace(problem, coils=coils),
+                point,
+                derivatives=derivatives,
+                optimize_G=False,
                 weight_inv_modB=True,
-            )[1]
+            )
 
-        def jacobian(at):
-            setup.surface.set_dofs(at[:-2])
-            return _outputs(
-                boozer_surface_residual(
-                    setup.surface, at[-2], at[-1], setup.bs, derivatives=1
-                )
-            )[1]
+        def exact(coils, point, derivatives):
+            return boozer_exact_residual(
+                replace(problem, coils=coils), point, rows, derivatives=derivatives
+            )
 
-        for function, analytic in (
-            (gradient, hessian @ direction),
-            (jacobian, residual_hessians @ direction),
-        ):
-            base = function(x)
-            previous_error = 1e9
-            for step in np.power(2.0, -np.arange(7, 20)):
-                error = np.linalg.norm(
-                    (function(x + step * direction) - base) / step - analytic
+        # (Taylor model, through the field kernel) as functions of the coils.
+        pairs = {
+            "residual Jacobian": (
+                lambda coils: residual(coils, x, 1)[1],
+                lambda coils: jax.jacfwd(lambda p: residual(coils, p, 0)[0])(x),
+            ),
+            "penalty gradient": (
+                lambda coils: penalty(coils, x, 1)[1],
+                lambda coils: jax.grad(lambda p: penalty(coils, p, 0))(x),
+            ),
+            "penalty Hessian": (
+                lambda coils: penalty(coils, x, 2)[2],
+                lambda coils: jax.hessian(lambda p: penalty(coils, p, 0))(x),
+            ),
+            "BoozerExact Jacobian": (
+                lambda coils: exact(coils, exact_x, 1)[1],
+                lambda coils: jax.jacfwd(lambda p: exact(coils, p, 0))(exact_x),
+            ),
+        }
+        rng = parity_rng(5)
+        for name, (taylor, through_field) in pairs.items():
+            with self.subTest(name=name):
+                value, pullback = jax.vjp(taylor, problem.coils)
+                expected_value, expected_pullback = jax.vjp(through_field, problem.coils)
+                assert_matches_native(value, host_array(expected_value), name)
+                cotangent = place_float64(
+                    rng.standard_normal(value.shape), problem.targetlabel
                 )
-                self.assertLess(error, 0.55 * previous_error)
-                previous_error = error
-        setup.surface.set_dofs(x[:-2])
+                actual = jax.tree.leaves(pullback(cotangent)[0])
+                expected = jax.tree.leaves(expected_pullback(cotangent)[0])
+                self.assertTrue(len(actual) == len(expected) > 0, "coil leaves")
+                for leaf, (a, e) in enumerate(zip(actual, expected)):
+                    assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
+
+    def test_second_derivatives_nest_forward_over_reverse(self):
+        """The penalty Hessian and the BoozerExact KKT Jacobian compile, at
+        1296 points and 435 unknowns, to temporaries below one
+        ``(npoints, nx, nx)`` float64 array: forward over reverse needs a few
+        ``(npoints, nx)`` tangents, while reverse over forward keeps every
+        forward tangent for its reverse sweep (about 40 such arrays, 75 GiB).
+        The backend's point chunks bound the field kernels' own temporaries."""
+        set_backend("jax", device="cpu")
+        _, _, axis, nfp, bs = get_data("ncsx")
+        nphi = ntheta = 36
+        surface = SurfaceXYZTensorFourier(
+            mpol=8,
+            ntor=8,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=np.linspace(0, 1 / nfp, nphi, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1, ntheta, endpoint=False),
+        )
+        surface.fit_to_curve(axis, 0.1, flip_theta=True)
+        volume = Volume(surface)
+        problem = boozer_problem(
+            JaxBiotSavart(bs.coils), surface, volume, volume.J(), 1.0
+        )
+        x = place_float64(_decision(surface, True), problem.targetlabel)
+        xl = place_float64(_decision(surface, True, (0.3, -0.2)), problem.targetlabel)
+        nx = x.shape[0]
+        bound = nphi * ntheta * nx * nx * 8
+        compiled = {
+            "penalty Hessian": boozer_penalty_constraints.lower(
+                problem, x, derivatives=2, optimize_G=True
+            ).compile(),
+            "KKT Jacobian": boozer_exact_constraints.lower(
+                problem, xl, derivatives=1
+            ).compile(),
+        }
+        for name, program in compiled.items():
+            with self.subTest(name=name):
+                memory = program.memory_analysis()
+                assert memory is not None, f"{name}: no memory analysis"
+                temporaries = memory.temp_size_in_bytes
+                self.assertTrue(
+                    temporaries < bound,
+                    f"{name}: {temporaries} bytes of temporaries >= {bound}",
+                )
