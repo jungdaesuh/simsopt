@@ -904,17 +904,18 @@ std::tuple<Array, Array, Array, Array, Array> GPMO_ArbVec_backtracking(
                     // Skip if dipole has not been placed
                     if (Gamma_complement(cj)) continue;
 
-                    // Evaluate angle between moments; save if greatest so far 
-                    double cos_angle = 0;
-                    for (int l = 0; l < 3; ++l) {
-                        cos_angle += x(j, l) * x(cj, l);
-                    }
+                    // Evaluate angle between moments; save if greatest so far.
                     // At exactly pi only an exact negation is antiparallel;
-                    // the rounded dot above is build-dependent there.
+                    // a rounded dot product is build-dependent there.
+                    double cos_angle = 0;
                     if (thresh_angle == M_PI) {
                         bool antiparallel = (x(j, 0) == -x(cj, 0)) && (x(j, 1) == -x(cj, 1))
                             && (x(j, 2) == -x(cj, 2));
                         cos_angle = antiparallel ? -1.0 : 1.0;
+                    } else {
+                        for (int l = 0; l < 3; ++l) {
+                            cos_angle += x(j, l) * x(cj, l);
+                        }
                     }
                     if (cos_angle < min_cos_angle) {
                         min_cos_angle = cos_angle;

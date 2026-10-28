@@ -53,7 +53,7 @@ class BoozerRadialFourierTransformTests(unittest.TestCase):
         with np.load(output) as loaded:
             return {key: np.array(loaded[key]) for key in loaded.files}
 
-    def test_transforms_match_a_serial_reference_with_four_threads(self):
+    def test_transforms_match_a_serial_reference_with_one_and_four_threads(self):
         """Even and odd transforms match the serial reference with one and four threads."""
         rng = np.random.default_rng(1)
         xm, xn = _modes()
