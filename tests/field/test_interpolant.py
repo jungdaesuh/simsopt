@@ -120,14 +120,19 @@ class Testing(unittest.TestCase):
         interpolant_strict.interpolate_batch(fun)
 
         center = np.array([0.5 * (lo + hi) for lo, hi, _ in ranges])
+
+        def point_at(axis, value):
+            """The domain center with coordinate ``axis`` set to ``value``, as a (1, 3) array."""
+            xyz = center[None, :].copy()
+            xyz[0, axis] = value
+            return xyz
+
         for axis, (lo, hi, n) in enumerate(ranges):
             cell = (hi - lo) / n
             for value in (lo - 0.5 * cell, lo - 1.5 * cell, hi + 0.5 * cell,
                           np.nan, np.inf, -np.inf, 1e300, -1e300):
                 with self.subTest(axis=axis, value=value):
-                    xyz = center.copy()
-                    xyz[axis] = value
-                    xyz = xyz[None, :].copy()
+                    xyz = point_at(axis, value)
                     fhxyz = np.ones((1, dim))
                     interpolant_ok.evaluate_batch(xyz, fhxyz)
                     np.testing.assert_array_equal(fhxyz, 1.)
@@ -138,9 +143,7 @@ class Testing(unittest.TestCase):
         for axis, (lo, hi, n) in enumerate(ranges):
             for value in (lo - 1e-14, hi + 1e-14):
                 with self.subTest(axis=axis, value=value):
-                    xyz = center.copy()
-                    xyz[axis] = value
-                    xyz = xyz[None, :].copy()
+                    xyz = point_at(axis, value)
                     expected = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
                     for interpolant in (interpolant_ok, interpolant_strict):
                         fhxyz = np.zeros((1, dim))
