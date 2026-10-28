@@ -609,6 +609,12 @@ _STPMX = 1e10
 _EPSMCH = 2.220446049250313e-16
 _FLOAT_EPS = float(np.finfo(float).eps)
 
+# Steps of formt's k-sum per loop trip. Rolled, every step pays a GPU launch and
+# loop overhead; fully unrolled, the graph and its compile time grow with
+# ``maxcor``. At BoozerLS's ``maxcor`` 200, 25 keeps nearly all of the unrolled
+# warm speed and the rolled solver's compile time.
+_FORMT_UNROLL = 25
+
 # What the pending evaluation is for: the start or a line-search trial; or the end.
 _LB_INIT, _LB_SEARCH, _LB_DONE = range(3)
 
@@ -774,18 +780,22 @@ def _formt_failed(memory: _LbfgsbMemory):
     definite (``L`` and ``D`` the strictly lower part and the diagonal of
     ``sy``). Each term ``sy_ik sy_jk / sy_kk``, k < min(i, j), is multiplied,
     divided and added in order of k, as in SciPy's C, so tiny terms underflow
-    as there (whether T keeps its last pivot can turn on it). (Without bounds
-    T is not used otherwise.)"""
+    as there (whether T keeps its last pivot can turn on it). The sum runs up
+    to ``_FORMT_UNROLL`` steps per loop trip. Each term's mask (k < min(i, j)
+    among held rows) depends on ``col`` through ``held``: a mask from k alone
+    is a constant wherever the loop is fully unrolled, and XLA hoists such
+    constants out of the solver's loop as ``maxcor`` matrices of scratch.
+    (Without bounds T is not used otherwise.)"""
     held, pairs, eye = _held(memory)
     D = jnp.where(held, jnp.diagonal(memory.sy), 1.0)
     L = jnp.where(pairs, jnp.tril(memory.sy, -1), 0.0)
     index = jnp.arange(memory.sy.shape[0])
-    first_index = jnp.minimum(index[:, None], index[None, :])
 
     def add_term(k, ddum):
-        return ddum + jnp.where(k < first_index, jnp.outer(L[:, k], L[:, k]) / D[k], 0.0)
+        rows = held & (index > k)
+        return ddum + jnp.where(rows[:, None] & rows, jnp.outer(L[:, k], L[:, k]) / D[k], 0.0)
 
-    ddum = lax.fori_loop(0, memory.sy.shape[0], add_term, jnp.zeros_like(memory.sy))
+    ddum = lax.fori_loop(0, memory.sy.shape[0], add_term, jnp.zeros_like(memory.sy), unroll=_FORMT_UNROLL)
     SS = jnp.triu(memory.ss) + jnp.triu(memory.ss, 1).T
     T = jnp.where(pairs, ddum + memory.theta * SS, eye)
     return _cholesky_failed(T)[1]
