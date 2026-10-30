@@ -23,7 +23,6 @@ import numpy as np
 from simsopt_jax.backend import register_backend_cache_clear
 from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
-from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 from .field import (
     grouped_biot_savart_A_from_spec,
@@ -326,8 +325,7 @@ def qfm_residual(spec: QfmSpec) -> jax.Array:
 
     Returns:
         jax.Array: Dimensionless scalar shape () ratio; zero fields or normals remain nonfinite."""
-    inputs = snapshot_host_tree((spec,))
-    return _jitted_qfm_residual(*inputs)
+    return _jitted_qfm_residual(spec)
 
 
 def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
@@ -335,8 +333,7 @@ def qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
 
     Returns:
         tuple[jax.Array, jax.Array]: Dimensionless value shape () and full surface-coefficient gradient shape (ndofs,), in inverse meters, including fixed DOFs."""
-    inputs = snapshot_host_tree((spec,))
-    return _jitted_qfm_residual_value_and_grad(*inputs)
+    return _jitted_qfm_residual_value_and_grad(spec)
 
 
 def qfm_label(spec: QfmLabelSpec) -> jax.Array:
@@ -347,8 +344,7 @@ def qfm_label(spec: QfmLabelSpec) -> jax.Array:
 
     Returns:
         jax.Array: Scalar shape () volume in cubic meters, area in square meters, or toroidal flux in webers."""
-    inputs = snapshot_host_tree((spec,))
-    return _jitted_qfm_label(*inputs)
+    return _jitted_qfm_label(spec)
 
 
 def qfm_label_constraint(
@@ -363,8 +359,7 @@ def qfm_label_constraint(
 
     Returns:
         jax.Array: Scalar shape () squared error in squared label units."""
-    inputs = snapshot_host_tree((spec, targetlabel, label_value))
-    return _jitted_qfm_label_constraint(*inputs)
+    return _jitted_qfm_label_constraint(spec, targetlabel, label_value)
 
 
 def qfm_label_constraint_value_and_grad(
@@ -374,8 +369,7 @@ def qfm_label_constraint_value_and_grad(
 
     Returns:
         tuple[jax.Array, jax.Array]: Scalar squared error shape () and full coefficient gradient shape (ndofs,), in squared label units per meter."""
-    inputs = snapshot_host_tree((spec, targetlabel, label_value))
-    return _jitted_qfm_label_constraint_value_and_grad(*inputs)
+    return _jitted_qfm_label_constraint_value_and_grad(spec, targetlabel, label_value)
 
 
 def qfm_penalty_constraints(
@@ -393,8 +387,7 @@ def qfm_penalty_constraints(
 
     Returns:
         jax.Array: Scalar shape () native scalarized objective."""
-    inputs = snapshot_host_tree((spec, label, targetlabel, constraint_weight, label_value))
-    return _jitted_qfm_penalty_constraints(*inputs)
+    return _jitted_qfm_penalty_constraints(spec, label, targetlabel, constraint_weight, label_value)
 
 
 def qfm_penalty_constraints_value_and_grad(
@@ -405,8 +398,7 @@ def qfm_penalty_constraints_value_and_grad(
 
     Returns:
         tuple[jax.Array, jax.Array]: Objective shape () and full surface-coefficient gradient shape (ndofs,), including fixed DOFs; units follow the native scalarization."""
-    inputs = snapshot_host_tree((spec, label, targetlabel, constraint_weight, label_value))
-    return _jitted_qfm_penalty_constraints_value_and_grad(*inputs)
+    return _jitted_qfm_penalty_constraints_value_and_grad(spec, label, targetlabel, constraint_weight, label_value)
 
 
 class _CompiledFunctionCache(Protocol):
