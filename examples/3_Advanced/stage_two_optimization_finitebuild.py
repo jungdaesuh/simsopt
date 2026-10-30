@@ -246,9 +246,8 @@ print("""
 """)
 
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 400, 'gtol': 1e-20, 'ftol': 1e-20}, tol=1e-20)
-
-if args.fused:
-    JF.x = res.x
+# The minimizer's last evaluation need not be at its result, so the outputs below use res.x.
+JF.x = res.x
 curves_to_vtk(curves_fb, OUT_DIR + f"curves_opt_fb_{config_str}")
 pointData = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + f"surf_opt_fb_{config_str}", extra_data=pointData)

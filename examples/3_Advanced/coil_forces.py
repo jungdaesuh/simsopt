@@ -307,8 +307,8 @@ dofs = cast(np.ndarray, JF.x)
 print(f"Optimization with FORCE_WEIGHT={FORCE_WEIGHT.value} and LENGTH_WEIGHT={LENGTH_WEIGHT.value}")
 # print("INITIAL OPTIMIZATION")
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+# The minimizer's last evaluation need not be at its result, so the outputs below use res.x.
+JF.x = res.x
 coils_to_vtk(coils, OUT_DIR + "coils_opt_short", close=True)
 
 pointData_surf = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
@@ -323,8 +323,7 @@ if args.fused:
     problem = stage_two_problem()
 # print("OPTIMIZATION WITH REDUCED LENGTH PENALTY\n")
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+JF.x = res.x
 coils_to_vtk(coils, OUT_DIR + "coils_opt_force", close=True)
 pointData_surf = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + f"surf_opt_force_WEIGHT={FORCE_WEIGHT.value:e}_LWEIGHT={LENGTH_WEIGHT.value*10:e}", extra_data=pointData_surf)
@@ -333,7 +332,6 @@ s.to_vtk(OUT_DIR + f"surf_opt_force_WEIGHT={FORCE_WEIGHT.value:e}_LWEIGHT={LENGT
 bs.save(OUT_DIR + "biot_savart_opt.json")
 
 #Print out final important info:
-JF.x = res.x if args.fused else dofs
 J = JF.J()
 grad = JF.dJ()
 jf = Jf.J()
