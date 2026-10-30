@@ -15,6 +15,7 @@ with optional_jax_imports():
         biot_savart_dB_by_dX,
     )
     from simsopt_jax.core.curve_xyz_fourier import _constant_row
+    from simsopt_jax.core.reductions import pairwise_sum_axis
 
 
 import numpy as np
@@ -74,3 +75,17 @@ class TestKernelNumericHelpers(JaxTestCase):
 
         np.testing.assert_allclose(np.asarray(ones_row), np.ones((1, 3)))
         np.testing.assert_allclose(np.asarray(zeros_row), np.zeros((1, 3)))
+
+    def test_pairwise_sum_padding_reads_no_values(self):
+        """Power-of-two padding is exact zeros, so a quadrature sum keeps IEEE
+        semantics: an infinite term gives an infinite sum, and finite terms whose
+        plain sum overflows do not turn the padding into NaN."""
+        rows = [
+            ((np.inf, 1.0, 1.0), np.inf),
+            ((1.0e308, 1.0e308, -1.0e308), np.inf),
+            ((1.0e308, -1.0e308, 1.0), 1.0),
+        ]
+        for values, expected in rows:
+            with self.subTest(values=values):
+                total = pairwise_sum_axis(jnp.asarray(values), axis=0)
+                self.assertEqual(float(total), expected)
