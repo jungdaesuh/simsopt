@@ -10,8 +10,10 @@ explicit transfers, and the penalty with its gradient runs as one jitted JAX
 program. Curvature is computed from ``gammadash`` and ``gammadashdash`` in that
 program rather than by the curve. Distance penalties use the native C++
 candidate search, then evaluate every point pair within each selected pair;
-only selected pairs enter the program, gathered into batches padded to
-power-of-two lengths, so a sparse search costs little and an empty one nothing.
+only selected pairs enter the point-pair distance computation, gathered into
+batches padded to power-of-two lengths. Placing and differentiating the full
+curve geometry still costs O(curves x quadrature points); without a candidate
+no penalty program runs and no geometry is placed.
 For C++ curves (and their rotated copies) these paths make no
 implicit transfer; JAX-backed native curves (``JaxCurve`` subclasses) still
 compute their own geometry and VJPs with implicit transfers.
@@ -149,13 +151,14 @@ def _distance_candidate_key(curves, minimum_distance) -> tuple[object, ...]:
     )
 
 
-def _distance_operand_key(curves, candidate_key: tuple[object, ...]) -> tuple[object, ...]:
-    """Invalidate placed operands when geometry, policy or default-device scope changes.
+def _distance_operand_key(curves, candidates: _DistanceCandidates) -> tuple[object, ...]:
+    """Invalidate placed operands when candidates, geometry, policy or default-device scope change.
 
     Backend dtypes remains the placement owner; recording the scope prevents
     cross-scope reuse without duplicating its device-selection rules.
     """
-    return candidate_key + (
+    return candidates.key + (
+        candidates.candidates,
         get_backend_policy(), get_runtime_jax_device(), jax.config.values["jax_default_device"],
         tuple(_array_snapshot_key(curve.gammadash()) for curve in curves),
     )
@@ -321,19 +324,30 @@ class JaxMeanSquaredCurvature(Optimizable):
 
 @dataclass(frozen=True)
 class _DistanceCandidates:
-    """Host-only native candidate data, independent of JAX operand placement."""
+    """Host-only native candidate data, independent of JAX operand placement.
+
+    ``candidates`` is the native search's result for the state ``key``, or the
+    pairs a caller assigned at that state.
+    """
 
     key: tuple[object, ...]
     candidates: tuple[tuple[int, int], ...]
+
+
+def _assigned_candidates(key: tuple[object, ...], pairs) -> _DistanceCandidates | None:
+    """Native's ``candidates`` assignment at the state ``key``: None reruns the search."""
+    return None if pairs is None else _DistanceCandidates(key, tuple(tuple(pair) for pair in pairs))
 
 
 @dataclass(frozen=True)
 class _DistanceOperands:
     """One exact-state set of placed operands for the candidates of one search.
 
-    ``batch_classes`` is the static (hashable) part, one entry per batch: the
-    quadrature classes its rows index. Batch lengths are powers of two, so the
-    compiled programs depend on the candidates only through O(log) shapes.
+    ``batch_classes`` is the static (hashable) part, one entry per batch in
+    sorted order: the quadrature classes its rows index. Rows are dynamic and
+    batch lengths are powers of two, so the compiled programs depend on the
+    candidates only through which class pairs occur and each batch's
+    power-of-two length: with one quadrature class, O(log(candidates)) programs.
     """
 
     key: tuple[object, ...]
@@ -367,27 +381,31 @@ def _padded_candidate_batches(groups):
 
     A group of ``n`` rows is padded to ``2**ceil(log2(n))`` rows that repeat
     row 0 and are flagged invalid, so the penalty kernel gives them zero value
-    and zero gradient. ``simsoptpp`` returns candidates in no fixed order;
+    and, for finite geometry, zero gradient. Padding evaluates up to about
+    twice the ``n`` rows. ``simsoptpp`` returns candidates in no fixed order;
     callers group them sorted, so equal candidate sets give bitwise-equal sums.
+    Batches follow the sorted group keys, so candidate sets with the same keys
+    and padded lengths share one static key and one compiled program.
 
     Args:
-        groups (dict): maps a hashable batch key to a non-empty list of row
-            tuples of one length ``k``, in first-appearance order.
+        groups (dict): maps a sortable batch key to a non-empty list of row
+            tuples of one length ``k``.
 
     Returns:
-        tuple: ``(keys, batches)``: the group keys in order, and per group
-            ``k`` int32 index arrays and one bool validity array, each of
-            shape (padded length,).
+        tuple: ``(keys, batches)``: the sorted group keys, and per group ``k``
+            int32 index arrays and one bool validity array, each of shape
+            (padded length,).
     """
+    keys = tuple(sorted(groups))
     batches = []
-    for rows in groups.values():
+    for rows in (groups[key] for key in keys):
         padded = np.zeros((1 << (len(rows) - 1).bit_length(), len(rows[0])), dtype=np.int32)
         padded[: len(rows)] = rows
         batches.append((
             *(_as_jax_int32(column) for column in padded.T),
             _flags(np.arange(padded.shape[0]) < len(rows)),
         ))
-    return tuple(groups), tuple(batches)
+    return keys, tuple(batches)
 
 
 def _zero_curve_derivative(curves):
@@ -459,11 +477,15 @@ class JaxCurveCurveDistance(Optimizable):
 
     with :math:`n_i`, :math:`n_j` the numbers of sampled points. As in the native class, only
     pairs the native candidate search finds within :math:`d_{\min}` are evaluated; the others
-    contribute zero. Only candidate pairs enter the compiled program, so its work and memory
-    scale with the number of candidates, and no candidate means no JAX work. ``candidates``,
+    contribute zero. Only candidate pairs enter the point-pair distance computation, so its
+    O(:math:`n_i n_j`) work and memory scale with the number of candidates (padded to a power
+    of two per pair of quadrature counts). The placed geometry, its transfers and the gradient
+    pull-back cover every curve, O(curves x quadrature points). Without a candidate the adapter
+    places nothing and runs no penalty program; JAX-backed curves still evaluate their own
+    geometry and VJPs. ``candidates``,
     ``compute_candidates()`` and ``shortest_distance_among_candidates()`` are native's; the
-    search is cached per exact geometry and settings, so ``candidates`` is always current and
-    read-only.
+    search is cached per exact geometry and settings, so ``candidates`` is always current
+    unless assigned (see ``candidates``).
 
     Args:
         curves (list[Curve]): all curves, including symmetry copies.
@@ -493,10 +515,13 @@ class JaxCurveCurveDistance(Optimizable):
             samples, self.minimum_distance, self.num_basecurves
         )
 
-    def _candidate_snapshot(self) -> _DistanceCandidates:
-        key = _distance_candidate_key(self.curves, self.minimum_distance) + (
+    def _candidate_key(self) -> tuple[object, ...]:
+        return _distance_candidate_key(self.curves, self.minimum_distance) + (
             self.num_basecurves, self.downsample,
         )
+
+    def _candidate_snapshot(self) -> _DistanceCandidates:
+        key = self._candidate_key()
         cached = self._candidate_cache
         if cached is not None and cached.key == key:
             return cached
@@ -506,11 +531,15 @@ class JaxCurveCurveDistance(Optimizable):
         return snapshot
 
     def _snapshot(self) -> _DistanceOperands | None:
-        """Placed operands of the candidate pairs, or None without a candidate."""
+        """Placed operands of the candidate pairs, or None without a candidate.
+
+        Without a candidate the operands of an earlier state are released too.
+        """
         candidate_snapshot = self._candidate_snapshot()
         if not candidate_snapshot.candidates:
+            self._distance_snapshot = None
             return None
-        key = _distance_operand_key(self.curves, candidate_snapshot.key)
+        key = _distance_operand_key(self.curves, candidate_snapshot)
         cached = self._distance_snapshot
         if cached is not None and cached.key == key:
             return cached
@@ -531,13 +560,21 @@ class JaxCurveCurveDistance(Optimizable):
 
     @property
     def candidates(self):
-        """The native candidate pairs at the current state.
+        """The candidate pairs at the current state, searched when not yet known.
+
+        Assigning a list of pairs makes ``J``, ``dJ`` and the distance queries use it, as
+        in native, until the curve geometry or the settings change; assigning None
+        reruns the search.
 
         Returns:
-            list[tuple[int, int]]: curve index pairs ``(i, j)`` with some sampled points closer
-                than ``minimum_distance``, in no fixed order.
+            list[tuple[int, int]]: a copy of the curve index pairs ``(i, j)`` with some
+                sampled points closer than ``minimum_distance``, in no fixed order.
         """
         return list(self._candidate_snapshot().candidates)
+
+    @candidates.setter
+    def candidates(self, pairs):
+        self._candidate_cache = _assigned_candidates(self._candidate_key(), pairs)
 
     def compute_candidates(self):
         """Run the native candidate search unless its result for the current state is cached."""
@@ -647,10 +684,13 @@ class JaxCurveSurfaceDistance(Optimizable):
     and :math:`d_{\min}` is ``minimum_distance``. The surface element uses the unnormalized
     normal :math:`\mathbf{N}`, :math:`ds = |\mathbf{N}|~d\varphi~d\theta`, and each integral is
     the mean over the quadrature points. As in the native class, only curves the native
-    candidate search finds within :math:`d_{\min}` are evaluated; only they enter the compiled
-    program, and no candidate means no JAX work. ``candidates``, ``compute_candidates()`` and
+    candidate search finds within :math:`d_{\min}` are evaluated: only they enter the
+    point-pair distance computation, while the placed curve geometry, its transfers and the
+    gradient pull-back cover every curve. Without a candidate the adapter places nothing and
+    runs no penalty program; JAX-backed curves still evaluate their own geometry and VJPs.
+    ``candidates``, ``compute_candidates()`` and
     ``shortest_distance_among_candidates()`` are native's; the search is cached per exact
-    geometry, so ``candidates`` is always current and read-only.
+    geometry, so ``candidates`` is always current unless assigned (see ``candidates``).
 
     The surface is not a dependency: only curve DOFs receive derivatives, and the surface
     geometry is read at each evaluation.
@@ -675,12 +715,15 @@ class JaxCurveSurfaceDistance(Optimizable):
             [curve.gamma() for curve in self.curves], [surface_points], self.minimum_distance
         )
 
-    def _candidate_snapshot(self) -> _DistanceCandidates:
-        key = _distance_candidate_key(self.curves, self.minimum_distance) + (
+    def _candidate_key(self) -> tuple[object, ...]:
+        return _distance_candidate_key(self.curves, self.minimum_distance) + (
             _array_snapshot_key(self.surface.gamma()),
             _array_snapshot_key(self.surface.quadpoints_phi),
             _array_snapshot_key(self.surface.quadpoints_theta),
         )
+
+    def _candidate_snapshot(self) -> _DistanceCandidates:
+        key = self._candidate_key()
         cached = self._candidate_cache
         if cached is not None and cached.key == key:
             return cached
@@ -691,11 +734,15 @@ class JaxCurveSurfaceDistance(Optimizable):
         return snapshot
 
     def _snapshot(self) -> _DistanceOperands | None:
-        """Placed operands of the candidate curves, or None without a candidate."""
+        """Placed operands of the candidate curves, or None without a candidate.
+
+        Without a candidate the operands of an earlier state are released too.
+        """
         candidate_snapshot = self._candidate_snapshot()
         if not candidate_snapshot.candidates:
+            self._distance_snapshot = None
             return None
-        key = _distance_operand_key(self.curves, candidate_snapshot.key) + (
+        key = _distance_operand_key(self.curves, candidate_snapshot) + (
             _array_snapshot_key(self.surface.normal()),
         )
         cached = self._distance_snapshot
@@ -723,13 +770,22 @@ class JaxCurveSurfaceDistance(Optimizable):
 
     @property
     def candidates(self):
-        """The native candidate curves at the current state.
+        """The candidate curves at the current state, searched when not yet known.
+
+        Assigning a list of pairs ``(i, 0)`` makes ``J``, ``dJ`` and the distance queries
+        use it, as in native, until the curve or surface geometry or the threshold
+        change; assigning None reruns the search.
 
         Returns:
-            list[tuple[int, int]]: pairs ``(i, 0)`` of curve ``i`` with some sampled point closer
-                than ``minimum_distance`` to the surface, in no fixed order.
+            list[tuple[int, int]]: a copy of the pairs ``(i, 0)`` of curve ``i`` with some
+                sampled point closer than ``minimum_distance`` to the surface, in no fixed
+                order.
         """
         return list(self._candidate_snapshot().candidates)
+
+    @candidates.setter
+    def candidates(self, pairs):
+        self._candidate_cache = _assigned_candidates(self._candidate_key(), pairs)
 
     def compute_candidates(self):
         """Run the native candidate search unless its result for the current state is cached."""

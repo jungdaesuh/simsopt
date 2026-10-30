@@ -40,6 +40,7 @@ from simsopt.util import in_github_actions
 
 try:
     import jax
+    from simsopt_jax.backend.dtypes import as_jax_float64
     from simsopt_jax.backend.jit import jit
     from simsopt_jax.objectives import StageTwoObjectiveConfig, fused_stage_two_objective, make_stage_two_problem
     from simsopt_jax_adapters.geo import (
@@ -190,8 +191,20 @@ if args.fused:
 
 
 def fused_value_and_grad(dofs):
-    """Evaluate the frozen problem and return a host gradient in composite DOF order."""
-    value, gradient = jax.device_get(value_and_grad(problem, dofs[field_order]))
+    """Evaluate the frozen fused problem at composite DOFs.
+
+    The DOFs are placed on the device explicitly, so the evaluation also runs
+    under ``SIMSOPT_JAX_TRANSFER_GUARD=disallow``.
+
+    Args:
+        dofs: Array of shape (ndofs,), free DOFs of ``JF`` in its DOF order, in native
+            geometry (m) and current (A) units.
+
+    Returns:
+        tuple: ``(value, gradient)``: the objective as a float, in the units of ``JF``, and
+            its host gradient, of shape (ndofs,), in ``JF``'s DOF order.
+    """
+    value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(dofs[field_order])))
     return float(value), gradient[objective_order]
 
 
