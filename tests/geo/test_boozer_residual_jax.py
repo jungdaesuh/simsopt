@@ -172,8 +172,16 @@ def _fitted_surface(
     Returns:
         SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier: The
         fitted surface; its DOFs are the unique least-squares solution.
+
+    Raises:
+        AssertionError: If the fit grid leaves a DOF undetermined, so that the
+            fitted DOFs would depend on which native build solves the fit.
     """
     surface = _surface(kind, stellsym, nfp, clamped, fit_grid=True)
+    ndofs = surface.get_dofs().size
+    rank = np.linalg.matrix_rank(surface.dgamma_by_dcoeff().reshape(-1, ndofs))
+    if rank != ndofs:
+        raise AssertionError(f"{kind} fit grid determines {rank} of {ndofs} DOFs.")
     surface.fit_to_curve(axis, 0.1, flip_theta=True)
     return surface
 
@@ -370,19 +378,6 @@ def _assert_every_formulation_native(
 
 
 class TestBoozerResidualJax(JaxTestCase):
-    def test_fixture_fit_determines_every_surface_dof(self):
-        """Every fixture surface's fit has a full-rank least-squares matrix, so
-        its DOFs do not depend on which native build solves it."""
-        _, _, axis, nfp, _ = get_data("ncsx")
-        for kind in _SURFACE_CLASSES:
-            for stellsym in (True, False):
-                for clamped in (False, True) if kind == "tensor" else (False,):
-                    with self.subTest(kind=kind, stellsym=stellsym, clamped=clamped):
-                        surface = _fitted_surface(kind, stellsym, nfp, axis, clamped)
-                        ndofs = surface.get_dofs().size
-                        matrix = surface.dgamma_by_dcoeff().reshape(-1, ndofs)
-                        self.assertEqual(np.linalg.matrix_rank(matrix), ndofs)
-
     def test_surface_residual_matches_native(self):
         """Boozer residuals, Jacobians and Hessians agree with native formulations."""
         for name in _RESIDUAL_CASES:
