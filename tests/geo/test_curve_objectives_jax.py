@@ -652,6 +652,30 @@ class TestCurveObjectivesJax(JaxTestCase):
                 )
                 self.assertEqual(_point_pair_distance_shapes(surface_adapter), [(1, 20, 64)])
 
+    def test_distance_programs_are_reused_by_candidate_sets_of_equal_shape(self):
+        """Candidate sets with the same quadrature-class pairs and padded batch lengths share
+        the compiled J and dJ programs, whichever rows they hold and in whichever order the
+        class pairs first occur.
+
+        Curves 0 to 5 have 20, 24, 24, 20, 20 and 24 points. The first layout raises curve 3
+        above curve 0 and curve 5 above curve 1, the second curve 2 above curve 1 and curve 4
+        above curve 3: one 20-point and one 24-point pair each, found in opposite orders.
+        """
+        counts = (20, 24, 24, 20, 20, 24)
+        programs = (curve_objectives._curve_pair_penalty, curve_objectives._curve_pair_penalty_grad)
+        program_counts = []
+        for close in (((3, 0), (5, 1)), ((2, 1), (4, 3))):
+            above = dict(close)
+            curves = [
+                _circle((float(above.get(k, k)), 0.0, 0.05 if k in above else 0.0), 0.2, numquadpoints=count)
+                for k, count in enumerate(counts)
+            ]
+            native, adapter = CurveCurveDistance(curves, 0.1), JaxCurveCurveDistance(curves, 0.1)
+            _assert_matches_native_including_nans("CurveCurveDistance", native, adapter, active=True)
+            self.assertEqual(sorted(adapter.candidates), sorted(close))
+            program_counts.append([program._cache_size() for program in programs])
+        self.assertEqual(program_counts[1], program_counts[0])
+
     def test_distance_terms_without_candidates_do_no_jax_work(self):
         """With no native candidate the value is 0 and the gradient native's zeros, without
         placing geometry or running a JAX program."""

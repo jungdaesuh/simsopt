@@ -331,9 +331,11 @@ class _DistanceCandidates:
 class _DistanceOperands:
     """One exact-state set of placed operands for the candidates of one search.
 
-    ``batch_classes`` is the static (hashable) part, one entry per batch: the
-    quadrature classes its rows index. Batch lengths are powers of two, so the
-    compiled programs depend on the candidates only through O(log) shapes.
+    ``batch_classes`` is the static (hashable) part, one entry per batch in
+    sorted order: the quadrature classes its rows index. Rows are dynamic and
+    batch lengths are powers of two, so the compiled programs depend on the
+    candidates only through which class pairs occur and each batch's
+    power-of-two length: with one quadrature class, O(log(candidates)) programs.
     """
 
     key: tuple[object, ...]
@@ -369,25 +371,28 @@ def _padded_candidate_batches(groups):
     row 0 and are flagged invalid, so the penalty kernel gives them zero value
     and zero gradient. ``simsoptpp`` returns candidates in no fixed order;
     callers group them sorted, so equal candidate sets give bitwise-equal sums.
+    Batches follow the sorted group keys, so candidate sets with the same keys
+    and padded lengths share one static key and one compiled program.
 
     Args:
-        groups (dict): maps a hashable batch key to a non-empty list of row
-            tuples of one length ``k``, in first-appearance order.
+        groups (dict): maps a sortable batch key to a non-empty list of row
+            tuples of one length ``k``.
 
     Returns:
-        tuple: ``(keys, batches)``: the group keys in order, and per group
-            ``k`` int32 index arrays and one bool validity array, each of
-            shape (padded length,).
+        tuple: ``(keys, batches)``: the sorted group keys, and per group ``k``
+            int32 index arrays and one bool validity array, each of shape
+            (padded length,).
     """
+    keys = tuple(sorted(groups))
     batches = []
-    for rows in groups.values():
+    for rows in (groups[key] for key in keys):
         padded = np.zeros((1 << (len(rows) - 1).bit_length(), len(rows[0])), dtype=np.int32)
         padded[: len(rows)] = rows
         batches.append((
             *(_as_jax_int32(column) for column in padded.T),
             _flags(np.arange(padded.shape[0]) < len(rows)),
         ))
-    return tuple(groups), tuple(batches)
+    return keys, tuple(batches)
 
 
 def _zero_curve_derivative(curves):
