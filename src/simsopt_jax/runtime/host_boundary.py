@@ -116,6 +116,8 @@ def snapshot_host_tree(value: _TreeT, *, dtype=None) -> _TreeT:
 
     Device arrays and tracers pass through unchanged. A private contiguous
     NumPy copy prevents both CPU buffer aliasing and delayed transfer reads.
+    The copy keeps a NumPy subclass, so JAX still sees, for example, a masked
+    array's mask and rejects it as it rejects the original.
 
     Args:
         value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
@@ -137,7 +139,7 @@ def snapshot_host_tree(value: _TreeT, *, dtype=None) -> _TreeT:
             return leaf
         if isinstance(leaf, np.ndarray):
             leaf_dtype = leaf.dtype if dtype is None else dtype
-            return np.array(leaf, dtype=leaf_dtype, copy=True, order="C")
+            return np.array(leaf, dtype=leaf_dtype, copy=True, order="C", subok=True)
         if dtype is not None and (isinstance(leaf, np.generic) or np.isscalar(leaf)):
             return np.asarray(leaf, dtype=dtype)
         return leaf
