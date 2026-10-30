@@ -97,6 +97,10 @@ def _recording_copy(copied: list, value):
 class CopyingJitTests(JaxTestCase):
     def test_numpy_input_overwritten_after_the_call_keeps_the_result(self):
         """A result held across an in-place overwrite of its NumPy input keeps the old value."""
+        if jax.default_backend() == "cpu" and not jax.config.values[
+            "jax_cpu_enable_async_dispatch"
+        ]:
+            self.skipTest("synchronous CPU dispatch: no overwrite can race the call")
         slow = jit(lambda m: jnp.linalg.matrix_power(m, _GATE_POWER))
         eye = jnp.eye(_GATE_SIZE)
         for name, fun, call in _PASSING_STYLES:
