@@ -15,6 +15,7 @@ import numpy as np
 
 from simsopt._core.derivative import Derivative
 from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
+from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import create_equally_spaced_curves
 from simsopt.geo.curveperturbed import (
     CurvePerturbed,
@@ -22,6 +23,8 @@ from simsopt.geo.curveperturbed import (
     PerturbationSample,
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt.geo.finitebuild import CurveFilament
+from simsopt.geo.framedcurve import FramedCurveCentroid, FrameRotation
 
 
 _POINTS = np.array([[0.8, 0.1, 0.2], [1.1, -0.2, -0.1]])
@@ -216,3 +219,41 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
             field.coil_dof_extraction_spec() is spec,
             "field.coil_dof_extraction_spec() is spec",
         )
+
+    def test_notified_non_dof_parameter_changes_match_native(self):
+        """A changed current scale, filament offset or frame-rotation scale, once
+        notified, reaches the adapter's B and B pullback as it reaches native."""
+        for parameter in ("current_scale", "filament_offset", "rotation_scale"):
+            with self.subTest(parameter=parameter), self.case():
+                self._case_notified_non_dof_parameter_changes_match_native(parameter)
+
+    def _case_notified_non_dof_parameter_changes_match_native(self, parameter):
+        """Run one row with case-local objects released before runtime cleanup."""
+        curves, _ = _coils()
+        rotation = FrameRotation(curves[0].quadpoints, 1)
+        rotation.x = np.array([0.2, -0.1, 0.05])
+        filament = CurveFilament(FramedCurveCentroid(curves[0], rotation), 0.01, 0.02)
+        current = ScaledCurrent(Current(1e5), 2.0)
+        coils = [Coil(filament, current)]
+        field = backend.JaxBiotSavart(coils).set_points(_POINTS)
+        field.B()
+        if parameter == "current_scale":
+            current.scale = 3.0
+            current.set_recompute_flag()
+        elif parameter == "filament_offset":
+            filament.dn, filament.db = 0.03, -0.01
+            filament.set_recompute_flag()
+        else:
+            rotation.scale = 0.5
+            rotation.set_recompute_flag()
+        native = BiotSavart(coils).set_points(_POINTS)
+        np.testing.assert_allclose(
+            np.asarray(field.B()), native.B(), rtol=1e-12, atol=1e-14
+        )
+        cotangent = np.arange(6, dtype=float).reshape(2, 3) / 7
+        expected = cast(Derivative, native.B_vjp(cotangent))
+        actual = field.B_vjp(cotangent)
+        for owner in expected.data:
+            np.testing.assert_allclose(
+                actual.data[owner], expected.data[owner], rtol=1e-11, atol=1e-13
+            )

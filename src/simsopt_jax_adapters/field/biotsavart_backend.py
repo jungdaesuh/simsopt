@@ -67,6 +67,7 @@ from simsopt_jax.core.specs import (
 )
 from simsopt_jax_adapters.field._coil_graph import (
     _unwrap_coil_curve_and_current_objects,
+    coil_graph_parameters,
 )
 from simsopt_jax_adapters.geo.curve_contract import _optimizable_dof_layout
 from simsopt_jax_adapters.geo.curve_specs import (
@@ -776,7 +777,9 @@ class JaxBiotSavart(Optimizable):
             self._fixed_dofs_maybe_changed = False
 
     def _current_captured_coil_state_fingerprint(self) -> tuple[bytes, ...]:
-        """Fixed coordinates, fingerprinted once at the first read after a DOF notification."""
+        """Fixed coordinates and non-DOF coil parameters (current scales, filament
+        offsets, frame-rotation scales), fingerprinted once at the first read
+        after a dependency notification."""
         return tuple(
             np.ascontiguousarray(
                 np.asarray(opt.local_full_x, dtype=np.float64)[
@@ -784,7 +787,7 @@ class JaxBiotSavart(Optimizable):
                 ]
             ).tobytes()
             for opt in self.unique_dof_lineage
-        )
+        ) + (coil_graph_parameters(self.ancestors).tobytes(),)
 
     def _perturbation_samples_changed(self) -> bool:
         return any(
@@ -870,8 +873,8 @@ class JaxBiotSavart(Optimizable):
 
         Args:
             parent (Optimizable or None): Dependency that triggered the recompute
-                notification; a non-None parent marks fixed DOFs for re-check on
-                the next read.
+                notification; a non-None parent marks fixed DOFs and non-DOF
+                coil parameters for re-check on the next read.
         """
         if (
             parent is not None
@@ -1085,7 +1088,8 @@ class JaxBiotSavart(Optimizable):
 
         Returns:
             CoilSetDofExtractionSpec object: Cached reconstruction contract,
-                refreshed when captured fixed DOFs, samples or layout change.
+                refreshed when captured fixed DOFs, non-DOF coil parameters,
+                samples or layout change.
         """
         # Direct sample replacement can bypass the native curve notification.
         previous_spec = self._coil_dof_extraction_spec
