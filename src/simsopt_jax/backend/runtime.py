@@ -609,9 +609,16 @@ def _apply_cpu_compile_preset_env(config: BackendConfig, policy: BackendPolicy) 
     non-parity CPU lanes only: ``xla_cpu_opt_preset`` is inert on the CUDA
     backend (whose XLA flags carry the determinism contract), and the preset
     reduces XLA optimization passes -- which can shift CPU reduction order, so
-    it is withheld from the bit-exact ``*_parity`` lanes.
+    it is withheld from the bit-exact ``*_parity`` lanes. Once JAX initialized
+    its backends the preset cannot change this process, so ``XLA_FLAGS`` is
+    left alone rather than handed to child processes the parent never ran
+    with; it is a compile-speed default, not a request, so nothing warns.
     """
-    if config.jax_platform == "cuda" or policy.parity_mode:
+    if (
+        config.jax_platform == "cuda"
+        or policy.parity_mode
+        or _jax_backends_initialized()
+    ):
         return
     _set_runtime_env(
         _XLA_FLAGS_ENV,

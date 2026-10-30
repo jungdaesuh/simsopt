@@ -3,8 +3,9 @@
 1. A rejected call leaves the previous mode, environment and every JAX
    setting in place, and the field still evaluates as before.
 2. In a process whose JAX backends are initialized, GPU allocator settings
-   cannot apply: selecting the GPU warns instead of raising and leaves the
-   caller's allocator variables alone.
+   and XLA flags cannot apply: selecting the GPU warns instead of raising and
+   leaves the caller's allocator variables alone, and the CPU compile preset
+   stays out of ``XLA_FLAGS``.
 3. ``SIMSOPT_JAX_DEBUG_NANS`` is parsed like every other boolean setting.
 """
 
@@ -129,6 +130,17 @@ class TestSetBackendLifecycle(JaxTestCase):
         )
         if {"cuda", "gpu"} & set(jax.extend.backend.backends()):
             self.assertEqual(jax.numpy.zeros(3).devices(), {jax.devices("gpu")[0]})
+
+    def test_cpu_selection_after_initialization_keeps_xla_flags(self):
+        """The fast CPU mode's compile preset, which XLA reads only at backend
+        initialization, is not exported to an initialized process."""
+        os.environ["XLA_FLAGS"] = "--xla_cpu_enable_fast_math=false"
+        self.assertTrue(runtime_module._jax_backends_initialized())
+
+        set_backend("jax", device="cpu", intent="fast")
+
+        self.assertEqual(get_backend_mode(), "jax_cpu_fast")
+        self.assertEqual(os.environ["XLA_FLAGS"], "--xla_cpu_enable_fast_math=false")
 
     def test_debug_nans_env_is_a_strict_boolean(self):
         """SIMSOPT_JAX_DEBUG_NANS accepts the boolean spellings and rejects others."""
