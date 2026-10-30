@@ -120,11 +120,15 @@ class LevelsetStoppingCriterion : public StoppingCriterion{
         shared_ptr<RegularGridInterpolant3D<Array>> levelset;
     public:
         LevelsetStoppingCriterion(shared_ptr<RegularGridInterpolant3D<Array>> levelset) : levelset(levelset) { };
+        // Stops where the levelset is negative, and outside the levelset's grid (or at a
+        // non-finite point), where it is not defined.
         bool operator()(int iter, double t, double x, double y, double z) override {
             double r = std::sqrt(x*x + y*y);
             double phi = std::atan2(y, x);
             if(phi < 0)
                 phi += 2*M_PI;
+            if(!levelset->in_bounds(r, phi, z))
+                return true;
             double f = levelset->evaluate(r, phi, z)[0];
             //fmt::print("Levelset at xyz=({}, {}, {}), rphiz=({}, {}, {}), f={}\n", x, y, z, r, phi, z, f);
             return f<0;

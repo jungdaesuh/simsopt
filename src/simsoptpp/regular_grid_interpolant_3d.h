@@ -2,6 +2,7 @@
 #include "simdhelpers.h"
 #include <unordered_map>
 #include <algorithm>
+#include <array>
 #include <fmt/core.h>
 #include <fmt/ranges.h>
 #include <functional>
@@ -142,6 +143,11 @@ class RegularGridInterpolant3D {
         }
 
         int locate_unsafe(double x, double y, double z);
+        // shifts a coordinate within _EPS_ of a grid face onto the grid and returns the
+        // scaled coordinates, in which cell i of an axis covers [i, i+1)
+        std::array<double, 3> scaled_coordinates(double& x, double& y, double& z) const;
+        // whether a scaled coordinate lies in [0, n), i.e. inside the grid along its axis; false for NaN
+        static bool inside_axis(double scaled, int n) { return scaled >= 0 && scaled < n; }
         void evaluate_inplace(double x, double y, double z, double* res);
         void evaluate_local(double x, double y, double z, int cell_idx, double* res);
 
@@ -304,6 +310,9 @@ class RegularGridInterpolant3D {
 
         void interpolate_batch(std::function<Vec(Vec, Vec, Vec)> &f); // build the interpolant
 
+        // whether (x, y, z) lies in [xmin, xmax] x [ymin, ymax] x [zmin, zmax], with the same
+        // 1e-13 face tolerance as evaluate; false for a non-finite coordinate
+        bool in_bounds(double x, double y, double z) const;
         Vec evaluate(double x, double y, double z); // evaluate the interpolant at one location
         void evaluate_batch(Array& xyz, Array& fxyz); // evluate the interpolant at multiple locations
 
