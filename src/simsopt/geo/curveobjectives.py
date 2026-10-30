@@ -388,6 +388,9 @@ class CurveSurfaceDistance(Optimizable):
         found again after a curve changes or the surface moves; the surface
         need not be a parent, so its points are compared with those at the
         last search.
+
+        Returns:
+            None: the result is stored in ``self.candidates``.
         """
         gamma = self.surface.gamma()
         if self.candidates is None or not np.array_equal(gamma, self._candidates_surface_gamma):
@@ -435,10 +438,17 @@ class CurveSurfaceDistance(Optimizable):
         """
         Evaluate the derivative of the penalty.
 
+        Args:
+            partials (bool): Keyword added by ``derivative_dec``. If True,
+                return the :obj:`~simsopt._core.derivative.Derivative` instead
+                of the assembled gradient. Defaults to False.
+
         Returns:
-            Derivative: the gradient of :math:`J` (m^5 divided by the unit of
-            each DOF), keyed by the curves and, with ``surface_derivatives``
-            and free surface DOFs, by the surface.
+            np.ndarray, shape (dof_size,): the gradient of :math:`J` with
+            respect to the free DOFs of the penalty, in m^5 divided by the unit
+            of each DOF. With ``partials=True``, the ``Derivative`` keyed by
+            the curves and, with ``surface_derivatives`` and free surface DOFs,
+            by the surface.
         """
         self.compute_candidates()
         with_surface = self.surface_derivatives and self.surface.dof_size > 0
