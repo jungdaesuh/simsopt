@@ -87,7 +87,14 @@ void init_magneticfields(py::module_ &m){
                     inside_view(i) = self.in_bounds(xyz(i, 0), xyz(i, 1), xyz(i, 2));
                 return inside;
             }, py::arg("xyz"),
-            "Return a boolean array of shape `(npoints,)` that is true where a point of the `(npoints, 3)` array `xyz` lies in the interpolation grid, with the same 1e-13 face tolerance as `evaluate`. It is false for a non-finite coordinate. Outside the grid, `evaluate` extrapolates (or throws if out_of_bounds_ok is false).");
+            "Report which points lie in the interpolation grid.\n\n"
+            "A point is inside with the same 1e-13 face tolerance as `evaluate`, and outside for a\n"
+            "non-finite coordinate. Outside the grid, `evaluate` extrapolates (or throws if\n"
+            "out_of_bounds_ok is false).\n\n"
+            "Args:\n"
+            "    xyz (array, shape (npoints, 3)): Points in the interpolant's coordinates.\n\n"
+            "Returns:\n"
+            "    array of bool, shape (npoints,): True where the point is in the grid.\n");
 
 
     py::class_<CurrentBase<PyArray>, shared_ptr<CurrentBase<PyArray>>, PyCurrentBaseTrampoline>(m, "CurrentBase")
