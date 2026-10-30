@@ -3,11 +3,9 @@ import itertools
 import unittest
 from functools import partial
 from types import SimpleNamespace
-from typing import cast, Tuple
 from unittest import mock
 
 import numpy as np
-from numpy.typing import NDArray
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.geo.boozersurface import BoozerSurface, boozer_surface_residual
 from simsopt.field.biotsavart import BiotSavart
@@ -814,9 +812,8 @@ class BoozerSurfaceTests(unittest.TestCase):
         _, boozer_surface = get_boozer_surface(boozer_type="exact", converge=False)
         s = boozer_surface.surface
         dofs = s.get_dofs().copy()
-        initial_residual, jacobian = cast(
-            Tuple[NDArray[np.float64], NDArray[np.float64]],
-            boozer_surface_residual(s, -0.406, -2.0, boozer_surface.biotsavart, derivatives=1))
+        initial_residual, jacobian = boozer_surface_residual(
+            s, -0.406, -2.0, boozer_surface.biotsavart, derivatives=1)
         for maxiter in (0, -1):
             with self.subTest(maxiter=maxiter):
                 boozer_surface.need_to_run_code = True
@@ -841,9 +838,8 @@ class BoozerSurfaceTests(unittest.TestCase):
         _, boozer_surface = get_boozer_surface(boozer_type="exact", converge=False)
         s = boozer_surface.surface
         dofs = s.get_dofs().copy()
-        initial_residual, jacobian = cast(
-            Tuple[NDArray[np.float64], NDArray[np.float64]],
-            boozer_surface_residual(s, -0.406, -2.0, boozer_surface.biotsavart, derivatives=1))
+        initial_residual, jacobian = boozer_surface_residual(
+            s, -0.406, -2.0, boozer_surface.biotsavart, derivatives=1)
         for maxiter, iterations in ((0.5, 1), (1.5, 2)):
             with self.subTest(maxiter=maxiter):
                 boozer_surface.need_to_run_code = True

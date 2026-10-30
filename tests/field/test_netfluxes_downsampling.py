@@ -1,20 +1,11 @@
 """Public native flux derivatives on the objective's quadrature grid."""
 
-from abc import abstractmethod
 import unittest
-from typing import Literal, Protocol, cast
 
 import numpy as np
 
-from simsopt._core.derivative import Derivative
 from simsopt.field import Coil, Current, NetFluxes
 from simsopt.geo import CurveXYZFourier, create_equally_spaced_curves
-
-
-class _PartialDerivative(Protocol):
-    @abstractmethod
-    def __call__(self, *, partials: Literal[True]) -> Derivative:
-        """Describe the partials keyword supplied by derivative_dec."""
 
 
 class NetFluxesDownsamplingTests(unittest.TestCase):
@@ -115,10 +106,8 @@ class NetFluxesDownsamplingTests(unittest.TestCase):
                 np.testing.assert_allclose(
                     objective.J(), sampled.J(), rtol=1e-13, atol=1e-14
                 )
-                objective_partials = cast(_PartialDerivative, objective.dJ)(
-                    partials=True
-                )
-                sampled_partials = cast(_PartialDerivative, sampled.dJ)(partials=True)
+                objective_partials = objective.dJ(partials=True)
+                sampled_partials = sampled.dJ(partials=True)
                 for dependency, sampled_dependency in [
                     (curves[0], sampled_curve),
                     (source.curve, source.curve),
