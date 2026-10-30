@@ -384,6 +384,25 @@ class TestStageTwoCoilTerms(JaxTestCase):
         np.testing.assert_allclose(drop_in.J(), native.J(), rtol=1e-12, atol=0.0)
         _assert_close(cast(Callable[..., Derivative], drop_in.dJ)(partials=True)(field), native_gradient)
 
+    def test_symmetry_image_pack_in_another_filament_order_matches_native(self):
+        """A symmetry image that lists its pack's filaments in reverse order keeps
+        the shared centerline, so value and gradient still equal native."""
+        surface = _surface()
+        base, centerlines, coils = _finite_build(surface, "centroid", 1)
+        image = len(base) * _FILAMENTS
+        coils = coils[:image] + coils[image:image + _FILAMENTS][::-1] + coils[image + _FILAMENTS:]
+        config = _finite_build_config(base)
+        field = JaxBiotSavart(coils)
+        problem = make_stage_two_problem(
+            field, JaxSquaredFlux(surface, field).fixed_surface_flux_spec(), config
+        )
+        native = _native_finite_build(surface, base, centerlines, coils, config)
+        geometry = stage_two_geometry(field.coil_dof_extraction_spec(), jnp.asarray(field.x), _FILAMENTS)
+        _assert_close(geometry.centerline_gamma, np.asarray([curve.gamma() for curve in centerlines]))
+        value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
+        np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=0.0)
+        _assert_close(gradient, _native_gradient(native, field))
+
     def test_fused_coil_terms_match_central_differences(self):
         """Fused coil-term directional gradients match independent central differences."""
         rng = np.random.default_rng(31)
