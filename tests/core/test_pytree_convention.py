@@ -1,5 +1,7 @@
 """Keep JAX registration and immutable record conventions centralized."""
 
+from __future__ import annotations
+
 from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
@@ -19,7 +21,7 @@ from collections.abc import Callable
 from collections import Counter
 from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Tuple, cast
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,7 +43,9 @@ NAMEDTUPLE_NAMES = frozenset(("NamedTuple", "namedtuple"))
 ALIAS_NAMES = (
     REGISTRATION_NAMES | NAMEDTUPLE_NAMES | {"pytree_dataclass", "pytree_node"}
 )
-Violation = tuple[str, str, str, str]
+# typing.Tuple: a module-level alias is evaluated at import, and builtin
+# tuple[...] subscripting needs Python 3.9; unsupported runtimes must still skip.
+Violation = Tuple[str, str, str, str]
 
 
 class ConventionVisitor(ast.NodeVisitor):

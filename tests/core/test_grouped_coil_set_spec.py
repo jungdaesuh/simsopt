@@ -4,14 +4,15 @@ from __future__ import annotations
 
 # Initialize the shared JAX runtime before importing kernel modules.
 # ruff: noqa: I001
-from unittest_jax_support import JaxTestCase, aligned_host_copy
+from unittest_jax_support import JaxTestCase, aligned_host_copy, optional_jax_imports
 
 import numpy as np
 
-from simsopt_jax.core.specs import (
-    make_coil_group_spec,
-    make_grouped_coil_set_spec,
-)
+with optional_jax_imports():
+    from simsopt_jax.core.specs import (
+        make_coil_group_spec,
+        make_grouped_coil_set_spec,
+    )
 
 
 class TestGroupedCoilSetSpec(JaxTestCase):
