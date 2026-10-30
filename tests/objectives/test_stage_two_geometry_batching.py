@@ -10,6 +10,7 @@ with optional_jax_imports():
     import jax.numpy as jnp
     from simsopt.field import Current, coils_via_symmetries
     from simsopt.geo import create_equally_spaced_curves
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core._device_scalars import placement_zero
     from simsopt_jax.core.curve_geometry import curve_geometry_from_dofs
     from simsopt_jax.core.field import coil_specs_from_dof_extraction_spec
@@ -170,7 +171,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
     ) -> None:
         """Batched geometry matches per-curve evaluation for curves with different grids and symmetries."""
         extraction, parameters = _mixed_problem()
-        actual = jax.jit(stage_two_coil_geometry)(extraction, parameters)
+        actual = jit(stage_two_coil_geometry)(extraction, parameters)
         expected = _scalar_geometry(extraction, parameters)
         for value, reference in zip(actual, expected, strict=True):
             np.testing.assert_allclose(value, reference, rtol=3e-13, atol=3e-12)
@@ -188,7 +189,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
             return _geometry_energy(_scalar_geometry(extraction, values))
 
         direction = jnp.cos(parameters)
-        actual_gradient, actual_hvp = jax.jit(
+        actual_gradient, actual_hvp = jit(
             lambda values, tangent: jax.jvp(jax.grad(batched), (values,), (tangent,))
         )(parameters, direction)
         expected_gradient, expected_hvp = jax.jvp(
@@ -232,7 +233,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         extraction, parameters = _mixed_problem()
         tangent = jnp.ones_like(parameters)
 
-        @jax.jit
+        @jit
         def evaluate(
             spec: CoilSetDofExtractionSpec, values: jax.Array, direction: jax.Array
         ) -> tuple[
@@ -295,16 +296,16 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         coils = coils_via_symmetries(curves, native_currents, 2, True)
         field = JaxBiotSavart(coils)
         extraction = field.coil_dof_extraction_spec()
-        parameters = jax.device_put(np.asarray(field.x))
+        parameters = jnp.array(field.x)
         tangent = jnp.ones_like(parameters)
         weights = np.linspace(0.3, 1.1, len(coils))
-        current_cotangent = jax.device_put(weights)
+        current_cotangent = jnp.array(weights)
         native_values = np.asarray([coil.current.get_value() for coil in coils])
         native_jacobian = np.stack(
             [coil.current.vjp(np.ones(1))(field) for coil in coils]
         )
 
-        @jax.jit
+        @jit
         def evaluate(
             spec: CoilSetDofExtractionSpec,
             values: jax.Array,
@@ -339,8 +340,8 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
         )
         templates = tuple(
             CurveXYZFourierSpec(
-                dofs=jax.device_put(np.asarray(curve.get_dofs())),
-                quadpoints=jax.device_put(np.asarray(curve.quadpoints)),
+                dofs=jnp.array(curve.get_dofs()),
+                quadpoints=jnp.array(curve.quadpoints),
                 order=1,
             )
             for curve in curves
@@ -350,7 +351,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
             np.linspace(0.1 + index, 0.9 + index, spec.dofs.size)
             for index, spec in enumerate(templates)
         )
-        tangents = tuple(jax.device_put(direction) for direction in directions)
+        tangents = tuple(jnp.array(direction) for direction in directions)
         weights = tuple(
             tuple(
                 np.cos(np.arange(24).reshape((8, 3)) + curve_index + term_index)
@@ -358,7 +359,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
             )
             for curve_index in range(len(curves))
         )
-        cotangents = jax.tree.map(jax.device_put, weights)
+        cotangents = jax.tree.map(jnp.array, weights)
 
         def geometry(
             values: tuple[jax.Array, ...],
