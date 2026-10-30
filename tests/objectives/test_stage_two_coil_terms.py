@@ -54,6 +54,7 @@ with optional_jax_imports():
         JaxLpCurveCurvature,
         JaxMeanSquaredCurvature,
     )
+    from simsopt_jax.backend.dtypes import as_jax_float64
     from simsopt_jax.backend.jit import jit
     from simsopt_jax_adapters.objectives import JaxSquaredFlux
     from field.test_force_jax import _assert_close
@@ -506,7 +507,7 @@ class TestStageTwoCoilTerms(JaxTestCase):
         for field, problem in ((force_field, force_problem), (finite_build_field, finite_build_problem)):
             x = field.x
             with jax.transfer_guard("disallow"):
-                value, gradient = jax.device_get(value_and_grad(problem, jax.device_put(x)))  # noqa: TID251 the guard test needs an explicit host-to-device transfer
+                value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(x)))
             # A separately compiled program may reassociate GPU reductions.
             expected_value, expected_gradient = _value_and_grad(problem, jnp.asarray(x))
             np.testing.assert_allclose(float(value), float(expected_value), rtol=1e-12, atol=0.0)
