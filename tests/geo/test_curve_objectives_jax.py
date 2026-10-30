@@ -641,7 +641,7 @@ class TestCurveObjectivesJax(JaxTestCase):
                 curves = _separated_circles(num_far, twins)
                 pair_native, pair_adapter = CurveCurveDistance(curves, 0.1), JaxCurveCurveDistance(curves, 0.1)
                 _assert_matches_native_including_nans("CurveCurveDistance", pair_native, pair_adapter, active=True)
-                self.assertEqual(len(pair_adapter._candidate_snapshot().candidates), len(twins))
+                self.assertEqual(len(pair_adapter.candidates), len(twins))
                 self.assertEqual(_point_pair_distance_shapes(pair_adapter), [(1, 24, 20), (4, 20, 20)])
                 near = [_circle((0.0, 0.0, 0.0), 1.0), *curves[2 * len(twins):]]
                 surface_native = CurveSurfaceDistance(near, surface, 0.4)
@@ -669,6 +669,32 @@ class TestCurveObjectivesJax(JaxTestCase):
             _assert_matches_native_including_nans(name, native, adapter)
             self.assertEqual(adapter.J(), 0.0)
             self.assertFalse(np.any(adapter.dJ()), name)
+
+    def test_distance_candidate_queries_match_native(self):
+        """``candidates``, ``compute_candidates()`` and ``shortest_distance_among_candidates()``
+        match native, without candidates too, and follow DOF changes. ``simsoptpp``
+        returns the candidates in no fixed order."""
+        base, curves = _curves()
+        surface = _surface()
+        for threshold in (0.05, _CC_THRESHOLD, 1.0):
+            with self.subTest(threshold=threshold), self.case():
+                pairs = (
+                    (CurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2),
+                     JaxCurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2)),
+                    (CurveSurfaceDistance(curves, surface, threshold),
+                     JaxCurveSurfaceDistance(curves, surface, threshold)),
+                )
+                for native, adapter in pairs:
+                    self.assertIsNone(adapter.compute_candidates())
+                    native.compute_candidates()
+                    self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
+                    self.assertEqual(
+                        adapter.shortest_distance_among_candidates(), native.shortest_distance_among_candidates()
+                    )
+        native, adapter = pairs[0]
+        base[0].x = np.asarray(base[0].x) + 0.2
+        native.compute_candidates()
+        self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
 
     def test_distance_terms_evaluate_every_point_of_a_native_candidate(self):
         """Within a candidate pair every point is evaluated, as native: a zero tangent

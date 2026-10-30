@@ -460,7 +460,10 @@ class JaxCurveCurveDistance(Optimizable):
     with :math:`n_i`, :math:`n_j` the numbers of sampled points. As in the native class, only
     pairs the native candidate search finds within :math:`d_{\min}` are evaluated; the others
     contribute zero. Only candidate pairs enter the compiled program, so its work and memory
-    scale with the number of candidates, and no candidate means no JAX work.
+    scale with the number of candidates, and no candidate means no JAX work. ``candidates``,
+    ``compute_candidates()`` and ``shortest_distance_among_candidates()`` are native's; the
+    search is cached per exact geometry and settings, so ``candidates`` is always current and
+    read-only.
 
     Args:
         curves (list[Curve]): all curves, including symmetry copies.
@@ -526,20 +529,47 @@ class JaxCurveCurveDistance(Optimizable):
         self._distance_snapshot = snapshot
         return snapshot
 
+    @property
+    def candidates(self):
+        """The native candidate pairs at the current state.
+
+        Returns:
+            list[tuple[int, int]]: curve index pairs ``(i, j)`` with some sampled points closer
+                than ``minimum_distance``, in no fixed order.
+        """
+        return list(self._candidate_snapshot().candidates)
+
+    def compute_candidates(self):
+        """Run the native candidate search unless its result for the current state is cached."""
+        self._candidate_snapshot()
+
+    def shortest_distance_among_candidates(self):
+        """Find the native sampled shortest distance over the candidate pairs.
+
+        Returns:
+            float: the smaller of ``minimum_distance`` and the candidate pairs' shortest
+                sampled distance, in m.
+        """
+        samples = self._samples()
+        return min([self.minimum_distance] + [
+            np.min(cdist(samples[i], samples[j])) for i, j in self._candidate_snapshot().candidates
+        ])
+
     def shortest_distance(self):
         """Find the native sampled shortest distance.
 
         With candidates, return the minimum over candidates and the threshold;
-        without candidates, search all eligible geometry.
+        without candidates, search all curve pairs.
 
         Returns:
             float: sampled distance in m.
         """
+        if self._candidate_snapshot().candidates:
+            return self.shortest_distance_among_candidates()
         samples = self._samples()
-        candidates = self._candidate_snapshot().candidates
-        pairs = candidates or _curve_pairs(len(samples), len(samples))
-        distances = [np.min(cdist(samples[i], samples[j])) for i, j in pairs]
-        return min([self.minimum_distance] + distances) if candidates else min(distances)
+        return min(
+            np.min(cdist(samples[i], samples[j])) for i, j in _curve_pairs(len(samples), len(samples))
+        )
 
     def J(self):
         """Evaluate the native objective formula on the active JAX device.
@@ -618,7 +648,9 @@ class JaxCurveSurfaceDistance(Optimizable):
     normal :math:`\mathbf{N}`, :math:`ds = |\mathbf{N}|~d\varphi~d\theta`, and each integral is
     the mean over the quadrature points. As in the native class, only curves the native
     candidate search finds within :math:`d_{\min}` are evaluated; only they enter the compiled
-    program, and no candidate means no JAX work.
+    program, and no candidate means no JAX work. ``candidates``, ``compute_candidates()`` and
+    ``shortest_distance_among_candidates()`` are native's; the search is cached per exact
+    geometry, so ``candidates`` is always current and read-only.
 
     The surface is not a dependency: only curve DOFs receive derivatives, and the surface
     geometry is read at each evaluation.
@@ -689,20 +721,46 @@ class JaxCurveSurfaceDistance(Optimizable):
         self._distance_snapshot = snapshot
         return snapshot
 
+    @property
+    def candidates(self):
+        """The native candidate curves at the current state.
+
+        Returns:
+            list[tuple[int, int]]: pairs ``(i, 0)`` of curve ``i`` with some sampled point closer
+                than ``minimum_distance`` to the surface, in no fixed order.
+        """
+        return list(self._candidate_snapshot().candidates)
+
+    def compute_candidates(self):
+        """Run the native candidate search unless its result for the current state is cached."""
+        self._candidate_snapshot()
+
+    def shortest_distance_among_candidates(self):
+        """Find the native sampled shortest distance over the candidate curves.
+
+        Returns:
+            float: the smaller of ``minimum_distance`` and the candidate curves' shortest
+                sampled distance to the surface, in m.
+        """
+        surface_points = self.surface.gamma().reshape((-1, 3))
+        return min([self.minimum_distance] + [
+            np.min(cdist(self.curves[i].gamma(), surface_points))
+            for i, _ in self._candidate_snapshot().candidates
+        ])
+
     def shortest_distance(self):
         """Find the native sampled shortest distance.
 
         With candidates, return the minimum over candidates and the threshold;
-        without candidates, search all eligible geometry.
+        without candidates, search all curves.
 
         Returns:
             float: sampled distance in m.
         """
+        if self._candidate_snapshot().candidates:
+            return self.shortest_distance_among_candidates()
         surface_points = self.surface.gamma().reshape((-1, 3))
-        candidates = self._candidate_snapshot().candidates
-        indices = [i for i, _ in candidates] or range(len(self.curves))
-        distances = [np.min(cdist(self.curves[i].gamma(), surface_points)) for i in indices]
-        return min([self.minimum_distance] + distances) if candidates else min(distances)
+        return min(np.min(cdist(curve.gamma(), surface_points)) for curve in self.curves)
 
     def J(self):
         """Evaluate the native objective formula on the active JAX device.
