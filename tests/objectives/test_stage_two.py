@@ -35,6 +35,7 @@ with optional_jax_imports():
 
 
 from dataclasses import replace
+from typing import cast
 
 import numpy as np
 from scipy.optimize import minimize
@@ -84,10 +85,10 @@ def _coils(surface, *, perturb: bool = True, shared_dofs: bool = False) -> tuple
     return base, coils
 
 
-def _native_composite(
+def _native_penalty(
     surface, base, coils, config: StageTwoObjectiveConfig
 ) -> Optimizable:
-    """The native objective that ``config`` describes, as in the Stage-II examples.
+    """The native weighted geometric penalty that ``config`` describes, as in the Stage-II examples.
 
     A ``None`` weight leaves its term out; a zero weight keeps ``0 * term``.
     """
@@ -116,9 +117,14 @@ def _native_composite(
             for curve in base
         )),
     ]
-    return SquaredFlux(surface, BiotSavart(coils)) + sum(
-        weight * term for weight, term in weighted_terms if weight is not None
-    )
+    return cast(Optimizable, sum(weight * term for weight, term in weighted_terms if weight is not None))
+
+
+def _native_composite(
+    surface, base, coils, config: StageTwoObjectiveConfig
+) -> Optimizable:
+    """The native objective that ``config`` describes: squared flux plus :func:`_native_penalty`."""
+    return SquaredFlux(surface, BiotSavart(coils)) + _native_penalty(surface, base, coils, config)
 
 
 def _problem(config: StageTwoObjectiveConfig, *, perturb: bool = True, shared_dofs: bool = False):
@@ -188,9 +194,10 @@ class TestStageTwo(JaxTestCase):
         B = native_flux.field.B().reshape(surface.normal().shape)
         native_max_normal_field = np.max(np.abs(np.sum(B * surface.unitnormal(), axis=2)))
         base = [coil.curve for coil in field.coils[:_NCOILS]]
+        native_penalty = _native_penalty(surface, base, field.coils, _ACTIVE)
         np.testing.assert_allclose(objective, native.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(squared_flux, native_flux.J(), rtol=1e-12, atol=1e-14)
-        np.testing.assert_allclose(penalty, objective - squared_flux, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(penalty, native_penalty.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(max_normal_field, native_max_normal_field, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(length, sum(CurveLength(c).J() for c in base), rtol=1e-12)
 
