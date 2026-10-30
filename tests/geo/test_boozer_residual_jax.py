@@ -463,6 +463,7 @@ class TestBoozerResidualJax(JaxTestCase):
             _outputs(results[0.7, 2]),
             _outputs(expected[7e4, 2]),
             _outputs(expected[0.7, 2]),
+            strict=True,
         )
         for order, (heavy, light, native_heavy, native_light) in enumerate(pairs):
             assert_matches_native(
