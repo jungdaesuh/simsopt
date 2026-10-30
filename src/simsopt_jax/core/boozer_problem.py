@@ -397,6 +397,10 @@ def boozer_surface_residual(
             npoints, nx) and residual Hessians (3 * npoints, nx, nx). Residual units are
             tesla squared meters, or tesla meters when weighted; derivative units follow
             x.
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0, 1 or 2.
+        TypeError: When the ``derivatives >= 1`` outputs are differentiated in ``x``.
     """
 
     x = as_jax_float64(x)
@@ -448,6 +452,11 @@ def boozer_penalty_constraints(
             weighted constraints, or (value, gradient) or (value, gradient, Hessian),
             with shapes (), (nx,), (nx, nx). The Boozer term is divided by 3 * npoints;
             units follow the residual and native constraint coefficient.
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0, 1 or 2, or the problem has no
+            ``constraint_weight``.
+        TypeError: When the ``derivatives >= 1`` outputs are differentiated in ``x``.
     """
 
     x = as_jax_float64(x)
