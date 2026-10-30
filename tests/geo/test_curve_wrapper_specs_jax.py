@@ -78,7 +78,8 @@ def _perturbed_and_equivalent() -> tuple[CurvePerturbed, CurveXYZFourier]:
 
 
 def _filament(curve, frame) -> CurveFilament:
-    rotation = FrameRotation(curve.quadpoints, 2)
+    # A non-unit scale multiplies every rotation-angle derivative the frame uses.
+    rotation = FrameRotation(curve.quadpoints, 2, scale=0.7)
     rotation.x = np.array([0.1, 0.2, 0.3, -0.1, 0.05])
     return CurveFilament(frame(curve, rotation), 0.02, 0.03)
 
