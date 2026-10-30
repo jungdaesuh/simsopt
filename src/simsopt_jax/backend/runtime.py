@@ -38,7 +38,9 @@ Retained settings:
   backend reconfiguration clears registered in-process kernel and placement caches.
 * GPU allocation controls are ``SIMSOPT_JAX_GPU_PREALLOCATE``,
   ``SIMSOPT_JAX_GPU_MEM_FRACTION``, ``SIMSOPT_JAX_GPU_ALLOCATOR`` and
-  ``SIMSOPT_TF_GPU_ALLOCATOR``. Set these before initializing a GPU backend.
+  ``SIMSOPT_TF_GPU_ALLOCATOR``. Set these before initializing a GPU backend;
+  afterwards they cannot apply, and a differing setting warns. Standard XLA
+  allocator variables none of them sets keep the caller's value.
 * Field evaluation runs on the single runtime device (the first local device
   of the selected platform); it does not distribute work across devices.
 
@@ -541,60 +543,59 @@ def _set_runtime_env(name: str, value: str | None) -> None:
 def _gpu_memory_runtime_env(
     config: BackendConfig,
 ) -> tuple[tuple[str, str | None], ...]:
-    if config.xla_gpu_preallocate is None:
-        preallocate = None
-    else:
-        preallocate = "true" if config.xla_gpu_preallocate else "false"
+    """The standard JAX/XLA allocator variables ``config`` resolves.
 
-    if config.xla_gpu_allocator == "vmm":
-        python_mem_fraction = None
-        client_mem_fraction = (
-            None
-            if config.xla_gpu_mem_fraction is None
-            else str(config.xla_gpu_mem_fraction)
+    Only settings ``config`` resolves (not None) appear, so a caller's own
+    ``XLA_PYTHON_CLIENT_*`` value survives when no ``SIMSOPT_*`` override or
+    keyword sets it. A resolved memory fraction owns both fraction variables:
+    it goes to the one the allocator reads and clears the other (value None).
+    """
+    env: list[tuple[str, str | None]] = []
+    if config.xla_gpu_preallocate is not None:
+        env.append(
+            (
+                _XLA_PYTHON_CLIENT_PREALLOCATE_ENV,
+                "true" if config.xla_gpu_preallocate else "false",
+            )
         )
-    else:
-        python_mem_fraction = (
-            None
-            if config.xla_gpu_mem_fraction is None
-            else str(config.xla_gpu_mem_fraction)
-        )
-        client_mem_fraction = None
-
-    return (
-        (_XLA_PYTHON_CLIENT_PREALLOCATE_ENV, preallocate),
-        (_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator),
-        (_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, python_mem_fraction),
-        (_XLA_CLIENT_MEM_FRACTION_ENV, client_mem_fraction),
-        (_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator),
-    )
-
-
-def _gpu_memory_runtime_env_matches(config: BackendConfig) -> bool:
-    return all(
-        os.environ.get(name) == expected
-        for name, expected in _gpu_memory_runtime_env(config)
-    )
-
-
-def _assert_jax_not_initialized_for_gpu_memory_config(config: BackendConfig) -> None:
-    if config.jax_platform != "cuda" or not _jax_backends_initialized():
-        return
-    if _gpu_memory_runtime_env_matches(config):
-        return
-    raise RuntimeError(
-        "JAX GPU memory environment variables must be resolved before "
-        "backend initialization. Call simsopt_jax.backend.set_backend(...) "
-        "before touching JAX devices."
-    )
+    if config.xla_gpu_allocator is not None:
+        env.append((_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator))
+    if config.xla_gpu_mem_fraction is not None:
+        fraction = str(config.xla_gpu_mem_fraction)
+        vmm = config.xla_gpu_allocator == "vmm"
+        env.append((_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None if vmm else fraction))
+        env.append((_XLA_CLIENT_MEM_FRACTION_ENV, fraction if vmm else None))
+    if config.tf_gpu_allocator is not None:
+        env.append((_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator))
+    return tuple(env)
 
 
 def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
+    """Export ``config``'s GPU allocator settings while they can still apply.
+
+    XLA reads them when it initializes its backends. Afterwards they cannot
+    change this process, so they are left alone (child processes still
+    resolve the synchronized ``SIMSOPT_*`` variables) and a setting that
+    differs from the running process warns.
+    """
     if config.jax_platform != "cuda":
         return
-    _assert_jax_not_initialized_for_gpu_memory_config(config)
-    for name, value in _gpu_memory_runtime_env(config):
-        _set_runtime_env(name, value)
+    runtime_env = _gpu_memory_runtime_env(config)
+    if not _jax_backends_initialized():
+        for name, value in runtime_env:
+            _set_runtime_env(name, value)
+        return
+    differing = tuple(
+        name for name, value in runtime_env if os.environ.get(name) != value
+    )
+    if differing:
+        warnings.warn(
+            "JAX already initialized its backends, so the requested GPU memory "
+            f"settings ({', '.join(differing)}) do not apply to this process; "
+            "set them before touching JAX devices.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def _apply_cpu_compile_preset_env(config: BackendConfig, policy: BackendPolicy) -> None:
@@ -788,8 +789,9 @@ def set_backend(
     This keeps the legacy env vars in sync so existing scripts and subprocess
     helpers continue to work unchanged. GPU memory keywords resolve the
     pre-backend-initialization JAX/XLA allocator env vars explicitly; env overrides still sit
-    between mode defaults and these arguments. Also updates the config cache so
-    subsequent ``get_backend_config()`` calls are free.
+    between mode defaults and these arguments. Once JAX initialized its backends they
+    cannot change the process, so a differing setting warns instead. Also updates the
+    config cache so subsequent ``get_backend_config()`` calls are free.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
