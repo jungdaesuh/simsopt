@@ -13,6 +13,7 @@ from simsopt.geo.curveobjectives import CurveLength, LpCurveCurvature, \
     LpCurveTorsion, CurveCurveDistance, ArclengthVariation, \
     MeanSquaredCurvature, CurveSurfaceDistance, LinkingNumber
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+from simsopt.geo.surfacehenneberg import SurfaceHenneberg
 from simsopt.configs.zoo import get_data
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 import simsoptpp as sopp
@@ -377,19 +378,72 @@ class Testing(unittest.TestCase):
         threshold = 1.0
         J = CurveSurfaceDistance(curves, surface, threshold)
 
-        # Taylor test over the curve dofs; the surface dofs are tested below.
-        surface.fix_all()
         h = 1e-1 * np.random.rand(J.dof_size)
         self.assert_taylor_test(J, J, h, np.sum(J.dJ() * h), range(5, 12))
 
+    def test_curve_surface_distance_surface_dofs_are_opt_in(self):
+        """
+        The surface is a target, not a variable, unless surface_derivatives is
+        set; the choice survives a JSON round trip with the DOFs and gradient.
+        """
+        base_curves, curves, surface = get_ncsx_curves_and_surface()
+        curve_names = [name for c in base_curves for name in c.dof_names]
+        for options in [{}, {'surface_derivatives': True}]:
+            with self.subTest(**options):
+                surface_derivatives = options.get('surface_derivatives', False)
+                J = CurveSurfaceDistance(curves, surface, 1.0, **options)
+                names = curve_names + (list(surface.dof_names) if surface_derivatives else [])
+                self.assertEqual(J.dof_names, names)
+                regen = json.loads(json.dumps(SIMSON(J), cls=GSONEncoder), cls=GSONDecoder)
+                self.assertEqual(regen.surface_derivatives, surface_derivatives)
+                self.assertEqual(len(regen.dof_names), len(names))
+                self.assertEqual(regen.surface in regen.parents, surface_derivatives)
+                np.testing.assert_allclose(np.asarray(regen.dJ()), np.asarray(J.dJ()), rtol=1e-14, atol=0)
+
+    def test_curve_surface_distance_follows_a_moving_surface(self):
+        """
+        The curves near the surface are found again when the surface moves,
+        also when the surface is not a parent of the penalty.
+        """
+        _, curves, surface = get_ncsx_curves_and_surface()
+        for options in [{}, {'surface_derivatives': True}]:
+            with self.subTest(**options):
+                surface.set_rc(1, 0, 0.2)
+                surface.set_zs(1, 0, 0.2)
+                J = CurveSurfaceDistance(curves, surface, 0.1, **options)
+                # The surface is at least 0.16 from the coils.
+                self.assertEqual(J.J(), 0.)
+                surface.set_rc(1, 0, 0.3)
+                surface.set_zs(1, 0, 0.3)
+                fresh = CurveSurfaceDistance(curves, surface, 0.1, **options)
+                self.assertGreater(fresh.J(), 0.)
+                # The candidates may come in another order, which changes the sum by rounding.
+                np.testing.assert_allclose(J.J(), fresh.J(), rtol=1e-13, atol=0)
+                np.testing.assert_allclose(np.asarray(J.dJ()), np.asarray(fresh.dJ()), rtol=1e-13, atol=0)
+
+    def test_curve_surface_distance_fixed_surface_without_dof_derivatives(self):
+        """
+        A fixed surface needs no derivatives with respect to its dofs, which
+        SurfaceHenneberg does not implement, even with surface_derivatives.
+        """
+        surface = SurfaceHenneberg(nfp=1, alpha_fac=1, mmax=1, nmax=0)
+        surface.R0nH[0] = 1.0
+        surface.set_rhomn(1, 0, 0.3)
+        surface.local_full_x = surface.get_dofs()
+        surface.fix_all()
+        curves = create_equally_spaced_curves(2, 1, stellsym=False, R0=1.0, R1=0.5, order=1)
+        expected = np.asarray(CurveSurfaceDistance(curves, surface, 0.5).dJ())
+        self.assertGreater(np.linalg.norm(expected), 0.)
+        np.testing.assert_array_equal(CurveSurfaceDistance(curves, surface, 0.5, surface_derivatives=True).dJ(), expected)
+
     def test_curve_surface_distance_surface_derivative(self):
         """
-        CurveSurfaceDistance depends on the surface: a change of the surface
-        resets the candidates, and the derivative includes the surface dofs.
+        With surface_derivatives the surface is a parent: a change of the
+        surface resets the candidates, and the derivative includes the surface dofs.
         """
         np.random.seed(0)
         base_curves, curves, surface = get_ncsx_curves_and_surface()
-        J = CurveSurfaceDistance(curves, surface, 1.0)
+        J = CurveSurfaceDistance(curves, surface, 1.0, surface_derivatives=True)
         self.assertIn(surface, J.parents)
         self.assertEqual(J.dof_size, sum(c.dof_size for c in base_curves) + surface.dof_size)
 

@@ -343,27 +343,48 @@ class CurveSurfaceDistance(Optimizable):
     points on all coils :math:`i` and on the surface lie more than
     :math:`d_\min` away from one another.
 
+    By default the surface is the fixed target of a coil optimization: the
+    penalty depends on the curve DOFs only, and the surface geometry is read
+    at each evaluation. With ``surface_derivatives=True`` the surface is a
+    parent as well, so its free DOFs are DOFs of the penalty and ``dJ``
+    includes their derivatives.
+
+    Args:
+        curves (list[Curve]): the curves to penalize, positions in m.
+        surface (Surface): the surface, positions in m.
+        minimum_distance (float): the threshold distance :math:`d_\min` in m.
+        surface_derivatives (bool): whether the surface DOFs are DOFs of the
+            penalty. Defaults to False.
     """
 
-    def __init__(self, curves, surface, minimum_distance):
+    def __init__(self, curves, surface, minimum_distance, surface_derivatives=False):
         self.curves = curves
         self.surface = surface
         self.minimum_distance = minimum_distance
+        self.surface_derivatives = surface_derivatives
 
         self.J_jax = jit(lambda gammac, lc, gammas, ns: cs_distance_pure(gammac, lc, gammas, ns, minimum_distance))
         self.dJ_dcurve = jit(grad(self.J_jax, argnums=(0, 1)))
         self.dJ_dcurve_and_surface = jit(grad(self.J_jax, argnums=(0, 1, 2, 3)))
         self.candidates = None
-        super().__init__(depends_on=[*curves, surface])
+        self._candidates_surface_gamma = np.zeros((0, 3))
+        super().__init__(depends_on=[*curves, surface] if surface_derivatives else curves)
 
     def recompute_bell(self, parent=None):
         self.candidates = None
 
     def compute_candidates(self):
-        if self.candidates is None:
-            candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
-                [c.gamma() for c in self.curves], [self.surface.gamma().reshape((-1, 3))], self.minimum_distance)
-            self.candidates = candidates
+        """
+        Find the curves within ``minimum_distance`` of the surface. They are
+        found again after a curve changes or the surface moves; the surface
+        need not be a parent, so its points are compared with those at the
+        last search.
+        """
+        gamma = self.surface.gamma()
+        if self.candidates is None or not np.array_equal(gamma, self._candidates_surface_gamma):
+            self.candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+                [c.gamma() for c in self.curves], [gamma.reshape((-1, 3))], self.minimum_distance)
+            self._candidates_surface_gamma = gamma.copy()
 
     def shortest_distance_among_candidates(self):
         self.compute_candidates()
@@ -397,10 +418,10 @@ class CurveSurfaceDistance(Optimizable):
     def dJ(self):
         """
         This returns the derivative of the quantity with respect to the curve dofs and,
-        while the surface is a parent, the surface dofs.
+        with ``surface_derivatives``, the free surface dofs.
         """
         self.compute_candidates()
-        with_surface = self.surface in self.parents
+        with_surface = self.surface_derivatives and self.surface.dof_size > 0
         dJ_dargs = self.dJ_dcurve_and_surface if with_surface else self.dJ_dcurve
         dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
         dgammadash_by_dcoeff_vjp_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]

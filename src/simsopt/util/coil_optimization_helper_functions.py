@@ -175,8 +175,6 @@ def coil_optimization(s, bs, base_curves, curves, **kwargs):
     Jls = [CurveLength(c) for c in base_curves]
     Jccdist = CurveCurveDistance(curves, CC_THRESHOLD, num_basecurves=len(base_curves))
     Jcsdist = CurveSurfaceDistance(curves, s, CS_THRESHOLD)
-    # the surface is the target of the coil optimization, not a variable
-    Jcsdist.remove_parent(s)
     Jcs = [LpCurveCurvature(c, 2, CURVATURE_THRESHOLD) for c in base_curves]
     Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
     linking_number = LinkingNumber(curves)
@@ -694,7 +692,6 @@ def vacuum_stage_II_optimization(
     nphi = 32
     ntheta = 32
     s = SurfaceRZFourier.from_vmec_input(INPUT_FILE, range="half period", nphi=nphi, ntheta=ntheta)
-    s.fix_all()  # the boundary is the target, not a variable
     nfp = s.nfp
     R0 = s.get_rc(0, 0)
 

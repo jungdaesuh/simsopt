@@ -217,6 +217,20 @@ class TestCoilSetSurfaceTarget(unittest.TestCase):
             err = err_new
         penalty.x = x
 
+    def test_cs_distance_penalty_follows_a_moving_surface(self):
+        """The coil-surface distance penalty is evaluated at the current surface position."""
+        coilset = CoilSet()
+        surface = coilset.surface
+        penalty = coilset.cs_distance_penalty(0.1)
+        # The surface, of minor radius 0.1, is at least 0.18 from the coils.
+        self.assertEqual(penalty.J(), 0.)
+        surface.set_rc(1, 0, 0.25)
+        surface.set_zs(1, 0, 0.25)
+        fresh = coilset.cs_distance_penalty(0.1)
+        self.assertGreater(fresh.J(), 0.)
+        # The candidates may come in another order, which changes the sum by rounding.
+        np.testing.assert_allclose(penalty.J(), fresh.J(), rtol=1e-13, atol=0)
+
 
 class TestReducedCoilSet(TestCoilSet):
     def setUp(self):
