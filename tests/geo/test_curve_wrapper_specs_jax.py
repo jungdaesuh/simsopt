@@ -37,6 +37,9 @@ from simsopt.geo import (
 from simsopt.geo.framedcurve import FramedCurve, FramedCurveCentroid, FramedCurveFrenet
 
 _NQUAD = 128
+# Spectral-derivative references resolve the Frenet frame to round-off only
+# from 256 points (at 128 the spectral error of gammadashdash is 2e-8).
+_SPECTRAL_NQUAD = 256
 _ORDER = 3
 _FRAMES = (FramedCurveCentroid, FramedCurveFrenet)
 
@@ -117,23 +120,22 @@ class TestCurveWrapperSpecs(JaxTestCase):
 
     def test_filament_second_derivative_is_derivative_of_tangent(self):
         """gammadashdash equals the spectral derivative of gammadash for both frames."""
-        _perturbed, summed = _perturbed_and_equivalent()
+        curve = _xyz_curve({**_BASE, **_PERTURBATION}, nquad=_SPECTRAL_NQUAD)
         for frame in _FRAMES:
             with self.subTest(frame=frame.__name__):
                 gamma, gammadash, gammadashdash = _terms(
-                    curve_spec_from_adapter_curve(_filament(summed, frame)), 2
+                    curve_spec_from_adapter_curve(_filament(curve, frame)), 2
                 )
-                np.testing.assert_allclose(_spectral_derivative(gamma), gammadash, rtol=0, atol=1e-10)
-                np.testing.assert_allclose(_spectral_derivative(gammadash), gammadashdash, rtol=0, atol=1e-7)
+                np.testing.assert_allclose(_spectral_derivative(gamma), gammadash, rtol=0, atol=1e-11)
+                np.testing.assert_allclose(_spectral_derivative(gammadash), gammadashdash, rtol=0, atol=1e-11)
 
     def test_filament_over_filament_derivatives_are_derivatives_of_lower_terms(self):
         """Nested filaments: each derivative is the spectral derivative of the term below.
 
         Native filaments provide no second derivative, so native evaluates only
-        the position of a centroid filament over another filament. The grid is
-        fine enough to resolve the Frenet frame's spectrum.
+        the position of a centroid filament over another filament.
         """
-        inner = _filament(_xyz_curve(_BASE, nquad=256), FramedCurveCentroid)
+        inner = _filament(_xyz_curve(_BASE, nquad=_SPECTRAL_NQUAD), FramedCurveCentroid)
         for frame in _FRAMES:
             with self.subTest(frame=frame.__name__):
                 outer = _filament(inner, frame)
