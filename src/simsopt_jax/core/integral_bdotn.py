@@ -15,7 +15,7 @@ associated in a different order, so results agree to round-off. An empty
 target array means no target field, as in the C++ kernel. Inputs are
 converted to float64 at the boundary, as the C++ kernel computes in double;
 float64 needs JAX's 64-bit mode (``jax_enable_x64``), which importing
-:mod:`simsopt.geo` or starting the simsopt JAX runtime turns on.
+:mod:`simsopt_jax` (and so this module) or :mod:`simsopt.geo` turns on.
 """
 
 from functools import partial

@@ -11,8 +11,8 @@ the fused objective from :func:`distance_candidate_pure`. Each public boundary
 converts floating inputs to float64, as native evaluates in double: caller
 NumPy arrays are snapshotted and placed, device arrays and tracers are cast.
 float64 needs JAX's 64-bit mode (``jax_enable_x64``), which importing
-:mod:`simsopt.geo` or starting the simsopt JAX runtime turns on; without it
-JAX computes in float32.
+:mod:`simsopt_jax` (and so this module) or :mod:`simsopt.geo` turns on; if it
+is switched off again, JAX computes in float32.
 """
 
 from __future__ import annotations
