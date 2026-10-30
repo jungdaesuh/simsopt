@@ -16,6 +16,7 @@ from typing import cast
 
 import jax
 from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_clear
+from simsopt_jax.backend.jit import jit
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
@@ -837,7 +838,7 @@ def _make_d2B_vjp_kernel(hessian_vjp_point_cs):
         ))
 
     kernel.__name__ = "biotsavart_d2B_vjp"
-    return jax.jit(kernel)
+    return jit(kernel)
 
 
 def invalidate_kernel_cache() -> None:
