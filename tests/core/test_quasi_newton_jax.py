@@ -7,10 +7,12 @@ Capped after k = 1, ..., 10 iterations, each solve stops at ``maxiter``
 (status 1) with SciPy's message, iteration and evaluation counts, and its
 iterate and ``hess_inv`` (BFGS's matrix; L-BFGS-B's correction pairs in the
 order of SciPy's ring buffer) agree with SciPy's, relative to the largest
-entry, to 1e-12 on the quadratic and the Rosenbrock function (measured worst
-1.2e-13) and to 5e-9 on the quartic, whose conditioning magnifies round-off
-(measured worst 7.7e-10, BFGS on the GPU). L-BFGS-B holds three corrections
-there, so its memory wraps. Run to convergence (ten corrections), status,
+entry, to 1e-12 (measured worst 3.9e-13, BFGS on the quartic on the GPU), or,
+where SciPy's own runs from ``x0`` moved by one ulp scatter wider, to twice
+that scatter: ten L-BFGS-B iterations on the quadratic magnify round-off
+1e4-fold, so SciPy's own ``yk`` scatter there by 2e-12 (and move by 1.8e-12
+when only the objective's sums are reordered). Capped, L-BFGS-B holds three
+corrections, so its memory wraps. Run to convergence (ten corrections), status,
 message, counts, ``x``, ``fun`` and ``jac`` (to the same bounds, ``fun`` and
 ``jac`` relative to their size at ``x0``) are SciPy's and ``hess_inv`` agrees
 to 1e-7 after forty or more updates; L-BFGS-B's 100 to 200 iterations on the
@@ -37,12 +39,13 @@ directly.
 """
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core.quasi_newton import (
         BFGS_MESSAGES,
         LBFGSB_MESSAGES,
@@ -59,7 +62,7 @@ from unittest_jax_support import (
     parity_rng,
 )
 
-from functools import partial
+from functools import cache, partial
 import warnings
 
 import numpy as np
@@ -67,18 +70,20 @@ from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, minimize
 from scipy.optimize import _linesearch as scipy_linesearch
 
 _EARLY_ITERATIONS = 10
-_EARLY_RTOL = {"quadratic": 1e-12, "rosenbrock": 1e-12, "ill-conditioned": 5e-9}
+_EARLY_RTOL = 1e-12
 _FINAL_RTOL = 1e-5
 _FAILURE_RTOL = 1e-12
 _TINY_RTOL = 1e-14
 # hess_inv after a converged walk: forty or more updates, each rounded
-# differently (BFGS's rank-two form, XLA's sums); measured worst 5.5e-9 of the
+# differently (XLA's sums and fused multiply-adds); measured worst 1.1e-9 of the
 # largest entry, BFGS on the Rosenbrock function.
 _CONVERGED_HESS_INV_RTOL = 1e-7
-# fun and jac magnify an iterate's difference (measured worst 2.1e-12 and
-# 9.6e-13 of their size on the quadratic and the Rosenbrock function, 2.2e-10 on
-# the quartic).
-_EARLY_FUN_JAC_RTOL = {name: 10 * rtol for name, rtol in _EARLY_RTOL.items()}
+# fun and jac magnify an iterate's difference (measured worst 3.0e-12 of their
+# size, L-BFGS-B on the quadratic at k = 10).
+_EARLY_FUN_JAC_RTOL = 10 * _EARLY_RTOL
+# SciPy's own round-off scatter: its runs from x0 moved by one ulp per entry,
+# in the sign patterns of these nine seeds.
+_SCATTER_SEEDS = range(20261029, 20261038)
 # At a converged solution fun and jac are near zero, so they are compared
 # absolutely (measured worst 3.3e-24 and 4.5e-14 where the walks match).
 _CONVERGED_FUN_ATOL = 1e-14
@@ -139,6 +144,10 @@ def _tiny_scale(x, params):
     return jnp.sum(1e-200 * (u**2 / 2 + 0.1 * jnp.sin(u)))
 
 
+def _badly_scaled(x, params):
+    return 5e17 * jnp.sum(x**2)
+
+
 _OBJECTIVES = {
     "quadratic": _quadratic,
     "rosenbrock": _rosenbrock,
@@ -149,6 +158,7 @@ _OBJECTIVES = {
     "linear": _linear,
     "steep": _steep,
     "tiny-scale": _tiny_scale,
+    "badly-scaled": _badly_scaled,
     "unavailable": _unavailable,
 }
 
@@ -172,16 +182,19 @@ def _problems():
     }
 
 
-@partial(jax.jit, static_argnames=("name",))
-def _device_bfgs(x0, params, gtol, maxiter, name):
-    return minimize_bfgs(partial(_value_and_grad, name, params=params), x0, gtol, maxiter)
+if JAX_IMPORT_ERROR is None:
+    # The compiled solvers exist only where the JAX runtime does, so discovery
+    # can import this module and skip it without JAX.
 
+    @partial(jit, static_argnames=("name",))
+    def _device_bfgs(x0, params, gtol, maxiter, name):
+        return minimize_bfgs(partial(_value_and_grad, name, params=params), x0, gtol, maxiter)
 
-@partial(jax.jit, static_argnames=("name", "maxcor", "maxls"))
-def _device_lbfgsb(x0, params, ftol, gtol, maxiter, maxls, name, maxcor):
-    return minimize_lbfgsb(
-        partial(_value_and_grad, name, params=params), x0, ftol, gtol, maxiter, maxcor=maxcor, maxls=maxls
-    )
+    @partial(jit, static_argnames=("name", "maxcor", "maxls"))
+    def _device_lbfgsb(x0, params, ftol, gtol, maxiter, maxls, name, maxcor):
+        return minimize_lbfgsb(
+            partial(_value_and_grad, name, params=params), x0, ftol, gtol, maxiter, maxcor=maxcor, maxls=maxls
+        )
 
 
 def _scipy(name, x0, params, method, options) -> OptimizeResult:
@@ -196,6 +209,29 @@ def _scipy(name, x0, params, method, options) -> OptimizeResult:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             return minimize(fun, x0, jac=True, method=method, options=options)
+
+
+@cache
+def _scipy_scatter(method, name, maxiter) -> tuple[OptimizeResult, ...]:
+    """SciPy's runs of ``_problems()[name]`` capped at ``maxiter`` from its
+    start moved by one ulp per entry, one per seed in ``_SCATTER_SEEDS``: how
+    far SciPy's own round-off carries it. Cached: every lane compares with it."""
+    x0, params = _problems()[name]
+    starts = (np.nextafter(x0, parity_rng(seed).choice((-np.inf, np.inf), x0.size)) for seed in _SCATTER_SEEDS)
+    return tuple(_scipy(name, start, params, method, _options(method, maxiter)) for start in starts)
+
+
+def _round_off_rtol(rtol, expected, scattered, scale=None):
+    """``rtol``, or twice SciPy's scatter about ``expected`` relative to
+    ``scale`` (by default the largest entry of ``expected``) where that is
+    larger: two runs that each round within that scatter of SciPy's differ by
+    up to twice it. ``scattered`` holds the scattered runs' values of it."""
+    expected = np.asarray(expected, dtype=np.float64)
+    spread = max((np.max(np.abs(np.asarray(other) - expected), initial=0.0) for other in scattered), default=0.0)
+    if spread == 0.0:
+        return rtol
+    reference = np.max(np.abs(expected)) if scale is None else scale
+    return max(rtol, 2.0 * spread / reference)
 
 
 def _device(name, x0, params, method, options, lane):
@@ -237,20 +273,28 @@ class TestQuasiNewtonJax(JaxTestCase):
             f"{name}: (status, message, nit, nfev, njev) differ from SciPy's",
         )
 
-    def _assert_scipy_hess_inv(self, expected: OptimizeResult, result, name: str, rtol: float):
+    def _assert_scipy_hess_inv(
+        self, expected: OptimizeResult, result, name: str, rtol: float, scattered: tuple[OptimizeResult, ...] = ()
+    ):
         """``hess_inv`` is SciPy's: BFGS's matrix, or the correction pairs of
-        L-BFGS-B's ``LbfgsInvHessProduct`` in SciPy's (ring-buffer) order."""
+        L-BFGS-B's ``LbfgsInvHessProduct`` in SciPy's (ring-buffer) order; to
+        ``rtol``, or SciPy's own ``scattered`` runs' bound where that is larger."""
         if isinstance(expected.hess_inv, LbfgsInvHessProduct):
             corrections = result.hess_inv
             count = int(corrections.count)
             self.assertEqual(count, expected.hess_inv.n_corrs, f"{name}: number of corrections")
-            assert_matches_native(corrections.s[:count], expected.hess_inv.sk, f"{name} hess_inv sk", rtol)
-            assert_matches_native(corrections.y[:count], expected.hess_inv.yk, f"{name} hess_inv yk", rtol)
+            for actual, field in ((corrections.s[:count], "sk"), (corrections.y[:count], "yk")):
+                reference = getattr(expected.hess_inv, field)
+                bound = _round_off_rtol(rtol, reference, [getattr(other.hess_inv, field) for other in scattered])
+                assert_matches_native(actual, reference, f"{name} hess_inv {field}", bound)
         else:
-            assert_matches_native(result.hess_inv, expected.hess_inv, f"{name} hess_inv", rtol)
+            bound = _round_off_rtol(rtol, expected.hess_inv, [other.hess_inv for other in scattered])
+            assert_matches_native(result.hess_inv, expected.hess_inv, f"{name} hess_inv", bound)
 
     def test_early_iterates_match_scipy(self):
-        """Capped at k iterations, both solvers stop as SciPy does with its iterate to round-off."""
+        """Capped at k iterations, both solvers stop as SciPy does with its
+        iterate to round-off: to the fixed bounds, or where SciPy's own runs
+        from a start one ulp away scatter wider, to twice that scatter."""
         for lane in _LANES:
             for method in ("BFGS", "L-BFGS-B"):
                 for name in _problems():
@@ -263,13 +307,18 @@ class TestQuasiNewtonJax(JaxTestCase):
             options = _options(method, k)
             expected = _scipy(name, x0, params, method, options)
             self.assertEqual(expected.status, 1, f"{name}: SciPy converged before k={k}")
+            scattered = _scipy_scatter(method, name, k)
             result, message = _device(name, x0, params, method, options, lane)
             self._assert_scipy_record(expected, result, message, f"{method} {name} k={k}")
-            assert_matches_native(result.x, expected.x, f"{method} {name} x at k={k}", _EARLY_RTOL[name])
-            rtol = _EARLY_FUN_JAC_RTOL[name]
-            assert_matches_native(result.fun, expected.fun, f"{method} {name} fun at k={k}", rtol, abs(expected.fun))
-            assert_matches_native(result.jac, expected.jac, f"{method} {name} jac at k={k}", rtol)
-            self._assert_scipy_hess_inv(expected, result, f"{method} {name} k={k}", _EARLY_RTOL[name])
+            for field, rtol, scale in (
+                ("x", _EARLY_RTOL, None),
+                ("fun", _EARLY_FUN_JAC_RTOL, abs(expected.fun)),
+                ("jac", _EARLY_FUN_JAC_RTOL, None),
+            ):
+                bound = _round_off_rtol(rtol, expected[field], [other[field] for other in scattered], scale)
+                actual = getattr(result, field)
+                assert_matches_native(actual, expected[field], f"{method} {name} {field} at k={k}", bound, scale)
+            self._assert_scipy_hess_inv(expected, result, f"{method} {name} k={k}", _EARLY_RTOL, scattered)
 
     def test_converged_solves_match_scipy(self):
         """Run to convergence, both solvers end as SciPy does: status,
@@ -297,9 +346,8 @@ class TestQuasiNewtonJax(JaxTestCase):
             )
             assert_matches_native(result.x, expected.x, f"{method} {name} solution", _FINAL_RTOL)
             return
-        rtol = _EARLY_RTOL[name]
         self._assert_scipy_record(expected, result, message, f"{method} {name}")
-        assert_matches_native(result.x, expected.x, f"{method} {name} solution", rtol)
+        assert_matches_native(result.x, expected.x, f"{method} {name} solution", _EARLY_RTOL)
         assert_matches_native(result.fun, expected.fun, f"{method} {name} fun", _CONVERGED_FUN_ATOL, 1.0)
         assert_matches_native(result.jac, expected.jac, f"{method} {name} jac", _CONVERGED_JAC_ATOL, 1.0)
         self._assert_scipy_hess_inv(expected, result, f"{method} {name}", _CONVERGED_HESS_INV_RTOL)
@@ -342,6 +390,29 @@ class TestQuasiNewtonJax(JaxTestCase):
                     result, message = _device(name, x0, np.zeros(0), "BFGS", options, lane)
                     self._assert_scipy_record(expected, result, message, case)
                     assert_matches_native(result.x, expected.x, f"{case} x", _FAILURE_RTOL)
+
+    def test_bfgs_update_keeps_badly_scaled_inverse_hessian(self):
+        """On f = 5e17 x^2 from x = 1 the first update's rho s s^T (1e-18) lies
+        below the round-off of terms the size of H = 1. SciPy's factored update
+        keeps H = 1 / (2 * 5e17); so does the port, after that first update
+        (with SciPy's record) and to convergence (with SciPy's status). An
+        expanded rank-two update leaves H negative and ends with status 2. The
+        iteration count to convergence is not compared: the second step lands
+        within round-off of x = 0, exactly on it on the GPU, which then stops
+        one iteration before SciPy."""
+        x0 = np.ones(1)
+        for lane in _LANES:
+            for maxiter in (1, 100):
+                with self.subTest(lane=lane, maxiter=maxiter), self.case():
+                    options = _options("BFGS", maxiter)
+                    expected = _scipy("badly-scaled", x0, np.zeros(0), "BFGS", options)
+                    self.assertEqual(expected.status, 1 if maxiter == 1 else 0, "SciPy's status changed")
+                    result, message = _device("badly-scaled", x0, np.zeros(0), "BFGS", options, lane)
+                    if maxiter == 1:
+                        self._assert_scipy_record(expected, result, message, "badly scaled, one update")
+                    else:
+                        self.assertEqual((int(result.status), message), (expected.status, expected.message))
+                    self._assert_scipy_hess_inv(expected, result, f"badly scaled, maxiter={maxiter}", _FAILURE_RTOL)
 
     def test_zoom_interpolants_match_scipy(self):
         """The cubic and quadratic minimizers are SciPy's, ``None`` where SciPy's

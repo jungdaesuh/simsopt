@@ -11,6 +11,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.backend.jit import jit
+
 from ._device_scalars import two_pi as _two_pi
 from ._math_utils import as_jax_float64 as _as_jax_float64
 
@@ -53,7 +55,7 @@ def _rotate_frame(
     return nn, bb
 
 
-@jax.jit
+@jit
 def centroid_frame(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -93,7 +95,7 @@ def centroid_frame(
     return t, n, b
 
 
-@jax.jit
+@jit
 def rotated_centroid_frame(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -124,7 +126,7 @@ def rotated_centroid_frame(
     return t, nn, bb
 
 
-@jax.jit
+@jit
 def frenet_frame(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -171,7 +173,7 @@ def frenet_frame(
     return t, n, b
 
 
-@jax.jit
+@jit
 def rotated_frenet_frame(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -231,5 +233,5 @@ def _rotation_alphadash_impl(
     return alphadash
 
 
-rotation_alpha = jax.jit(_rotation_alpha_impl, static_argnames=("order",))
-rotation_alphadash = jax.jit(_rotation_alphadash_impl, static_argnames=("order",))
+rotation_alpha = jit(_rotation_alpha_impl, static_argnames=("order",))
+rotation_alphadash = jit(_rotation_alphadash_impl, static_argnames=("order",))

@@ -17,12 +17,15 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import boozer_solvers
 from unittest import mock
 
 from unittest_jax_support import host_array, parity_default_device
 
+from collections.abc import Callable
 import inspect
+from typing import Any
 
 import numpy as np
 
@@ -82,26 +85,23 @@ _CASES = {
 }
 
 
+def _compiled_afresh(solver, static_argnames: tuple[str, ...]):
+    """``solver``'s body compiled anew, so it traces the substituted formulation."""
+    body: Callable[..., Any] = inspect.unwrap(solver)
+    return jit(body, static_argnames=static_argnames)
+
+
 def _run(name: str, x: jax.Array):
     """The loop ``name`` compiled afresh (so it traces the substituted formulation)."""
     tol, maxiter = jnp.asarray(_TOL), jnp.asarray(_MAXITER)
     if name == "exact":
-        loop = jax.jit(
-            inspect.unwrap(boozer_solvers.boozer_exact_newton),
-            static_argnames=("G_from_currents",),
-        )
+        loop = _compiled_afresh(boozer_solvers.boozer_exact_newton, ("G_from_currents",))
         return loop(None, x, jnp.arange(2, dtype=jnp.int32), tol, maxiter)
     options = {"optimize_G": True, "weight_inv_modB": False}
     if name == "penalty-newton":
-        loop = jax.jit(
-            inspect.unwrap(boozer_solvers.boozer_penalty_newton),
-            static_argnames=tuple(options),
-        )
+        loop = _compiled_afresh(boozer_solvers.boozer_penalty_newton, tuple(options))
         return loop(None, x, tol, maxiter, jnp.asarray(0.0), **options)
-    loop = jax.jit(
-        inspect.unwrap(boozer_solvers.boozer_penalty_gauss_newton),
-        static_argnames=tuple(options),
-    )
+    loop = _compiled_afresh(boozer_solvers.boozer_penalty_gauss_newton, tuple(options))
     return loop(None, x, tol, maxiter, **options)
 
 

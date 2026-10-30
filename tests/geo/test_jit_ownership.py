@@ -172,7 +172,7 @@ class JitOwnershipTests(unittest.TestCase):
                 wrapped = jit_module.jit(lambda x: jnp.sum(x**3))
                 np.testing.assert_allclose(jax.grad(wrapped)(values), 3 * values**2, rtol=1e-14, atol=0)
                 np.testing.assert_allclose(jax.jacfwd(jax.grad(wrapped))(values), np.diag(6 * values), rtol=1e-14, atol=0)
-                nested = jax.jit(jax.grad(wrapped))
+                nested = jax.jit(jax.grad(wrapped))  # noqa: TID251 checks composition with raw jax.jit
                 np.testing.assert_allclose(nested(values), 3 * values**2, rtol=1e-14, atol=0)
                 batch = np.stack([values, 2 * values])
                 np.testing.assert_allclose(jax.vmap(wrapped)(batch), np.sum(batch**3, axis=1), rtol=1e-14, atol=0)
@@ -294,7 +294,7 @@ class JitOwnershipTests(unittest.TestCase):
     def test_jax_input_donation_is_preserved(self):
         with mock.patch.dict(parameters, {"jit": True}):
             wrapped = jit(lambda value: value + 1, donate_argnums=0)
-        value = jax.device_put(np.ones(3), jax.devices("cpu")[0])
+        value = jax.device_put(np.ones(3), jax.devices("cpu")[0])  # noqa: TID251 test places on a chosen device
         np.testing.assert_array_equal(wrapped(value), np.full(3, 2.0))
         self.assertTrue(value.is_deleted())
 

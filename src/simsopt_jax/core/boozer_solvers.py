@@ -47,6 +47,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.scipy.linalg import lu_factor, lu_solve
 
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
 
 from .boozer_problem import (
@@ -190,7 +191,7 @@ def _continues(iterations, norm, singular, tol, maxiter):
     return (iterations < maxiter) & (norm > tol) & ~singular
 
 
-@partial(jax.jit, static_argnames=("G_from_currents",))
+@partial(jit, static_argnames=("G_from_currents",))
 def boozer_exact_newton(
     problem: BoozerProblem,
     x: jax.Array,
@@ -266,7 +267,7 @@ def boozer_exact_newton(
     )
 
 
-@partial(jax.jit, static_argnames=("optimize_G", "weight_inv_modB"))
+@partial(jit, static_argnames=("optimize_G", "weight_inv_modB"))
 def boozer_penalty_newton(
     problem: BoozerProblem,
     x: jax.Array,
@@ -340,7 +341,7 @@ def boozer_penalty_newton(
     return BoozerPenaltyNewtonResult(*lax.while_loop(proceed, step, initial))
 
 
-@partial(jax.jit, static_argnames=("optimize_G", "weight_inv_modB"))
+@partial(jit, static_argnames=("optimize_G", "weight_inv_modB"))
 def boozer_penalty_gauss_newton(
     problem: BoozerProblem,
     x: jax.Array,
@@ -418,7 +419,7 @@ def _penalty_value_and_grad(problem: BoozerProblem, optimize_G: bool, weight_inv
     )
 
 
-@partial(jax.jit, static_argnames=("optimize_G", "weight_inv_modB"))
+@partial(jit, static_argnames=("optimize_G", "weight_inv_modB"))
 def boozer_penalty_bfgs(
     problem: BoozerProblem,
     x: jax.Array,
@@ -452,7 +453,7 @@ def boozer_penalty_bfgs(
     return minimize_bfgs(_penalty_value_and_grad(problem, optimize_G, weight_inv_modB), x, gtol, maxiter)
 
 
-@partial(jax.jit, static_argnames=("maxcor", "optimize_G", "weight_inv_modB"))
+@partial(jit, static_argnames=("maxcor", "optimize_G", "weight_inv_modB"))
 def boozer_penalty_lbfgsb(
     problem: BoozerProblem,
     x: jax.Array,
@@ -493,7 +494,7 @@ def boozer_penalty_lbfgsb(
     )
 
 
-@jax.jit
+@jit
 def boozer_exact_residual_coil_vjp(
     problem: BoozerProblem, x: jax.Array, residual_rows: jax.Array, cotangent: jax.Array
 ) -> GroupedCoilSetSpec:
@@ -523,7 +524,7 @@ def boozer_exact_residual_coil_vjp(
     return pullback(cotangent)[0]
 
 
-@partial(jax.jit, static_argnames=("optimize_G", "weight_inv_modB"))
+@partial(jit, static_argnames=("optimize_G", "weight_inv_modB"))
 def boozer_penalty_coil_vjp(
     problem: BoozerProblem,
     x: jax.Array,
@@ -570,7 +571,7 @@ def boozer_penalty_coil_vjp(
     return jax.grad(directional_derivative)(problem.coils)
 
 
-@partial(jax.jit, static_argnames=("optimize_G", "weight_inv_modB"))
+@partial(jit, static_argnames=("optimize_G", "weight_inv_modB"))
 def boozer_residual_objective(
     problem: BoozerProblem,
     x: jax.Array,
