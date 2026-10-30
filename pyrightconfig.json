@@ -10,6 +10,7 @@
     "tests/core/test_backend_xla_gpu_fusion_autotuner.py",
     "tests/core/test_coil_dof_extraction_spec_placement.py",
     "tests/core/test_current_expression_extraction.py",
+    "tests/core/test_grouped_field_without_coils.py",
     "tests/core/test_device_one_gradient_path.py",
     "tests/core/test_kernel_numeric_helpers.py",
     "tests/core/test_placement_zero.py",
