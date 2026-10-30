@@ -2,6 +2,7 @@
 #include "simdhelpers.h"
 #include <unordered_map>
 #include <algorithm>
+#include <array>
 #include <fmt/core.h>
 #include <fmt/ranges.h>
 #include <functional>
@@ -78,8 +79,10 @@ class RegularGridInterpolant3D {
      * rectangular domain D so that Ω⊂D, and then defines a function `skip`
      * that returns true outside of Ω and false inside of Ω. Internally, we
      * then skip all cells for which the function returns true on all eight
-     * corners. For some pictures that explain the idea behind the skip
-     * function and its caveats, please check the discussion under
+     * corners. A skipped cell holds no interpolant: a query that lands in
+     * one gives NaN with out_of_bounds_ok and throws otherwise. For some
+     * pictures that explain the idea behind the skip function and its caveats,
+     * please check the discussion under
      * https://github.com/hiddenSymmetries/simsopt/pull/227
      */
     private:
@@ -89,7 +92,10 @@ class RegularGridInterpolant3D {
         const double xmax, ymax, zmax; // lower bounds of the x, y, and z coordinates
         const int value_size; // number of output dimensions of the interpolant, i.e. space that is mapped into
         const InterpolationRule rule; // the interpolation rule to use on each cell in the grid
-        const bool out_of_bounds_ok; // whether to do nothing or throw an error when the interpolant is queried at an out-of-bounds point
+        // whether an out-of-bounds query extrapolates from the nearest boundary cell or throws an
+        // error. Extrapolation gives NaN where the scaled grid index is not finite (a non-finite
+        // coordinate, or one so far out that the index overflows) and in a skipped cell.
+        const bool out_of_bounds_ok;
 
         // location of the mesh nodes in [xmin, xmax], [ymin, ymax], and [zmin, zmax]
         // has size nx+1, ny+1, nz+1 respectively
@@ -140,6 +146,11 @@ class RegularGridInterpolant3D {
         }
 
         int locate_unsafe(double x, double y, double z);
+        // shifts a coordinate within _EPS_ of a grid face onto the grid and returns the
+        // scaled coordinates, in which cell i of an axis covers [i, i+1)
+        std::array<double, 3> scaled_coordinates(double& x, double& y, double& z) const;
+        // whether a scaled coordinate lies in [0, n), i.e. inside the grid along its axis; false for NaN
+        static bool inside_axis(double scaled, int n) { return scaled >= 0 && scaled < n; }
         void evaluate_inplace(double x, double y, double z, double* res);
         void evaluate_local(double x, double y, double z, int cell_idx, double* res);
 
@@ -302,6 +313,9 @@ class RegularGridInterpolant3D {
 
         void interpolate_batch(std::function<Vec(Vec, Vec, Vec)> &f); // build the interpolant
 
+        // whether (x, y, z) lies in [xmin, xmax] x [ymin, ymax] x [zmin, zmax], with the same
+        // 1e-13 face tolerance as evaluate; false for a non-finite coordinate
+        bool in_bounds(double x, double y, double z) const;
         Vec evaluate(double x, double y, double z); // evaluate the interpolant at one location
         void evaluate_batch(Array& xyz, Array& fxyz); // evluate the interpolant at multiple locations
 

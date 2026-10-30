@@ -66,9 +66,10 @@ class Testing(unittest.TestCase):
     def test_out_of_bounds(self):
         """
         Check that the interpolant behaves correctly when evaluated outside of
-        the defined domain.  If created with out_of_bounds_ok=True, then
-        nothing should happen, but if out_of_bounds_ok=False, then a runtime
-        error should be raised.
+        the defined domain.  If created with out_of_bounds_ok=True, then the
+        polynomial of the nearest boundary cell is extrapolated, which
+        reproduces a polynomial of the interpolation degree; if
+        out_of_bounds_ok=False, then a runtime error should be raised.
         """
         np.random.seed(0)
         xran = (1.0, 4.0, 20)
@@ -93,7 +94,8 @@ class Testing(unittest.TestCase):
         interpolant = sopp.RegularGridInterpolant3D(rule, xran, yran, zran, dim, True)
         interpolant.interpolate_batch(fun)
         interpolant.evaluate_batch(xyz, fhxyz)
-        assert np.allclose(fhxyz, 1., atol=1e-14, rtol=1e-14)
+        fxyz = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
+        np.testing.assert_allclose(fhxyz, fxyz, rtol=1e-10, atol=1e-10)
 
         interpolant = sopp.RegularGridInterpolant3D(rule, xran, yran, zran, dim, False)
         interpolant.interpolate_batch(fun)
@@ -104,9 +106,15 @@ class Testing(unittest.TestCase):
         """
         A point outside the domain in a single coordinate (beyond the 1e-13
         face tolerance, or NaN, infinite or huge) is out of bounds: it must not
-        wrap into a neighbouring cell or round into the first one. With
-        out_of_bounds_ok=True the output is left untouched; with
-        out_of_bounds_ok=False a runtime error is raised.
+        wrap into a neighbouring cell, and ``in_bounds_batch`` reports it as
+        outside. With out_of_bounds_ok=True every query overwrites the output:
+        a finite point gets the nearest boundary cell's polynomial, which
+        reproduces ``fun`` exactly, and a coordinate whose scaled grid index is
+        not finite (a non-finite coordinate, or one so far out that the index
+        overflows) gets NaN. A huge finite coordinate whose index stays finite
+        is also evaluated with that polynomial, which overflows here because
+        ``fun`` is quadratic. With out_of_bounds_ok=False
+        a runtime error is raised.
         """
         np.random.seed(0)
         ranges = [(1.0, 4.0, 20), (1.1, 3.9, 10), (1.2, 3.8, 15)]
@@ -120,17 +128,29 @@ class Testing(unittest.TestCase):
         interpolant_strict.interpolate_batch(fun)
 
         center = np.array([0.5 * (lo + hi) for lo, hi, _ in ranges])
+
+        def point_at(axis, value):
+            """The domain center with coordinate ``axis`` set to ``value``, as a (1, 3) array."""
+            xyz = center[None, :].copy()
+            xyz[0, axis] = value
+            return xyz
+
         for axis, (lo, hi, n) in enumerate(ranges):
             cell = (hi - lo) / n
-            for value in (lo - 0.5 * cell, lo - 1.5 * cell, hi + 0.5 * cell,
+            for value in (lo - 0.5 * cell, lo - 1.5 * cell, hi + 0.5 * cell, hi + 2.5 * cell,
                           np.nan, np.inf, -np.inf, 1e300, -1e300):
                 with self.subTest(axis=axis, value=value):
-                    xyz = center.copy()
-                    xyz[axis] = value
-                    xyz = xyz[None, :].copy()
+                    xyz = point_at(axis, value)
                     fhxyz = np.ones((1, dim))
                     interpolant_ok.evaluate_batch(xyz, fhxyz)
-                    np.testing.assert_array_equal(fhxyz, 1.)
+                    self.assertFalse(interpolant_ok.in_bounds_batch(xyz)[0])
+                    if not np.isfinite(value):
+                        self.assertTrue(np.all(np.isnan(fhxyz)), fhxyz)
+                    elif abs(value) < 1e3:
+                        expected = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
+                        np.testing.assert_allclose(fhxyz, expected, rtol=1e-10, atol=1e-10)
+                    else:
+                        self.assertFalse(np.any(np.isfinite(fhxyz)), fhxyz)
                     with self.assertRaisesRegex(RuntimeError, rf"{'xyz'[axis]}idxs=.* not within \[0, {n}\)"):
                         interpolant_strict.evaluate_batch(xyz, fhxyz)
 
@@ -138,9 +158,8 @@ class Testing(unittest.TestCase):
         for axis, (lo, hi, n) in enumerate(ranges):
             for value in (lo - 1e-14, hi + 1e-14):
                 with self.subTest(axis=axis, value=value):
-                    xyz = center.copy()
-                    xyz[axis] = value
-                    xyz = xyz[None, :].copy()
+                    xyz = point_at(axis, value)
+                    self.assertTrue(interpolant_ok.in_bounds_batch(xyz)[0])
                     expected = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
                     for interpolant in (interpolant_ok, interpolant_strict):
                         fhxyz = np.zeros((1, dim))
@@ -150,7 +169,9 @@ class Testing(unittest.TestCase):
     def test_skip(self):
         """
         Check that the interpolant correctly identifies which regions in the
-        domain to skip
+        domain to skip, and that with out_of_bounds_ok=True a query in a skipped
+        cell, including one outside the domain whose nearest boundary cell is
+        skipped, writes NaN.
         """
         np.random.seed(0)
         xran = (1.0, 4.0, 30)
@@ -184,6 +205,7 @@ class Testing(unittest.TestCase):
             [1.3, 1.3, 1.3],  # do not keep
             [1.3, 2.9, 3.5],  # do not keep
             [3.5, 1.3, 1.3],  # do not keep
+            [0.5, 2.5, 2.5],  # outside the domain, nearest boundary cell skipped
         ])
         fhxyz = 100*np.ones((xyz.shape[0], dim))
 
@@ -192,7 +214,7 @@ class Testing(unittest.TestCase):
 
         fxyz = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
         assert np.allclose(fhxyz[:3, :], fxyz[:3, :], atol=1e-12, rtol=1e-12)
-        assert np.allclose(fhxyz[3:, :], 100, atol=1e-12, rtol=1e-12)
+        assert np.all(np.isnan(fhxyz[3:, :]))
 
     def test_convergence_order(self):
         for dim in [1, 4, 6]:

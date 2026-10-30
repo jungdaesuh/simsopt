@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 #include "regular_grid_interpolant_3d.h"
 #include <xtensor/containers/xarray.hpp>
 #include "xtensor/core/xlayout.hpp"
@@ -81,8 +83,7 @@ int RegularGridInterpolant3D<Array>::locate_unsafe(double x, double y, double z)
 }
 
 template<class Array>
-void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, double z, double* res){
-
+std::array<double, 3> RegularGridInterpolant3D<Array>::scaled_coordinates(double& x, double& y, double& z) const {
     // to avoid funny business when the data is just a tiny bit out of bounds
     // due to machine precision, we perform this check and shift
     if(x >= xmax) x -= _EPS_;
@@ -91,27 +92,45 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
     else if (y <= ymin) y += _EPS_;
     if(z >= zmax) z -= _EPS_;
     else if (z <= zmin) z += _EPS_;
+    return {nx*(x-xmin)/(xmax-xmin), ny*(y-ymin)/(ymax-ymin), nz*(z-zmin)/(zmax-zmin)};
+}
 
-    const std::array<double, 3> scaled_indices = {
-        nx*(x-xmin)/(xmax-xmin),
-        ny*(y-ymin)/(ymax-ymin),
-        nz*(z-zmin)/(zmax-zmin)};
+template<class Array>
+bool RegularGridInterpolant3D<Array>::in_bounds(double x, double y, double z) const {
+    const std::array<double, 3> scaled_indices = scaled_coordinates(x, y, z);
+    return inside_axis(scaled_indices[0], nx) && inside_axis(scaled_indices[1], ny)
+        && inside_axis(scaled_indices[2], nz);
+}
+
+template<class Array>
+void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, double z, double* res){
+    const std::array<double, 3> scaled_indices = scaled_coordinates(x, y, z);
     const std::array<int, 3> cell_counts = {nx, ny, nz};
+    std::array<int, 3> cell_indices;
     // A point is inside when every scaled index is in [0, n); NaN fails the
-    // comparisons too. Inside, truncation to int is the floor. (std::to_string:
-    // the bundled fmt overlaps a memcpy when it formats a double.)
+    // comparisons too. Outside, out_of_bounds_ok extrapolates the polynomial of
+    // the nearest boundary cell, so every query writes res; a non-finite scaled
+    // index has no such value and gives NaN, and so does a skipped cell (see
+    // evaluate_local). (std::to_string: the bundled fmt overlaps a memcpy when
+    // it formats a double.)
     for (int axis = 0; axis < 3; ++axis) {
-        if (!(scaled_indices[axis] >= 0 && scaled_indices[axis] < cell_counts[axis])) {
-            if(out_of_bounds_ok)
+        const double scaled = scaled_indices[axis];
+        if (!inside_axis(scaled, cell_counts[axis])) {
+            if(!out_of_bounds_ok)
+                throw std::runtime_error(std::string(1, "xyz"[axis]) + "idxs="
+                    + std::to_string(scaled) + " not within [0, "
+                    + std::to_string(cell_counts[axis]) + ")");
+            if(!std::isfinite(scaled)) {
+                std::fill(res, res + value_size, std::numeric_limits<double>::quiet_NaN());
                 return;
-            throw std::runtime_error(std::string(1, "xyz"[axis]) + "idxs="
-                + std::to_string(scaled_indices[axis]) + " not within [0, "
-                + std::to_string(cell_counts[axis]) + ")");
+            }
         }
+        // Clamp in double before the int conversion, which is undefined beyond int range.
+        cell_indices[axis] = int(std::clamp(std::floor(scaled), 0., double(cell_counts[axis] - 1)));
     }
-    int xidx = int(scaled_indices[0]);
-    int yidx = int(scaled_indices[1]);
-    int zidx = int(scaled_indices[2]);
+    const int xidx = cell_indices[0];
+    const int yidx = cell_indices[1];
+    const int zidx = cell_indices[2];
     double xlocal = (x-xmesh[xidx])/hx;
     double ylocal = (y-ymesh[yidx])/hy;
     double zlocal = (z-zmesh[zidx])/hz;
@@ -124,10 +143,11 @@ void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double 
     int degree = rule.degree;
     auto got = all_local_vals_map.find(cell_idx);
     if (got == all_local_vals_map.end()) {
-        if(out_of_bounds_ok)
-            return;
-        else
+        // a skipped cell holds no interpolant
+        if(!out_of_bounds_ok)
             throw std::runtime_error(fmt::format("cell_idx={} not in all_local_vals_map", cell_idx));
+        std::fill(res, res + value_size, std::numeric_limits<double>::quiet_NaN());
+        return;
     }
 
     double* vals_local = got->second.data();

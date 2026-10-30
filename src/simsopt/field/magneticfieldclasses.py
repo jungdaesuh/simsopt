@@ -868,7 +868,11 @@ class InterpolatedField(sopp.InterpolatedField, MagneticField):
             phirange: a 3-tuple of the form ``(phimin, phimax, nphi)``.
             zrange: a 3-tuple of the form ``(zmin, zmax, nz)``.
             extrapolate: whether to extrapolate the field when evaluate outside
-                         the integration domain or to throw an error.
+                         the integration domain or to throw an error. With
+                         ``extrapolate=True`` a query in a skipped cell (see
+                         ``skip``), or outside the domain with a skipped
+                         nearest boundary cell, returns NaN; with
+                         ``extrapolate=False`` it raises.
             nfp: Whether to exploit rotational symmetry. In this case any angle
                  is always mapped into the interval :math:`[0, 2\pi/\mathrm{nfp})`,
                  hence it makes sense to use ``phimin=0`` and
@@ -887,7 +891,11 @@ class InterpolatedField(sopp.InterpolatedField, MagneticField):
 
                   See also here
                   https://github.com/hiddenSymmetries/simsopt/pull/227 for a
-                  graphical illustration.
+                  graphical illustration. A query in a skipped cell, or
+                  outside the domain with a skipped nearest boundary cell,
+                  returns NaN with ``extrapolate=True`` (so ``estimate_error_B`` and
+                  ``estimate_error_GradAbsB`` are NaN when a sample hits a
+                  skipped cell) and raises with ``extrapolate=False``.
 
         """
         MagneticField.__init__(self)

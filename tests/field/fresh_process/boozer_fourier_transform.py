@@ -1,8 +1,8 @@
 """Child script for ``test_boozer_radial_fourier_transform``.
 
 Run in a fresh interpreter so that OpenMP reads ``OMP_NUM_THREADS`` when
-``simsoptpp`` loads. Usage: ``python fresh_process_boozer_fourier_transform.py
-INPUTS.npz OUTPUT.npz``.
+``simsoptpp`` loads. Usage: ``python boozer_fourier_transform.py INPUTS.npz
+OUTPUT.npz``.
 """
 
 import sys
