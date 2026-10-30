@@ -29,6 +29,13 @@ def _config(jax_platform):
     )
 
 
+def _before_backend_initialization():
+    """Patch the runtime to see a process whose JAX backends are not initialized."""
+    return mock.patch(
+        "simsopt_jax.backend.runtime._jax_backends_initialized", return_value=False
+    )
+
+
 def _policy(parity_mode=False):
     return _policy_from_config(
         _config_from_mode(
@@ -129,9 +136,11 @@ class TestBackendXlaCompilePreset(JaxTestCase):
         )
 
     def test_apply_sets_preset_on_cpu(self):
-        """A non-parity CPU lane with no prior flags gets exactly the preset."""
+        """A non-parity CPU lane with no prior flags gets exactly the preset
+        before JAX initializes its backends."""
         patches = self.patches
         patches.enter_context(mock.patch.dict(os.environ))
+        patches.enter_context(_before_backend_initialization())
         os.environ.pop(_XLA_FLAGS_ENV, None)
         _apply_cpu_compile_preset_env(_config("cpu"), _policy(parity_mode=False))
         self.assertTrue(
@@ -143,6 +152,7 @@ class TestBackendXlaCompilePreset(JaxTestCase):
         """Re-applying the config (e.g. repeated init) must not duplicate the preset."""
         patches = self.patches
         patches.enter_context(mock.patch.dict(os.environ))
+        patches.enter_context(_before_backend_initialization())
         os.environ.pop(_XLA_FLAGS_ENV, None)
         _apply_cpu_compile_preset_env(_config("cpu"), _policy())
         _apply_cpu_compile_preset_env(_config("cpu"), _policy())
