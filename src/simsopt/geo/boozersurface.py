@@ -96,6 +96,8 @@ class BoozerSurface(Optimizable):
       ``method='manual'``.
     - :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_exact_constraints_newton`: the norm of the optimality
       conditions returned by :obj:`~simsopt.geo.BoozerSurface.boozer_exact_constraints`.
+    - :obj:`~simsopt.geo.BoozerSurface.solve_residual_equation_exactly_newton`: the norm of the masked residual
+      and the label (and, without stellarator symmetry, z) constraints.
 
     *[1]: Giuliani A, Wechsung F, Stadler G, Cerfon A, Landreman M. Direct computation of magnetic surfaces in Boozer coordinates and coil optimization for quasisymmetry. Journal of Plasma Physics. 2022;88(4):905880401. doi:10.1017/S0022377822000563*
     
@@ -725,6 +727,24 @@ class BoozerSurface(Optimizable):
         self.biotsavart.set_points(s.gamma().reshape((-1, 3)))
         return iota, G
 
+    def _exact_residual(self, r, mask):
+        """
+        The BoozerExact Newton system's right-hand side: the masked residual ``r``, the label
+        constraint and, without stellarator symmetry, the constraint z(phi=0, theta=0) = 0.
+        """
+        constraints = [self.label.J() - self.targetlabel]
+        if not self.surface.stellsym:
+            constraints.append(self.surface.gamma()[0, 0, 2])
+        return np.concatenate((r[mask], constraints))
+
+    def _exact_residual_jacobian(self, J, mask):
+        """Jacobian of :meth:`_exact_residual` given the Jacobian ``J`` of the full residual."""
+        s = self.surface
+        rows = [J[mask, :], np.concatenate((self.label.dJ(partials=True)(s), [0., 0.]))]
+        if not s.stellsym:
+            rows.append(np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.])))
+        return np.vstack(rows)
+
     def minimize_boozer_exact_constraints_newton(self, tol=1e-12, maxiter=10, iota=0., G=None, lm=[0., 0.]):
         r"""
         This function solves the constrained optimization problem
@@ -891,7 +911,8 @@ class BoozerSurface(Optimizable):
 
         Args:
             tol (float, Optional): The tolerance for the optimization. Defaults to 1e-10.
-            maxiter (int, Optional): The maximum number of iterations for the optimization. Defaults to 10.
+            maxiter (int or float, Optional): Iteration limit. Non-positive values skip Newton steps;
+                positive fractional values allow steps while the iteration count is below the limit. Defaults to 10.
             iota (float, Optional): The initial guess for the value of the rotational transform on the surface. Defaults to 0.
             G (float, Optional): The initial guess for the value of G on the surface. Defaults to None.
             verbose (bool, Optional): If True, print the optimization progress. Defaults to False.
@@ -933,32 +954,21 @@ class BoozerSurface(Optimizable):
             mask[0, 0, 0] = False
         mask = mask.flatten()
 
-        label = self.label
         if G is None:
             G = 2. * np.pi * np.sum(np.abs([c.current.get_value() for c in self.biotsavart.coils])) * (4 * np.pi * 10**(-7) / (2 * np.pi))
         x = np.concatenate((s.get_dofs(), [iota, G]))
+        x0 = x.copy()
         i = 0
         r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
-        norm = 1e6
+        norm = initial_norm = 1e6
         while i < maxiter:
-            if s.stellsym:
-                b = np.concatenate((r[mask], [(label.J()-self.targetlabel)]))
-            else:
-                b = np.concatenate((r[mask], [(label.J()-self.targetlabel), s.gamma()[0, 0, 2]]))
+            b = self._exact_residual(r, mask)
             norm = np.linalg.norm(b)
+            if i == 0:
+                initial_norm = norm
             if norm <= tol:
                 break
-            if s.stellsym:
-                J = np.vstack((
-                    J[mask, :],
-                    np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
-                ))
-            else:
-                J = np.vstack((
-                    J[mask, :],
-                    np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
-                    np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
-                ))
+            J = self._exact_residual_jacobian(J, mask)
             dx = np.linalg.solve(J, b)
             dx += np.linalg.solve(J, b-J@dx)
             x -= dx
@@ -968,17 +978,16 @@ class BoozerSurface(Optimizable):
             i += 1
             r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
 
-        if s.stellsym:
-            J = np.vstack((
-                J[mask, :],
-                np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
-            ))
-        else:
-            J = np.vstack((
-                J[mask, :],
-                np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
-                np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
-            ))
+        if i > 0:
+            b = self._exact_residual(r, mask)
+            norm = np.linalg.norm(b)
+
+        if not _keep_iterate(norm, initial_norm):
+            s.set_dofs(x0[:-2])
+            iota, G = x0[-2:]
+            r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
+
+        J = self._exact_residual_jacobian(J, mask)
 
         P, L, U = lu(J)
         res = {
