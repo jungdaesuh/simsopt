@@ -9,6 +9,7 @@ with optional_jax_imports():
     import jax  # noqa: F401
     import jax.numpy as jnp
     from simsopt_jax import pytree
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.pytree import (
         pytree_dataclass,
         pytree_node,
@@ -847,8 +848,8 @@ class TestPytreeConvention(JaxTestCase):
             return value.first + 2 * value.second
 
         self.assertTrue(
-            float(jax.jit(weighted_sum)(restored)) == 5.0,
-            "float(jax.jit(weighted_sum)(restored)) == 5.0",
+            float(jit(weighted_sum)(restored)) == 5.0,
+            "float(jit(weighted_sum)(restored)) == 5.0",
         )
         gradient = jax.grad(weighted_sum)(restored)
         self.assertTrue(gradient.mode == "sum", 'gradient.mode == "sum"')
