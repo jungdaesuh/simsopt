@@ -97,17 +97,16 @@ def curve_spec_from_adapter_curve(curve, *, separate_owners: bool = False) -> Cu
 
 
 def _curve_perturbed_spec_from_curve(curve: CurvePerturbed, *, separate_owners: bool):
+    # The spec carries the sample and up to three derivatives; missing ones are
+    # zero placeholders that the spec's sample_derivatives marks as absent.
+    sample_derivatives = min(len(curve.sample._sample) - 1, 3)
     sample_gamma = curve.sample[0]
     sample_gammadash = curve.sample[1]
     sample_gammadashdash = (
-        curve.sample[2]
-        if len(curve.sample._sample) > 2
-        else np.zeros_like(sample_gamma)
+        curve.sample[2] if sample_derivatives >= 2 else np.zeros_like(sample_gamma)
     )
     sample_gammadashdashdash = (
-        curve.sample[3]
-        if len(curve.sample._sample) > 3
-        else np.zeros_like(sample_gamma)
+        curve.sample[3] if sample_derivatives >= 3 else np.zeros_like(sample_gamma)
     )
 
     return make_curve_perturbed_spec(
@@ -119,6 +118,7 @@ def _curve_perturbed_spec_from_curve(curve: CurvePerturbed, *, separate_owners: 
         sample_gammadash=sample_gammadash,
         sample_gammadashdash=sample_gammadashdash,
         sample_gammadashdashdash=sample_gammadashdashdash,
+        sample_derivatives=sample_derivatives,
     )
 
 

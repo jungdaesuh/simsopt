@@ -484,7 +484,7 @@ RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
         "sample_gammadashdash",
         "sample_gammadashdashdash",
     ),
-    meta=(),
+    meta=("sample_derivatives",),
 )
 class CurvePerturbedSpec:
     """Immutable wrapper payload for a perturbed base curve.
@@ -506,6 +506,9 @@ class CurvePerturbedSpec:
             perturbation, shape (Q, 3), in meters.
         sample_gammadashdashdash (jax.Array): Additive third parameter-derivative
             perturbation, shape (Q, 3), in meters.
+        sample_derivatives (int): Number of parameter derivatives the sample provides,
+            1 to 3; higher sample terms are zero placeholders, which filament frames
+            refuse to differentiate through.
     """
 
     dofs: jax.Array
@@ -516,6 +519,7 @@ class CurvePerturbedSpec:
     sample_gammadash: jax.Array
     sample_gammadashdash: jax.Array
     sample_gammadashdashdash: jax.Array
+    sample_derivatives: int
 
 
 @pytree_dataclass(
@@ -610,6 +614,54 @@ def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
     if isinstance(spec, CurveFilamentSpec):
         return "filament"
     raise TypeError(f"Unsupported curve spec type: {type(spec).__name__}")
+
+
+# Base-curve derivatives a filament frame consumes beyond the filament's own:
+# the centroid frame is built from gammadash, the Frenet frame from gammadashdash.
+_FILAMENT_FRAME_EXTRA_DERIVATIVES = {"centroid": 1, "frenet": 2}
+
+
+def _filament_base_derivative_order(frame_kind: str, order: int) -> int:
+    """Return the base-curve derivative order a filament frame needs.
+
+    Args:
+        frame_kind (str): "centroid" or "frenet".
+        order (int): Number of parameter derivatives of the filament position.
+
+    Returns:
+        int: Number of parameter derivatives of the base curve the frame needs.
+    """
+    return order + _FILAMENT_FRAME_EXTRA_DERIVATIVES[frame_kind]
+
+
+def _require_curve_derivatives(spec: CurveSpec, order: int) -> None:
+    """Reject a curve whose perturbation samples lack derivatives a filament needs.
+
+    Native ``PerturbationSample`` raises when a derivative above its sampler's
+    ``n_derivs`` is requested; this applies the same rule to every perturbed
+    layer below a filament frame, including the extra base derivatives the frame
+    consumes.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry.
+        order (int): Number of parameter derivatives of the curve position needed.
+
+    Raises:
+        ValueError: A perturbed layer provides fewer than the needed derivatives.
+    """
+    if isinstance(spec, CurvePerturbedSpec):
+        if order > spec.sample_derivatives:
+            raise ValueError(
+                f"The perturbation sample has {spec.sample_derivatives} derivatives, "
+                f"but derivative {order} is needed. Adjust the `n_derivs` parameter "
+                "of the sampler to access higher derivatives (the JAX spec carries "
+                "at most 3)."
+            )
+        _require_curve_derivatives(spec.base_curve, order)
+    elif isinstance(spec, CurveFilamentSpec):
+        _require_curve_derivatives(
+            spec.base_curve, _filament_base_derivative_order(spec.frame_kind, order)
+        )
 
 
 def make_coil_group_spec(
@@ -939,6 +991,7 @@ def make_curve_perturbed_spec(
     sample_gammadash: object,
     sample_gammadashdash: object,
     sample_gammadashdashdash: object,
+    sample_derivatives: int = 3,
 ) -> CurvePerturbedSpec:
     """Build an immutable CurvePerturbedSpec payload for JAX kernels.
 
@@ -959,12 +1012,21 @@ def make_curve_perturbed_spec(
             perturbation, shape (Q, 3), in meters.
         sample_gammadashdashdash (array-like): Additive third parameter-derivative
             perturbation, shape (Q, 3), in meters.
+        sample_derivatives (int): Number of parameter derivatives the sample provides,
+            1 to 3; pass zeros for the sample terms above it.
 
     Returns:
         CurvePerturbedSpec object: Frozen pytree payload; newly converted
             array leaves retain their argument shape, use float64
             and snapshot host NumPy inputs.
+
+    Raises:
+        ValueError: sample_derivatives is outside 1 to 3.
     """
+    if not 1 <= sample_derivatives <= 3:
+        raise ValueError(
+            f"sample_derivatives must be 1, 2 or 3, got {sample_derivatives}."
+        )
     return CurvePerturbedSpec(
         dofs=_as_float64_array(dofs),
         quadpoints=_as_float64_array(quadpoints),
@@ -974,6 +1036,7 @@ def make_curve_perturbed_spec(
         sample_gammadash=_as_float64_array(sample_gammadash),
         sample_gammadashdash=_as_float64_array(sample_gammadashdash),
         sample_gammadashdashdash=_as_float64_array(sample_gammadashdashdash),
+        sample_derivatives=int(sample_derivatives),
     )
 
 
@@ -1011,8 +1074,13 @@ def make_curve_filament_spec(
         CurveFilamentSpec object: Frozen pytree payload; newly converted array
             leaves retain their argument shape, use float64 and
             snapshot host NumPy inputs.
+
+    Raises:
+        ValueError: A perturbed base curve's sample lacks a derivative the frame
+            needs for the filament tangent (2 for centroid, 3 for frenet), as
+            native raises.
     """
-    return CurveFilamentSpec(
+    spec = CurveFilamentSpec(
         dofs=_as_float64_array(dofs),
         quadpoints=_as_float64_array(quadpoints),
         base_curve=base_curve,
@@ -1023,6 +1091,8 @@ def make_curve_filament_spec(
         dn=float(dn),
         db=float(db),
     )
+    _require_curve_derivatives(spec, 1)
+    return spec
 
 
 def make_coil_symmetry_spec(
