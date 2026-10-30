@@ -1,3 +1,4 @@
+import weakref
 from dataclasses import dataclass
 
 import numpy as np
@@ -105,18 +106,118 @@ class PerturbationSample(GSONable):
         sample = PerturbationSample(...)
         g = sample[0] # get the values of the perturbation
         gd = sample[1] # get the first derivative of the perturbation
+
+    Every :obj:`CurvePerturbed` built on a sample is registered with it, so
+    :meth:`resample` refreshes all curves that share the sample and every
+    object that depends on them (e.g. coils).
+    The registry holds weak references and is never serialized or copied:
+    pickling or copying a sample yields one with no registered curves, and
+    curves rebuilt on it register again.
     """
 
     def __init__(self, sampler, randomgen=None, sample=None):
+        """
+        Hold one draw of ``sampler``, or the given pre-drawn ``sample``.
+
+        Args:
+            sampler: the :obj:`GaussianSampler` that draws the perturbation.
+            randomgen: optional ``numpy.random.Generator`` used for every draw;
+                a fresh unseeded generator is used for each draw if ``None``.
+            sample: optional pre-drawn perturbation, a list of
+                ``sampler.n_derivs + 1`` arrays of shape ``(len(sampler.points), 3)``
+                holding the perturbation (in metres) and its derivatives with
+                respect to the curve parameter: the k-th entry is the k-th
+                derivative, in metres per (unit parameter)^k.
+                A new sample is drawn if ``None``.
+        """
         self.sampler = sampler
         self.randomgen = randomgen   # If not None, most likely fail with serialization
+        self._consumers = []
         if sample:
             self._sample = sample
         else:
             self.resample()
 
+    def __getstate__(self):
+        """
+        Return the picklable state, without the registry of curves.
+
+        Weak references cannot be pickled, and the curves of a copied sample
+        are not consumers of the copy.
+
+        Returns:
+            A shallow copy of ``__dict__`` without the consumer registry.
+        """
+        state = self.__dict__.copy()
+        del state['_consumers']
+        return state
+
+    def __setstate__(self, state):
+        """
+        Restore the state written by :meth:`__getstate__` with an empty registry.
+
+        Args:
+            state: the dictionary returned by :meth:`__getstate__`.
+        """
+        self.__dict__.update(state)
+        self._consumers = []
+
+    def add_consumer(self, curve):
+        """
+        Register a curve whose geometry depends on this sample.
+
+        Only a weak reference is kept, so registering does not extend the
+        lifetime of ``curve``. Curves are compared by identity, so another curve
+        that compares equal to ``curve`` stays registered and registering the
+        same curve twice has no further effect.
+
+        Args:
+            curve: a :obj:`CurvePerturbed` (or any ``Optimizable``) to notify
+                via ``set_recompute_flag()`` whenever :meth:`resample` draws
+                a new sample.
+        """
+        if not any(ref() is curve for ref in self._consumers):
+            self._consumers.append(weakref.ref(curve))
+
+    def remove_consumer(self, curve):
+        """
+        Stop notifying ``curve`` when :meth:`resample` draws a new sample.
+
+        Curves are compared by identity, so another curve that compares equal
+        to ``curve`` stays registered. References to consumers that no longer
+        exist are dropped as well.
+
+        Args:
+            curve: a consumer previously passed to :meth:`add_consumer`; a curve
+                that is not registered is ignored.
+        """
+        self._consumers = [ref for ref in self._consumers
+                           if (consumer := ref()) is not None and consumer is not curve]
+
     def resample(self):
+        """
+        Draw a new sample and invalidate every registered consumer.
+
+        Each live consumer receives ``set_recompute_flag()``, which clears its
+        cached geometry and propagates to its dependents. References to
+        consumers that no longer exist are dropped.
+
+        A new draw rings dependents exactly as a DOF change does, so
+        :obj:`~simsopt.geo.surfaceobjectives.ToroidalFlux` and
+        :obj:`~simsopt.geo.surfaceobjectives.QfmResidual` move a field they
+        share to their surface points at once; another reader of that field
+        must call ``set_points`` again after the draw.
+
+        Call this method on every rank that holds the graph. As after a DOF
+        change, the next access to a dependent
+        :obj:`~simsopt.objectives.utilities.MPIOptimizable` calls ``allgather``,
+        so a draw on only some of the ranks hangs.
+        """
         self._sample = self.sampler.draw_sample(self.randomgen)
+        live = [c for c in (ref() for ref in self._consumers) if c is not None]
+        self._consumers = [weakref.ref(c) for c in live]
+        for consumer in live:
+            consumer.set_recompute_flag()
 
     def __getitem__(self, deriv):
         """
@@ -169,15 +270,60 @@ class CurvePerturbed(sopp.Curve, Curve):
                     pert = PerturbationSample(sampler_systematic, randomgen=rg)
                     stell.append(CurvePerturbed(c, pert))
                 perturbed_curves.append(stell)
+
+        Args:
+            curve: the underlying :obj:`~simsopt.geo.curve.Curve`.
+            sample: the :obj:`PerturbationSample` added to ``curve``. It must be a
+                :obj:`PerturbationSample`, because the curve registers with it to
+                follow its :meth:`PerturbationSample.resample`. To apply a fixed,
+                pre-drawn deviation, wrap it as
+                ``PerturbationSample(sampler, sample=[d0, d1, ...])``.
         """
         self.curve = curve
         sopp.Curve.__init__(self, curve.quadpoints)
         Curve.__init__(self, depends_on=[curve])
-        self.sample = sample
+        self._sample = sample
+        sample.add_consumer(self)
+
+    @property
+    def sample(self):
+        """
+        The :obj:`PerturbationSample` added to the underlying curve.
+
+        Assigning a sample invalidates the curve and its dependents (e.g. coils)
+        at once. An assignment or a new draw rings dependents exactly as a DOF
+        change does, so :obj:`~simsopt.geo.surfaceobjectives.ToroidalFlux` and
+        :obj:`~simsopt.geo.surfaceobjectives.QfmResidual` move a field they share
+        to their surface points, and both must happen on every rank that holds
+        the graph (see :meth:`PerturbationSample.resample`).
+        """
+        return self._sample
+
+    @sample.setter
+    def sample(self, sample):
+        """
+        Use ``sample`` as the perturbation of this curve.
+
+        The curve leaves its previous sample and registers with ``sample``, so
+        a later ``sample.resample()`` refreshes it and a resample of the
+        previous sample no longer does.
+
+        Args:
+            sample: the new :obj:`PerturbationSample`.
+        """
+        self._sample.remove_consumer(self)
+        self._sample = sample
+        sample.add_consumer(self)
+        self.set_recompute_flag()
 
     def resample(self):
+        """
+        Draw a new perturbation for the shared :obj:`PerturbationSample`.
+
+        Equivalent to ``self.sample.resample()``: every curve built on the same
+        sample, and its dependents such as coils, is invalidated.
+        """
         self.sample.resample()
-        self.recompute_bell()
 
     def recompute_bell(self, parent=None):
         self.invalidate_cache()
