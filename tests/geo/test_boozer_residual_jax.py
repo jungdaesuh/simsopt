@@ -431,7 +431,10 @@ class TestBoozerResidualJax(JaxTestCase):
         native_boozer = _native_boozer(setup, 1.0)
         x = _decision(setup.surface, case.optimize_G)
         results, expected = {}, {}
-        for weight in (0.7, 700.0):
+        # The weight difference must dominate the residual term it cancels:
+        # at 700 the value of some cases is 1.5e4 times its label penalty, so
+        # one ulp of the value exceeds 1e-12 of the difference.
+        for weight in (0.7, 7e4):
             problem = boozer_problem(
                 setup.field, setup.surface, setup.label, setup.target, weight
             )
@@ -456,9 +459,9 @@ class TestBoozerResidualJax(JaxTestCase):
                     results[weight, derivatives], expected[weight, derivatives], name
                 )
         pairs = zip(
-            _outputs(results[700.0, 2]),
+            _outputs(results[7e4, 2]),
             _outputs(results[0.7, 2]),
-            _outputs(expected[700.0, 2]),
+            _outputs(expected[7e4, 2]),
             _outputs(expected[0.7, 2]),
         )
         for order, (heavy, light, native_heavy, native_light) in enumerate(pairs):
