@@ -371,10 +371,14 @@ class TestQuasiNewtonJax(JaxTestCase):
         below the round-off of terms the size of H = 1. SciPy's factored update
         keeps H = 1 / (2 * 5e17); so does the port, after that first update
         (with SciPy's record) and to convergence (with SciPy's status). An
-        expanded rank-two update leaves H negative and ends with status 2. The
-        iteration count to convergence is not compared: the second step lands
-        within round-off of x = 0, exactly on it on the GPU, which then stops
-        one iteration before SciPy."""
+        expanded rank-two update leaves H wrong after the first update (on
+        the CPU negative, ending with status 2; on the GPU 200 times too
+        large, which the next update repairs, so there only the first update
+        shows it). The iteration count to convergence is not compared: the
+        second step lands within round-off of x = 0, exactly on it on the GPU,
+        which then stops one update before SciPy. H is still compared: in one
+        variable each update sets H to s / y = 1 / (2 * 5e17), to round-off,
+        whatever H was."""
         x0 = np.ones(1)
         for lane in _LANES:
             for maxiter in (1, 100):
