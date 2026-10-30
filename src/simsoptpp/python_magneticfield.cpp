@@ -89,8 +89,9 @@ void init_magneticfields(py::module_ &m){
             }, py::arg("xyz"),
             "Report which points lie in the interpolation grid.\n\n"
             "A point is inside with the same 1e-13 face tolerance as `evaluate`, and outside for a\n"
-            "non-finite coordinate. Outside the grid, `evaluate` extrapolates (or throws if\n"
-            "out_of_bounds_ok is false).\n\n"
+            "non-finite coordinate. Outside the grid, `evaluate` extrapolates from the nearest\n"
+            "boundary cell, giving NaN where the scaled index is not finite or that cell is\n"
+            "skipped (or throws if out_of_bounds_ok is false).\n\n"
             "Args:\n"
             "    xyz (array, shape (npoints, 3)): Points in the interpolant's coordinates.\n\n"
             "Returns:\n"
