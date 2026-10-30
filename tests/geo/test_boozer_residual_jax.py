@@ -1281,9 +1281,12 @@ class TestBoozerResidualJax(JaxTestCase):
             with self.subTest(name=name), self.assertRaisesRegex(TypeError, "derivatives=1"):
                 derivative()
 
+        # The function itself, traced afresh on every call: patching the guard
+        # then changes what is traced without touching any compiled program.
+        traced = boozer_exact_constraints.__wrapped__
+
         def operations():
-            jax.clear_caches()
-            text = boozer_exact_constraints.lower(problem, xl).as_text()
+            text = jit(lambda p, point: traced(p, point)).lower(problem, xl).as_text()
             return Counter(re.findall(r"\b(?:stablehlo|chlo|func)\.[a-z_]+", text))
 
         guarded = operations()
@@ -1291,11 +1294,15 @@ class TestBoozerResidualJax(JaxTestCase):
             boozer_problem_module, "_without_derivatives_in_xl", lambda value: value
         ):
             unguarded = operations()
-            # The unguarded program is the one whose derivative in xl was wrong.
-            jax.jacfwd(constraints)(xl)
-        jax.clear_caches()
+            unguarded_jacobian = host_array(jax.jacfwd(partial(traced, problem))(xl))
         self.assertGreater(sum(guarded.values()), 0)
         self.assertEqual(guarded, unguarded, "the guard adds operations")
+        # What the guard refuses is wrong: without it, the derivative in xl
+        # misses d2B/dXdX and differs from the Jacobian of derivatives=1.
+        jacobian = host_array(boozer_exact_constraints(problem, xl, derivatives=1)[1])
+        self.assertGreater(
+            np.max(np.abs(unguarded_jacobian - jacobian)), 1e-6 * np.max(np.abs(jacobian))
+        )
 
     def test_exact_constraint_values_have_exact_coil_derivatives(self):
         """At a fixed ``xl``, the coil derivatives of
