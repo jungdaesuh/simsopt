@@ -27,6 +27,7 @@ with optional_jax_imports():
     from simsopt_jax.backend import jit as jit_module
     from simsopt_jax.backend.jit import CopyingJit, jit
     from simsopt_jax.backend.runtime import set_backend
+    from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 # A matrix power slow enough (milliseconds) to still be running when the
 # caller overwrites the input; it is the identity, so ``gate[0, 0] == 1``.
@@ -60,6 +61,37 @@ class _Table:
 
 with optional_jax_imports():
     jax.tree_util.register_pytree_node_class(_Table)
+
+
+def _table_probe(kind: str):
+    """``x * sum(table.values)`` with the parameter kinds ``kind`` names,
+    recording each ``table`` it receives."""
+    received = []
+
+    def positional_only(x, /, table):
+        received.append(table)
+        return x * jnp.sum(jnp.asarray(table.values))
+
+    def keyword_only(x, *, table):
+        received.append(table)
+        return x * jnp.sum(jnp.asarray(table.values))
+
+    def positional_or_keyword(x, table):
+        received.append(table)
+        return x * jnp.sum(jnp.asarray(table.values))
+
+    probes = {
+        "positional-only x": positional_only,
+        "keyword-only table": keyword_only,
+        "positional-or-keyword": positional_or_keyword,
+    }
+    return received, probes[kind]
+
+
+def _recording_copy(copied: list, value):
+    """``snapshot_host_tree(value)``, appending ``value`` to ``copied``."""
+    copied.append(value)
+    return snapshot_host_tree(value)
 
 
 class CopyingJitTests(JaxTestCase):
@@ -109,6 +141,40 @@ class CopyingJitTests(JaxTestCase):
         self.assertEqual(len(seen), 1)
         self.assertIs(seen[0], table)
         self.assertEqual(f._cache_size(), 1)
+
+    def test_static_selectors_match_raw_jit(self):
+        """Positional-only, keyword-only and iterator selectors make the arguments
+        static that ``jax.jit`` does, and the dynamic NumPy argument is copied."""
+        table = _Table(np.arange(3.0))
+        positional = lambda f, x: f(x, table)  # noqa: E731
+        keyword = lambda f, x: f(x, table=table)  # noqa: E731
+        # (name, probe kind, options factory, call); the factory gives every
+        # compile a fresh iterator.
+        cases = (
+            ("argnames", "positional-only x", lambda: {"static_argnames": "table"}, positional),
+            ("argnums", "positional-only x", lambda: {"static_argnums": 1}, keyword),
+            ("argnames", "keyword-only table", lambda: {"static_argnames": "table"}, keyword),
+            ("iterator argnums", "positional-or-keyword", lambda: {"static_argnums": iter((1,))}, keyword),
+            ("iterator argnames", "positional-or-keyword", lambda: {"static_argnames": iter(("table",))}, positional),
+        )
+        for name, kind, options, call in cases:
+            with self.subTest(selector=name, parameters=kind):
+                raw_received, raw_fun = _table_probe(kind)
+                raw = jax.jit(raw_fun, **options())  # noqa: TID251 - raw jax.jit is the reference
+                call(raw, np.ones(2))
+
+                received, fun = _table_probe(kind)
+                f = jit(fun, **options())
+                x = np.ones(2)
+                copied = []
+                with mock.patch.object(
+                    jit_module, "snapshot_host_tree", partial(_recording_copy, copied)
+                ):
+                    for _ in range(2):
+                        np.testing.assert_array_equal(call(f, x), np.full(2, 3.0))
+                self.assertEqual(received[0] is table, raw_received[0] is table)
+                self.assertEqual(f._cache_size(), 1)
+                self.assertTrue(any(value is x for value in copied), copied)
 
     def test_every_decorator_form_compiles_with_its_options(self):
         """``@jit``, ``partial(jit, ...)``, ``@jit(...)`` and ``jit(f, ...)`` give the same wrapper."""
