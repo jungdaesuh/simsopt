@@ -562,7 +562,7 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         ]
         adapter = JaxBiotSavart(coils).set_points(_POINTS)
         cotangent = _cotangent(quantity)
-        dofs = adapter.x.copy()
+        dofs = np.array(adapter.x, dtype=np.float64)
         patches.callback(setattr, adapter, "x", dofs)
         analytic = _gradient(_vjp(adapter, quantity, cotangent), adapter)
         for exponent in range(5):

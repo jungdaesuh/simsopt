@@ -8,7 +8,7 @@ implement the simsoptpp.MagneticField interface.
 import copy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Callable, NoReturn, cast
+from typing import NoReturn, cast
 
 import jax
 from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_clear
@@ -761,7 +761,6 @@ class JaxBiotSavart(Optimizable):
         # Native fields start with one evaluation point at the origin.
         self.set_points(np.zeros((1, 3)))
         self._free_dof_layout_ready = False
-        self._suppress_dependency_coil_dof_state = False
         self._fixed_dofs_maybe_changed = False
         self._local_free_positions_by_opt = {}
         self._device_contracts = {}
@@ -882,89 +881,21 @@ class JaxBiotSavart(Optimizable):
         return state
 
     def set_recompute_flag(self, parent=None):
-        """Mark dependent field state stale and defer fixed-DOF refresh until the next read.
+        """Mark dependent field state stale and defer the coil-parameter re-check to the next read.
+
+        Native fields read every coil parameter on their next evaluation after
+        any notification, so every notification, with or without a parent and
+        including the ones a DOF setter sends, marks fixed DOFs and non-DOF
+        coil parameters for re-check on the next read.
 
         Args:
             parent (Optimizable or None): Dependency that triggered the recompute
-                notification; a non-None parent marks fixed DOFs and non-DOF
-                coil parameters for re-check on the next read.
+                notification, or None for a direct call.
         """
-        if (
-            parent is not None
-            and self._free_dof_layout_ready
-            and not self._suppress_dependency_coil_dof_state
-        ):
-            # Every ancestor notifies separately; compare fixed DOFs once, on the next read.
+        if self._free_dof_layout_ready:
+            # Every ancestor notifies separately; compare once, on the next read.
             self._fixed_dofs_maybe_changed = True
         super().set_recompute_flag(parent=parent)
-
-    def _set_global_coil_dofs(
-        self,
-        optimizable_setter,
-        coil_dofs,
-        *,
-        rebuild_extraction_spec,
-    ):
-        self._suppress_dependency_coil_dof_state = True
-        try:
-            optimizable_setter(self, coil_dofs)
-        finally:
-            self._suppress_dependency_coil_dof_state = False
-        if rebuild_extraction_spec:
-            self._refresh_captured_coil_state()
-
-    @property
-    def x(self):
-        """Return the global free coil/current DOF vector.
-
-        Returns:
-            numpy.ndarray: Global free owner DOFs, shape (self.dof_size,), in
-                Optimizable lineage order; units depend on the owner.
-        """
-        return cast(Callable[[Optimizable], np.ndarray], Optimizable.x.fget)(self)
-
-    @x.setter
-    def x(self, coil_dofs):
-        """Set the global free coil/current DOF vector.
-
-        Native owner DOFs and the dependent field state are updated.
-
-        Args:
-            coil_dofs (array-like): Global free owner DOFs, shape (self.dof_size,), in
-                Optimizable lineage order.
-        """
-        self._set_global_coil_dofs(
-            Optimizable.x.fset,
-            coil_dofs,
-            rebuild_extraction_spec=False,
-        )
-
-    @property
-    def full_x(self):
-        """Return the global full, including fixed coil/current DOF vector.
-
-        Returns:
-            numpy.ndarray: Global full, including fixed owner DOFs, shape
-                (self.full_dof_size,), in Optimizable lineage order; units depend on
-                the owner.
-        """
-        return cast(Callable[[Optimizable], np.ndarray], Optimizable.full_x.fget)(self)
-
-    @full_x.setter
-    def full_x(self, coil_dofs):
-        """Set the global full, including fixed coil/current DOF vector.
-
-        Native owner DOFs and the dependent field state are updated.
-
-        Args:
-            coil_dofs (array-like): Global full, including fixed owner DOFs, shape
-                (self.full_dof_size,), in Optimizable lineage order.
-        """
-        self._set_global_coil_dofs(
-            Optimizable.full_x.fset,
-            coil_dofs,
-            rebuild_extraction_spec=True,
-        )
 
     def _local_free_positions(self, opt):
         cached = self._local_free_positions_by_opt.get(opt)
@@ -1108,7 +1039,8 @@ class JaxBiotSavart(Optimizable):
         previous_spec = self._coil_dof_extraction_spec
         self._refresh_captured_coil_state(check_fixed=self._fixed_dofs_maybe_changed)
         if self._coil_dof_extraction_spec is not previous_spec:
-            self.set_recompute_flag()
+            # The contract was just built from live state: notify dependents only.
+            super().set_recompute_flag()
         return self._coil_dof_extraction_spec
 
     def _free_vector_dof_map_spec(self, opt, *, full_graph, separate_owners=False):
@@ -1612,7 +1544,7 @@ class JaxBiotSavart(Optimizable):
                 order, in objective units per corresponding DOF unit.
         """
         if coil_dofs is None:
-            coil_dofs = self.x.copy()
+            coil_dofs = np.array(self.x, dtype=np.float64)
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
         self.coil_dof_extraction_spec()
         return _jitted_coil_cotangents_to_dofs_gradient(

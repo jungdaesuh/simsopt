@@ -221,13 +221,17 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         )
 
     def test_notified_non_dof_parameter_changes_match_native(self):
-        """A changed current scale, filament offset or frame-rotation scale, once
-        notified, reaches the adapter's B and B pullback as it reaches native."""
+        """A changed current scale, filament offset or frame-rotation scale reaches
+        the adapter's B and B pullback as it reaches native, whether the changed
+        object, the field, or the field's DOF setter sends the notification."""
         for parameter in ("current_scale", "filament_offset", "rotation_scale"):
-            with self.subTest(parameter=parameter), self.case():
-                self._case_notified_non_dof_parameter_changes_match_native(parameter)
+            for notifier in ("changed_object", "field", "field_x_setter"):
+                with self.subTest(parameter=parameter, notifier=notifier), self.case():
+                    self._case_notified_non_dof_parameter_changes_match_native(
+                        parameter, notifier
+                    )
 
-    def _case_notified_non_dof_parameter_changes_match_native(self, parameter):
+    def _case_notified_non_dof_parameter_changes_match_native(self, parameter, notifier):
         """Run one row with case-local objects released before runtime cleanup."""
         curves, _ = _coils()
         rotation = FrameRotation(curves[0].quadpoints, 1)
@@ -239,13 +243,19 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         field.B()
         if parameter == "current_scale":
             current.scale = 3.0
-            current.set_recompute_flag()
+            changed = current
         elif parameter == "filament_offset":
             filament.dn, filament.db = 0.03, -0.01
-            filament.set_recompute_flag()
+            changed = filament
         else:
             rotation.scale = 0.5
-            rotation.set_recompute_flag()
+            changed = rotation
+        if notifier == "changed_object":
+            changed.set_recompute_flag()
+        elif notifier == "field":
+            field.set_recompute_flag()
+        else:
+            field.x = field.x
         native = BiotSavart(coils).set_points(_POINTS)
         np.testing.assert_allclose(
             np.asarray(field.B()), native.B(), rtol=1e-12, atol=1e-14
