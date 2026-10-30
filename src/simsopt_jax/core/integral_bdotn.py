@@ -13,7 +13,9 @@ Singular inputs (a zero normal, or a zero field for ``"normalized"`` and
 ``"local"``) give the same IEEE nan/inf as the C++ kernel. Sums may be
 associated in a different order, so results agree to round-off. An empty
 target array means no target field, as in the C++ kernel. Inputs are
-converted to float64 at the boundary, as the C++ kernel computes in double.
+converted to float64 at the boundary, as the C++ kernel computes in double;
+float64 needs JAX's 64-bit mode (``jax_enable_x64``), which importing
+:mod:`simsopt.geo` or starting the simsopt JAX runtime turns on.
 """
 
 from functools import partial
@@ -54,9 +56,10 @@ def _validate_shapes(Bcoil, target, normal):
 def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     """Compute the flux objective using the module-level integral formulas.
 
-    Inputs of any floating dtype are evaluated in float64; caller NumPy
-    arrays are snapshotted before asynchronous execution. Zero normals and, for normalized/local definitions, zero field retain the
-    native IEEE NaN/inf behavior.
+    Inputs of any floating dtype are evaluated in float64 (with JAX's 64-bit
+    mode on); caller NumPy arrays are snapshotted before asynchronous
+    execution. Zero normals and, for the normalized and local definitions, a
+    zero field retain the native IEEE NaN/inf behavior.
 
     Args:
         Bcoil: Array of shape (nphi, ntheta, 3), magnetic field in T.
