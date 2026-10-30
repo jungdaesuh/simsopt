@@ -111,7 +111,7 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
             f"spec {builds.call_count} times and B {B_evaluations.call_count} times",
         )
 
-        field.x = field.x + 1e-3
+        field.x = np.asarray(field.x) + 1e-3
         _assert_field_matches_native(field, native)
         self.assertTrue(builds.call_count == 2, "builds.call_count == 2")
 
@@ -165,9 +165,9 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
             "backend",
         ):
             if mutation == "free":
-                field.x = field.x * 1.01
+                field.x = np.asarray(field.x) * 1.01
             elif mutation == "full":
-                field.full_x = field.full_x * 0.99
+                field.full_x = np.asarray(field.full_x) * 0.99
             elif mutation == "parent":
                 curves[1].x = curves[1].x + 2e-3
             elif mutation == "current":
@@ -252,13 +252,13 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
         )
         _assert_field_matches_native(field, native)
 
-        field.x = field.x * 1.01
+        field.x = np.asarray(field.x) * 1.01
         _assert_field_matches_native(field, native)
 
         curves[1].x = curves[1].x + 2e-3
         _assert_field_matches_native(field, native)
 
-        field.full_x = field.full_x * 0.995
+        field.full_x = np.asarray(field.full_x) * 0.995
         _assert_field_matches_native(field, native)
 
     def test_current_change_refreshes_the_field(self):

@@ -150,25 +150,30 @@ class CopyingJitTests(JaxTestCase):
         """Positional-only, keyword-only and iterator selectors make the arguments
         static that ``jax.jit`` does, and the dynamic NumPy argument is copied."""
         table = _Table(np.arange(3.0))
-        positional = lambda f, x: f(x, table)  # noqa: E731
-        keyword = lambda f, x: f(x, table=table)  # noqa: E731
-        # (name, probe kind, options factory, call); the factory gives every
-        # compile a fresh iterator.
+        positional = lambda f, x: f(x, table)
+        keyword = lambda f, x: f(x, table=table)
+        # (name, probe kind, compile with the selector, call); each compile
+        # builds a fresh iterator.
         cases = (
-            ("argnames", "positional-only x", lambda: {"static_argnames": "table"}, positional),
-            ("argnums", "positional-only x", lambda: {"static_argnums": 1}, keyword),
-            ("argnames", "keyword-only table", lambda: {"static_argnames": "table"}, keyword),
-            ("iterator argnums", "positional-or-keyword", lambda: {"static_argnums": iter((1,))}, keyword),
-            ("iterator argnames", "positional-or-keyword", lambda: {"static_argnames": iter(("table",))}, positional),
+            ("argnames", "positional-only x", lambda j, fun: j(fun, static_argnames="table"), positional),
+            ("argnums", "positional-only x", lambda j, fun: j(fun, static_argnums=1), keyword),
+            ("argnames", "keyword-only table", lambda j, fun: j(fun, static_argnames="table"), keyword),
+            ("iterator argnums", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=iter((1,))), keyword),
+            (
+                "iterator argnames",
+                "positional-or-keyword",
+                lambda j, fun: j(fun, static_argnames=iter(("table",))),
+                positional,
+            ),
         )
-        for name, kind, options, call in cases:
+        for name, kind, compile_with, call in cases:
             with self.subTest(selector=name, parameters=kind):
                 raw_received, raw_fun = _table_probe(kind)
-                raw = jax.jit(raw_fun, **options())  # noqa: TID251 raw jax.jit is the reference
+                raw = compile_with(jax.jit, raw_fun)  # noqa: TID251 raw jax.jit is the reference
                 call(raw, np.ones(2))
 
                 received, fun = _table_probe(kind)
-                f = jit(fun, **options())
+                f = compile_with(jit, fun)
                 x = np.ones(2)
                 copied = []
                 with mock.patch.object(
