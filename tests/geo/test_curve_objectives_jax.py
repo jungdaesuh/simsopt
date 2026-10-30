@@ -217,6 +217,21 @@ def _separated_circles(num_far, twins):
     return circles
 
 
+def _candidate_query_objectives(base, curves, surface, threshold):
+    """Native and adapter curve-curve (``downsample=2``) and curve-surface objectives."""
+    return (
+        (CurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2),
+         JaxCurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2)),
+        (CurveSurfaceDistance(curves, surface, threshold),
+         JaxCurveSurfaceDistance(curves, surface, threshold)),
+    )
+
+
+def _native_candidates(native):
+    """A native objective's computed candidates as sorted index tuples."""
+    return sorted(map(tuple, cast(list, native.candidates)))
+
+
 def _point_pair_distance_shapes(adapter):
     """Sorted shapes of the batched point-pair distance arrays the adapter's program computes."""
     snapshot = adapter._snapshot()
@@ -652,6 +667,30 @@ class TestCurveObjectivesJax(JaxTestCase):
                 )
                 self.assertEqual(_point_pair_distance_shapes(surface_adapter), [(1, 20, 64)])
 
+    def test_distance_programs_are_reused_by_candidate_sets_of_equal_shape(self):
+        """Candidate sets with the same quadrature-class pairs and padded batch lengths share
+        the compiled J and dJ programs, whichever rows they hold and in whichever order the
+        class pairs first occur.
+
+        Curves 0 to 5 have 20, 24, 24, 20, 20 and 24 points. The first layout raises curve 3
+        above curve 0 and curve 5 above curve 1, the second curve 2 above curve 1 and curve 4
+        above curve 3: one 20-point and one 24-point pair each, found in opposite orders.
+        """
+        counts = (20, 24, 24, 20, 20, 24)
+        programs = (curve_objectives._curve_pair_penalty, curve_objectives._curve_pair_penalty_grad)
+        program_counts = []
+        for close in (((3, 0), (5, 1)), ((2, 1), (4, 3))):
+            above = dict(close)
+            curves = [
+                _circle((float(above.get(k, k)), 0.0, 0.05 if k in above else 0.0), 0.2, numquadpoints=count)
+                for k, count in enumerate(counts)
+            ]
+            native, adapter = CurveCurveDistance(curves, 0.1), JaxCurveCurveDistance(curves, 0.1)
+            _assert_matches_native_including_nans("CurveCurveDistance", native, adapter, active=True)
+            self.assertEqual(sorted(adapter.candidates), sorted(close))
+            program_counts.append([program._cache_size() for program in programs])
+        self.assertEqual(program_counts[1], program_counts[0])
+
     def test_distance_terms_without_candidates_do_no_jax_work(self):
         """With no native candidate the value is 0 and the gradient native's zeros, without
         placing geometry or running a JAX program."""
@@ -671,31 +710,70 @@ class TestCurveObjectivesJax(JaxTestCase):
             self.assertEqual(adapter.J(), 0.0)
             self.assertFalse(np.any(adapter.dJ()), name)
 
+    def test_distance_operands_are_released_without_candidates(self):
+        """Once no pair is a candidate, the placed operands of the last candidate state are
+        dropped rather than held until the next one."""
+        surface = _surface()
+        curves = [_circle((0.0, 0.0, 0.0), 1.0), _circle((0.0, 0.0, 0.05), 1.0)]
+        adapters = (JaxCurveCurveDistance(curves, 0.1), JaxCurveSurfaceDistance(curves, surface, 0.4))
+        for adapter in adapters:
+            self.assertGreater(adapter.J(), 0.0)
+            self.assertIsNotNone(adapter._distance_snapshot)
+        for k, curve in enumerate(curves):
+            curve.x = _circle((0.0, 0.0, 50.0 + 5.0 * k), 1.0).x
+        for adapter in adapters:
+            self.assertEqual(adapter.J(), 0.0)
+            self.assertIsNone(adapter._distance_snapshot)
+
     def test_distance_candidate_queries_match_native(self):
         """``candidates``, ``compute_candidates()`` and ``shortest_distance_among_candidates()``
-        match native, without candidates too, and follow DOF changes. ``simsoptpp``
-        returns the candidates in no fixed order."""
+        match native, without candidates too, and follow a DOF change that adds candidates to
+        both searches. ``simsoptpp`` returns the candidates in no fixed order."""
         base, curves = _curves()
         surface = _surface()
         for threshold in (0.05, _CC_THRESHOLD, 1.0):
             with self.subTest(threshold=threshold), self.case():
-                pairs = (
-                    (CurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2),
-                     JaxCurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2)),
-                    (CurveSurfaceDistance(curves, surface, threshold),
-                     JaxCurveSurfaceDistance(curves, surface, threshold)),
-                )
-                for native, adapter in pairs:
+                for native, adapter in _candidate_query_objectives(base, curves, surface, threshold):
                     self.assertIsNone(adapter.compute_candidates())
                     native.compute_candidates()
-                    self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
+                    self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
                     self.assertEqual(
                         adapter.shortest_distance_among_candidates(), native.shortest_distance_among_candidates()
                     )
-        native, adapter = pairs[0]
+        objectives = _candidate_query_objectives(base, curves, surface, _CC_THRESHOLD)
+        before = []
+        for native, adapter in objectives:
+            native.compute_candidates()
+            before.append(_native_candidates(native))
+            self.assertEqual(sorted(adapter.candidates), before[-1])
         base[0].x = np.asarray(base[0].x) + 0.2
-        native.compute_candidates()
-        self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
+        for (native, adapter), earlier in zip(objectives, before, strict=True):
+            native.compute_candidates()
+            self.assertNotEqual(_native_candidates(native), earlier)
+            self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
+
+    def test_assigned_distance_candidates_act_as_native(self):
+        """Assigning ``candidates`` replaces the search as on native: an empty list gives
+        J = 0 and the all-pairs shortest distance, a subset only its terms, None the search
+        again; a DOF change discards the assignment."""
+        base, curves = _curves()
+        surface = _surface()
+        for native, adapter in _candidate_query_objectives(base, curves, surface, _CC_THRESHOLD):
+            name = type(native).__name__
+            native.compute_candidates()
+            for pairs in ([], _native_candidates(native)[:1], None):
+                with self.subTest(objective=name, pairs=pairs), self.case():
+                    native.candidates = pairs
+                    adapter.candidates = pairs
+                    _assert_matches_native_including_nans(name, native, adapter)
+                    self.assertEqual(adapter.shortest_distance(), native.shortest_distance())
+                    self.assertEqual(sorted(cast(list, adapter.candidates)), _native_candidates(native))
+            native.candidates = adapter.candidates = []
+            base[0].x = np.asarray(base[0].x) + 0.01
+            native.compute_candidates()
+            self.assertTrue(native.candidates, name)
+            self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
+            base[0].x = np.asarray(base[0].x) - 0.01
 
     def test_distance_terms_evaluate_every_point_of_a_native_candidate(self):
         """Within a candidate pair every point is evaluated, as native: a zero tangent

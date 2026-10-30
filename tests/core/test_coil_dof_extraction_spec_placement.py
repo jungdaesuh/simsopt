@@ -12,6 +12,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.backend.dtypes import as_jax_float64
     from simsopt_jax.backend.jit import jit
     from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
     from simsopt_jax.core.specs import (
@@ -143,8 +144,9 @@ class TestCoilDofExtractionSpecPlacement(JaxTestCase):
             ).field_inputs()[0]
             return gammas.sum()
 
+        owner_dofs = as_jax_float64(OWNER_DOFS)
         with jax.transfer_guard("disallow"):
-            total = jit(total_gamma)(jax.device_put(OWNER_DOFS))  # noqa: TID251 explicit transfer under the disallow guard
+            total = jit(total_gamma)(owner_dofs)
 
         self.assertTrue(
             np.isfinite(np.asarray(jax.device_get(total))),

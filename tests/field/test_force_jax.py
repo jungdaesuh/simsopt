@@ -338,6 +338,43 @@ class TestForceJax(JaxTestCase):
             self.assertTrue(all(np.all(np.isfinite(partial)) for partial in _partials(native).data.values()), name)
             _assert_matches_native(f"public {name}", native, adapter)
 
+    def test_kernels_evaluate_float32_inputs_in_double_like_native(self):
+        """float32 coil data is evaluated in float64, as native does. Currents of 1e22 A
+        make products I_i I_j of about 1e44 A^2, past float32's 3.4e38 range."""
+        quadpoints = np.linspace(0.0, 1.0, 12, endpoint=False)
+        angles = 2 * np.pi * quadpoints
+        ring = np.stack((np.cos(angles), np.sin(angles), 0.2 * np.sin(2 * angles)), axis=1)
+        ring_dash = 2 * np.pi * np.stack((-np.sin(angles), np.cos(angles), 0.4 * np.cos(2 * angles)), axis=1)
+        ring_dashdash = -4 * np.pi**2 * np.stack((np.cos(angles), np.sin(angles), 0.8 * np.sin(2 * angles)), axis=1)
+        gammas = np.stack((ring, 1.4 * ring + 0.1))
+        gammadashs = np.stack((ring_dash, 1.4 * ring_dash))
+        gammadashdashs = np.stack((ring_dashdash, 1.4 * ring_dashdash))
+        targets = (gammas, gammadashs, np.asarray([1e22, -2e22]))
+        sources = ((1.8 * gammas, 1.8 * gammadashs, np.asarray([3e5, 1e5])),)
+        regularizations = np.full(2, regularization_circ(0.05))
+        cases = {
+            "regularized_self_field": lambda t, dd, q, r, s: coil_forces.regularized_self_field(
+                t[0][0], t[1][0], dd[0], q, t[2][0], r[0]),
+            "lp_force": lambda t, dd, q, r, s: coil_forces.lp_force(t, dd, q, r, s, 2.0, 0.0, 1),
+            "lp_torque": lambda t, dd, q, r, s: coil_forces.lp_torque(t, dd, q, r, s, 2.0, 0.0, 1),
+            "squared_mean_force": lambda t, dd, q, r, s: coil_forces.squared_mean_force(t, s, 1),
+            "squared_mean_torque": lambda t, dd, q, r, s: coil_forces.squared_mean_torque(t, s, 1),
+            "b2energy": lambda t, dd, q, r, s: coil_forces.b2energy(t[0], t[1], t[2], r, 1),
+            "net_flux": lambda t, dd, q, r, s: coil_forces.net_flux(t[0][0], t[1][0], s[0], 1),
+        }
+
+        def cast(tree, dtype):
+            return jax.tree_util.tree_map(lambda value: jnp.asarray(value, dtype=dtype), tree)
+
+        single = cast((targets, gammadashdashs, quadpoints, regularizations, sources), np.float32)
+        for name, kernel in cases.items():
+            with self.subTest(kernel=name):
+                expected = np.asarray(kernel(*cast(single, np.float64)))
+                actual = kernel(*single)
+                self.assertEqual(actual.dtype, np.float64)
+                self.assertTrue(np.all(np.isfinite(expected)))
+                np.testing.assert_array_equal(np.asarray(actual), expected)
+
     def test_settings_fixed_at_construction_stay_fixed_like_native(self):
         """As native, ``p``, ``threshold`` and the targets' regularizations are construction settings."""
         targets, coils = _coils()

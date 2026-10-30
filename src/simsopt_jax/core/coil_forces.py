@@ -15,7 +15,8 @@ complete objectives cannot supply that masking through their public operands.
 A coil group is a ``(gammas, gammadashs, currents)`` triple. Every kernel takes the stride
 ``downsample`` over the quadrature points of all its stacks, as native does;
 it is a static Python integer. Source groups (native's coarse and fine source
-coils) may have quadrature counts different from the targets'.
+coils) may have quadrature counts different from the targets'. Every kernel
+evaluates its array inputs in float64, as native does, whatever their dtype.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from simsopt.field.force import (
 from simsopt.field.selffield import B_regularized_pure
 from simsopt.geo.curve import centroid_pure
 
+from ._math_utils import as_jax_float64
 from .biotsavart import biot_savart_A
 
 __all__ = [
@@ -78,7 +80,15 @@ def regularized_self_field(gamma, gammadash, gammadashdash, quadpoints, current,
     Returns:
         Array of shape (n, 3): regularized self magnetic field in T.
     """
-    return B_regularized_pure(gamma, gammadash, gammadashdash, quadpoints, current, regularization)
+    return B_regularized_pure(
+        *(as_jax_float64(value) for value in (gamma, gammadash, gammadashdash, quadpoints, current, regularization))
+    )
+
+
+def _float64_group(group: CoilGroup) -> CoilGroup:
+    """Return a coil group's ``(gammas, gammadashs, currents)`` in float64."""
+    gammas, gammadashs, currents = group
+    return as_jax_float64(gammas), as_jax_float64(gammadashs), as_jax_float64(currents)
 
 
 def _sampled(group: CoilGroup, downsample: int) -> CoilGroup:
@@ -140,8 +150,10 @@ def _regularized_force_densities(
 
     Apply the same quadrature stride to every geometry input and source group.
     """
-    targets = _sampled(targets, downsample)
-    sources = tuple(_sampled(group, downsample) for group in sources)
+    targets = _sampled(_float64_group(targets), downsample)
+    sources = tuple(_sampled(_float64_group(group), downsample) for group in sources)
+    gammadashdashs, quadpoints = as_jax_float64(gammadashdashs), as_jax_float64(quadpoints)
+    regularizations = as_jax_float64(regularizations)
     _gammas, gammadashs, currents = targets
     gammadash_norms = jnp.linalg.norm(gammadashs, axis=-1)
     tangents = gammadashs / gammadash_norms[:, :, None]
@@ -245,8 +257,8 @@ def squared_mean_force(targets: CoilGroup, sources: tuple[CoilGroup, ...], downs
     Returns:
         Array: scalar squared integrated force in MN^2.
     """
-    targets = _sampled(targets, downsample)
-    sources = tuple(_sampled(group, downsample) for group in sources)
+    targets = _sampled(_float64_group(targets), downsample)
+    sources = tuple(_sampled(_float64_group(group), downsample) for group in sources)
     gammas, gammadashs, currents = targets
     gammadash_norms = jnp.linalg.norm(gammadashs, axis=-1)[:, :, None]
     tangents = gammadashs / gammadash_norms
@@ -271,8 +283,8 @@ def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], down
     Returns:
         Array: scalar squared integrated torque in (MN m)^2.
     """
-    targets = _sampled(targets, downsample)
-    sources = tuple(_sampled(group, downsample) for group in sources)
+    targets = _sampled(_float64_group(targets), downsample)
+    sources = tuple(_sampled(_float64_group(group), downsample) for group in sources)
     gammas, gammadashs, currents = targets
     centers = jax.vmap(centroid_pure)(gammas, gammadashs)
     arclengths = jnp.linalg.norm(gammadashs, axis=-1)
@@ -298,7 +310,8 @@ def b2energy(gammas, gammadashs, currents, regularizations, downsample: int):
     Returns:
         Array: scalar vacuum field energy in MJ.
     """
-    return b2energy_pure(gammas, gammadashs, currents, downsample, regularizations)
+    gammas, gammadashs, currents = _float64_group((gammas, gammadashs, currents))
+    return b2energy_pure(gammas, gammadashs, currents, downsample, as_jax_float64(regularizations))
 
 
 def net_flux(target_gamma, target_gammadash, sources: CoilGroup, downsample: int):
@@ -316,5 +329,6 @@ def net_flux(target_gamma, target_gammadash, sources: CoilGroup, downsample: int
     Returns:
         Array: scalar net external flux in Wb.
     """
-    vector_potential = biot_savart_A(target_gamma[::downsample], *sources)
+    target_gamma, target_gammadash = as_jax_float64(target_gamma), as_jax_float64(target_gammadash)
+    vector_potential = biot_savart_A(target_gamma[::downsample], *_float64_group(sources))
     return net_ext_fluxes_pure(target_gammadash, vector_potential, downsample)

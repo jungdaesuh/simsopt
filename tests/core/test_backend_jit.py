@@ -27,6 +27,7 @@ with optional_jax_imports():
     from simsopt_jax.backend import jit as jit_module
     from simsopt_jax.backend.jit import CopyingJit, jit
     from simsopt_jax.backend.runtime import set_backend
+    from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 # A matrix power slow enough (milliseconds) to still be running when the
 # caller overwrites the input; it is the identity, so ``gate[0, 0] == 1``.
@@ -62,9 +63,44 @@ with optional_jax_imports():
     jax.tree_util.register_pytree_node_class(_Table)
 
 
+def _table_probe(kind: str):
+    """``x * sum(table.values)`` with the parameter kinds ``kind`` names,
+    recording each ``table`` it receives."""
+    received = []
+
+    def positional_only(x, /, table):
+        received.append(table)
+        return x * jnp.sum(jnp.asarray(table.values))
+
+    def keyword_only(x, *, table):
+        received.append(table)
+        return x * jnp.sum(jnp.asarray(table.values))
+
+    def positional_or_keyword(x, table):
+        received.append(table)
+        return x * jnp.sum(jnp.asarray(table.values))
+
+    probes = {
+        "positional-only x": positional_only,
+        "keyword-only table": keyword_only,
+        "positional-or-keyword": positional_or_keyword,
+    }
+    return received, probes[kind]
+
+
+def _recording_copy(copied: list, value):
+    """``snapshot_host_tree(value)``, appending ``value`` to ``copied``."""
+    copied.append(value)
+    return snapshot_host_tree(value)
+
+
 class CopyingJitTests(JaxTestCase):
     def test_numpy_input_overwritten_after_the_call_keeps_the_result(self):
         """A result held across an in-place overwrite of its NumPy input keeps the old value."""
+        if jax.default_backend() == "cpu" and not jax.config.values[
+            "jax_cpu_enable_async_dispatch"
+        ]:
+            self.skipTest("synchronous CPU dispatch: no overwrite can race the call")
         slow = jit(lambda m: jnp.linalg.matrix_power(m, _GATE_POWER))
         eye = jnp.eye(_GATE_SIZE)
         for name, fun, call in _PASSING_STYLES:
@@ -109,6 +145,45 @@ class CopyingJitTests(JaxTestCase):
         self.assertEqual(len(seen), 1)
         self.assertIs(seen[0], table)
         self.assertEqual(f._cache_size(), 1)
+
+    def test_static_selectors_match_raw_jit(self):
+        """Positional-only, keyword-only and iterator selectors make the arguments
+        static that ``jax.jit`` does, and the dynamic NumPy argument is copied."""
+        table = _Table(np.arange(3.0))
+        positional = lambda f, x: f(x, table)
+        keyword = lambda f, x: f(x, table=table)
+        # (name, probe kind, compile with the selector, call); each compile
+        # builds a fresh iterator.
+        cases = (
+            ("argnames", "positional-only x", lambda j, fun: j(fun, static_argnames="table"), positional),
+            ("argnums", "positional-only x", lambda j, fun: j(fun, static_argnums=1), keyword),
+            ("argnames", "keyword-only table", lambda j, fun: j(fun, static_argnames="table"), keyword),
+            ("iterator argnums", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=iter((1,))), keyword),
+            (
+                "iterator argnames",
+                "positional-or-keyword",
+                lambda j, fun: j(fun, static_argnames=iter(("table",))),
+                positional,
+            ),
+        )
+        for name, kind, compile_with, call in cases:
+            with self.subTest(selector=name, parameters=kind):
+                raw_received, raw_fun = _table_probe(kind)
+                raw = compile_with(jax.jit, raw_fun)  # noqa: TID251 raw jax.jit is the reference
+                call(raw, np.ones(2))
+
+                received, fun = _table_probe(kind)
+                f = compile_with(jit, fun)
+                x = np.ones(2)
+                copied = []
+                with mock.patch.object(
+                    jit_module, "snapshot_host_tree", partial(_recording_copy, copied)
+                ):
+                    for _ in range(2):
+                        np.testing.assert_array_equal(call(f, x), np.full(2, 3.0))
+                self.assertEqual(received[0] is table, raw_received[0] is table)
+                self.assertEqual(f._cache_size(), 1)
+                self.assertTrue(any(value is x for value in copied), copied)
 
     def test_every_decorator_form_compiles_with_its_options(self):
         """``@jit``, ``partial(jit, ...)``, ``@jit(...)`` and ``jit(f, ...)`` give the same wrapper."""
@@ -173,16 +248,23 @@ class CopyingJitTests(JaxTestCase):
         self.assertIsNot(tree["b"][0], host)
         np.testing.assert_array_equal(tree["b"][0], host)
 
+    def test_masked_array_is_rejected_like_raw_jit(self):
+        """A NumPy masked array keeps its mask through the copy, so JAX rejects it
+        as ``jax.jit`` does instead of computing with the masked entries."""
+        masked = np.ma.masked_array(np.arange(3.0), mask=[False, True, False])
+        with self.assertRaisesRegex(ValueError, "masked arrays are not supported"):
+            jit(lambda x: x * 1.0)(masked)
+
     def test_placement_matches_raw_jit(self):
         """NumPy, uncommitted and committed inputs land where ``jax.jit`` puts them."""
         identity = jit(lambda x: x * 1.0)
-        raw = jax.jit(lambda x: x * 1.0)  # noqa: TID251 - reference placement of raw jit
+        raw = jax.jit(lambda x: x * 1.0)  # noqa: TID251 reference placement of raw jit
         host = np.arange(4.0)
         cpu = jax.devices("cpu")[0]
         inputs = {
             "NumPy": host,
             "uncommitted": jnp.asarray(host),
-            "committed CPU": jax.device_put(host, cpu),  # noqa: TID251 - committed input under test
+            "committed CPU": jax.device_put(host, cpu),  # noqa: TID251 committed input under test
         }
         for name, value in inputs.items():
             with self.subTest(input=name):
@@ -202,8 +284,8 @@ class CopyingJitTests(JaxTestCase):
         expected = {
             "NumPy": (host, gpu),
             "uncommitted": (jnp.asarray(host), gpu),
-            "committed CPU": (jax.device_put(host, cpu), cpu),  # noqa: TID251 - committed input under test
-            "committed GPU": (jax.device_put(host, gpu), gpu),  # noqa: TID251 - committed input under test
+            "committed CPU": (jax.device_put(host, cpu), cpu),  # noqa: TID251 committed input under test
+            "committed GPU": (jax.device_put(host, gpu), gpu),  # noqa: TID251 committed input under test
         }
         for name, (value, device) in expected.items():
             with self.subTest(input=name):
