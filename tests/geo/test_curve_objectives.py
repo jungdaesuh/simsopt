@@ -20,6 +20,16 @@ import simsoptpp as sopp
 parameters['jit'] = False
 
 
+def get_ncsx_curves_and_surface():
+    """NCSX coils and a surface that comes within 1 of each of them."""
+    base_curves, _, _, _, bs = get_data("ncsx", coil_order=10)
+    surface = SurfaceRZFourier.from_nphi_ntheta(nfp=3, nphi=32, ntheta=32, ntor=0)
+    surface.set('rc(0,0)', 1.6)
+    surface.set('rc(1,0)', 0.2)
+    surface.set('zs(1,0)', 0.2)
+    return base_curves, [c.curve for c in bs.coils], surface
+
+
 class Testing(unittest.TestCase):
 
     curvetypes = ["CurveXYZFourier", "JaxCurveXYZFourier", "CurveRZFourier", "CurvePlanarFourier", "JaxCurvePlanarFourier", "CurveHelical"]
@@ -373,6 +383,20 @@ class Testing(unittest.TestCase):
             err_new = np.linalg.norm(deriv_est-deriv)
             self.assertLess(err_new, 0.3 * err, f"New error should be less than 0.3 * old error: {err_new} < {0.3 * err}")
             err = err_new
+
+    def test_curve_surface_distance_follows_a_moving_surface(self):
+        """The curves near the surface are found again when the surface moves."""
+        _, curves, surface = get_ncsx_curves_and_surface()
+        J = CurveSurfaceDistance(curves, surface, 0.1)
+        # The surface is at least 0.16 from the coils.
+        self.assertEqual(J.J(), 0.)
+        surface.set_rc(1, 0, 0.3)
+        surface.set_zs(1, 0, 0.3)
+        fresh = CurveSurfaceDistance(curves, surface, 0.1)
+        self.assertGreater(fresh.J(), 0.)
+        # The candidates may come in another order, which changes the sum by rounding.
+        np.testing.assert_allclose(J.J(), fresh.J(), rtol=1e-13, atol=0)
+        np.testing.assert_allclose(np.asarray(J.dJ()), np.asarray(fresh.dJ()), rtol=1e-13, atol=0)
 
     def test_linking_number(self):
         for downsample in [1, 2, 5]:
