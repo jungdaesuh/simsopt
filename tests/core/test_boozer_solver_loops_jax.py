@@ -25,7 +25,6 @@ from unittest_jax_support import host_array, parity_default_device
 
 from collections.abc import Callable
 import inspect
-from typing import Any
 
 import numpy as np
 
@@ -87,7 +86,7 @@ _CASES = {
 
 def _compiled_afresh(solver, static_argnames: tuple[str, ...]):
     """``solver``'s body compiled anew, so it traces the substituted formulation."""
-    body: Callable[..., Any] = inspect.unwrap(solver)
+    body: Callable[..., object] = inspect.unwrap(solver)
     return jit(body, static_argnames=static_argnames)
 
 

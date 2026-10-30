@@ -20,7 +20,8 @@ program (a ``lax.while_loop`` on the problem's device):
 The Newton-type stopping tests are native's, including how a NaN norm ends
 them, and so is the ``norm`` whose ``norm <= tol`` is native's ``success``. ``tol``,
 ``maxiter`` and ``stab`` are float64 operands (``maxiter`` may be ``inf``),
-so new values reuse the program. Where native's ``np.linalg.solve`` raises
+so new values reuse the program. ``x`` is cast to float64, as the
+formulations cast it, so the iterates and ``dJ/dx`` are float64 too. Where native's ``np.linalg.solve`` raises
 ``LinAlgError`` (an exactly zero LU pivot of a finite matrix), the loop stops
 with ``singular`` set and ``x`` at the iterate that met it; the caller
 raises. NaN steps continue, as natively. There is no damping, divergence
@@ -50,6 +51,7 @@ from jax.scipy.linalg import lu_factor, lu_solve
 from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
 
+from ._math_utils import as_jax_float64
 from .boozer_problem import (
     BoozerProblem,
     _G_from_coil_currents,
@@ -229,6 +231,7 @@ def boozer_exact_newton(
         BoozerExactNewtonResult: Result object with the final iterate, residual/Jacobian, stopping norm and
             singular-step flag; input problem is unchanged.
     """
+    x = as_jax_float64(x)
     if G_from_currents:
         x = jnp.concatenate((x, _G_from_coil_currents(problem.coils)[None]))
 
@@ -300,6 +303,7 @@ def boozer_penalty_newton(
         BoozerPenaltyNewtonResult: Result object with the final iterate and unshifted derivatives, gradient
             norm and singular-step flag; input problem is unchanged.
     """
+    x = as_jax_float64(x)
 
     def derivatives(x):
         _, gradient, hessian = boozer_penalty_constraints(
@@ -372,6 +376,7 @@ def boozer_penalty_gauss_newton(
         BoozerGaussNewtonResult: Result object with the final iterate, residual and normal equations, gradient
             norm and singular-step flag; input problem is unchanged.
     """
+    x = as_jax_float64(x)
 
     def normal_equations(x):
         residual, jacobian = boozer_penalty_residual(
@@ -450,6 +455,7 @@ def boozer_penalty_bfgs(
         QuasiNewtonResult: SciPy's result fields; ``message`` indexes
             :data:`~simsopt_jax.core.quasi_newton.BFGS_MESSAGES`.
     """
+    x = as_jax_float64(x)
     return minimize_bfgs(_penalty_value_and_grad(problem, optimize_G, weight_inv_modB), x, gtol, maxiter)
 
 
@@ -489,6 +495,7 @@ def boozer_penalty_lbfgsb(
         QuasiNewtonResult: SciPy's result fields; ``message`` indexes
             :data:`~simsopt_jax.core.quasi_newton.LBFGSB_MESSAGES`.
     """
+    x = as_jax_float64(x)
     return minimize_lbfgsb(
         _penalty_value_and_grad(problem, optimize_G, weight_inv_modB), x, ftol, gtol, maxiter, maxcor=maxcor
     )
@@ -603,6 +610,7 @@ def boozer_residual_objective(
             shapes. Uses the normalized Boozer and label residuals, omitting the z
             penalty; units follow the native penalty.
     """
+    x = as_jax_float64(x)
 
     def objective(coils, point):
         (residual,) = boozer_penalty_residual(

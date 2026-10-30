@@ -36,6 +36,15 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
+# scipy/optimize/_optimize.py, whose _minimize_bfgs minimize_bfgs ports:
+#
+# ******NOTICE***************
+# optimize.py module by Travis E. Oliphant
+#
+# You may copy and use this module as you see fit with no
+# guarantee implied provided you keep this notice in all copies.
+# *****END NOTICE************
+#
 # SciPy's C translation of L-BFGS-B 3.0, with DCSRCH and DCSTEP
 # (scipy/optimize/__lbfgsb.c):
 #
@@ -102,13 +111,11 @@ but from outer products, in O(n^2) where SciPy's two matrix products cost
 O(n^3). So a decision that hinges on the last bit can go the other way than
 in SciPy: a memory reset under underflow, or a trial point equal to an
 earlier one, which SciPy does not count again. Run op by op, the port makes
-SciPy's decisions there too. A long walk magnifies the round-off. BFGS walks
-have ended where SciPy's do: on the LS663 Boozer least-squares benchmark
-(about 1100 iterations) one Newton step converges from the device's end
-point as from SciPy's. L-BFGS-B walks can part: on LS663 neither the device
-nor SciPy converged in 1500 iterations, and whether Newton then converged
-depended on rounding alone (it failed after the device run and after SciPy
-with 1 or 16 BLAS threads, and converged after SciPy with 8).
+SciPy's decisions there too. A long walk magnifies the round-off, so it can
+part from SciPy's, as SciPy's own run does when its sums round differently:
+the counts then differ, a converged walk ends at SciPy's solution only to
+what ``gtol`` allows, and a walk stopped by ``maxiter`` can end elsewhere.
+L-BFGS-B's walks part sooner than BFGS's.
 
 Known differences in counting: SciPy compares a point with its cached one by
 array equality, so a point with a NaN coordinate never matches it and is
@@ -543,13 +550,14 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     rhok_inv = jnp.dot(yk, sk)
     rhok = jnp.where(rhok_inv == 0.0, _RHOK_DIVIDE_BY_ZERO, 1.0 / rhok_inv)
     # SciPy's A1 (H A2) + rho s s^T, with A1 = I - rho s y^T and A2 = A1^T,
-    # in SciPy's order: H A2 = H - rho (H y) s^T first, then A1 applied to it.
+    # in SciPy's order: H A2 = H - rho (H y) s^T first, then A1 applied to it,
+    # and (rho s) s^T, whose s s^T alone underflows for |s| below 1e-154.
     # Each factor nearly annihilates the s direction, so their errors multiply
     # instead of adding as in the expanded rank-two form, whose terms of size
     # |H| cancel and can leave H indefinite when rho s s^T is below their
     # round-off. Outer products keep it O(n^2) instead of SciPy's O(n^3).
     HA2 = s.H - rhok * jnp.outer(s.H @ yk, sk)
-    H = HA2 - rhok * jnp.outer(sk, yk @ HA2) + rhok * jnp.outer(sk, sk)
+    H = HA2 - rhok * jnp.outer(sk, yk @ HA2) + jnp.outer(rhok * sk, sk)
     iterate = accept & ~stop & (gnorm > gtol) & (k < maxiter)
     s = replace(s, 
         x=jnp.where(accept, x_t, s.x),
