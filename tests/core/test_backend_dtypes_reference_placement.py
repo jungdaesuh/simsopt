@@ -9,6 +9,7 @@ with optional_jax_imports():
     import jax  # noqa: F401
     import jax.numpy as jnp
     from simsopt_jax.backend import dtypes
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
     from simsopt_jax.core import _device_scalars
     from simsopt_jax.core._device_scalars import staged_like
@@ -49,7 +50,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         """A tracer reference is never probed for its placement (the O(jaxpr) walk)."""
         captured: dict[str, object] = {}
 
-        @jax.jit
+        @jit
         def f(x):
             with mock.patch.object(dtypes, "_committed_placement") as committed:
                 captured["result"] = dtypes._reference_placement(x)
@@ -64,7 +65,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
     def test_reference_placement_is_the_bare_device_of_a_committed_array(self):
         """A committed concrete reference is probed and reduced to its device."""
         device = jax.local_devices()[0]
-        arr = jax.device_put(np.zeros(3), device)
+        arr = jax.device_put(np.zeros(3), device)  # noqa: TID251 test places on a chosen device
         with mock.patch.object(
             dtypes,
             "_committed_placement",
@@ -82,7 +83,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
     def test_runtime_device_put_tree_can_preserve_arrays_and_place_host_leaves(self):
         """Preserving placement retains JAX leaf identity and places host leaves without
         changing structure or dtype."""
-        array = jax.device_put(np.ones(3, dtype=np.float64), jax.local_devices()[0])
+        array = jax.device_put(np.ones(3, dtype=np.float64), jax.local_devices()[0])  # noqa: TID251 test places on a chosen device
         value = {"device": array, "host": (np.asarray(2, dtype=np.int32), None)}
 
         placed = dtypes.runtime_device_put_tree(value, preserve_placement=True)
@@ -116,7 +117,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
             )
         )
 
-        @jax.jit
+        @jit
         def add_staged_scalar(reference):
             return reference + staged_like(reference, 1.0)
 
@@ -127,7 +128,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
     def test_staged_like_tracer_preserves_explicit_integer_dtype(self):
         """Scalar staging under JIT preserves a requested int32 dtype."""
 
-        @jax.jit
+        @jit
         def staged_integer(reference):
             return staged_like(reference, 1, dtype=jnp.int32)
 
@@ -158,7 +159,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         """The list/tuple branch skips a tracer leaf and returns None."""
         captured: dict[str, object] = {}
 
-        @jax.jit
+        @jit
         def f(x):
             with mock.patch.object(dtypes, "_committed_placement") as committed:
                 captured["result"] = dtypes._reference_placement([x])
@@ -270,7 +271,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         ``dtypes._array_device``).
         """
         patches = self.patches
-        reference = jax.device_put(np.zeros(3), jax.local_devices()[0])
+        reference = jax.device_put(np.zeros(3), jax.local_devices()[0])  # noqa: TID251 test places on a chosen device
         (reference_device,) = reference.devices()
         placements: list[object | None] = []
 
@@ -323,7 +324,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         with_committed_reference = dtypes.explicit_device_array(
             np.ones(3),
             dtype=jnp.float64,
-            reference=jax.device_put(np.zeros(3), default_device),
+            reference=jax.device_put(np.zeros(3), default_device),  # noqa: TID251 test places on a chosen device
         )
 
         for array in (
@@ -391,8 +392,8 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         cpu = jax.devices("cpu")[0]
         array = np.arange(5.0)
         pair = np.ones((2, 3))
-        on_gpu = jax.device_put(array, gpu)
-        tree = {"array": on_gpu, "pair": (jax.device_put(pair, gpu), np.arange(3))}
+        on_gpu = jax.device_put(array, gpu)  # noqa: TID251 test places on a chosen device
+        tree = {"array": on_gpu, "pair": (jax.device_put(pair, gpu), np.arange(3))}  # noqa: TID251 test places on a chosen device
         with disallow_host_transfers():
             array_on_cpu = dtypes.runtime_device_put_tree(on_gpu, device=cpu)
             tree_on_cpu = dtypes.runtime_device_put_tree(tree, device=cpu)
@@ -422,7 +423,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         gpu = jax.devices("gpu")[0]
         cpu = jax.devices("cpu")[0]
         values = np.arange(4.0)
-        on_gpu = jax.device_put(values, gpu)
+        on_gpu = jax.device_put(values, gpu)  # noqa: TID251 test places on a chosen device
         set_backend("jax_cpu_parity", configure_runtime=False)
         with disallow_host_transfers():
             placed = dtypes.runtime_device_put_tree({"x": on_gpu})["x"]

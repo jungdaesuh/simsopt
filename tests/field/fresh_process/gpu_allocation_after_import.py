@@ -1,7 +1,8 @@
 """Fresh-process child: GPU allocator settings apply after importing JAX.
 
 Installing them must not initialize JAX's devices, which only a process that
-has not touched them yet can show.
+has not touched them yet can show. A standard XLA variable no simsopt setting
+resolves keeps the caller's value.
 """
 
 import os
@@ -17,6 +18,8 @@ from simsopt_jax.backend.runtime import (
 def main() -> None:
     """Apply the allocator environment and check JAX stays uninitialized."""
     assert not _jax_backends_initialized()
+    os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+    os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
     config = _config_from_mode(
         "jax_gpu_fast",
         strict=False,
@@ -26,6 +29,8 @@ def main() -> None:
     _apply_jax_gpu_memory_env(config)
     assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
     assert os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] == "0.5"
+    assert os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] == "platform"
+    assert os.environ["TF_GPU_ALLOCATOR"] == "cuda_malloc_async"
     assert not _jax_backends_initialized()
 
 
