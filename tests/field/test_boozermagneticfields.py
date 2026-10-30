@@ -141,7 +141,9 @@ class TestingAnalytic(unittest.TestCase):
         ba.set_points(near)
         np.testing.assert_allclose(modB_at(near), ba.modB()[:, 0], rtol=1e-3)
         after_inner = modB_at(outside)
-        modB_at(np.array([[0.5, 0.7, 0.3]]))
+        # An inside batch of the same shape reuses the output buffers, so a
+        # value it leaves behind would show up below.
+        modB_at(np.array([[0.5, 0.7 + 0.5*i, 0.3] for i in range(len(outside))]))
         np.testing.assert_array_equal(modB_at(outside), after_inner)
 
 
