@@ -16,7 +16,7 @@ import numpy as np
 from simsopt._core.derivative import Derivative
 from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
-from simsopt.geo import create_equally_spaced_curves
+from simsopt.geo import RotatedCurve, create_equally_spaced_curves
 from simsopt.geo.curveperturbed import (
     CurvePerturbed,
     GaussianSampler,
@@ -221,10 +221,13 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         )
 
     def test_notified_non_dof_parameter_changes_match_native(self):
-        """A changed current scale, filament offset or frame-rotation scale reaches
-        the adapter's B and B pullback as it reaches native, whether the changed
-        object, the field, or the field's DOF setter sends the notification."""
-        for parameter in ("current_scale", "filament_offset", "rotation_scale"):
+        """A changed current scale, filament offset, frame-rotation scale or
+        RotatedCurve rotation matrix reaches the adapter's B and B pullback as it
+        reaches native, whether the changed object, the field, or the field's DOF
+        setter sends the notification."""
+        for parameter in (
+            "current_scale", "filament_offset", "rotation_scale", "rotation_matrix",
+        ):
             for notifier in ("changed_object", "field", "field_x_setter"):
                 with self.subTest(parameter=parameter, notifier=notifier), self.case():
                     self._case_notified_non_dof_parameter_changes_match_native(
@@ -238,7 +241,8 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         rotation.x = np.array([0.2, -0.1, 0.05])
         filament = CurveFilament(FramedCurveCentroid(curves[0], rotation), 0.01, 0.02)
         current = ScaledCurrent(Current(1e5), 2.0)
-        coils = [Coil(filament, current)]
+        rotated = RotatedCurve(curves[1], 0.3, False)
+        coils = [Coil(filament, current), Coil(rotated, Current(-4e4))]
         field = backend.JaxBiotSavart(coils).set_points(_POINTS)
         field.B()
         if parameter == "current_scale":
@@ -247,9 +251,14 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         elif parameter == "filament_offset":
             filament.dn, filament.db = 0.03, -0.01
             changed = filament
-        else:
+        elif parameter == "rotation_scale":
             rotation.scale = 0.5
             changed = rotation
+        else:
+            # Native evaluation reads rotmat and its transpose.
+            rotated.rotmat = RotatedCurve(curves[1], 0.7, False).rotmat
+            rotated.rotmatT = rotated.rotmat.T.copy()
+            changed = rotated
         if notifier == "changed_object":
             changed.set_recompute_flag()
         elif notifier == "field":
