@@ -447,30 +447,38 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             pullback.coil_indices,
         )
         np.testing.assert_allclose(flat, expected_gradient, rtol=1e-11, atol=1e-13)
-        if quantity == "A":
-            # The value half of the combined VJP must ignore the gradient cotangent.
-            vgrad = _cotangent("dA_by_dX")
-            combined_native = cast(
-                Derivative,
-                native.A_and_dA_vjp(cotangent, vgrad)[0](native, as_derivative=True),
-            )
-            combined_adapter = cast(
-                Derivative,
-                adapter.A_and_dA_vjp(cotangent, vgrad)[0](adapter, as_derivative=True),
-            )
-            for owner in expected_partials.data:
-                np.testing.assert_allclose(
-                    combined_adapter.data[owner],
-                    combined_native.data[owner],
-                    rtol=1e-11,
-                    atol=1e-13,
+        if quantity in ("A", "B"):
+            # Both halves of the combined VJP, with both cotangents nonzero, match
+            # native; the value half ignores the gradient cotangent.
+            combined_vjp = f"{quantity}_and_d{quantity}_vjp"
+            vgrad = _cotangent(f"d{quantity}_by_dX")
+            getattr(native, f"d{quantity}_by_dX")()
+            native_halves = getattr(native, combined_vjp)(cotangent, vgrad)
+            adapter_halves = getattr(adapter, combined_vjp)(cotangent, vgrad)
+            for half, (native_half, adapter_half) in enumerate(
+                zip(native_halves, adapter_halves, strict=True)
+            ):
+                combined_native = cast(
+                    Derivative, native_half(native, as_derivative=True)
                 )
-                np.testing.assert_allclose(
-                    combined_adapter.data[owner],
-                    actual_partials.data[owner],
-                    rtol=1e-11,
-                    atol=1e-13,
+                combined_adapter = cast(
+                    Derivative, adapter_half(adapter, as_derivative=True)
                 )
+                for owner in combined_native.data:
+                    np.testing.assert_allclose(
+                        combined_adapter.data[owner],
+                        combined_native.data[owner],
+                        rtol=1e-11,
+                        atol=1e-13,
+                        err_msg=f"{combined_vjp} half {half}",
+                    )
+                    if half == 0:
+                        np.testing.assert_allclose(
+                            combined_adapter.data[owner],
+                            actual_partials.data[owner],
+                            rtol=1e-11,
+                            atol=1e-13,
+                        )
 
         dofs = native.x.copy()
         direction = np.linspace(-0.3, 0.4, dofs.size)
