@@ -48,6 +48,7 @@ from simsopt.util import in_github_actions, calculate_modB_on_major_radius
 
 try:
     import jax
+    from simsopt_jax.backend.dtypes import as_jax_float64
     from simsopt_jax.backend.jit import jit
     from simsopt_jax.objectives import StageTwoObjectiveConfig, fused_stage_two_objective, make_stage_two_problem
     from simsopt_jax_adapters.geo import (
@@ -229,8 +230,20 @@ if args.fused:
 
 
 def fused_value_and_grad(dofs):
-    """Evaluate the frozen problem and return a host gradient in composite DOF order."""
-    value, gradient = jax.device_get(value_and_grad(problem, dofs[field_order]))
+    """Evaluate the frozen fused problem and return a host gradient in composite DOF order.
+
+    The DOFs are placed on the device explicitly, so the evaluation also runs
+    under ``SIMSOPT_JAX_TRANSFER_GUARD=disallow``.
+
+    Args:
+        dofs (np.ndarray): Free DOFs of ``JF`` in its order, shape ``(len(JF.x),)``:
+            curve Fourier coefficients in metres and coil currents in amperes.
+
+    Returns:
+        tuple[float, np.ndarray]: The value of ``JF`` and its gradient with respect
+            to ``dofs``, shape ``(len(JF.x),)``, in ``JF``'s DOF order.
+    """
+    value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(dofs[field_order])))
     return float(value), gradient[objective_order]
 
 
@@ -307,8 +320,8 @@ dofs = cast(np.ndarray, JF.x)
 print(f"Optimization with FORCE_WEIGHT={FORCE_WEIGHT.value} and LENGTH_WEIGHT={LENGTH_WEIGHT.value}")
 # print("INITIAL OPTIMIZATION")
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+# The minimizer's last evaluation need not be at its result, so the outputs below use res.x.
+JF.x = res.x
 coils_to_vtk(coils, OUT_DIR + "coils_opt_short", close=True)
 
 pointData_surf = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
@@ -323,8 +336,7 @@ if args.fused:
     problem = stage_two_problem()
 # print("OPTIMIZATION WITH REDUCED LENGTH PENALTY\n")
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+JF.x = res.x
 coils_to_vtk(coils, OUT_DIR + "coils_opt_force", close=True)
 pointData_surf = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + f"surf_opt_force_WEIGHT={FORCE_WEIGHT.value:e}_LWEIGHT={LENGTH_WEIGHT.value*10:e}", extra_data=pointData_surf)
@@ -333,7 +345,6 @@ s.to_vtk(OUT_DIR + f"surf_opt_force_WEIGHT={FORCE_WEIGHT.value:e}_LWEIGHT={LENGT
 bs.save(OUT_DIR + "biot_savart_opt.json")
 
 #Print out final important info:
-JF.x = res.x if args.fused else dofs
 J = JF.J()
 grad = JF.dJ()
 jf = Jf.J()
