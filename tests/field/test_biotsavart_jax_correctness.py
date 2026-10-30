@@ -6,6 +6,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.core import biotsavart as core_biotsavart
     from simsopt_jax.core import curve_gamma_and_gammadash_from_spec
     from simsopt_jax.core.field import (
         group_biot_savart_B_vjp,
@@ -446,30 +447,38 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             pullback.coil_indices,
         )
         np.testing.assert_allclose(flat, expected_gradient, rtol=1e-11, atol=1e-13)
-        if quantity == "A":
-            # The value half of the combined VJP must ignore the gradient cotangent.
-            vgrad = _cotangent("dA_by_dX")
-            combined_native = cast(
-                Derivative,
-                native.A_and_dA_vjp(cotangent, vgrad)[0](native, as_derivative=True),
-            )
-            combined_adapter = cast(
-                Derivative,
-                adapter.A_and_dA_vjp(cotangent, vgrad)[0](adapter, as_derivative=True),
-            )
-            for owner in expected_partials.data:
-                np.testing.assert_allclose(
-                    combined_adapter.data[owner],
-                    combined_native.data[owner],
-                    rtol=1e-11,
-                    atol=1e-13,
+        if quantity in ("A", "B"):
+            # Both halves of the combined VJP, with both cotangents nonzero, match
+            # native; the value half ignores the gradient cotangent.
+            combined_vjp = f"{quantity}_and_d{quantity}_vjp"
+            vgrad = _cotangent(f"d{quantity}_by_dX")
+            getattr(native, f"d{quantity}_by_dX")()
+            native_halves = getattr(native, combined_vjp)(cotangent, vgrad)
+            adapter_halves = getattr(adapter, combined_vjp)(cotangent, vgrad)
+            for half, (native_half, adapter_half) in enumerate(
+                zip(native_halves, adapter_halves, strict=True)
+            ):
+                combined_native = cast(
+                    Derivative, native_half(native, as_derivative=True)
                 )
-                np.testing.assert_allclose(
-                    combined_adapter.data[owner],
-                    actual_partials.data[owner],
-                    rtol=1e-11,
-                    atol=1e-13,
+                combined_adapter = cast(
+                    Derivative, adapter_half(adapter, as_derivative=True)
                 )
+                for owner in combined_native.data:
+                    np.testing.assert_allclose(
+                        combined_adapter.data[owner],
+                        combined_native.data[owner],
+                        rtol=1e-11,
+                        atol=1e-13,
+                        err_msg=f"{combined_vjp} half {half}",
+                    )
+                    if half == 0:
+                        np.testing.assert_allclose(
+                            combined_adapter.data[owner],
+                            actual_partials.data[owner],
+                            rtol=1e-11,
+                            atol=1e-13,
+                        )
 
         dofs = native.x.copy()
         direction = np.linspace(-0.3, 0.4, dofs.size)
@@ -568,6 +577,45 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
                 rtol=1e-9,
                 atol=1e-14,
             )
+
+    def test_raw_kernels_evaluate_single_precision_inputs_in_float64(self):
+        """Raw kernels and the B pullback upcast float32 inputs and compute in float64.
+
+        The float32 inputs are exact in float64, so each result must equal, bit
+        for bit, the evaluation of their float64 upcast.
+        """
+        coils = [Coil(curve, Current(1e5)) for curve in _curves()]
+        single = (
+            _POINTS.astype(np.float32),
+            _cotangent("B").astype(np.float32),
+            np.stack([coil.curve.gamma() for coil in coils]).astype(np.float32),
+            np.stack([coil.curve.gammadash() for coil in coils]).astype(np.float32),
+            np.array([coil.current.get_value() for coil in coils], dtype=np.float32),
+        )
+        double = tuple(value.astype(np.float64) for value in single)
+
+        def evaluate(name, points, cotangent, *coil_data):
+            if name == "biot_savart_B_vjp":
+                return core_biotsavart.biot_savart_B_vjp(points, cotangent, *coil_data)
+            return getattr(core_biotsavart, name)(points, *coil_data)
+
+        for name in (
+            "biot_savart_B",
+            "biot_savart_A",
+            "biot_savart_dB_by_dX",
+            "biot_savart_B_and_dB",
+            "biot_savart_B_vjp",
+        ):
+            with self.subTest(kernel=name):
+                for actual, expected in zip(
+                    jax.tree.leaves(evaluate(name, *single)),
+                    jax.tree.leaves(evaluate(name, *double)),
+                    strict=True,
+                ):
+                    self.assertEqual(actual.dtype, np.float64)
+                    np.testing.assert_array_equal(
+                        np.asarray(actual), np.asarray(expected)
+                    )
 
     def test_grouped_field_evaluates_single_precision_points_in_float64(self):
         """Grouped B and its pullback evaluate float32 points and cotangents in float64."""
