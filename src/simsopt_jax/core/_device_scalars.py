@@ -13,15 +13,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from simsopt_jax.backend.dtypes import explicit_device_array
+from simsopt_jax.backend.jit import jit
 
 
 @lru_cache(maxsize=None)
 def _staged_scalar_builder(host_value: object, dtype_string: str):
     resolved_dtype = np.dtype(dtype_string)
 
-    @jax.jit
+    @jit
     def build(reference):
-        zero = jnp.sum(reference - reference).astype(resolved_dtype)
+        zero = placement_zero(reference).astype(resolved_dtype)
         literal = jnp.asarray(host_value, dtype=resolved_dtype)
         return zero + literal
 
@@ -31,26 +32,28 @@ def _staged_scalar_builder(host_value: object, dtype_string: str):
 def device_one(reference: jax.Array) -> jax.Array:
     """A 1.0 placed and typed like ``reference``, with no derivative path.
 
-    The value is built from ``reference`` only for placement.  Its derivative
-    is zero, and it must also be computed as zero: left differentiable, reverse
-    mode sends the full cotangent of every product ``device_one(r) * y`` into
-    ``r`` twice, as ``+c`` and ``-c``, and accumulates them beside ``r``'s own
-    cotangent.  When ``c`` dwarfs that cotangent -- ``mu0/4pi`` scaling a field
-    whose currents are its reference -- the sum ``(g + c) - c`` keeps only
-    ``u |c|`` of ``g``'s accuracy.
+    The value is ``exp`` of :func:`placement_zero`, which reads no value of
+    ``reference``, so a nonfinite entry (an infinite coil current) cannot turn
+    the 1 into NaN and spread to every product ``device_one(r) * y``. Its
+    derivative is zero, and ``stop_gradient`` also computes it as zero: a
+    differentiable, value-reading 1 such as ``exp(sum(r - r))`` sends the full
+    cotangent ``c`` of every such product into ``r`` as ``+c`` and ``-c``, and
+    when ``c`` dwarfs ``r``'s own cotangent ``g`` -- ``mu0/4pi`` scaling a field
+    whose currents are its reference -- ``(g + c) - c`` keeps only ``u |c|`` of
+    ``g``'s accuracy.
 
     Args:
         reference (jax.Array): Reference array of any shape whose dtype and execution
             placement are used.
 
     Returns:
-        jax.Array: Dimensionless scalar 1, shape (), with zero cotangent;
-            finite reference values are assumed.
+        jax.Array: Dimensionless scalar 1, shape (), with zero cotangent, for
+            any reference values, finite or not.
     """
-    return jax.lax.stop_gradient(jnp.exp(jnp.sum(reference - reference)))
+    return jax.lax.stop_gradient(jnp.exp(placement_zero(reference)))
 
 
-@partial(jax.jit, keep_unused=True)
+@partial(jit, keep_unused=True)
 def _placed_zero(reference: jax.Array) -> jax.Array:
     """Sum a zero-size broadcast without reading any reference elements.
 
@@ -102,6 +105,9 @@ def _placement_zero_jvp(primals, tangents):
 
 def two_pi(reference: jax.Array) -> jax.Array:
     """Return 2*pi with the reference dtype and placement.
+
+    Built from :func:`device_one`, so no value of ``reference`` is read and a
+    nonfinite entry (a point at infinity) cannot change it.
 
     Args:
         reference (jax.Array): Reference array of any shape whose dtype and execution

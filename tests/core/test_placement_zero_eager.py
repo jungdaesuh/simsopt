@@ -7,6 +7,7 @@ from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import jax
+    import jax.numpy as jnp
     from simsopt_jax.core._device_scalars import placement_zero
 
 
@@ -21,10 +22,10 @@ class TestPlacementZeroEager(JaxTestCase):
             np.empty((0,)),
         )
         for reference in references:
-            placed = jax.device_put(reference)
+            placed = jnp.array(reference)
             for seed in (np.nan, np.inf, -np.inf, 1.0):
-                tangent = jax.device_put(np.full(reference.shape, seed))
-                cotangent = jax.device_put(np.asarray(seed))
+                tangent = jnp.array(np.full(reference.shape, seed))
+                cotangent = jnp.array(np.asarray(seed))
                 with self.subTest(shape=reference.shape, seed=seed):
                     with jax.disable_jit(), jax.transfer_guard("disallow"):
                         zero, derivative = jax.jvp(
@@ -41,10 +42,10 @@ class TestPlacementZeroEager(JaxTestCase):
 
     def test_nested_jvp_and_hvp_are_exact_zeros_without_jit(self) -> None:
         """Second-order JVPs and Hessian-vector products are exact +0.0, with and without JIT."""
-        reference = jax.device_put(np.asarray((np.nan, np.inf, 1.0e308)))
-        direction = jax.device_put(np.asarray((np.inf, np.nan, -np.inf)))
-        seed = jax.device_put(np.asarray(np.inf))
-        seed_tangent = jax.device_put(np.asarray(np.nan))
+        reference = jnp.array(np.asarray((np.nan, np.inf, 1.0e308)))
+        direction = jnp.array(np.asarray((np.inf, np.nan, -np.inf)))
+        seed = jnp.array(np.asarray(np.inf))
+        seed_tangent = jnp.array(np.asarray(np.nan))
 
         def first_derivative(values: jax.Array) -> jax.Array:
             return jax.jvp(placement_zero, (values,), (values,))[1]
@@ -71,9 +72,9 @@ class TestPlacementZeroEager(JaxTestCase):
 
     def test_batched_zero_has_exact_nonfinite_jvp_and_transpose(self) -> None:
         """Under vmap, the value, JVP and VJP stay exact +0.0 for non-finite batches."""
-        references = jax.device_put(np.asarray(((np.nan, np.inf), (1.0e308, 1.0e308))))
-        direction = jax.device_put(np.full(references.shape, np.nan))
-        seed = jax.device_put(np.full((references.shape[0],), np.inf))
+        references = jnp.array(np.asarray(((np.nan, np.inf), (1.0e308, 1.0e308))))
+        direction = jnp.array(np.full(references.shape, np.nan))
+        seed = jnp.array(np.full((references.shape[0],), np.inf))
         with jax.disable_jit(), jax.transfer_guard("disallow"):
             values, tangent = jax.jvp(
                 jax.vmap(placement_zero), (references,), (direction,)
@@ -92,8 +93,8 @@ class TestPlacementZeroEager(JaxTestCase):
         reference = np.asarray((1.0, -2.0, 3.0))
         direction = np.asarray((0.5, 0.2, -0.3))
         for step in (1.0e-2, 1.0e-4, 1.0e-6):
-            plus = jax.device_put(reference + step * direction)
-            minus = jax.device_put(reference - step * direction)
+            plus = jnp.array(reference + step * direction)
+            minus = jnp.array(reference - step * direction)
             with self.subTest(step=step):
                 with jax.disable_jit(), jax.transfer_guard("disallow"):
                     values = (placement_zero(plus), placement_zero(minus))
