@@ -696,6 +696,26 @@ class TestQfmJax(JaxTestCase):
         _assert_pair(port.qfm.J(), native.qfm.J())
         _assert_pair(port.qfm.dJ_by_dsurfacecoefficients(), expected)
 
+    def test_one_point_flux_field_broadcasts_like_native(self):
+        """An independent one-point flux field broadcasts over the flux row as in native."""
+        for jax_label_field in [False, True]:
+            with self.subTest(jax_label_field=jax_label_field), self.case():
+                native, port = _pair(label_class=ToroidalFlux)
+                for solver in (native, port):
+                    label_surface = _label_surface(solver)
+                    field_class = (
+                        JaxBiotSavart if jax_label_field and solver is port else BiotSavart
+                    )
+                    solver.label = ToroidalFlux(
+                        label_surface, field_class(solver.label.biotsavart.coils), idx=0
+                    )
+                    solver.label.biotsavart.set_points(label_surface.gamma()[0][:1] + 0.01)
+                for name in ("qfm_label_constraint", "qfm_penalty_constraints"):
+                    _assert_pair(
+                        getattr(port, name)(port.surface.x, derivatives=1),
+                        getattr(native, name)(native.surface.x, derivatives=1),
+                    )
+
     def test_invalid_derivative_method_and_flux_index_match_native(self):
         """Invalid orders, method names and flux indices raise native exception classes."""
         native, port = _pair(label_class=ToroidalFlux)

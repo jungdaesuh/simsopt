@@ -139,9 +139,11 @@ def _field_at_moving_points(
     the points were the surface positions. The increment
     positions - stop_gradient(positions) is exactly zero, so the value is the
     buffer field, while reverse mode differentiates the field linearized at
-    the buffer points along the surface position derivative.
+    the buffer points along the surface position derivative. A buffer that
+    broadcasts against the positions, such as a single flux point, is
+    broadcast first, as native broadcasts its field against the positions.
     """
-    anchor = jnp.asarray(points)
+    anchor = jnp.broadcast_to(jnp.asarray(points), positions.shape)
     displacement = positions - jax.lax.stop_gradient(positions)
     return field(anchor) + jax.jvp(field, (anchor,), (displacement,))[1]
 
