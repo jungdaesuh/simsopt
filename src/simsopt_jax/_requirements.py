@@ -1,4 +1,4 @@
-"""Interpreter and JAX requirements checked before any backend kernels load.
+"""Interpreter and JAX requirements checked, and float64 enabled, before any kernels load.
 
 ``simsopt_jax`` needs JAX 0.10 or newer (the ``jax`` extra), which needs Python 3.11, and the
 package uses Python 3.10+ features such as ``zip(..., strict=True)`` and dataclass slots. The
@@ -39,3 +39,8 @@ _require_jax_version("jaxlib", jaxlib_version)
 import jax
 
 _require_jax_version("jax", jax.__version__)
+
+# Every simsopt_jax kernel computes in float64. Importing simsopt_jax enables it
+# for the process, as importing simsopt.geo does, here so that no array a kernel
+# module builds at import is float32.
+jax.config.update("jax_enable_x64", True)
