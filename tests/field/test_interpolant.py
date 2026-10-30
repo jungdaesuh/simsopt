@@ -106,11 +106,11 @@ class Testing(unittest.TestCase):
         """
         A point outside the domain in a single coordinate (beyond the 1e-13
         face tolerance, or NaN, infinite or huge) is out of bounds: it must not
-        wrap into a neighbouring cell. With out_of_bounds_ok=True every query
-        overwrites the output: a finite point gets the nearest boundary cell's
-        polynomial, which reproduces ``fun`` exactly, and a non-finite or
-        overflowing one gets a non-finite value. With out_of_bounds_ok=False a
-        runtime error is raised.
+        wrap into a neighbouring cell, and ``in_bounds_batch`` reports it as
+        outside. With out_of_bounds_ok=True every query overwrites the output:
+        a finite point gets the nearest boundary cell's polynomial, which
+        reproduces ``fun`` exactly, and a non-finite or overflowing one gets a
+        non-finite value. With out_of_bounds_ok=False a runtime error is raised.
         """
         np.random.seed(0)
         ranges = [(1.0, 4.0, 20), (1.1, 3.9, 10), (1.2, 3.8, 15)]
@@ -139,6 +139,7 @@ class Testing(unittest.TestCase):
                     xyz = point_at(axis, value)
                     fhxyz = np.ones((1, dim))
                     interpolant_ok.evaluate_batch(xyz, fhxyz)
+                    self.assertFalse(interpolant_ok.in_bounds_batch(xyz)[0])
                     if abs(value) < 1e3:
                         expected = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
                         np.testing.assert_allclose(fhxyz, expected, rtol=1e-10, atol=1e-10)
@@ -152,6 +153,7 @@ class Testing(unittest.TestCase):
             for value in (lo - 1e-14, hi + 1e-14):
                 with self.subTest(axis=axis, value=value):
                     xyz = point_at(axis, value)
+                    self.assertTrue(interpolant_ok.in_bounds_batch(xyz)[0])
                     expected = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
                     for interpolant in (interpolant_ok, interpolant_strict):
                         fhxyz = np.zeros((1, dim))
