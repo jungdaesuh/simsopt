@@ -84,8 +84,20 @@ class BoozerSurface(Optimizable):
     :obj:`~simsopt.geo.BoozerSurface.solve_residual_equation_exactly_newton` and :obj:`~simsopt.geo.SurfaceXYZTensorFourier.get_stellsym_mask()`
     for more information.
 
-    A solve that fails and ends with a larger residual than it started with restores the surface, iota and G
-    it started from, so that the next solve does not start from a diverged iterate.
+    A solve that fails and ends with a larger or non-finite value of its own convergence measure than it started
+    with restores the surface, iota and G it started from, so that the next solve does not start from a diverged
+    iterate. The measure is the one each solver drives down:
+
+    - :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_penalty_constraints_LBFGS`: the penalty objective value.
+    - :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_penalty_constraints_newton`: the norm of the penalty
+      objective's gradient.
+    - :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_penalty_constraints_ls`: the norm of the residual vector,
+      constraint rows included, for the SciPy methods, and the norm of its gradient :math:`J^T r` for
+      ``method='manual'``.
+    - :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_exact_constraints_newton`: the norm of the optimality
+      conditions returned by :obj:`~simsopt.geo.BoozerSurface.boozer_exact_constraints`.
+    - :obj:`~simsopt.geo.BoozerSurface.solve_residual_equation_exactly_newton`: the norm of the masked residual
+      and the label (and, without stellarator symmetry, z) constraints.
 
     *[1]: Giuliani A, Wechsung F, Stadler G, Cerfon A, Landreman M. Direct computation of magnetic surfaces in Boozer coordinates and coil optimization for quasisymmetry. Journal of Plasma Physics. 2022;88(4):905880401. doi:10.1017/S0022377822000563*
     

@@ -773,6 +773,69 @@ class BoozerSurfaceTests(unittest.TestCase):
                        mock.patch.object(exact.label, 'J', side_effect=lambda: exact.targetlabel)],
                       x0, -2., after, -2.0, lambda v: {'residual': v * np.ones(nresidual)})
 
+    def test_failed_penalty_solves_compare_their_own_convergence_measure(self):
+        """
+        A failed step that lowers the penalty value and residual norm but
+        raises the gradient norm, or the reverse, is kept or undone by the
+        value (LBFGS) or residual norm (SciPy least squares), and by the
+        gradient norm in penalty Newton and manual least squares.
+        """
+        _, ls = get_boozer_surface(boozer_type="ls", converge=False)
+        dofs = ls.surface.get_dofs()
+        x0 = np.concatenate((dofs, [-0.406, -2.0]))
+        n = x0.size
+
+        def failed_minimize(fun, x, **kwargs):
+            f, g = fun(x + 1.)
+            return SimpleNamespace(x=x + 1., fun=f, jac=g, nit=1, success=False)
+
+        def failed_least_squares(fun, x, jac, **kwargs):
+            r, J = fun(x + 1.), jac(x + 1.)
+            return SimpleNamespace(x=x + 1., fun=r, grad=J.T @ r, jac=J, status=0)
+
+        solve_patch = mock.patch('numpy.linalg.solve', side_effect=lambda _A, b: np.ones_like(b))
+        for value, gradient in [(0.5, 10.), (10., 0.5)]:
+            # Both measures are 1 at x0, and value and gradient everywhere else.
+            def scales(x, value=value, gradient=gradient):
+                return (1., 1.) if np.array_equal(x, x0) else (value, gradient)
+
+            def penalty(x, derivatives=1, **kwargs):
+                ls.surface.set_dofs(x[:dofs.size])
+                v, g = scales(x)
+                return (v, g * np.ones(n)) + ((np.eye(n),) if derivatives == 2 else ())
+
+            def residual_and_jacobian(x, *args):
+                ls.surface.set_dofs(x[:dofs.size])
+                v, g = scales(x)
+                return v * np.ones(n), g / v * np.eye(n)
+
+            penalty_patch = mock.patch.object(ls, 'boozer_penalty_constraints_vectorized', side_effect=penalty)
+            ls_patch = mock.patch.object(ls, '_get_residual_vector_and_jacobian', side_effect=residual_and_jacobian)
+            cases = {
+                'LBFGS': (lambda: ls.minimize_boozer_penalty_constraints_LBFGS(maxiter=1, iota=-0.406, G=-2.0),
+                          [penalty_patch, mock.patch('simsopt.geo.boozersurface.minimize', side_effect=failed_minimize)],
+                          1., value),
+                'ls': (lambda: ls.minimize_boozer_penalty_constraints_ls(maxiter=1, iota=-0.406, G=-2.0),
+                       [ls_patch, mock.patch('simsopt.geo.boozersurface.least_squares', side_effect=failed_least_squares)],
+                       1., value),
+                'newton': (lambda: ls.minimize_boozer_penalty_constraints_newton(maxiter=1, iota=-0.406, G=-2.0),
+                           [penalty_patch, solve_patch], -1., gradient),
+                'ls manual': (lambda: ls.minimize_boozer_penalty_constraints_ls(maxiter=1, iota=-0.406, G=-2.0, method='manual'),
+                              [ls_patch, solve_patch], -1., gradient),
+            }
+            for name, (solve, patches, shift, measure) in cases.items():
+                with self.subTest(solver=name, value=value, gradient=gradient):
+                    ls.surface.set_dofs(dofs)
+                    ls.need_to_run_code = True
+                    with contextlib.ExitStack() as stack:
+                        for patch in patches:
+                            stack.enter_context(patch)
+                        res = solve()
+                    self.assertFalse(res['success'])
+                    expected = x0 + shift if measure <= 1. else x0
+                    np.testing.assert_array_equal(ls.surface.get_dofs(), expected[:dofs.size])
+                    self.assertEqual(res['iota'], expected[dofs.size])
+
     def test_failed_scipy_solves_leave_the_field_on_the_returned_surface(self):
         """
         After a failed SciPy solve, which evaluates its starting point to decide
