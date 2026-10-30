@@ -33,6 +33,7 @@ with optional_jax_imports():
         mean_squared_curvature_pure,
         curve_surface_distance_penalty_pure,
     )
+    from simsopt_jax_adapters.geo import curve_objectives
     from simsopt_jax_adapters.geo import (
         JaxCurveCurveDistance,
         JaxCurveLength,
@@ -44,6 +45,7 @@ from unittest import mock
 
 
 from collections.abc import Callable
+from functools import partial
 import os
 import subprocess
 import sys
@@ -199,6 +201,42 @@ def _circle(center, radius, numquadpoints=20):
     curve.set("xc(1)", radius)
     curve.set("ys(1)", radius)
     return curve
+
+
+def _separated_circles(num_far, twins):
+    """Circles of radius 0.2 in the xy-plane, centred 1 m apart on the x-axis, then twins.
+
+    The circles are 0.6 m apart. Twin ``k`` (an (x, quadrature count) pair) is a
+    circle at ``x`` raised by 0.05 m, so only twin-circle pairs lie within 0.1 m.
+    ``num_far`` more circles follow on the x-axis beyond 100 m.
+    """
+    circles = [_circle((float(x), 0.0, 0.0), 0.2) for x, _ in twins]
+    circles += [_circle((float(x), 0.0, 0.05), 0.2, numquadpoints=count) for x, count in twins]
+    circles += [_circle((100.0 + k, 0.0, 0.0), 0.2) for k in range(num_far)]
+    return circles
+
+
+def _point_pair_distance_shapes(adapter):
+    """Sorted shapes of the batched point-pair distance arrays the adapter's program computes."""
+    snapshot = adapter._snapshot()
+    if isinstance(adapter, JaxCurveCurveDistance):
+        total = partial(
+            curve_objectives._curve_pair_penalty_total,
+            batch_classes=snapshot.batch_classes, downsample=adapter.downsample,
+        )
+    else:
+        total = partial(curve_objectives._curve_surface_penalty_total, batch_classes=snapshot.batch_classes)
+
+    def shapes(jaxpr):
+        for equation in jaxpr.eqns:
+            if equation.primitive.name == "sqrt" and equation.outvars[0].aval.ndim == 3:
+                yield equation.outvars[0].aval.shape
+            for param in equation.params.values():
+                inner = getattr(param, "jaxpr", param)
+                if hasattr(inner, "eqns"):
+                    yield from shapes(inner)
+
+    return sorted(shapes(jax.make_jaxpr(total)(*snapshot.operands).jaxpr))
 
 
 # Minimum distances at which the squared distance of the two points rounds to the
@@ -588,6 +626,49 @@ class TestCurveObjectivesJax(JaxTestCase):
         for name, native, adapter in cases:
             _assert_matches_native_including_nans(name, native, adapter)
             self.assertTrue(adapter.J() == 0.0 and not np.any(adapter.dJ()), name)
+
+    def test_distance_programs_scale_with_candidates_not_pairs(self):
+        """Only native candidates are evaluated, in power-of-two padded batches per pair of
+        quadrature classes, however many far curves are added; padding adds nothing.
+
+        Three 20-point twins form one batch padded to 4 pairs, the 24-point twin one of 1;
+        the curve near the surface is the only surface candidate.
+        """
+        surface = _surface()
+        twins = [(0, 20), (1, 20), (2, 20), (3, 24)]
+        for num_far in (0, 12):
+            with self.subTest(num_far=num_far), self.case():
+                curves = _separated_circles(num_far, twins)
+                pair_native, pair_adapter = CurveCurveDistance(curves, 0.1), JaxCurveCurveDistance(curves, 0.1)
+                _assert_matches_native_including_nans("CurveCurveDistance", pair_native, pair_adapter, active=True)
+                self.assertEqual(len(pair_adapter._candidate_snapshot().candidates), len(twins))
+                self.assertEqual(_point_pair_distance_shapes(pair_adapter), [(1, 24, 20), (4, 20, 20)])
+                near = [_circle((0.0, 0.0, 0.0), 1.0), *curves[2 * len(twins):]]
+                surface_native = CurveSurfaceDistance(near, surface, 0.4)
+                surface_adapter = JaxCurveSurfaceDistance(near, surface, 0.4)
+                _assert_matches_native_including_nans(
+                    "CurveSurfaceDistance", surface_native, surface_adapter, active=True
+                )
+                self.assertEqual(_point_pair_distance_shapes(surface_adapter), [(1, 20, 64)])
+
+    def test_distance_terms_without_candidates_do_no_jax_work(self):
+        """With no native candidate the value is 0 and the gradient native's zeros, without
+        placing geometry or running a JAX program."""
+        surface = _surface()
+        curves = _separated_circles(3, [])
+        cases = (
+            ("CurveCurveDistance", CurveCurveDistance(curves, 0.1), JaxCurveCurveDistance(curves, 0.1)),
+            ("CurveSurfaceDistance", CurveSurfaceDistance(curves, surface, 0.1),
+             JaxCurveSurfaceDistance(curves, surface, 0.1)),
+        )
+        forbidden = mock.Mock(side_effect=AssertionError("JAX work without a candidate"))
+        for name in ("_class_stacked_geometry", "_curve_pair_penalty", "_curve_pair_penalty_grad",
+                     "_curve_surface_penalty", "_curve_surface_penalty_grad"):
+            self.patches.enter_context(mock.patch.object(curve_objectives, name, forbidden))
+        for name, native, adapter in cases:
+            _assert_matches_native_including_nans(name, native, adapter)
+            self.assertEqual(adapter.J(), 0.0)
+            self.assertFalse(np.any(adapter.dJ()), name)
 
     def test_distance_terms_evaluate_every_point_of_a_native_candidate(self):
         """Within a candidate pair every point is evaluated, as native: a zero tangent
