@@ -1076,10 +1076,14 @@ def make_curve_filament_spec(
             snapshot host NumPy inputs.
 
     Raises:
-        ValueError: A perturbed base curve's sample lacks a derivative the frame
-            needs for the filament tangent (2 for centroid, 3 for frenet), as
-            native raises.
+        ValueError: frame_kind is not centroid or frenet, or a perturbed base
+            curve's sample lacks a derivative the frame needs for the filament
+            tangent (2 for centroid, 3 for frenet), as native raises.
     """
+    if frame_kind not in _FILAMENT_FRAME_EXTRA_DERIVATIVES:
+        raise ValueError(
+            f"frame_kind must be 'centroid' or 'frenet', got {frame_kind!r}."
+        )
     spec = CurveFilamentSpec(
         dofs=_as_float64_array(dofs),
         quadpoints=_as_float64_array(quadpoints),

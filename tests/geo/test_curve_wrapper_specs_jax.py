@@ -15,8 +15,13 @@ with optional_jax_imports():
     from simsopt_jax.core import (
         curve_gamma_and_gammadash_from_dofs,
         curve_geometry_from_dofs,
+        make_curve_filament_spec,
+        make_optimizable_dof_map_spec,
     )
+    from simsopt_jax.core.specs import CurveFilamentSpec
     from simsopt_jax_adapters.geo.curve_specs import curve_spec_from_adapter_curve
+
+from typing import cast
 
 import numpy as np
 from simsopt.geo import (
@@ -26,8 +31,9 @@ from simsopt.geo import (
     FrameRotation,
     GaussianSampler,
     PerturbationSample,
+    RotatedCurve,
 )
-from simsopt.geo.framedcurve import FramedCurveCentroid, FramedCurveFrenet
+from simsopt.geo.framedcurve import FramedCurve, FramedCurveCentroid, FramedCurveFrenet
 
 _NQUAD = 128
 _ORDER = 3
@@ -134,3 +140,36 @@ class TestCurveWrapperSpecs(JaxTestCase):
                     filament.gammadash()
                 with self.assertRaisesRegex(ValueError, f"has {n_derivs} derivatives"):
                     curve_spec_from_adapter_curve(filament)
+
+    def test_unsupported_frames_and_wrapper_orders_raise(self):
+        """Custom frames, unknown frame kinds and inner RotatedCurve placements are rejected."""
+        base = _xyz_curve(_BASE)
+        custom_frame = CurveFilament(FramedCurve(base), 0.02, 0.03)
+        with self.assertRaisesRegex(NotImplementedError, "FramedCurve"):
+            curve_spec_from_adapter_curve(custom_frame)
+        valid = cast(
+            CurveFilamentSpec,
+            curve_spec_from_adapter_curve(_filament(base, FramedCurveCentroid)),
+        )
+        with self.assertRaisesRegex(ValueError, "frame_kind"):
+            make_curve_filament_spec(
+                dofs=valid.dofs,
+                quadpoints=valid.quadpoints,
+                base_curve=valid.base_curve,
+                base_curve_map=valid.base_curve_map,
+                rotation=valid.rotation,
+                rotation_map=valid.rotation_map,
+                frame_kind="custom",
+                dn=valid.dn,
+                db=valid.db,
+            )
+        rotated = RotatedCurve(base, np.pi / 3, flip=False)
+        sampler = GaussianSampler(base.quadpoints, 0.05, 0.3, n_derivs=3)
+        for inner_rotation in (
+            CurvePerturbed(rotated, PerturbationSample(sampler)),
+            _filament(rotated, FramedCurveCentroid),
+        ):
+            with self.subTest(wrapper=type(inner_rotation).__name__), self.assertRaisesRegex(
+                NotImplementedError, "RotatedCurve"
+            ):
+                curve_spec_from_adapter_curve(inner_rotation)
