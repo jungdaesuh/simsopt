@@ -1137,6 +1137,33 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
             if child is not None:
                 child.set_recompute_flag(parent=self)
 
+    def _notify_non_dof_change(self) -> None:
+        """
+        Signal that an input of this object changed without any DOF changing.
+
+        Calls :meth:`_on_non_dof_change` on this object and on everything that
+        depends on it, directly or indirectly; its ancestors are not told. The
+        owner of such an input (e.g. the draw of a
+        :obj:`~simsopt.geo.curveperturbed.CurvePerturbed`) calls this after
+        each real change, in addition to :meth:`set_recompute_flag`. DOF setters
+        do not send this signal.
+        """
+        self._on_non_dof_change()
+        for weakref_child in self._children:
+            child = weakref_child()
+            if child is not None:
+                child._notify_non_dof_change()
+
+    def _on_non_dof_change(self) -> None:
+        """
+        Respond to :meth:`_notify_non_dof_change`. Does nothing by default.
+
+        :meth:`recompute_bell` also rings on DOF assignments that change no
+        value, so a class without free DOFs may keep its results there. Such a
+        class overrides this method to drop them, because this signal means
+        that its output really changed.
+        """
+
     def get(self, key: Key) -> Real:
         """
         Get the value of specified DOF.

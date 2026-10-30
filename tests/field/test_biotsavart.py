@@ -1,10 +1,14 @@
 import unittest
 
 import numpy as np
+from numpy.random import PCG64DXSM, Generator
 
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt.geo.curveperturbed import GaussianSampler, PerturbationSample, CurvePerturbed
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import Coil, Current, ScaledCurrent
+from simsopt.field.magneticfield import MagneticFieldSum
+from simsopt.field.magneticfieldclasses import ToroidalField
 
 
 def get_curve(num_quadrature_points=200, perturb=False):
@@ -20,7 +24,110 @@ def get_curve(num_quadrature_points=200, perturb=False):
     return coil
 
 
+def circle(radius, z):
+    """Horizontal circle of ``radius`` (m) at height ``z`` (m), 64 quadrature points."""
+    curve = CurveXYZFourier(64, 2)
+    curve.set("xc(1)", radius)
+    curve.set("ys(1)", radius)
+    curve.set("zc(0)", z)
+    return curve
+
+
+def get_perturbed_coils(seed):
+    """Two circular coils (radii 1 m and 1.5 m) sharing one perturbation sample.
+
+    Returns the coils, their base curves, and the shared PerturbationSample.
+    """
+    sampler = GaussianSampler(np.linspace(0, 1, 64, endpoint=False), 0.05, 0.3, n_derivs=1)
+    sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(seed)))
+    bases = [circle(1.0, 0.0), circle(1.5, 0.3)]
+    coils = [Coil(CurvePerturbed(base, sample), Current(1e5)) for base in bases]
+    return coils, bases, sample
+
+
+def fresh_field(bases, samples, points):
+    """B (T, shape (npoints, 3)) of new coils on ``bases``, perturbed by the matching ``samples``."""
+    coils = [Coil(CurvePerturbed(base, sample), Current(1e5)) for base, sample in zip(bases, samples)]
+    return BiotSavart(coils).set_points(points).B()
+
+
+RESAMPLE_POINTS = np.array([[0.1, 0.2, 0.05], [0.3, -0.1, 0.2], [1.2, 0.0, 0.1]])
+
+
 class Testing(unittest.TestCase):
+
+    def assert_field_moved_to(self, B, B_before, B_truth):
+        """Assert that ``B`` equals ``B_truth`` and that the change from ``B_before`` is real."""
+        # A new draw moves the field by percent-level amounts, so equality is meaningful.
+        self.assertGreater(np.max(np.abs(B_truth - B_before)), 1e-3 * np.max(np.abs(B_truth)))
+        np.testing.assert_allclose(B, B_truth, rtol=0, atol=1e-13 * np.max(np.abs(B_truth)))
+
+    def test_fully_fixed_field_follows_a_new_draw(self):
+        """A field with no free DOF, alone or in a sum, follows a resampled shared perturbation.
+
+        Field-error studies resample coils whose DOFs are all fixed. A draw through
+        one coil moves both coils that share the sample, so the cached field must
+        equal a field built from scratch with the new draw.
+        """
+        coils, bases, sample = get_perturbed_coils(seed=2)
+        field = BiotSavart(coils)
+        field.fix_all()
+        background = ToroidalField(1.0, 1.0)
+        total = MagneticFieldSum([field, background])
+        self.assertEqual(total.dof_size, 0)
+        total.set_points(RESAMPLE_POINTS)
+        B_before = field.B().copy()
+        total_before = total.B().copy()
+        background_B = background.B().copy()
+
+        coils[0].curve.resample()
+        truth = fresh_field(bases, [sample, sample], RESAMPLE_POINTS)
+        self.assert_field_moved_to(total.B(), total_before, truth + background_B)
+        self.assert_field_moved_to(field.B(), B_before, truth)
+
+    def test_fully_fixed_field_follows_sample_reassignment(self):
+        """A fully fixed field follows a new sample of one coil, and later draws of that sample."""
+        coils, bases, sample = get_perturbed_coils(seed=3)
+        new_sample = PerturbationSample(sample.sampler, randomgen=Generator(PCG64DXSM(4)))
+        field = BiotSavart(coils)
+        field.fix_all()
+        field.set_points(RESAMPLE_POINTS)
+        curve = coils[0].curve
+        for change in (lambda: setattr(curve, "sample", new_sample), curve.resample, sample.resample):
+            B_before = field.B().copy()
+            change()
+            self.assert_field_moved_to(field.B(), B_before,
+                                       fresh_field(bases, [new_sample, sample], RESAMPLE_POINTS))
+
+    def test_x_assignment_keeps_the_cache_of_a_field_with_no_free_dof(self):
+        """Assigning x on a sum spares its fully fixed and DOF-free terms; a new draw does not.
+
+        A background field can be expensive (many coils or magnets), and an x
+        assignment on another term gives it nothing new, so its cached B must
+        survive. A sentinel written into the native cache through ``B_ref`` stays
+        visible only while the cache lives.
+        """
+        sentinel = -123456.0
+        coils, bases, sample = get_perturbed_coils(seed=5)
+        fixed = BiotSavart(coils)
+        fixed.fix_all()
+        dof_free = ToroidalField(1.0, 1.0)
+        free = BiotSavart([Coil(circle(0.5, 0.3), Current(1e5))])
+        total = MagneticFieldSum([fixed, dof_free, free])
+        total.set_points(RESAMPLE_POINTS)
+        total.B()
+        B_free = free.B().copy()
+        B_fixed = fixed.B().copy()
+        fixed.B_ref()[0, 0] = sentinel
+        dof_free.B_ref()[0, 0] = sentinel
+
+        total.x = np.array(total.x) + 1e-3
+        self.assertFalse(np.array_equal(free.B(), B_free), "the free term must follow x")
+        self.assertEqual(fixed.B()[0, 0], sentinel, "a fully fixed field lost its cache on an x assignment")
+        self.assertEqual(dof_free.B()[0, 0], sentinel, "a DOF-free field lost its cache on an x assignment")
+
+        coils[0].curve.resample()
+        self.assert_field_moved_to(fixed.B(), B_fixed, fresh_field(bases, [sample, sample], RESAMPLE_POINTS))
 
     def test_biotsavart_both_interfaces_give_same_result(self):
         curve = get_curve()
