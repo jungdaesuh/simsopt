@@ -1371,6 +1371,35 @@ class CoilForcesTest(unittest.TestCase):
             np.testing.assert_array_less(err_new, 0.31 * err)
             err = err_new
 
+    def test_netfluxes_downsample_taylor_test(self):
+        """NetFluxes.dJ matches central differences of J at second order for each downsample."""
+        rng = np.random.default_rng(31)
+        curves = create_equally_spaced_curves(2, 1, False, order=3, numquadpoints=12)
+        for curve in curves:
+            curve.x = curve.x + 0.04 * rng.standard_normal(curve.x.shape)
+        target = Coil(curves[0], Current(2.1e4))
+        source = Coil(CurveXYZFourier(24, 3, dofs=curves[1].dofs), Current(1.7e4))
+        for downsample in [1, 2, 3]:
+            with self.subTest(downsample=downsample):
+                objective = NetFluxes(target, [source], downsample=downsample)
+                x0 = np.array(objective.x)
+                h = rng.uniform(-1, 1, x0.shape)
+                for current in [target.current, source.current]:
+                    start, stop = objective.dof_indices[current]
+                    h[start:stop] *= 1e4
+                deriv = objective.dJ() @ h
+                err = np.inf
+                for i in range(2, 8):
+                    eps = 0.5**i * 1e-1
+                    objective.x = x0 + eps * h
+                    Jp = objective.J()
+                    objective.x = x0 - eps * h
+                    Jm = objective.J()
+                    err_new = abs((Jp - Jm) / (2 * eps) - deriv)
+                    self.assertLess(err_new, 0.3 * err)
+                    err = err_new
+                objective.x = x0
+
     def test_circular_regularized_coil_subclass(self):
         """Test that CircularRegularizedCoil works with the new method-based API."""
         R0 = 1.7
