@@ -634,13 +634,35 @@ def _filament_base_derivative_order(frame_kind: str, order: int) -> int:
     return order + _FILAMENT_FRAME_EXTRA_DERIVATIVES[frame_kind]
 
 
+def _require_sample_derivatives(spec: CurvePerturbedSpec, order: int) -> None:
+    """Reject a perturbed curve whose sample lacks a needed derivative.
+
+    Native ``PerturbationSample`` raises when a derivative above its sampler's
+    ``n_derivs`` is requested; the zero placeholders above
+    ``spec.sample_derivatives`` are not derivatives and must not be used.
+
+    Args:
+        spec (CurvePerturbedSpec): Immutable perturbed-curve payload.
+        order (int): Number of parameter derivatives of the curve position needed.
+
+    Raises:
+        ValueError: The sample provides fewer than ``order`` derivatives.
+    """
+    if order > spec.sample_derivatives:
+        raise ValueError(
+            f"The perturbation sample has {spec.sample_derivatives} derivatives, "
+            f"but derivative {order} is needed. Adjust the `n_derivs` parameter "
+            "of the sampler to access higher derivatives (the JAX spec carries "
+            "at most 3)."
+        )
+
+
 def _require_curve_derivatives(spec: CurveSpec, order: int) -> None:
     """Reject a curve whose perturbation samples lack derivatives a filament needs.
 
-    Native ``PerturbationSample`` raises when a derivative above its sampler's
-    ``n_derivs`` is requested; this applies the same rule to every perturbed
-    layer below a filament frame, including the extra base derivatives the frame
-    consumes.
+    Applies ``_require_sample_derivatives`` to every perturbed layer below a
+    filament frame, including the extra base derivatives the frame consumes,
+    so a filament spec is rejected when it is built rather than evaluated.
 
     Args:
         spec (CurveSpec): Immutable curve geometry.
@@ -650,13 +672,7 @@ def _require_curve_derivatives(spec: CurveSpec, order: int) -> None:
         ValueError: A perturbed layer provides fewer than the needed derivatives.
     """
     if isinstance(spec, CurvePerturbedSpec):
-        if order > spec.sample_derivatives:
-            raise ValueError(
-                f"The perturbation sample has {spec.sample_derivatives} derivatives, "
-                f"but derivative {order} is needed. Adjust the `n_derivs` parameter "
-                "of the sampler to access higher derivatives (the JAX spec carries "
-                "at most 3)."
-            )
+        _require_sample_derivatives(spec, order)
         _require_curve_derivatives(spec.base_curve, order)
     elif isinstance(spec, CurveFilamentSpec):
         _require_curve_derivatives(
@@ -1003,15 +1019,17 @@ def make_curve_perturbed_spec(
     sample_gammadash: object,
     sample_gammadashdash: object,
     sample_gammadashdashdash: object,
-    sample_derivatives: int = 3,
+    sample_derivatives: int,
 ) -> CurvePerturbedSpec:
     """Build an immutable CurvePerturbedSpec payload for JAX kernels.
 
     Args:
         dofs (array-like): Wrapper DOFs, shape (D,), including dependencies in the
             layout described by base_curve_map.
-        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,),
-            conventionally in [0, 1).
+        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,):
+            the base curve's grid, on which the sample is drawn, as for native
+            ``CurvePerturbed``. Geometry is evaluated on that grid; this field does
+            not resample it.
         base_curve (CurveSpec): Immutable geometry of the unperturbed or centerline
             curve.
         base_curve_map (OptimizableDofMapSpec): Map from wrapper DOFs to base-curve
@@ -1025,7 +1043,8 @@ def make_curve_perturbed_spec(
         sample_gammadashdashdash (array-like): Additive third parameter-derivative
             perturbation, shape (Q, 3), in meters.
         sample_derivatives (int): Number of parameter derivatives the sample provides,
-            1 to 3; pass zeros for the sample terms above it.
+            1 to 3; pass zeros for the sample terms above it. Required, so zero
+            placeholders are never mistaken for derivatives.
 
     Returns:
         CurvePerturbedSpec object: Frozen pytree payload; newly converted
@@ -1069,8 +1088,9 @@ def make_curve_filament_spec(
     Args:
         dofs (array-like): Wrapper DOFs, shape (D,), including curve and rotation
             dependencies in their mapped layouts.
-        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,),
-            conventionally in [0, 1).
+        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,):
+            the base curve's and rotation's grid, as for native ``CurveFilament``.
+            Geometry is evaluated on those grids; this field does not resample them.
         base_curve (CurveSpec): Immutable geometry of the unperturbed or centerline
             curve.
         base_curve_map (OptimizableDofMapSpec): Map from wrapper DOFs to base-curve
