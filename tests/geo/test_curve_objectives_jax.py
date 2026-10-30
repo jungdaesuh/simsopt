@@ -23,6 +23,7 @@ with optional_jax_imports():
         create_equally_spaced_curves,
     )
     from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import curve_kernels
     from simsopt_jax.core.curve_kernels import (
         curve_curve_distance_penalty_pure,
@@ -300,7 +301,7 @@ class TestCurveObjectivesJax(JaxTestCase):
         The length kernel has one operand, so no queued input can hold its evaluation; the
         test wraps its compiled formula so that it also waits for the execution gate."""
         compiled = curve_kernels._curve_length_from_incremental_arclength_pure
-        held = jax.jit(lambda speed, ready: jnp.where(ready[0] > 0, compiled(speed), jnp.nan))
+        held = jax.jit(lambda speed, ready: jnp.where(ready[0] > 0, compiled(speed), jnp.nan))  # noqa: TID251 no copy, so only the kernel boundary owns the buffer
         for misaligned in (False, True):
             with self.subTest(misaligned=misaligned), self.case():
                 speed = _host_array((65536,), misaligned=misaligned)
@@ -330,10 +331,10 @@ class TestCurveObjectivesJax(JaxTestCase):
         )
         for kernel, inputs in calls:
             with self.subTest(kernel=kernel.__name__):
-                np.testing.assert_array_equal(jax.jit(kernel)(*inputs), kernel(*inputs))
+                np.testing.assert_array_equal(jit(kernel)(*inputs), kernel(*inputs))
                 if kernel is not distance_candidate_pure:
                     gradient = jax.grad(lambda value: jnp.sum(kernel(value, *inputs[1:])))
-                    np.testing.assert_allclose(jax.jit(gradient)(inputs[0]), gradient(inputs[0]), rtol=1e-14, atol=1e-14)
+                    np.testing.assert_allclose(jit(gradient)(inputs[0]), gradient(inputs[0]), rtol=1e-14, atol=1e-14)
 
     def test_pure_kernels_evaluate_float32_inputs_in_double_like_native(self):
         """float32 geometry is evaluated in float64, as native does. The scales make a

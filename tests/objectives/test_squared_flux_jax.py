@@ -11,6 +11,7 @@ with optional_jax_imports():
     import jax.numpy as jnp
     import simsoptpp as sopp
     from simsopt._core.optimizable import Optimizable
+    from simsopt_jax.backend.jit import jit
     from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
     from simsopt.geo import CurveXYZFourier, SurfaceRZFourier, create_equally_spaced_curves
     from simsopt.objectives import SquaredFlux
@@ -113,8 +114,8 @@ class TestSquaredFluxJax(JaxTestCase):
         for definition in _DEFINITIONS:
             with self.subTest(definition=definition):
                 evaluate = lambda field: integral_BdotN(field, target, normal, definition)
-                np.testing.assert_array_equal(jax.jit(evaluate)(B), evaluate(B))
-                np.testing.assert_allclose(jax.jit(jax.grad(evaluate))(B), jax.grad(evaluate)(B), rtol=1e-14, atol=1e-14)
+                np.testing.assert_array_equal(jit(evaluate)(B), evaluate(B))
+                np.testing.assert_allclose(jit(jax.grad(evaluate))(B), jax.grad(evaluate)(B), rtol=1e-14, atol=1e-14)
 
     def test_integral_bdotn_matches_cpp(self):
         """All flux definitions and target forms match the native C++ integral."""

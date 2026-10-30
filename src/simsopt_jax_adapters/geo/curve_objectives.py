@@ -71,12 +71,12 @@ def _mean_squared_curvature_from_geometry(gammadash, gammadashdash):
     return mean_squared_curvature_pure(kappa_pure(gammadash, gammadashdash), gammadash)
 
 
-_curve_length = jax.jit(_length_from_tangent)
-_curve_length_grad = jax.jit(jax.grad(_length_from_tangent))
-_lp_curvature = jax.jit(_lp_curvature_from_geometry)
-_lp_curvature_grad = jax.jit(jax.grad(_lp_curvature_from_geometry, argnums=(0, 1)))
-_mean_squared_curvature = jax.jit(_mean_squared_curvature_from_geometry)
-_mean_squared_curvature_grad = jax.jit(
+_curve_length = jit(_length_from_tangent)
+_curve_length_grad = jit(jax.grad(_length_from_tangent))
+_lp_curvature = jit(_lp_curvature_from_geometry)
+_lp_curvature_grad = jit(jax.grad(_lp_curvature_from_geometry, argnums=(0, 1)))
+_mean_squared_curvature = jit(_mean_squared_curvature_from_geometry)
+_mean_squared_curvature_grad = jit(
     jax.grad(_mean_squared_curvature_from_geometry, argnums=(0, 1))
 )
 
