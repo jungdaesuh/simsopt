@@ -342,7 +342,7 @@ class TestHostBoundarySsotRatchet(JaxTestCase):
     def test_allow_host_transfers_lifts_the_strict_guard_for_its_block_only(self):
         """A permissive transfer scope allows host arithmetic and restores the
         surrounding strict guard."""
-        device_array = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
+        device_array = jnp.array(np.asarray([1.0, 2.0], dtype=np.float64))
         host_values = np.asarray([3.0, 4.0], dtype=np.float64)
 
         with disallow_host_transfers():
@@ -362,7 +362,7 @@ class TestHostBoundarySsotRatchet(JaxTestCase):
             "float": np.asarray([1.0, 2.0], dtype=np.float64),
             "integer": (np.asarray(3, dtype=np.int16),),
         }
-        reference = jax.device_put(np.zeros(2, dtype=np.float64))
+        reference = jnp.array(np.zeros(2, dtype=np.float64))
 
         with disallow_host_transfers():
             placed_tree = runtime_device_put_tree(tree)
