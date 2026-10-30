@@ -651,6 +651,15 @@ class JsonTest(unittest.TestCase):
         obj = json.loads(json.dumps(d), cls=GSONDecoder)
         self.assertEqual(type(obj), dict)
 
+    def test_redirect_to_another_module(self):
+        """The decoder follows a redirect to a class in another module."""
+        GSONable.REDIRECT["old_module"] = {
+            "old_class": {"@class": "GoodGSONClass", "@module": GoodGSONClass.__module__}}
+        self.addCleanup(GSONable.REDIRECT.pop, "old_module")
+        d = {"@class": "old_class", "@module": "old_module", "a": 1, "b": 1, "c": 1}
+        obj = json.loads(json.dumps(d), cls=GSONDecoder)
+        self.assertEqual(type(obj), GoodGSONClass)
+
     def test_redirect_settings_file(self):
         data = _load_redirect(os.path.join(test_dir, "test_settings.yaml"))
         self.assertEqual(
