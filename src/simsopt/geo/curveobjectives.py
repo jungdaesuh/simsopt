@@ -447,8 +447,10 @@ class CurveSurfaceDistance(Optimizable):
             np.ndarray, shape (dof_size,): the gradient of :math:`J` with
             respect to the free DOFs of the penalty, in m^5 divided by the unit
             of each DOF. With ``partials=True``, the ``Derivative`` keyed by
-            the curves and, with ``surface_derivatives`` and free surface DOFs,
-            by the surface.
+            the objects that own the curve DOFs (a ``RotatedCurve`` or
+            ``CurveFilament`` contributes under the curve it wraps, so read it
+            with ``D(curve)``, not ``D.data[curve]``) and, with
+            ``surface_derivatives`` and free surface DOFs, by the surface.
         """
         self.compute_candidates()
         with_surface = self.surface_derivatives and self.surface.dof_size > 0
