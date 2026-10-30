@@ -62,6 +62,7 @@ from simsopt_jax.pytree import pytree_dataclass
 
 from ._math_utils import as_jax_float64
 from .boozer_residual import (
+    _require_derivative_order,
     boozer_point_residual,
     objective_derivatives,
     residual_derivatives,
@@ -438,7 +439,11 @@ def boozer_exact_constraints(
         jax.Array | tuple[jax.Array, jax.Array]: Lagrangian stationarity and label/z
             constraints, shape (nx + 2,), optionally with Jacobian (nx + 2, nx + 2);
             rows have their native stationarity and constraint units.
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0 or 1.
     """
+    _require_derivative_order(derivatives, 1)
     nx = xl.shape[0] - 2
 
     def lagrangian(x, multipliers):
@@ -492,7 +497,12 @@ def boozer_exact_residual(
             constraint, plus z without stellarator symmetry, shape (nb,), optionally
             Jacobian (nb, nx). Boozer rows have tesla squared meter units; constraint
             rows use label units and meters.
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0 or 1.
+        RuntimeError: If the problem's surface is not a ``SurfaceXYZTensorFourier``.
     """
+    _require_derivative_order(derivatives, 1)
     if not isinstance(problem.surface, SurfaceXYZTensorFourierSpec):
         raise RuntimeError(
             "Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier"

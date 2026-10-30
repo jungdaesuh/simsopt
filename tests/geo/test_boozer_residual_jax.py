@@ -950,9 +950,8 @@ class TestBoozerResidualJax(JaxTestCase):
         # As native solve_residual_equation_exactly_newton, only tensor surfaces have the exact system.
         with self.assertRaisesRegex(RuntimeError, "SurfaceXYZTensorFourier"):
             boozer_exact_residual_rows(setup.surface)
-        tensor_rows = boozer_exact_residual_rows(
-            _setup("tensor", True, "volume").surface
-        )
+        tensor_setup = _setup("tensor", True, "volume")
+        tensor_rows = boozer_exact_residual_rows(tensor_setup.surface)
         with self.assertRaisesRegex(RuntimeError, "SurfaceXYZTensorFourier"):
             boozer_exact_residual(
                 exact,
@@ -963,6 +962,43 @@ class TestBoozerResidualJax(JaxTestCase):
             boozer_penalty_constraints(
                 replace(exact, constraint_weight=exact.targetlabel), x, optimize_G=True
             )
+        # As native asserts: no order the field model does not carry.
+        weighted = replace(exact, constraint_weight=exact.targetlabel)
+        tensor = boozer_problem(
+            tensor_setup.field, tensor_setup.surface, tensor_setup.label, tensor_setup.target
+        )
+        tensor_x = place_float64(_decision(tensor_setup.surface, True), tensor.targetlabel)
+        tensor_xl = place_float64(
+            _decision(tensor_setup.surface, True, (0.1, 0.2)), tensor.targetlabel
+        )
+        unsupported = {
+            "residual": [
+                lambda order: jax_boozer_surface_residual(
+                    exact, x, derivatives=order, optimize_G=False
+                ),
+                (-1, 3),
+            ],
+            "penalty": [
+                lambda order: boozer_penalty_constraints(weighted, x, derivatives=order),
+                (-1, 3),
+            ],
+            "exact constraints": [
+                lambda order: boozer_exact_constraints(tensor, tensor_xl, derivatives=order),
+                (-1, 2, 3),
+            ],
+            "exact residual": [
+                lambda order: boozer_exact_residual(
+                    tensor, tensor_x, tensor_rows, derivatives=order
+                ),
+                (-1, 2, 3),
+            ],
+        }
+        for name, (formulation, orders) in unsupported.items():
+            for order in orders:
+                with self.subTest(name=name, derivatives=order), self.assertRaisesRegex(
+                    ValueError, "derivatives must be"
+                ):
+                    formulation(order)
 
     def test_penalty_gradient_taylor(self):
         """The penalty gradient matches forward differences of the penalty at shrinking
