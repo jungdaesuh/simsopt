@@ -78,7 +78,24 @@ void init_magneticfields(py::module_ &m){
         .def(py::init<InterpolationRule, RangeTriplet, RangeTriplet, RangeTriplet, int, bool>())
         .def("interpolate_batch", &RegularGridInterpolant3D<PyTensor>::interpolate_batch, "Interpolate a function by evaluating the function on all interpolation nodes simultanuously.")
         .def("evaluate", &RegularGridInterpolant3D<PyTensor>::evaluate, "Evaluate the interpolant at a point.")
-        .def("evaluate_batch", &RegularGridInterpolant3D<PyTensor>::evaluate_batch, "Evaluate the interpolant at multiple points (faster than `evaluate` as it uses prefetching).");
+        .def("evaluate_batch", &RegularGridInterpolant3D<PyTensor>::evaluate_batch, "Evaluate the interpolant at multiple points (faster than `evaluate` as it uses prefetching).")
+        .def("in_bounds_batch", [](const RegularGridInterpolant3D<PyTensor>& self, const PyTensor& xyz) {
+                const py::ssize_t npoints = xyz.shape(0);
+                py::array_t<bool> inside(npoints);
+                auto inside_view = inside.mutable_unchecked<1>();
+                for (py::ssize_t i = 0; i < npoints; ++i)
+                    inside_view(i) = self.in_bounds(xyz(i, 0), xyz(i, 1), xyz(i, 2));
+                return inside;
+            }, py::arg("xyz"),
+            "Report which points lie in the interpolation grid.\n\n"
+            "A point is inside with the same 1e-13 face tolerance as `evaluate`, and outside for a\n"
+            "non-finite coordinate. Outside the grid, `evaluate` extrapolates from the nearest\n"
+            "boundary cell, giving NaN where the scaled index is not finite or that cell is\n"
+            "skipped (or throws if out_of_bounds_ok is false).\n\n"
+            "Args:\n"
+            "    xyz (array, shape (npoints, 3)): Points in the interpolant's coordinates.\n\n"
+            "Returns:\n"
+            "    array of bool, shape (npoints,): True where the point is in the grid.\n");
 
 
     py::class_<CurrentBase<PyArray>, shared_ptr<CurrentBase<PyArray>>, PyCurrentBaseTrampoline>(m, "CurrentBase")
