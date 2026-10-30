@@ -132,7 +132,7 @@ class CopyingJit:
             # jax.jit receives the selectors this wrapper copies by, so both
             # agree by construction, and an iterator selector is read once.
             options = {**options, "static_argnums": nums, "static_argnames": names}
-        self._compiled = jax.jit(fun, **options)  # noqa: TID251 - the one raw jit; this wrapper owns NumPy inputs.
+        self._compiled = jax.jit(fun, **options)  # noqa: TID251 the one raw jit; this wrapper owns NumPy inputs
         self._static_argnums = frozenset(nums)
         self._static_argnames = frozenset(names)
 

@@ -164,7 +164,7 @@ class CopyingJitTests(JaxTestCase):
         for name, kind, options, call in cases:
             with self.subTest(selector=name, parameters=kind):
                 raw_received, raw_fun = _table_probe(kind)
-                raw = jax.jit(raw_fun, **options())  # noqa: TID251 - raw jax.jit is the reference
+                raw = jax.jit(raw_fun, **options())  # noqa: TID251 raw jax.jit is the reference
                 call(raw, np.ones(2))
 
                 received, fun = _table_probe(kind)
@@ -246,13 +246,13 @@ class CopyingJitTests(JaxTestCase):
     def test_placement_matches_raw_jit(self):
         """NumPy, uncommitted and committed inputs land where ``jax.jit`` puts them."""
         identity = jit(lambda x: x * 1.0)
-        raw = jax.jit(lambda x: x * 1.0)  # noqa: TID251 - reference placement of raw jit
+        raw = jax.jit(lambda x: x * 1.0)  # noqa: TID251 reference placement of raw jit
         host = np.arange(4.0)
         cpu = jax.devices("cpu")[0]
         inputs = {
             "NumPy": host,
             "uncommitted": jnp.asarray(host),
-            "committed CPU": jax.device_put(host, cpu),  # noqa: TID251 - committed input under test
+            "committed CPU": jax.device_put(host, cpu),  # noqa: TID251 committed input under test
         }
         for name, value in inputs.items():
             with self.subTest(input=name):
@@ -272,8 +272,8 @@ class CopyingJitTests(JaxTestCase):
         expected = {
             "NumPy": (host, gpu),
             "uncommitted": (jnp.asarray(host), gpu),
-            "committed CPU": (jax.device_put(host, cpu), cpu),  # noqa: TID251 - committed input under test
-            "committed GPU": (jax.device_put(host, gpu), gpu),  # noqa: TID251 - committed input under test
+            "committed CPU": (jax.device_put(host, cpu), cpu),  # noqa: TID251 committed input under test
+            "committed GPU": (jax.device_put(host, gpu), gpu),  # noqa: TID251 committed input under test
         }
         for name, (value, device) in expected.items():
             with self.subTest(input=name):
