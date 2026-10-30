@@ -110,9 +110,7 @@ class CopyingJit:
     method like the compiled function does.
 
     Not protected: NumPy arrays that ``fun`` captures from an enclosing scope
-    and JAX arrays that already alias NumPy memory. NumPy subclass leaves are
-    copied as plain arrays, so a masked array loses its mask where
-    ``jax.jit`` rejects it.
+    and JAX arrays that already alias NumPy memory.
     """
 
     def __init__(self, fun: Callable, **options) -> None:

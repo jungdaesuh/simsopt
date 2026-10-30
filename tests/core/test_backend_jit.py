@@ -243,6 +243,13 @@ class CopyingJitTests(JaxTestCase):
         self.assertIsNot(tree["b"][0], host)
         np.testing.assert_array_equal(tree["b"][0], host)
 
+    def test_masked_array_is_rejected_like_raw_jit(self):
+        """A NumPy masked array keeps its mask through the copy, so JAX rejects it
+        as ``jax.jit`` does instead of computing with the masked entries."""
+        masked = np.ma.masked_array(np.arange(3.0), mask=[False, True, False])
+        with self.assertRaisesRegex(ValueError, "masked arrays are not supported"):
+            jit(lambda x: x * 1.0)(masked)
+
     def test_placement_matches_raw_jit(self):
         """NumPy, uncommitted and committed inputs land where ``jax.jit`` puts them."""
         identity = jit(lambda x: x * 1.0)
