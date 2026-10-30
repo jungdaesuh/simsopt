@@ -48,7 +48,7 @@ __all__ = [
 
 @pytree_dataclass(
     data=("boozer", "extraction", "nonqs_surface", "residual_rows", "targets", "tol", "maxiter"),
-    meta=("length_indices", "axis"),
+    meta=("length_indices", "length_owner_blocks", "axis"),
 )
 class ExactSingleStageProblem:
     """Immutable boozerQA snapshot; targets are [iota, major radius, length].
@@ -76,6 +76,10 @@ class ExactSingleStageProblem:
             infinite.
         length_indices (tuple[int, ...]): Original coil indices selecting length terms;
             each occurrence contributes once.
+        length_owner_blocks (tuple[tuple[tuple[int, int, int], ...], ...]): One entry
+            per Optimizable owning length-term DOFs (native's Derivative keys),
+            listing ``(term, start, end)`` slices of each length term's curve input
+            vector that hold that owner's DOFs.
         axis (int): Non-QS averaging axis, 0 for phi or 1 for theta.
     """
 
@@ -87,6 +91,7 @@ class ExactSingleStageProblem:
     tol: jax.Array
     maxiter: jax.Array
     length_indices: tuple[int, ...]
+    length_owner_blocks: tuple[tuple[tuple[int, int, int], ...], ...]
     axis: int
 
 
@@ -195,27 +200,37 @@ def _major_radius(surface: SurfaceSpec) -> tuple[jax.Array, jax.Array]:
 
 
 def _length_penalty(
-    problem: ExactSingleStageProblem, dofs: jax.Array,
+    extraction: CoilSetDofExtractionSpec,
+    length_indices: tuple[int, ...],
+    length_owner_blocks: tuple[tuple[tuple[int, int, int], ...], ...],
+    target: jax.Array,
+    dofs: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Native ``QuadraticPenalty(total_length, target, "max")`` value and gradient.
 
-    As native does, the total-length derivative is completed with a unit
-    cotangent and then scaled by the multiplier ``max(L - target, 0)``. An
-    infinite multiplier (target ``-inf``) therefore gives ``+/-inf`` where the
-    derivative is nonzero and NaN where it is zero on DOFs the lengths read,
-    instead of NaNs spread through the length VJP. DOFs no length reads keep
-    exact zeros, as native's per-optimizable derivative does.
+    Native holds the total-length derivative per owner Optimizable, scales
+    each owner's derivative by the multiplier ``max(L - target, 0)``, and only
+    then sums owners that share DOFs. This follows the same order, so an
+    infinite multiplier (target ``-inf``) gives ``+/-inf`` where an owner's
+    derivative is nonzero, NaN where it is zero on DOFs that owner holds, and
+    NaN where owners sharing a DOF disagree. DOFs no owner holds keep exact
+    zeros.
 
     Args:
-        problem (ExactSingleStageProblem): Problem snapshot; ``targets[2]`` is the
-            total-length target in meters.
+        extraction (CoilSetDofExtractionSpec): Coil reconstruction snapshot for the
+            free DOF vector of shape (nfree,).
+        length_indices (tuple[int, ...]): Coil indices of the length terms, one per term.
+        length_owner_blocks (tuple[tuple[tuple[int, int, int], ...], ...]): One entry per
+            owner Optimizable, listing ``(term, start, end)`` slices of each length
+            term's curve input vector that hold that owner's DOFs.
+        target (jax.Array): Scalar total-length target in meters.
         dofs (jax.Array): Shape (nfree,) free coil DOFs.
 
     Returns:
         tuple[jax.Array, jax.Array, jax.Array]: Penalty value in square meters,
             total length in meters, and the penalty gradient of shape (nfree,).
     """
-    coils = tuple(problem.extraction.coils[index] for index in problem.length_indices)
+    coils = tuple(extraction.coils[index] for index in length_indices)
 
     def curve_inputs(dofs: jax.Array) -> tuple[jax.Array, ...]:
         return tuple(optimizable_input_dofs_from_map_spec(coil.curve_map, dofs) for coil in coils)
@@ -228,10 +243,31 @@ def _length_penalty(
 
     inputs, inputs_pullback = jax.vjp(curve_inputs, dofs)
     total_length, length_pullback = jax.vjp(total_length_of, inputs)
-    (length_derivative,) = inputs_pullback(length_pullback(jnp.ones_like(total_length))[0])
-    (reads,) = inputs_pullback(tuple(jnp.ones_like(curve_dofs) for curve_dofs in inputs))
-    multiplier = jnp.maximum(total_length - problem.targets[2], 0)
-    gradient = jnp.where(reads != 0, multiplier * length_derivative, 0)
+    multiplier = jnp.maximum(total_length - target, 0)
+    if not length_owner_blocks:
+        return 0.5 * multiplier**2, total_length, jnp.zeros_like(dofs)
+    (term_derivatives,) = length_pullback(jnp.ones_like(total_length))
+
+    def owner_cotangents(fill: tuple[jax.Array, ...]) -> tuple[jax.Array, ...]:
+        # Each owner's summed slice sits at its first block. The copy maps'
+        # pullback multiplies by one-hot matrices, so only finite values may
+        # pass through it; the multiplier is applied afterwards.
+        rows = []
+        for blocks in length_owner_blocks:
+            owner = sum(fill[term][start:end] for term, start, end in blocks)
+            first, start, end = blocks[0]
+            rows.append(tuple(
+                jnp.zeros_like(inputs[term]).at[start:end].set(owner) if term == first
+                else jnp.zeros_like(inputs[term])
+                for term in range(len(inputs))
+            ))
+        return tuple(jnp.stack(column) for column in zip(*rows))
+
+    (owner_derivatives,) = jax.vmap(inputs_pullback)(owner_cotangents(term_derivatives))
+    (owner_reads,) = jax.vmap(inputs_pullback)(
+        owner_cotangents(tuple(jnp.ones_like(curve_dofs) for curve_dofs in inputs)),
+    )
+    gradient = jnp.sum(jnp.where(owner_reads != 0, multiplier * owner_derivatives, 0), axis=0)
     return 0.5 * multiplier**2, total_length, gradient
 
 
@@ -329,7 +365,9 @@ def exact_single_stage_evaluate(
         return gradient, adjoint_finite(component_rhs, component_adjoints)
 
     gradient, finite = jax.lax.cond(jnp.all(jnp.isfinite(multipliers)), composed_gradient, component_gradient)
-    length_penalty, total_length, length_gradient = _length_penalty(problem, dofs)
+    length_penalty, total_length, length_gradient = _length_penalty(
+        problem.extraction, problem.length_indices, problem.length_owner_blocks, problem.targets[2], dofs,
+    )
     success = solved.norm <= problem.tol
     return ExactSingleStageResult(
         value=jnp.where(success, value + length_penalty, 1e3),

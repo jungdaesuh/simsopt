@@ -37,6 +37,8 @@ import jax
 import numpy as np
 from numpy.typing import NDArray
 
+from simsopt._core.optimizable import Optimizable
+from simsopt.field.coil import Coil
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo.curve import Curve
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -48,14 +50,50 @@ from simsopt_jax.core.single_stage_exact import (
 )
 from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.runtime.host_boundary import host_value
+from simsopt_jax_adapters.field._coil_graph import _unwrap_coil_curve_and_current_objects
 from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
 
 from .boozer_problem import boozer_exact_residual_rows, boozer_problem
 from .boozer_surface import JaxBoozerSurface
+from .curve_contract import _optimizable_dof_layout, adapter_curve_dof_mode
 from .surface_objectives import _nonqs_axis, _nonqs_surface
 from .surface_specs import surface_spec_from_surface
 
 __all__ = ["ExactSingleStageEvaluation", "JaxExactSingleStage"]
+
+
+def _length_owner_blocks(
+    coils: Sequence[Coil], length_indices: Sequence[int],
+) -> tuple[tuple[tuple[int, int, int], ...], ...]:
+    """Group the length terms' curve inputs by the Optimizable owning each slice.
+
+    These owners are the keys of native's total-length ``Derivative``, which
+    ``QuadraticPenalty`` scales before owners sharing DOFs are summed. The
+    slices follow the curve input layout of ``JaxBiotSavart``'s extraction:
+    an unwrapped curve's local DOFs, or its full graph for perturbed and
+    filament curves.
+
+    Args:
+        coils (Sequence[Coil]): Field coils in extraction order.
+        length_indices (Sequence[int]): Coil index of each length term.
+
+    Returns:
+        tuple[tuple[tuple[int, int, int], ...], ...]: Per owner with free DOFs, in
+            first-appearance order, its ``(term, start, end)`` input slices.
+    """
+    blocks: dict[Optimizable, list[tuple[int, int, int]]] = {}
+    for term, index in enumerate(length_indices):
+        coil = coils[index]
+        curve = _unwrap_coil_curve_and_current_objects(coil.curve, coil.current)[0]
+        owners = (
+            _optimizable_dof_layout(curve)[1].items()
+            if adapter_curve_dof_mode(curve) == "full"
+            else ((curve, (0, int(curve.local_full_dof_size))),)
+        )
+        for owner, (start, end) in owners:
+            if int(owner.local_dof_size) > 0:
+                blocks.setdefault(owner, []).append((term, int(start), int(end)))
+    return tuple(tuple(owner_blocks) for owner_blocks in blocks.values())
 
 
 @dataclass(frozen=True)
@@ -226,6 +264,7 @@ class JaxExactSingleStage:
                 tol=explicit_device_array(tol, dtype=np.float64, reference=reference),
                 maxiter=explicit_device_array(maxiter, dtype=np.float64, reference=reference),
                 length_indices=tuple(length_indices),
+                length_owner_blocks=_length_owner_blocks(coils, length_indices),
                 axis=_nonqs_axis(quasi_poloidal),
             ),
             initial_state=ExactSingleStageState(

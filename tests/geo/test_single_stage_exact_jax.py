@@ -14,10 +14,11 @@ with optional_jax_imports():
     import jax
     from simsopt.configs import get_data
     from simsopt._core.derivative import Derivative
-    from simsopt.field import BiotSavart
+    from simsopt.field import BiotSavart, Coil, Current
     from simsopt.geo import (
         BoozerSurface,
         CurveLength,
+        CurveXYZFourier,
         Iotas,
         MajorRadius,
         NonQuasiSymmetricRatio,
@@ -29,6 +30,7 @@ with optional_jax_imports():
     from simsopt_jax.core.single_stage_exact import (
         ExactSingleStageState,
         _absolute,
+        _length_penalty,
         exact_single_stage_evaluate,
     )
     from simsopt_jax.core.surface_fourier_series import surface_spec_with_dofs
@@ -45,7 +47,10 @@ with optional_jax_imports():
     )
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
-    from simsopt_jax_adapters.geo.single_stage_exact import JaxExactSingleStage
+    from simsopt_jax_adapters.geo.single_stage_exact import (
+        JaxExactSingleStage,
+        _length_owner_blocks,
+    )
     from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
 
 from unittest_jax_support import (
@@ -817,6 +822,38 @@ class TestSingleStageExactJax(JaxTestCase):
         assert_matches_native(
             result.gradient[finite], expected_gradient[finite], "finite gradient entries"
         )
+
+    def test_length_penalty_scales_each_owner_before_shared_dofs_combine(self):
+        """Native scales each owner's length derivative before summing shared DOFs.
+
+        Two curves share one DOF object. At phi=0 the first curve's length does
+        not depend on xc(1); at phi=0.25 the second's does. With an infinite
+        multiplier, native's shared xc(1) entry is inf*0 + inf*positive = NaN,
+        not the inf of scaling the already combined derivative.
+        """
+        first = CurveXYZFourier(np.array([0.0]), 1)
+        second = CurveXYZFourier(np.array([0.25]), 1, dofs=first.dofs)
+        first.x = np.array([0, 0, 1, 0, 1, 0, 0, 0, 0], dtype=np.float64)  # xc(1)=ys(1)=1
+        coils = [Coil(first, Current(1.0)), Coil(second, Current(2.0))]
+        field = JaxBiotSavart(coils)
+        penalty = QuadraticPenalty(
+            CurveLength(first) + CurveLength(second), -np.inf, "max"
+        )
+        with np.errstate(invalid="ignore"):
+            expected = np.asarray(
+                cast(Callable[..., Derivative], penalty.dJ)(partials=True)(field)
+            )
+        terms = (0, 1)
+        _, _, gradient = _length_penalty(
+            field.coil_dof_extraction_spec(),
+            terms,
+            _length_owner_blocks(coils, terms),
+            explicit_device_array(-np.inf, dtype=np.float64),
+            explicit_device_array(field.x, dtype=np.float64),
+        )
+        shared_xc1 = [name.endswith(":xc(1)") for name in field.dof_names]
+        self.assertTrue(np.all(np.isnan(expected[shared_xc1])))
+        np.testing.assert_array_equal(host_array(gradient), expected)
 
     def test_device_result_exposes_exactly_singular_newton(self):
         """The pure device result exposes a singular Newton step and its failed iterate."""
