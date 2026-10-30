@@ -203,7 +203,7 @@ def _with_value(traced: jax.Array, value: jax.Array) -> jax.Array:
 def _with_value_jvp(
     primals: tuple[jax.Array, jax.Array], tangents: tuple[jax.Array, jax.Array],
 ) -> tuple[jax.Array, jax.Array]:
-    return primals[1], tangents[0]
+    return _with_value(*primals), tangents[0]
 
 
 def _label_value_and_grad(

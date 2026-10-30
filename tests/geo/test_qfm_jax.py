@@ -27,6 +27,7 @@ with optional_jax_imports():
     from simsopt_jax.backend.dtypes import explicit_device_array
     from simsopt_jax.core.qfm import (
         qfm_label,
+        qfm_label_constraint_value_and_grad,
         qfm_residual,
         qfm_residual_value_and_grad,
     )
@@ -735,6 +736,22 @@ class TestQfmJax(JaxTestCase):
         value_derivative, hessian = _forward_derivatives(qfm_residual_value_and_grad, spec)
         self.assertTrue(np.all(np.isfinite(hessian)))
         _assert_pair(value_derivative, host_array(qfm_residual_value_and_grad(spec)[1]))
+
+    def test_label_value_keeps_second_derivatives(self):
+        """A supplied label value replaces only the value, also under a second derivative.
+
+        The Hessian of 0.5 * (l - t)**2 contains dl dl^T, and the derivative of
+        the value is (l - t) dl; both must stay as without a supplied value.
+        """
+        _, port = _pair_with_nonzero_label_gradient()
+        spec = port._label_spec()
+        target = port._target(spec)
+        _assert_pair(
+            _forward_derivatives(
+                qfm_label_constraint_value_and_grad, spec, target, qfm_label(spec)
+            ),
+            _forward_derivatives(qfm_label_constraint_value_and_grad, spec, target),
+        )
 
     def test_one_point_flux_field_broadcasts_like_native(self):
         """An independent one-point flux field broadcasts over the flux row as in native."""
