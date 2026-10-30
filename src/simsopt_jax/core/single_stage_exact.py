@@ -282,10 +282,12 @@ def exact_single_stage_evaluate(
     One jitted dispatch; no differentiation through the Newton iteration.
     New free DOFs, warm starts, targets, tolerance and cap reuse the program.
     Callers place all arguments on a single device before calling.
-    The gradient is one reverse-mode derivative of the composed objective,
-    one adjoint solve and one implicit coil VJP. When a penalty multiplier is
-    nonfinite, each component is solved and pulled back on its own and then
-    scaled, preserving native's inf/NaN propagation.
+    The non-QS, iota and radius gradient is one reverse-mode derivative of
+    their composition, one adjoint solve and one implicit coil VJP. When the
+    iota or radius multiplier is nonfinite, each component is solved and
+    pulled back on its own and then scaled, preserving native's inf/NaN
+    propagation. The length gradient is added separately: each owner's
+    completed length derivative is scaled by its multiplier, as in native.
 
     Successful values add the non-QS ratio to half the squared iota and
     major-radius target errors, plus ``0.5 * max(total_length - length_target, 0)**2``.
