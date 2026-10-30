@@ -1,6 +1,8 @@
 """Regression tests for ``set_backend`` process-state changes.
 
-1. In a process whose JAX backends are initialized, GPU allocator settings
+1. A rejected call leaves the previous mode, environment and JAX settings in
+   place, and the field still evaluates as before.
+2. In a process whose JAX backends are initialized, GPU allocator settings
    cannot apply: selecting the GPU warns instead of raising and leaves the
    caller's allocator variables alone.
 """
@@ -15,14 +17,93 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import simsopt_jax.backend.runtime as runtime_module
     from simsopt_jax.backend.runtime import (
+        get_backend_config,
         get_backend_mode,
         set_backend,
     )
+    from simsopt_jax_adapters.field import JaxBiotSavart
 import os
 import warnings
+from contextlib import nullcontext
+from unittest import mock
+
+import numpy as np
+from simsopt.field import Coil, Current
+from simsopt.geo import create_equally_spaced_curves
+
+
+def _field_B() -> np.ndarray:
+    """B (T), shape (2, 3), of two 100 kA circular coils at two off-axis points."""
+    curves = create_equally_spaced_curves(
+        2, 1, stellsym=False, R0=1.0, R1=0.5, order=2, numquadpoints=16
+    )
+    field = JaxBiotSavart([Coil(curve, Current(1.0e5)) for curve in curves])
+    field.set_points(np.array([[1.1, 0.0, 0.1], [0.9, 0.2, -0.1]]))
+    return np.asarray(field.B())
+
+
+_OBSERVED_ENV_PREFIXES = ("SIMSOPT_", "JAX_", "XLA_", "TF_GPU_")
+_OBSERVED_JAX_CONFIG_NAMES = (
+    "jax_platforms",
+    "jax_platform_name",
+    "jax_enable_x64",
+    "jax_default_matmul_precision",
+    "jax_debug_nans",
+    "jax_disable_jit",
+    "jax_transfer_guard",
+    "jax_compilation_cache_dir",
+    "jax_default_device",
+)
+
+
+def _process_state() -> tuple[dict[str, str], dict[str, object]]:
+    """The backend environment variables and JAX settings of this process."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith(_OBSERVED_ENV_PREFIXES)
+    }
+    jax_config = {name: jax.config.values[name] for name in _OBSERVED_JAX_CONFIG_NAMES}
+    return env, jax_config
 
 
 class TestSetBackendLifecycle(JaxTestCase):
+    def test_rejected_set_backend_keeps_the_previous_mode(self):
+        """An early or a late rejection restores the CPU parity mode and its field."""
+        rows = [
+            (
+                "determinism flags missing",
+                "does not enable",
+                nullcontext(),
+                lambda: set_backend("jax", device="gpu", intent="parity"),
+            ),
+            (
+                "default device rejected",
+                "rejected",
+                mock.patch.object(
+                    runtime_module,
+                    "_select_initialized_jax_default_device",
+                    side_effect=RuntimeError("rejected"),
+                ),
+                lambda: set_backend(
+                    "jax", device="gpu", debug_nans=True, disable_jit=True
+                ),
+            ),
+        ]
+        for name, message, rejection, request in rows:
+            with self.subTest(name), self.case():
+                os.environ.pop("XLA_FLAGS", None)
+                config = set_backend("jax", device="cpu", intent="parity")
+                reference_B = _field_B()
+                state = _process_state()
+                with rejection, self.assertRaisesRegex(RuntimeError, message):
+                    request()
+
+                self.assertEqual(get_backend_mode(), "jax_cpu_parity")
+                self.assertIs(get_backend_config(), config)
+                self.assertEqual(_process_state(), state)
+                np.testing.assert_array_equal(_field_B(), reference_B)
+
     def test_gpu_selection_after_initialization_keeps_the_allocator_env(self):
         """Selecting the GPU in an initialized process warns about allocator settings
         it cannot apply and leaves the caller's XLA variables unchanged."""

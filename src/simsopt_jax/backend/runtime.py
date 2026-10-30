@@ -55,6 +55,8 @@ import shlex
 import sys
 import threading
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Callable, Literal
 
 import jax
@@ -768,6 +770,65 @@ def apply_jax_runtime_config() -> None:
     _select_initialized_jax_default_device(jax, config)
 
 
+# Process state a ``set_backend`` call changes, restored when the call is rejected.
+_SET_BACKEND_ENV_NAMES = (
+    *(env_name for env_name, _ in _SYNCED_RUNTIME_ENV_VALUES),
+    _JAX_PLATFORMS_ENV,
+    _XLA_FLAGS_ENV,
+    _XLA_PYTHON_CLIENT_PREALLOCATE_ENV,
+    _XLA_PYTHON_CLIENT_ALLOCATOR_ENV,
+    _XLA_PYTHON_CLIENT_MEM_FRACTION_ENV,
+    _XLA_CLIENT_MEM_FRACTION_ENV,
+    _TF_GPU_ALLOCATOR_ENV,
+)
+_APPLIED_JAX_CONFIG_NAMES = (
+    "jax_platforms",
+    "jax_platform_name",
+    "jax_enable_x64",
+    "jax_default_matmul_precision",
+    "jax_debug_nans",
+    "jax_disable_jit",
+    "jax_transfer_guard",
+    "jax_compilation_cache_dir",
+    "jax_persistent_cache_min_compile_time_secs",
+    "jax_persistent_cache_min_entry_size_bytes",
+    "jax_persistent_cache_enable_xla_caches",
+    "jax_default_device",
+)
+
+
+@contextmanager
+def _restore_backend_state_on_error() -> Iterator[None]:
+    """Hold the runtime lock and undo every change if the body raises.
+
+    Restores the installed configuration, the environment variables
+    ``set_backend`` synchronizes or exports, and the JAX settings
+    ``apply_jax_runtime_config`` updates, so a rejected call leaves the
+    process in the mode it had before.
+    """
+    global _cached_backend_config
+    global _requested_jax_platforms_value, _exported_jax_platforms
+    with _backend_runtime_lock:
+        config = _cached_backend_config
+        platforms_state = (_requested_jax_platforms_value, _exported_jax_platforms)
+        env = tuple((name, os.environ.get(name)) for name in _SET_BACKEND_ENV_NAMES)
+        jax_config = tuple(
+            (name, jax.config.values[name]) for name in _APPLIED_JAX_CONFIG_NAMES
+        )
+        try:
+            yield
+        except BaseException:
+            for name, value in env:
+                _set_runtime_env(name, value)
+            for name, value in jax_config:
+                if jax.config.values[name] != value:
+                    jax.config.update(name, value)
+            _cached_backend_config = config
+            _requested_jax_platforms_value, _exported_jax_platforms = platforms_state
+            _reset_backend_runtime_caches()
+            raise
+
+
 def set_backend(
     mode: BackendMode | Literal["jax"],
     *,
@@ -791,7 +852,8 @@ def set_backend(
     pre-backend-initialization JAX/XLA allocator env vars explicitly; env overrides still sit
     between mode defaults and these arguments. Once JAX initialized its backends they
     cannot change the process, so a differing setting warns instead. Also updates the
-    config cache so subsequent ``get_backend_config()`` calls are free.
+    config cache so subsequent ``get_backend_config()`` calls are free. A call that
+    raises leaves the previous configuration, environment and JAX settings in place.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
@@ -829,6 +891,11 @@ def set_backend(
     Returns:
         BackendConfig object: Installed immutable configuration after
             resolving overrides.
+
+    Raises:
+        RuntimeError: GPU parity without the determinism ``XLA_FLAGS``, or a
+            platform JAX never initialized in strict or GPU parity mode.
+        ValueError: An invalid mode, selector or override.
     """
     global _cached_backend_config
     if mode == "jax":
@@ -856,13 +923,13 @@ def set_backend(
         xla_gpu_allocator=xla_gpu_allocator,
         tf_gpu_allocator=tf_gpu_allocator,
     )
-    with _backend_runtime_lock:
+    with _restore_backend_state_on_error():
         _cached_backend_config = config
         _reset_backend_runtime_caches()
         for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
             os.environ[env_name] = _runtime_env_value(getattr(config, attribute_name))
         _export_startup_jax_platforms(config)
         _apply_cuda_autotuner_env(config)
-    if configure_runtime:
-        apply_jax_runtime_config()
+        if configure_runtime:
+            apply_jax_runtime_config()
     return config
