@@ -796,6 +796,29 @@ class TestQfmJax(JaxTestCase):
                         getattr(native, name)(native.surface.x, derivatives=1),
                     )
 
+    def test_flux_field_row_broadcasts_over_a_one_point_label_row(self):
+        """A multi-point flux field broadcasts over a one-point flux row as in native."""
+        native, port = _pair(label_class=ToroidalFlux)
+        for solver in (native, port):
+            label_surface = SurfaceRZFourier(
+                mpol=1,
+                ntor=1,
+                nfp=solver.surface.nfp,
+                quadpoints_phi=solver.surface.quadpoints_phi,
+                quadpoints_theta=[0.0],
+            )
+            label_surface.set_dofs(solver.surface.get_dofs())
+            solver.label = ToroidalFlux(
+                label_surface, BiotSavart(solver.label.biotsavart.coils), idx=0
+            )
+            solver.label.biotsavart.set_points(solver.surface.gamma()[0] + 0.01)
+        for name in ("qfm_label_constraint", "qfm_penalty_constraints"):
+            for derivatives in (0, 1):
+                _assert_pair(
+                    getattr(port, name)(port.surface.x, derivatives),
+                    getattr(native, name)(native.surface.x, derivatives),
+                )
+
     def test_overflowing_label_value_is_the_same_for_both_derivative_orders(self):
         """An infinite label gives the native infinite value with and without derivatives."""
         for method in ["qfm_label_constraint", "qfm_penalty_constraints"]:

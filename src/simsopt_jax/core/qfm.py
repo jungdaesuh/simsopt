@@ -139,12 +139,24 @@ def _field_at_moving_points(
     the points were the surface positions. The increment
     positions - stop_gradient(positions) is exactly zero, so the value is the
     buffer field, while reverse mode differentiates the field linearized at
-    the buffer points along the surface position derivative. A buffer that
-    broadcasts against the positions, such as a single flux point, is
-    broadcast first, as native broadcasts its field against the positions.
+    the buffer points along the surface position derivative. The buffer and
+    the positions broadcast against each other, as native broadcasts its
+    field against the positions: a single flux point over a flux row, or a
+    flux row over a single-point label row.
+
+    Args:
+        field (Callable[[jax.Array], jax.Array]): Maps shape (n, 3) Cartesian points
+            in meters to shape (n, 3) field vectors.
+        points (jax.Array | numpy.ndarray): Shape (n, 3) field buffer points in meters.
+        positions (jax.Array): Shape (m, 3) surface positions in meters, broadcastable
+            with ``points``.
+
+    Returns:
+        jax.Array: Shape (max(n, m), 3) field vectors in the field units.
     """
-    anchor = jnp.broadcast_to(jnp.asarray(points), positions.shape)
-    displacement = positions - jax.lax.stop_gradient(positions)
+    shape = jnp.broadcast_shapes(jnp.shape(points), positions.shape)
+    anchor = jnp.broadcast_to(jnp.asarray(points), shape)
+    displacement = jnp.broadcast_to(positions - jax.lax.stop_gradient(positions), shape)
     return field(anchor) + jax.jvp(field, (anchor,), (displacement,))[1]
 
 
