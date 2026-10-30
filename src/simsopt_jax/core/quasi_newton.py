@@ -91,16 +91,24 @@ problem as an argument compiles it once.
 Statuses, messages (``BFGS_MESSAGES[message]``, ``LBFGSB_MESSAGES[message]``),
 iteration counts, ``nfev``/``njev`` (``ScalarFunction`` counts a point again
 only when it differs from the last one), ``hess_inv`` and SciPy's checks of
-its inputs without bounds are SciPy's. Iterates agree with SciPy to
-round-off, which a long walk magnifies: XLA sums dot and matrix products in
-its own order, and BFGS forms SciPy's update ``A1 (H A2) + rho s s^T``,
-with ``A1 = I - rho s y^T`` and ``A2 = A1^T``, in SciPy's order but from outer
-products (in O(n^2) where SciPy's two matrix products cost O(n^3)). Compiled
-code may also fuse a multiply and an add into one rounding (XLA does on CPU and GPU),
-so a decision that hinges on the last bit can go the other way than in SciPy:
-a memory reset under underflow, or a trial point equal to an earlier one,
-which SciPy does not count again. Run op by op, the port makes SciPy's
-decisions there too.
+its inputs without bounds are SciPy's. These claims are checked against
+SciPy 1.17 only; other SciPy versions may differ in them.
+
+Iterates agree with SciPy to round-off, not bitwise: XLA sums dot and matrix
+products in its own order and may fuse a multiply and an add into one
+rounding (it does on CPU and GPU), and BFGS forms SciPy's update ``A1 (H A2)
++ rho s s^T``, with ``A1 = I - rho s y^T`` and ``A2 = A1^T``, in SciPy's order
+but from outer products, in O(n^2) where SciPy's two matrix products cost
+O(n^3). So a decision that hinges on the last bit can go the other way than
+in SciPy: a memory reset under underflow, or a trial point equal to an
+earlier one, which SciPy does not count again. Run op by op, the port makes
+SciPy's decisions there too. A long walk magnifies the round-off. BFGS walks
+have ended where SciPy's do: on the LS663 Boozer least-squares benchmark
+(about 1100 iterations) one Newton step converges from the device's end
+point as from SciPy's. L-BFGS-B walks can part: on LS663 neither the device
+nor SciPy converged in 1500 iterations, and whether Newton then converged
+depended on rounding alone (it failed after the device run and after SciPy
+with 1 or 16 BLAS threads, and converged after SciPy with 8).
 
 Known differences in counting: SciPy compares a point with its cached one by
 array equality, so a point with a NaN coordinate never matches it and is
