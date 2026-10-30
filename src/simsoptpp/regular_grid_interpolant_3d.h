@@ -89,7 +89,9 @@ class RegularGridInterpolant3D {
         const double xmax, ymax, zmax; // lower bounds of the x, y, and z coordinates
         const int value_size; // number of output dimensions of the interpolant, i.e. space that is mapped into
         const InterpolationRule rule; // the interpolation rule to use on each cell in the grid
-        const bool out_of_bounds_ok; // whether to do nothing or throw an error when the interpolant is queried at an out-of-bounds point
+        // whether an out-of-bounds query extrapolates from the nearest boundary cell (NaN for a
+        // non-finite coordinate) or throws an error
+        const bool out_of_bounds_ok;
 
         // location of the mesh nodes in [xmin, xmax], [ymin, ymax], and [zmin, zmax]
         // has size nx+1, ny+1, nz+1 respectively
