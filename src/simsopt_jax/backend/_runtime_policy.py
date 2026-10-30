@@ -440,7 +440,7 @@ def _config_from_mode(
             debug_nans,
             parse_explicit=bool,
             env_names=(_DEBUG_NANS_ENV,),
-            parse_env=lambda value, source: value.strip().lower() in _TRUTHY_ENV_VALUES,
+            parse_env=lambda value, source: _parse_bool_value(value, source=source),
             read_default=lambda: False,
         )
         resolved_disable_jit = _resolve_kwarg(

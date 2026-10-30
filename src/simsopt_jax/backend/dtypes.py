@@ -180,7 +180,7 @@ def _explicit_backend_hop(leaf, placement):
 
 def _explicit_device_put_leaves(leaves: list, placements: list) -> list:
     """``jax.device_put(leaves, placements)`` with cross-backend moves made explicit."""
-    return jax.device_put(
+    return jax.device_put(  # noqa: TID251 placement owner; callers snapshot NumPy leaves
         [
             _explicit_backend_hop(leaf, placement)
             for leaf, placement in zip(leaves, placements, strict=True)
@@ -191,7 +191,7 @@ def _explicit_device_put_leaves(leaves: list, placements: list) -> list:
 
 def _explicit_device_put(value, placement):
     """``jax.device_put(value, placement)`` with cross-backend moves made explicit."""
-    return jax.device_put(
+    return jax.device_put(  # noqa: TID251 placement owner; callers snapshot NumPy leaves
         jax.tree.map(lambda leaf: _explicit_backend_hop(leaf, placement), value),
         placement,
     )
