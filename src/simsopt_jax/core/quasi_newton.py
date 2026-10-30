@@ -550,13 +550,14 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     rhok_inv = jnp.dot(yk, sk)
     rhok = jnp.where(rhok_inv == 0.0, _RHOK_DIVIDE_BY_ZERO, 1.0 / rhok_inv)
     # SciPy's A1 (H A2) + rho s s^T, with A1 = I - rho s y^T and A2 = A1^T,
-    # in SciPy's order: H A2 = H - rho (H y) s^T first, then A1 applied to it.
+    # in SciPy's order: H A2 = H - rho (H y) s^T first, then A1 applied to it,
+    # and (rho s) s^T, whose s s^T alone underflows for |s| below 1e-154.
     # Each factor nearly annihilates the s direction, so their errors multiply
     # instead of adding as in the expanded rank-two form, whose terms of size
     # |H| cancel and can leave H indefinite when rho s s^T is below their
     # round-off. Outer products keep it O(n^2) instead of SciPy's O(n^3).
     HA2 = s.H - rhok * jnp.outer(s.H @ yk, sk)
-    H = HA2 - rhok * jnp.outer(sk, yk @ HA2) + rhok * jnp.outer(sk, sk)
+    H = HA2 - rhok * jnp.outer(sk, yk @ HA2) + jnp.outer(rhok * sk, sk)
     iterate = accept & ~stop & (gnorm > gtol) & (k < maxiter)
     s = replace(s, 
         x=jnp.where(accept, x_t, s.x),
