@@ -158,6 +158,23 @@ class TestSquaredFluxJax(JaxTestCase):
             self.assertFalse(np.isfinite(expected))
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
 
+    def test_integral_bdotn_evaluates_float32_inputs_in_double_like_cpp(self):
+        """float32 inputs are evaluated in float64, as the C++ kernel does: at |B| ~ 1e20
+        the squared field overflows float32 (max 3.4e38) but not double."""
+        rng = np.random.default_rng(8)
+        B = (1e20 * rng.standard_normal((6, 7, 3))).astype(np.float32)
+        normal = rng.standard_normal((6, 7, 3)).astype(np.float32)
+        target = (1e19 * rng.standard_normal((6, 7))).astype(np.float32)
+        for definition in _DEFINITIONS:
+            with self.subTest(definition=definition):
+                expected = sopp.integral_BdotN(
+                    B.astype(np.float64), target.astype(np.float64), normal.astype(np.float64), definition
+                )
+                actual = integral_BdotN(B, target, normal, definition)
+                self.assertEqual(actual.dtype, np.float64)
+                self.assertTrue(np.isfinite(expected))
+                np.testing.assert_allclose(float(actual), expected, rtol=1e-12)
+
     def test_squared_flux_matches_native_value_gradient_and_partials(self):
         """Squared flux matches native values, free gradients and fixed partials."""
         for case_id_0, (target_kind, shared_dofs) in zip(["symmetric_coils", "target_and_shared_dofs"], [("none", False), ("array", True)], strict=True):

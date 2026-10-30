@@ -297,6 +297,30 @@ class TestCurveObjectivesJax(JaxTestCase):
                     gradient = jax.grad(lambda value: jnp.sum(kernel(value, *inputs[1:])))
                     np.testing.assert_allclose(jax.jit(gradient)(inputs[0]), gradient(inputs[0]), rtol=1e-14, atol=1e-14)
 
+    def test_pure_kernels_evaluate_float32_inputs_in_double_like_native(self):
+        """float32 geometry is evaluated in float64, as native does. The scales make a
+        float32 evaluation overflow (max 3.4e38): |gamma'|^3 at |gamma'| ~ 1e13, the
+        sum of speeds ~ 1e38, and kappa^2 at kappa ~ 1e20."""
+        rng = np.random.default_rng(9)
+        speed = 1e38 * (1.0 + rng.random(16))
+        tangent = 1e13 * rng.standard_normal((16, 3))
+        normal = 1e13 * rng.standard_normal((16, 3))
+        kappa = 1e20 * (1.0 + rng.random(16))
+        cases = (
+            (curve_length_from_incremental_arclength_pure, (speed,)),
+            (kappa_pure, (tangent, normal)),
+            (curvature_p_norm_from_kappa_pure, (kappa, tangent, 2.0, 1e19)),
+            (mean_squared_curvature_pure, (kappa, tangent)),
+        )
+        for kernel, inputs in cases:
+            with self.subTest(kernel=kernel.__name__):
+                single = tuple(np.asarray(value, dtype=np.float32) for value in inputs)
+                expected = np.asarray(kernel(*(value.astype(np.float64) for value in single)))
+                actual = kernel(*single)
+                self.assertEqual(actual.dtype, np.float64)
+                self.assertTrue(np.all(np.isfinite(expected)))
+                np.testing.assert_array_equal(np.asarray(actual), expected)
+
     def test_distance_kernels_snapshot_numpy_before_pending_evaluation(self):
         """Mutating each caller-owned geometry array cannot change a queued distance penalty."""
         for misaligned in [False, True]:
