@@ -100,16 +100,19 @@ def _holds_numpy(value) -> bool:
 class CopyingJit:
     """A function compiled with ``jax.jit`` whose NumPy arguments are copied per call.
 
-    Calls copy the NumPy array leaves of dynamic arguments and pass every
-    other value through by identity: JAX arrays, tracers, Python scalars and
-    static arguments, so the compilation cache keys are those of
-    ``jax.jit``. Calls without NumPy leaves skip the copy. Attributes of the
+    Calls copy the NumPy array leaves of dynamic arguments, rebuilding the
+    containers that hold them, and pass static arguments and every other leaf
+    (JAX arrays, tracers, Python scalars) through by identity, so the
+    compilation cache keys are those of ``jax.jit``. Calls without NumPy
+    leaves skip the copy. Attributes of the
     compiled function (``lower``, ``trace``, ``eval_shape``,
     ``clear_cache``, ...) are forwarded unchanged, and the wrapper binds as a
     method like the compiled function does.
 
     Not protected: NumPy arrays that ``fun`` captures from an enclosing scope
-    and JAX arrays that already alias NumPy memory.
+    and JAX arrays that already alias NumPy memory. NumPy subclass leaves are
+    copied as plain arrays, so a masked array loses its mask where
+    ``jax.jit`` rejects it.
     """
 
     def __init__(self, fun: Callable, **options) -> None:
@@ -167,11 +170,31 @@ class CopyingJit:
         return self._compiled(*args, **kwargs)
 
     def __get__(self, instance, owner=None):
-        """Bind to ``instance`` as a method, as ``jax.jit`` functions do."""
+        """Bind to ``instance`` as a method, as ``jax.jit`` functions do.
+
+        Args:
+            instance (object or None): Instance the attribute is read from;
+                None for a read from the class.
+            owner (type or None): Class the attribute is read from.
+
+        Returns:
+            CopyingJit or types.MethodType: This wrapper for a class read, or
+                this wrapper bound to ``instance``.
+        """
         return self if instance is None else types.MethodType(self, instance)
 
     def __getattr__(self, name: str):
-        """Forward attributes of the compiled function, such as ``lower``."""
+        """Forward attributes of the compiled function, such as ``lower``.
+
+        Args:
+            name (str): Attribute missing from this wrapper.
+
+        Returns:
+            object: The compiled function's attribute ``name``.
+
+        Raises:
+            AttributeError: The compiled function has no attribute ``name``.
+        """
         # ``_compiled`` reaches here only on an instance made without
         # ``__init__`` (``copy.copy``); raising avoids infinite recursion.
         if name == "_compiled":
