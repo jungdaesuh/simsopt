@@ -428,10 +428,14 @@ class JaxBiotSavart(Optimizable):
         coils (Sequence[Coil]): Native simsopt coil graph; geometry is in meters and
             physical currents in amperes.
 
-    Supported curves are XYZ Fourier (including Fourier symmetries), RZ
-    Fourier, planar Fourier and helical curves, plus rotated, perturbed and
-    Frenet filament wrappers of them; other curves may supply a compatible
-    ``to_spec()`` method.
+    Supported curves are those
+    :func:`~simsopt_jax_adapters.geo.curve_specs.curve_spec_from_adapter_curve`
+    converts: XYZ Fourier (including Fourier symmetries and
+    ``JaxCurveXYZFourier``), RZ Fourier, planar Fourier (including
+    ``JaxCurvePlanarFourier``) and helical curves; perturbed curves and
+    filaments with a centroid or Frenet frame wrapping any of them; a
+    ``RotatedCurve`` as the outermost wrapper; and other curves that supply a
+    compatible ``to_spec()`` method.
 
     This is not a ``simsoptpp.MagneticField``: field-line tracing,
     :class:`~simsopt.field.InterpolatedField` and native field arithmetic need
@@ -773,6 +777,13 @@ class JaxBiotSavart(Optimizable):
         return field
 
     def __init__(self, coils):
+        """Build the field over a native coil graph, evaluated at the origin.
+
+        Args:
+            coils (Sequence[Coil]): Native simsopt coils; geometry in meters and
+                physical currents in amperes. The field depends on them as an
+                Optimizable and refreshes when they notify a change.
+        """
         self._coils = list(coils)
         self._points_version = 0
         # Native fields start with one evaluation point at the origin.
