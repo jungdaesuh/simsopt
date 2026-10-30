@@ -1061,6 +1061,19 @@ class SurfaceRZFourierTests(unittest.TestCase):
         np.testing.assert_allclose(
             s10.x, s9.x, err_msg='Copying surface is broken for stellarator symmetric surfaces!')
         
+    def test_copy_nfp_phi_range(self):
+        """copy(nfp=...) gives field- and half-period phi grids the new period length and keeps other grids."""
+        for grid_range in (Surface.RANGE_FULL_TORUS, Surface.RANGE_FIELD_PERIOD, Surface.RANGE_HALF_PERIOD):
+            s = SurfaceRZFourier.from_nphi_ntheta(nphi=8, ntheta=8, nfp=3, range=grid_range)
+            for options in ({}, {"range": grid_range}):
+                with self.subTest(grid=grid_range, options=options):
+                    np.testing.assert_allclose(s.copy(nfp=5, **options).quadpoints_phi,
+                                               Surface.get_phi_quadpoints(nphi=8, range=grid_range, nfp=5))
+        with self.subTest(grid="custom"):
+            custom = [0.0, 0.2, 0.4, 0.7]
+            s = SurfaceRZFourier(nfp=3, quadpoints_phi=custom)
+            np.testing.assert_allclose(s.copy(nfp=5).quadpoints_phi, custom)
+
     def test_fixed_range(self):
         """
         Test that DOFs are fixed correctly by invoking fixed_range().
