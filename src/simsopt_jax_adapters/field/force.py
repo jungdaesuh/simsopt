@@ -26,6 +26,7 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
 from simsopt.field.coil import RegularizedCoil
 from simsopt.field.force import _check_downsample, _check_quadpoints_consistency
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.core import coil_forces
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax.runtime.host_boundary import host_array, host_tree
@@ -164,28 +165,28 @@ class _CoilSetObjective(Optimizable):
 
 
 # One compiled program per objective, shapes, downsample and source-group count.
-_lp_force = jax.jit(coil_forces.lp_force, static_argnames=("downsample",))
-_lp_force_grad = jax.jit(
+_lp_force = jit(coil_forces.lp_force, static_argnames=("downsample",))
+_lp_force_grad = jit(
     jax.grad(coil_forces.lp_force, argnums=(0, 1, 4)), static_argnames=("downsample",)
 )
-_lp_torque = jax.jit(coil_forces.lp_torque, static_argnames=("downsample",))
-_lp_torque_grad = jax.jit(
+_lp_torque = jit(coil_forces.lp_torque, static_argnames=("downsample",))
+_lp_torque_grad = jit(
     jax.grad(coil_forces.lp_torque, argnums=(0, 1, 4)), static_argnames=("downsample",)
 )
-_squared_mean_force = jax.jit(coil_forces.squared_mean_force, static_argnames=("downsample",))
-_squared_mean_force_grad = jax.jit(
+_squared_mean_force = jit(coil_forces.squared_mean_force, static_argnames=("downsample",))
+_squared_mean_force_grad = jit(
     jax.grad(coil_forces.squared_mean_force, argnums=(0, 1)), static_argnames=("downsample",)
 )
-_squared_mean_torque = jax.jit(coil_forces.squared_mean_torque, static_argnames=("downsample",))
-_squared_mean_torque_grad = jax.jit(
+_squared_mean_torque = jit(coil_forces.squared_mean_torque, static_argnames=("downsample",))
+_squared_mean_torque_grad = jit(
     jax.grad(coil_forces.squared_mean_torque, argnums=(0, 1)), static_argnames=("downsample",)
 )
-_b2energy = jax.jit(coil_forces.b2energy, static_argnames=("downsample",))
-_b2energy_grad = jax.jit(
+_b2energy = jit(coil_forces.b2energy, static_argnames=("downsample",))
+_b2energy_grad = jit(
     jax.grad(coil_forces.b2energy, argnums=(0, 1, 2)), static_argnames=("downsample",)
 )
-_net_flux = jax.jit(coil_forces.net_flux, static_argnames=("downsample",))
-_net_flux_grad = jax.jit(
+_net_flux = jit(coil_forces.net_flux, static_argnames=("downsample",))
+_net_flux_grad = jit(
     jax.grad(coil_forces.net_flux, argnums=(0, 1, 2)), static_argnames=("downsample",)
 )
 

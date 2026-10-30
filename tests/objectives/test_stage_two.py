@@ -9,6 +9,8 @@ with optional_jax_imports():
     import jax
     import jax.numpy as jnp
     from simsopt._core.optimizable import Optimizable
+    from simsopt_jax.backend.dtypes import as_jax_float64
+    from simsopt_jax.backend.jit import jit
     from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
     from simsopt.geo import (
         CurveCurveDistance,
@@ -35,6 +37,7 @@ with optional_jax_imports():
 
 
 from dataclasses import replace
+from typing import cast
 
 import numpy as np
 from scipy.optimize import minimize
@@ -84,10 +87,10 @@ def _coils(surface, *, perturb: bool = True, shared_dofs: bool = False) -> tuple
     return base, coils
 
 
-def _native_composite(
+def _native_penalty(
     surface, base, coils, config: StageTwoObjectiveConfig
 ) -> Optimizable:
-    """The native objective that ``config`` describes, as in the Stage-II examples.
+    """The native weighted geometric penalty that ``config`` describes, as in the Stage-II examples.
 
     A ``None`` weight leaves its term out; a zero weight keeps ``0 * term``.
     """
@@ -116,9 +119,14 @@ def _native_composite(
             for curve in base
         )),
     ]
-    return SquaredFlux(surface, BiotSavart(coils)) + sum(
-        weight * term for weight, term in weighted_terms if weight is not None
-    )
+    return cast(Optimizable, sum(weight * term for weight, term in weighted_terms if weight is not None))
+
+
+def _native_composite(
+    surface, base, coils, config: StageTwoObjectiveConfig
+) -> Optimizable:
+    """The native objective that ``config`` describes: squared flux plus :func:`_native_penalty`."""
+    return SquaredFlux(surface, BiotSavart(coils)) + _native_penalty(surface, base, coils, config)
 
 
 def _problem(config: StageTwoObjectiveConfig, *, perturb: bool = True, shared_dofs: bool = False):
@@ -136,9 +144,9 @@ def _native_gradient(native: Optimizable, field: JaxBiotSavart) -> np.ndarray:
 
 
 if JAX_IMPORT_ERROR is None:
-    _value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
-    _objective = jax.jit(fused_stage_two_objective)
-    _values = jax.jit(fused_stage_two_values)
+    _value_and_grad = jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+    _objective = jit(fused_stage_two_objective)
+    _values = jit(fused_stage_two_values)
 
 
 class TestStageTwo(JaxTestCase):
@@ -188,9 +196,10 @@ class TestStageTwo(JaxTestCase):
         B = native_flux.field.B().reshape(surface.normal().shape)
         native_max_normal_field = np.max(np.abs(np.sum(B * surface.unitnormal(), axis=2)))
         base = [coil.curve for coil in field.coils[:_NCOILS]]
+        native_penalty = _native_penalty(surface, base, field.coils, _ACTIVE)
         np.testing.assert_allclose(objective, native.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(squared_flux, native_flux.J(), rtol=1e-12, atol=1e-14)
-        np.testing.assert_allclose(penalty, objective - squared_flux, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(penalty, native_penalty.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(max_normal_field, native_max_normal_field, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(length, sum(CurveLength(c).J() for c in base), rtol=1e-12)
 
@@ -223,7 +232,7 @@ class TestStageTwo(JaxTestCase):
             traces.append(parameters)
             return fused_stage_two_objective(current_problem, parameters)
 
-        value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=1))
+        value_and_grad = jit(jax.value_and_grad(objective, argnums=1))
         x = jnp.asarray(field.x)
         value_and_grad(problem, x)
         lighter = replace(_ACTIVE, length_weight=length_weight)
@@ -323,7 +332,7 @@ class TestStageTwo(JaxTestCase):
                     surface_gamma, surface_normal, config,
                 )
 
-            value, gradient = jax.jit(jax.value_and_grad(penalty, argnums=(0, 1)))(gamma, gammadash)
+            value, gradient = jit(jax.value_and_grad(penalty, argnums=(0, 1)))(gamma, gammadash)
             self.assertEqual(float(value), 0.0, side)
             gradient = np.concatenate([np.asarray(part).ravel() for part in gradient])
             outcomes[side] = (bool(np.all(np.isfinite(native.dJ()))), gradient)
@@ -341,10 +350,10 @@ class TestStageTwo(JaxTestCase):
     def test_fused_program_compiles_and_runs_under_the_strict_transfer_guard(self):
         """The fused value and gradient compile and run with explicit transfers only."""
         field, _, _, problem = _problem(_ACTIVE)
-        value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+        value_and_grad = jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
         x = field.x
         with jax.transfer_guard("disallow"):
-            value, gradient = jax.device_get(value_and_grad(problem, jax.device_put(x)))
+            value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(x)))
         # A separately compiled program may reassociate GPU reductions.
         expected_value, expected_gradient = _value_and_grad(problem, jnp.asarray(x))
         np.testing.assert_allclose(float(value), float(expected_value), rtol=1e-12, atol=1e-14)
@@ -406,7 +415,7 @@ class TestStageTwo(JaxTestCase):
             return native.J(), native.dJ()
 
         def fused_fun(x):
-            value, gradient = jax.device_get(_value_and_grad(problem, jax.device_put(x)))
+            value, gradient = jax.device_get(_value_and_grad(problem, x))
             return float(value), gradient
 
         self.assertEqual(native.dof_names, field.dof_names)

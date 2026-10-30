@@ -8,6 +8,7 @@ import jax
 import numpy as np
 from simsopt._core.derivative import derivative_dec
 from simsopt._core.optimizable import Optimizable
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.core.field import (
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_inputs,
@@ -38,8 +39,8 @@ def _squared_flux_from_coil_arrays(flux_spec: FixedSurfaceFluxSpec, coil_arrays)
     return fixed_surface_flux_integral_from_B(B, flux_spec)
 
 
-_squared_flux_value = jax.jit(_squared_flux_from_coil_arrays)
-_squared_flux_value_and_coil_cotangents = jax.jit(
+_squared_flux_value = jit(_squared_flux_from_coil_arrays)
+_squared_flux_value_and_coil_cotangents = jit(
     jax.value_and_grad(_squared_flux_from_coil_arrays, argnums=1)
 )
 

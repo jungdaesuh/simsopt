@@ -23,6 +23,7 @@ with optional_jax_imports():
         create_equally_spaced_curves,
     )
     from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import curve_kernels
     from simsopt_jax.core.curve_kernels import (
         curve_curve_distance_penalty_pure,
@@ -33,6 +34,7 @@ with optional_jax_imports():
         mean_squared_curvature_pure,
         curve_surface_distance_penalty_pure,
     )
+    from simsopt_jax_adapters.geo import curve_objectives
     from simsopt_jax_adapters.geo import (
         JaxCurveCurveDistance,
         JaxCurveLength,
@@ -44,6 +46,7 @@ from unittest import mock
 
 
 from collections.abc import Callable
+from functools import partial
 import os
 import subprocess
 import sys
@@ -201,6 +204,42 @@ def _circle(center, radius, numquadpoints=20):
     return curve
 
 
+def _separated_circles(num_far, twins):
+    """Circles of radius 0.2 in the xy-plane, centred 1 m apart on the x-axis, then twins.
+
+    The circles are 0.6 m apart. Twin ``k`` (an (x, quadrature count) pair) is a
+    circle at ``x`` raised by 0.05 m, so only twin-circle pairs lie within 0.1 m.
+    ``num_far`` more circles follow on the x-axis beyond 100 m.
+    """
+    circles = [_circle((float(x), 0.0, 0.0), 0.2) for x, _ in twins]
+    circles += [_circle((float(x), 0.0, 0.05), 0.2, numquadpoints=count) for x, count in twins]
+    circles += [_circle((100.0 + k, 0.0, 0.0), 0.2) for k in range(num_far)]
+    return circles
+
+
+def _point_pair_distance_shapes(adapter):
+    """Sorted shapes of the batched point-pair distance arrays the adapter's program computes."""
+    snapshot = adapter._snapshot()
+    if isinstance(adapter, JaxCurveCurveDistance):
+        total = partial(
+            curve_objectives._curve_pair_penalty_total,
+            batch_classes=snapshot.batch_classes, downsample=adapter.downsample,
+        )
+    else:
+        total = partial(curve_objectives._curve_surface_penalty_total, batch_classes=snapshot.batch_classes)
+
+    def shapes(jaxpr):
+        for equation in jaxpr.eqns:
+            if equation.primitive.name == "sqrt" and equation.outvars[0].aval.ndim == 3:
+                yield equation.outvars[0].aval.shape
+            for param in equation.params.values():
+                inner = getattr(param, "jaxpr", param)
+                if hasattr(inner, "eqns"):
+                    yield from shapes(inner)
+
+    return sorted(shapes(jax.make_jaxpr(total)(*snapshot.operands).jaxpr))
+
+
 # Minimum distances at which the squared distance of the two points rounds to the
 # squared threshold: with and without fused multiply-adds the candidate test
 # differs in the last bit (both directions).
@@ -262,7 +301,7 @@ class TestCurveObjectivesJax(JaxTestCase):
         The length kernel has one operand, so no queued input can hold its evaluation; the
         test wraps its compiled formula so that it also waits for the execution gate."""
         compiled = curve_kernels._curve_length_from_incremental_arclength_pure
-        held = jax.jit(lambda speed, ready: jnp.where(ready[0] > 0, compiled(speed), jnp.nan))
+        held = jax.jit(lambda speed, ready: jnp.where(ready[0] > 0, compiled(speed), jnp.nan))  # noqa: TID251 no copy, so only the kernel boundary owns the buffer
         for misaligned in (False, True):
             with self.subTest(misaligned=misaligned), self.case():
                 speed = _host_array((65536,), misaligned=misaligned)
@@ -292,10 +331,34 @@ class TestCurveObjectivesJax(JaxTestCase):
         )
         for kernel, inputs in calls:
             with self.subTest(kernel=kernel.__name__):
-                np.testing.assert_array_equal(jax.jit(kernel)(*inputs), kernel(*inputs))
+                np.testing.assert_array_equal(jit(kernel)(*inputs), kernel(*inputs))
                 if kernel is not distance_candidate_pure:
                     gradient = jax.grad(lambda value: jnp.sum(kernel(value, *inputs[1:])))
-                    np.testing.assert_allclose(jax.jit(gradient)(inputs[0]), gradient(inputs[0]), rtol=1e-14, atol=1e-14)
+                    np.testing.assert_allclose(jit(gradient)(inputs[0]), gradient(inputs[0]), rtol=1e-14, atol=1e-14)
+
+    def test_pure_kernels_evaluate_float32_inputs_in_double_like_native(self):
+        """float32 geometry is evaluated in float64, as native does. The scales make a
+        float32 evaluation overflow (max 3.4e38): |gamma'|^3 at |gamma'| ~ 1e13, the
+        sum of speeds ~ 1e38, and kappa^2 at kappa ~ 1e20."""
+        rng = np.random.default_rng(9)
+        speed = 1e38 * (1.0 + rng.random(16))
+        tangent = 1e13 * rng.standard_normal((16, 3))
+        normal = 1e13 * rng.standard_normal((16, 3))
+        kappa = 1e20 * (1.0 + rng.random(16))
+        cases = (
+            (curve_length_from_incremental_arclength_pure, (speed,)),
+            (kappa_pure, (tangent, normal)),
+            (curvature_p_norm_from_kappa_pure, (kappa, tangent, 2.0, 1e19)),
+            (mean_squared_curvature_pure, (kappa, tangent)),
+        )
+        for kernel, inputs in cases:
+            with self.subTest(kernel=kernel.__name__):
+                single = tuple(np.asarray(value, dtype=np.float32) for value in inputs)
+                expected = np.asarray(kernel(*(value.astype(np.float64) for value in single)))
+                actual = kernel(*single)
+                self.assertEqual(actual.dtype, np.float64)
+                self.assertTrue(np.all(np.isfinite(expected)))
+                np.testing.assert_array_equal(np.asarray(actual), expected)
 
     def test_distance_kernels_snapshot_numpy_before_pending_evaluation(self):
         """Mutating each caller-owned geometry array cannot change a queued distance penalty."""
@@ -564,6 +627,75 @@ class TestCurveObjectivesJax(JaxTestCase):
         for name, native, adapter in cases:
             _assert_matches_native_including_nans(name, native, adapter)
             self.assertTrue(adapter.J() == 0.0 and not np.any(adapter.dJ()), name)
+
+    def test_distance_programs_scale_with_candidates_not_pairs(self):
+        """Only native candidates are evaluated, in power-of-two padded batches per pair of
+        quadrature classes, however many far curves are added; padding adds nothing.
+
+        Three 20-point twins form one batch padded to 4 pairs, the 24-point twin one of 1;
+        the curve near the surface is the only surface candidate.
+        """
+        surface = _surface()
+        twins = [(0, 20), (1, 20), (2, 20), (3, 24)]
+        for num_far in (0, 12):
+            with self.subTest(num_far=num_far), self.case():
+                curves = _separated_circles(num_far, twins)
+                pair_native, pair_adapter = CurveCurveDistance(curves, 0.1), JaxCurveCurveDistance(curves, 0.1)
+                _assert_matches_native_including_nans("CurveCurveDistance", pair_native, pair_adapter, active=True)
+                self.assertEqual(len(pair_adapter.candidates), len(twins))
+                self.assertEqual(_point_pair_distance_shapes(pair_adapter), [(1, 24, 20), (4, 20, 20)])
+                near = [_circle((0.0, 0.0, 0.0), 1.0), *curves[2 * len(twins):]]
+                surface_native = CurveSurfaceDistance(near, surface, 0.4)
+                surface_adapter = JaxCurveSurfaceDistance(near, surface, 0.4)
+                _assert_matches_native_including_nans(
+                    "CurveSurfaceDistance", surface_native, surface_adapter, active=True
+                )
+                self.assertEqual(_point_pair_distance_shapes(surface_adapter), [(1, 20, 64)])
+
+    def test_distance_terms_without_candidates_do_no_jax_work(self):
+        """With no native candidate the value is 0 and the gradient native's zeros, without
+        placing geometry or running a JAX program."""
+        surface = _surface()
+        curves = _separated_circles(3, [])
+        cases = (
+            ("CurveCurveDistance", CurveCurveDistance(curves, 0.1), JaxCurveCurveDistance(curves, 0.1)),
+            ("CurveSurfaceDistance", CurveSurfaceDistance(curves, surface, 0.1),
+             JaxCurveSurfaceDistance(curves, surface, 0.1)),
+        )
+        forbidden = mock.Mock(side_effect=AssertionError("JAX work without a candidate"))
+        for name in ("_class_stacked_geometry", "_curve_pair_penalty", "_curve_pair_penalty_grad",
+                     "_curve_surface_penalty", "_curve_surface_penalty_grad"):
+            self.patches.enter_context(mock.patch.object(curve_objectives, name, forbidden))
+        for name, native, adapter in cases:
+            _assert_matches_native_including_nans(name, native, adapter)
+            self.assertEqual(adapter.J(), 0.0)
+            self.assertFalse(np.any(adapter.dJ()), name)
+
+    def test_distance_candidate_queries_match_native(self):
+        """``candidates``, ``compute_candidates()`` and ``shortest_distance_among_candidates()``
+        match native, without candidates too, and follow DOF changes. ``simsoptpp``
+        returns the candidates in no fixed order."""
+        base, curves = _curves()
+        surface = _surface()
+        for threshold in (0.05, _CC_THRESHOLD, 1.0):
+            with self.subTest(threshold=threshold), self.case():
+                pairs = (
+                    (CurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2),
+                     JaxCurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2)),
+                    (CurveSurfaceDistance(curves, surface, threshold),
+                     JaxCurveSurfaceDistance(curves, surface, threshold)),
+                )
+                for native, adapter in pairs:
+                    self.assertIsNone(adapter.compute_candidates())
+                    native.compute_candidates()
+                    self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
+                    self.assertEqual(
+                        adapter.shortest_distance_among_candidates(), native.shortest_distance_among_candidates()
+                    )
+        native, adapter = pairs[0]
+        base[0].x = np.asarray(base[0].x) + 0.2
+        native.compute_candidates()
+        self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
 
     def test_distance_terms_evaluate_every_point_of_a_native_candidate(self):
         """Within a candidate pair every point is evaluated, as native: a zero tangent

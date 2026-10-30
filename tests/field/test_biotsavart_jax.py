@@ -21,7 +21,12 @@ with optional_jax_imports():
     )
     from simsopt_jax.core.specs import CoilGroupSpec, GroupedCoilSetSpec
     from simsopt_jax.core import biotsavart as core_biotsavart
+    from simsopt_jax.backend import get_field_kernel_tuning
+    from simsopt_jax.backend.runtime import invalidate_backend_cache
 
+
+import os
+from unittest import mock
 
 import numpy as np
 from typing import cast
@@ -133,6 +138,43 @@ def _assert_cylindrical_accessors_match_cpu(jax_field, cpu_field):
     )
 
 
+class TestBiotSavartJaxPhysics(JaxTestCase):
+    """Field properties that hold independently of the native implementation."""
+
+    def test_circular_loop_on_axis_field_is_analytic(self):
+        """On the axis of a circular loop of radius R carrying I,
+        B = (0, 0, mu0 I R^2 / (2 (R^2 + z^2)^(3/2))).
+
+        The integrand is constant along the loop for points on its axis, so the
+        quadrature is exact and only round-off remains.
+        """
+        radius, current = 1.3, 2.0e5
+        curve = CurveXYZFourier(64, 1)
+        curve.x = np.array(
+            [radius if name in ("xc(1)", "ys(1)") else 0.0 for name in curve.local_dof_names]
+        )
+        z = np.array([-2.0, -0.4, 0.0, 0.25, 3.0])
+        points = np.stack((np.zeros_like(z), np.zeros_like(z), z), axis=1)
+        field = JaxBiotSavart([Coil(curve, Current(current))]).set_points(points)
+        mu0 = 4.0e-7 * np.pi
+        expected = np.zeros_like(points)
+        expected[:, 2] = mu0 * current * radius**2 / (2.0 * (radius**2 + z**2) ** 1.5)
+        np.testing.assert_allclose(
+            np.asarray(field.B()), expected, rtol=1e-14, atol=1e-14 * expected[:, 2].max()
+        )
+
+    def test_field_is_divergence_free(self):
+        """The trace of dB/dX vanishes to round-off of its largest entry at each
+        point, around the NCSX magnetic axis."""
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        field = JaxBiotSavart(list(bs._coils)).set_points(points_np)
+        dB = np.asarray(field.dB_by_dX())
+        divergence = np.trace(dB, axis1=1, axis2=2)
+        self.assertLess(
+            np.max(np.abs(divergence) / np.max(np.abs(dB), axis=(1, 2))), 1e-13
+        )
+
+
 class TestBiotSavartJaxCppParity(JaxTestCase):
     """Compare against the installed C++ simsoptpp kernel."""
 
@@ -234,6 +276,45 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
 
         _assert_cylindrical_points_match_cpu(bs_jax, bs)
 
+    def test_nonfinite_point_leaves_other_cylindrical_angles_native(self):
+        """A nonfinite point does not change the cylindrical angle of finite points,
+        for Cartesian input (wrap to [0, 2*pi)) and cylindrical input (fmod)."""
+        bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        bs_jax = JaxBiotSavart(list(bs._coils))
+        for setter, points in (
+            ("set_points_cart", [[1.0, -1.0, 0.0], [np.inf, 0.0, 0.0]]),
+            ("set_points_cyl", [[1.0, 7.0, 0.0], [1.0, np.nan, 0.0]]),
+        ):
+            with self.subTest(setter=setter):
+                points = np.ascontiguousarray(points, dtype=np.float64)
+                getattr(bs, setter)(points)
+                getattr(bs_jax, setter)(points)
+                np.testing.assert_array_equal(
+                    bs_jax.get_points_cyl()[0], bs.get_points_cyl()[0]
+                )
+
+    def test_default_evaluation_point_is_origin_like_native(self):
+        """Without set_points the field is evaluated at one point at the origin."""
+        bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        native = BiotSavart(list(bs._coils))
+        bs_jax = JaxBiotSavart(list(bs._coils))
+        np.testing.assert_array_equal(bs_jax.get_points_cart(), np.zeros((1, 3)))
+        np.testing.assert_allclose(
+            np.asarray(bs_jax.B()),
+            native.B(),
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+
+    def test_empty_coil_set_GradAbsB_is_nan_like_native(self):
+        """With no coils |B| is identically zero and its gradient is native's 0/0."""
+        _, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        native = BiotSavart([]).set_points(points_np)
+        bs_jax = JaxBiotSavart([]).set_points(points_np)
+        np.testing.assert_array_equal(np.asarray(bs_jax.B()), native.B())
+        self.assertTrue(np.all(np.isnan(native.GradAbsB())))
+        np.testing.assert_array_equal(np.asarray(bs_jax.GradAbsB()), native.GradAbsB())
+
     def test_B_vjp_parity_ncsx(self):
         """Native Biot-Savart parity on identical coils, points and cotangents."""
 
@@ -257,6 +338,55 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
                     "JaxBiotSavart.B_vjp() does not match BiotSavart.B_vjp() "
                     "on the NCSX parity fixture"
                 ),
+            )
+
+    def test_coil_chunked_kernels_and_pullback_match_native_ncsx(self):
+        """Coil chunking leaves B, dB/dX and the B pullback at native values.
+
+        The 18 NCSX coils form two chunks of 10 and 8 (the exact two-chunk
+        path), or two chunks of 7 and a 4-coil tail (the padded loop).
+        """
+        for chunk_size in (10, 7):
+            with self.subTest(chunk_size=chunk_size), self.case() as patches:
+                patches.enter_context(
+                    mock.patch.dict(
+                        os.environ, {"SIMSOPT_JAX_COIL_CHUNK_SIZE": str(chunk_size)}
+                    )
+                )
+                invalidate_backend_cache()
+                self._case_coil_chunked_kernels_and_pullback_match_native_ncsx(
+                    chunk_size
+                )
+
+    def _case_coil_chunked_kernels_and_pullback_match_native_ncsx(self, chunk_size):
+        """Run one row with case-local objects released before runtime cleanup."""
+        bs, points_np, gammas_np, gds_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
+        self.assertEqual(get_field_kernel_tuning().coil_chunk_size, chunk_size)
+        self.assertEqual(len(currents_np), 18)
+        np.testing.assert_allclose(
+            np.asarray(biot_savart_B(points_np, gammas_np, gds_np, currents_np)),
+            bs.B(),
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+        np.testing.assert_allclose(
+            np.asarray(biot_savart_dB_by_dX(points_np, gammas_np, gds_np, currents_np)),
+            bs.dB_by_dX(),
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+        bs_jax = JaxBiotSavart(list(bs._coils)).set_points(points_np)
+        v = np.asarray(bs.B(), dtype=np.float64).copy()
+        expected = cast(Derivative, bs.B_vjp(v))
+        actual = bs_jax.B_vjp(v)
+        for coil in bs._coils:
+            np.testing.assert_allclose(
+                np.asarray(actual(coil)),
+                np.asarray(expected(coil)),
+                rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
             )
 
     def test_adapter_derivative_parity_ncsx(self):

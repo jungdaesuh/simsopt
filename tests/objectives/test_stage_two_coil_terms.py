@@ -54,6 +54,7 @@ with optional_jax_imports():
         JaxLpCurveCurvature,
         JaxMeanSquaredCurvature,
     )
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax_adapters.objectives import JaxSquaredFlux
     from field.test_force_jax import _assert_close
     from objectives.test_squared_flux_jax import _surface
@@ -162,7 +163,7 @@ def _native_force_composite(surface, coils, config) -> Optimizable:
 
 
 if JAX_IMPORT_ERROR is None:
-    _penalties_value_and_grad = jax.jit(
+    _penalties_value_and_grad = jit(
         jax.value_and_grad(lambda problem, x: fused_stage_two_values(problem, x)[2], argnums=1)
     )
     # Weights that give every term a visible share of the objective at the test state.
@@ -286,7 +287,7 @@ def _run_both(native: Optimizable, field: JaxBiotSavart, problem, scale: float, 
         return scale * native.J(), scale * gradient
 
     def fused_fun(x):
-        value, gradient = jax.device_get(_value_and_grad(problem, jax.device_put(x)))
+        value, gradient = jax.device_get(_value_and_grad(problem, jnp.array(x)))
         return scale * float(value), scale * gradient
 
     native_result = minimize(native_fun, x0, jac=True, method="L-BFGS-B", options=options, tol=1e-15)
@@ -384,6 +385,25 @@ class TestStageTwoCoilTerms(JaxTestCase):
         np.testing.assert_allclose(drop_in.J(), native.J(), rtol=1e-12, atol=0.0)
         _assert_close(cast(Callable[..., Derivative], drop_in.dJ)(partials=True)(field), native_gradient)
 
+    def test_symmetry_image_pack_in_another_filament_order_matches_native(self):
+        """A symmetry image that lists its pack's filaments in reverse order keeps
+        the shared centerline, so value and gradient still equal native."""
+        surface = _surface()
+        base, centerlines, coils = _finite_build(surface, "centroid", 1)
+        image = len(base) * _FILAMENTS
+        coils = coils[:image] + coils[image:image + _FILAMENTS][::-1] + coils[image + _FILAMENTS:]
+        config = _finite_build_config(base)
+        field = JaxBiotSavart(coils)
+        problem = make_stage_two_problem(
+            field, JaxSquaredFlux(surface, field).fixed_surface_flux_spec(), config
+        )
+        native = _native_finite_build(surface, base, centerlines, coils, config)
+        geometry = stage_two_geometry(field.coil_dof_extraction_spec(), jnp.asarray(field.x), _FILAMENTS)
+        _assert_close(geometry.centerline_gamma, np.asarray([curve.gamma() for curve in centerlines]))
+        value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
+        np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=0.0)
+        _assert_close(gradient, _native_gradient(native, field))
+
     def test_fused_coil_terms_match_central_differences(self):
         """Fused coil-term directional gradients match independent central differences."""
         rng = np.random.default_rng(31)
@@ -410,7 +430,7 @@ class TestStageTwoCoilTerms(JaxTestCase):
             traces.append(parameters)
             return fused_stage_two_objective(current_problem, parameters)
 
-        value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=1))
+        value_and_grad = jit(jax.value_and_grad(objective, argnums=1))
         x, base_x = jnp.asarray(field.x), jnp.asarray(base_field.x)
         value_and_grad(problem, x)
         value_and_grad(base_problem, base_x)
@@ -480,13 +500,13 @@ class TestStageTwoCoilTerms(JaxTestCase):
 
     def test_fused_coil_term_programs_run_under_the_strict_transfer_guard(self):
         """Fused coil terms compile and run with explicit transfers only."""
-        value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+        value_and_grad = jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
         _, _, force_field, _, force_problem = _force_problem(_ALL_FORCE_TERMS)
         (finite_build_field, _, _, _, finite_build_problem), _ = _finite_build_problem()
         for field, problem in ((force_field, force_problem), (finite_build_field, finite_build_problem)):
             x = field.x
             with jax.transfer_guard("disallow"):
-                value, gradient = jax.device_get(value_and_grad(problem, jax.device_put(x)))
+                value, gradient = jax.device_get(value_and_grad(problem, jax.device_put(x)))  # noqa: TID251 the guard test needs an explicit host-to-device transfer
             # A separately compiled program may reassociate GPU reductions.
             expected_value, expected_gradient = _value_and_grad(problem, jnp.asarray(x))
             np.testing.assert_allclose(float(value), float(expected_value), rtol=1e-12, atol=0.0)

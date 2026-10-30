@@ -20,7 +20,7 @@ def _cpu_float64(values: list[float]) -> "jax.Array":
 
     cpu_device = jax.devices("cpu")[0]
     assert cpu_device.platform == "cpu"
-    placed = jax.device_put(np.asarray(values, dtype=np.float64), cpu_device)
+    placed = jax.device_put(np.asarray(values, dtype=np.float64), cpu_device)  # noqa: TID251 test places on a chosen device
     assert placed.dtype == np.float64
     return placed
 
@@ -64,7 +64,7 @@ class TestRuntimeHostBoundary(JaxTestCase):
             device_array = _cpu_float64([1.0, 2.0])
 
             with disallow_host_transfers():
-                placed = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float64))
+                placed = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float64))  # noqa: TID251 explicit transfer under the disallow guard
                 fetched = jax.device_get(device_array)
                 implicit_sum = float(np.sum(device_array))
                 implicit_list = device_array.tolist()

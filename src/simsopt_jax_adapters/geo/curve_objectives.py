@@ -9,7 +9,9 @@ the geometry moves to the active JAX device and the gradients back through
 explicit transfers, and the penalty with its gradient runs as one jitted JAX
 program. Curvature is computed from ``gammadash`` and ``gammadashdash`` in that
 program rather than by the curve. Distance penalties use the native C++
-candidate search, then evaluate every point pair within each selected pair.
+candidate search, then evaluate every point pair within each selected pair;
+only selected pairs enter the program, gathered into batches padded to
+power-of-two lengths, so a sparse search costs little and an empty one nothing.
 For C++ curves (and their rotated copies) these paths make no
 implicit transfer; JAX-backed native curves (``JaxCurve`` subclasses) still
 compute their own geometry and VJPs with implicit transfers.
@@ -27,9 +29,11 @@ from scipy.spatial.distance import cdist
 import simsoptpp as sopp
 from simsopt._core.derivative import derivative_dec
 from simsopt._core.optimizable import Optimizable
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.backend.runtime import get_backend_policy, get_runtime_jax_device
 from simsopt_jax.core._math_utils import as_jax_array as _as_jax_array
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
+from simsopt_jax.core._math_utils import as_jax_int32 as _as_jax_int32
 from simsopt_jax.core.curve_kernels import (
     curvature_p_norm_from_kappa_pure,
     curve_curve_distance_penalty_pure,
@@ -67,12 +71,12 @@ def _mean_squared_curvature_from_geometry(gammadash, gammadashdash):
     return mean_squared_curvature_pure(kappa_pure(gammadash, gammadashdash), gammadash)
 
 
-_curve_length = jax.jit(_length_from_tangent)
-_curve_length_grad = jax.jit(jax.grad(_length_from_tangent))
-_lp_curvature = jax.jit(_lp_curvature_from_geometry)
-_lp_curvature_grad = jax.jit(jax.grad(_lp_curvature_from_geometry, argnums=(0, 1)))
-_mean_squared_curvature = jax.jit(_mean_squared_curvature_from_geometry)
-_mean_squared_curvature_grad = jax.jit(
+_curve_length = jit(_length_from_tangent)
+_curve_length_grad = jit(jax.grad(_length_from_tangent))
+_lp_curvature = jit(_lp_curvature_from_geometry)
+_lp_curvature_grad = jit(jax.grad(_lp_curvature_from_geometry, argnums=(0, 1)))
+_mean_squared_curvature = jit(_mean_squared_curvature_from_geometry)
+_mean_squared_curvature_grad = jit(
     jax.grad(_mean_squared_curvature_from_geometry, argnums=(0, 1))
 )
 
@@ -316,38 +320,6 @@ class JaxMeanSquaredCurvature(Optimizable):
 
 
 @dataclass(frozen=True)
-class _CurvePairBatch:
-    """Curve pairs whose first and second members share one quadrature class each.
-
-    ``first_rows[k]`` and ``second_rows[k]`` index pair ``k``'s curves in the
-    ``first_class`` and ``second_class`` stacks of :class:`_CurvePairPlan`.
-    """
-
-    first_class: int
-    second_class: int
-    first_rows: tuple[int, ...]
-    second_rows: tuple[int, ...]
-    pairs: tuple[tuple[int, int], ...]
-
-
-@dataclass(frozen=True)
-class _CurvePairPlan:
-    """Static vectorization of a curve-pair sum over equal-shape curve stacks.
-
-    ``class_members[c]`` lists the curve indices stacked, in curve order, into
-    quadrature class ``c``; every curve has a class, including curves that
-    appear in no pair. Each batch holds the pairs of one (first class, second
-    class) combination, in first-appearance order of the pair sequence; pair
-    order is kept only within a batch. Summing batch totals therefore
-    reassociates the per-pair loop's running sum (about 1e-16 relative). The
-    plan is hashable so jit specializes on it as a static argument.
-    """
-
-    class_members: tuple[tuple[int, ...], ...]
-    batches: tuple[_CurvePairBatch, ...]
-
-
-@dataclass(frozen=True)
 class _DistanceCandidates:
     """Host-only native candidate data, independent of JAX operand placement."""
 
@@ -356,24 +328,18 @@ class _DistanceCandidates:
 
 
 @dataclass(frozen=True)
-class _CurveCurveSnapshot:
-    """One exact-state set of placed curve-curve penalty operands."""
+class _DistanceOperands:
+    """One exact-state set of placed operands for the candidates of one search.
 
-    key: tuple[object, ...]
-    plan: _CurvePairPlan
-    operands: tuple[tuple[jax.Array, ...], tuple[jax.Array, ...], jax.Array, tuple[jax.Array, ...]]
-
-
-@dataclass(frozen=True)
-class _CurveSurfaceSnapshot:
-    """One exact-state set of placed operands including the surface geometry."""
+    ``batch_classes`` is the static (hashable) part, one entry per batch: the
+    quadrature classes its rows index. Batch lengths are powers of two, so the
+    compiled programs depend on the candidates only through O(log) shapes.
+    """
 
     key: tuple[object, ...]
     class_members: tuple[tuple[int, ...], ...]
-    operands: tuple[
-        tuple[jax.Array, ...], tuple[jax.Array, ...], tuple[jax.Array, ...],
-        jax.Array, jax.Array, jax.Array,
-    ]
+    batch_classes: tuple[object, ...]
+    operands: tuple[object, ...]
 
 
 def _curve_pairs(num_curves: int, num_basecurves: int):
@@ -383,54 +349,67 @@ def _curve_pairs(num_curves: int, num_basecurves: int):
     )
 
 
-@lru_cache(maxsize=64)
-def _curve_pair_plan(sample_counts: tuple[int, ...], num_basecurves: int) -> _CurvePairPlan:
-    pairs = _curve_pairs(len(sample_counts), num_basecurves)
-    class_members = _quadrature_classes(sample_counts)
-    class_positions = {
-        index: (cls, row)
-        for cls, members in enumerate(class_members)
-        for row, index in enumerate(members)
-    }
-    batch_rows: dict[tuple[int, int], tuple[list[int], list[int], list[tuple[int, int]]]] = {}
-    for first, second in pairs:
-        first_class, first_row = class_positions[first]
-        second_class, second_row = class_positions[second]
-        first_rows, second_rows, batch_pairs = batch_rows.setdefault(
-            (first_class, second_class), ([], [], [])
-        )
-        first_rows.append(first_row)
-        second_rows.append(second_row)
-        batch_pairs.append((first, second))
-    return _CurvePairPlan(
-        class_members=class_members,
-        batches=tuple(
-            _CurvePairBatch(
-                first_class=first_class,
-                second_class=second_class,
-                first_rows=tuple(first_rows),
-                second_rows=tuple(second_rows),
-                pairs=tuple(batch_pairs),
-            )
-            for (first_class, second_class), (first_rows, second_rows, batch_pairs) in (
-                batch_rows.items()
-            )
-        ),
-    )
-
-
 def _flags(values) -> jax.Array:
     return _as_jax_array(np.asarray(values, dtype=bool), dtype=jnp.bool_)
 
 
+def _class_positions(class_members) -> dict[int, tuple[int, int]]:
+    """Map each curve index to its (quadrature class, row in the class stack)."""
+    return {
+        index: (cls, row)
+        for cls, members in enumerate(class_members)
+        for row, index in enumerate(members)
+    }
+
+
+def _padded_candidate_batches(groups):
+    """Place grouped candidate rows as padded index columns and validity flags.
+
+    A group of ``n`` rows is padded to ``2**ceil(log2(n))`` rows that repeat
+    row 0 and are flagged invalid, so the penalty kernel gives them zero value
+    and zero gradient. ``simsoptpp`` returns candidates in no fixed order;
+    callers group them sorted, so equal candidate sets give bitwise-equal sums.
+
+    Args:
+        groups (dict): maps a hashable batch key to a non-empty list of row
+            tuples of one length ``k``, in first-appearance order.
+
+    Returns:
+        tuple: ``(keys, batches)``: the group keys in order, and per group
+            ``k`` int32 index arrays and one bool validity array, each of
+            shape (padded length,).
+    """
+    batches = []
+    for rows in groups.values():
+        padded = np.zeros((1 << (len(rows) - 1).bit_length(), len(rows[0])), dtype=np.int32)
+        padded[: len(rows)] = rows
+        batches.append((
+            *(_as_jax_int32(column) for column in padded.T),
+            _flags(np.arange(padded.shape[0]) < len(rows)),
+        ))
+    return tuple(groups), tuple(batches)
+
+
+def _zero_curve_derivative(curves):
+    """The derivative with no candidate: every curve's coefficient VJP of zero, as native."""
+    return _sum_curve_vjp_contributions(
+        curves,
+        [np.zeros_like(curve.gamma()) for curve in curves],
+        [np.zeros_like(curve.gammadash()) for curve in curves],
+    )
+
+
 def _curve_pair_penalty_total(
-    class_gammas, class_gammadashes, minimum_distance, batch_candidates, plan, downsample
+    class_gammas, class_gammadashes, batches, minimum_distance, batch_classes, downsample
 ):
-    """Sum the curve-curve penalty over every pair of ``plan``, one vmap per batch.
+    """Sum the curve-curve penalty over the candidate pairs, one vmap per batch.
 
     The class stacks hold full quadrature grids; every ``downsample``-th point
-    enters the penalty, so the gradient is on the full grids.
-    ``batch_candidates[b][k]`` is the native candidate decision of pair ``k`` of batch ``b``.
+    enters the penalty, so the gradient is on the full grids. Batch ``b``
+    pairs rows ``batches[b][0]`` of class ``batch_classes[b][0]`` with rows
+    ``batches[b][1]`` of class ``batch_classes[b][1]``; ``batches[b][2]`` is
+    false on padding. Summing batch totals reassociates native's running sum
+    over pairs (about 1e-16 relative).
     """
     class_gammas = tuple(gammas[:, ::downsample] for gammas in class_gammas)
     class_gammadashes = tuple(gammadashes[:, ::downsample] for gammadashes in class_gammadashes)
@@ -438,26 +417,26 @@ def _curve_pair_penalty_total(
         curve_curve_distance_penalty_pure, in_axes=(0, 0, 0, 0, None, 0)
     )
     total = jnp.zeros((), dtype=jnp.float64)
-    for batch, candidates in zip(plan.batches, batch_candidates, strict=True):
-        first_rows = np.asarray(batch.first_rows)
-        second_rows = np.asarray(batch.second_rows)
+    for (first_class, second_class), (first_rows, second_rows, valid) in zip(
+        batch_classes, batches, strict=True
+    ):
         # The gather's gradient is a scatter-add: GPU dJ is bitwise reproducible
         # only under --xla_gpu_exclude_nondeterministic_ops=true.
-        pair_values = batched_kernel(
-            class_gammas[batch.first_class][first_rows],
-            class_gammadashes[batch.first_class][first_rows],
-            class_gammas[batch.second_class][second_rows],
-            class_gammadashes[batch.second_class][second_rows],
+        total = total + jnp.sum(batched_kernel(
+            class_gammas[first_class][first_rows],
+            class_gammadashes[first_class][first_rows],
+            class_gammas[second_class][second_rows],
+            class_gammadashes[second_class][second_rows],
             minimum_distance,
-            candidates,
-        )
-        total = total + jnp.sum(pair_values)
+            valid,
+        ))
     return total
 
 
-_curve_pair_penalty = jax.jit(_curve_pair_penalty_total, static_argnames=("plan", "downsample"))
-_curve_pair_penalty_grad = jax.jit(
-    jax.grad(_curve_pair_penalty_total, argnums=(0, 1)), static_argnames=("plan", "downsample")
+_curve_pair_penalty = jit(_curve_pair_penalty_total, static_argnames=("batch_classes", "downsample"))
+_curve_pair_penalty_grad = jit(
+    jax.grad(_curve_pair_penalty_total, argnums=(0, 1)),
+    static_argnames=("batch_classes", "downsample"),
 )
 
 
@@ -480,7 +459,11 @@ class JaxCurveCurveDistance(Optimizable):
 
     with :math:`n_i`, :math:`n_j` the numbers of sampled points. As in the native class, only
     pairs the native candidate search finds within :math:`d_{\min}` are evaluated; the others
-    contribute zero.
+    contribute zero. Only candidate pairs enter the compiled program, so its work and memory
+    scale with the number of candidates, and no candidate means no JAX work. ``candidates``,
+    ``compute_candidates()`` and ``shortest_distance_among_candidates()`` are native's; the
+    search is cached per exact geometry and settings, so ``candidates`` is always current and
+    read-only.
 
     Args:
         curves (list[Curve]): all curves, including symmetry copies.
@@ -498,7 +481,7 @@ class JaxCurveCurveDistance(Optimizable):
         self.num_basecurves = num_basecurves or len(curves)
         self.downsample = downsample
         self._candidate_cache: _DistanceCandidates | None = None
-        self._distance_snapshot: _CurveCurveSnapshot | None = None
+        self._distance_snapshot: _DistanceOperands | None = None
         super().__init__(depends_on=curves)
 
     def _samples(self):
@@ -522,45 +505,71 @@ class JaxCurveCurveDistance(Optimizable):
         self._candidate_cache = snapshot
         return snapshot
 
-    def _snapshot(self) -> _CurveCurveSnapshot:
+    def _snapshot(self) -> _DistanceOperands | None:
+        """Placed operands of the candidate pairs, or None without a candidate."""
         candidate_snapshot = self._candidate_snapshot()
+        if not candidate_snapshot.candidates:
+            return None
         key = _distance_operand_key(self.curves, candidate_snapshot.key)
         cached = self._distance_snapshot
         if cached is not None and cached.key == key:
             return cached
-        plan = _curve_pair_plan(
-            tuple(int(curve.gamma().shape[0]) for curve in self.curves), self.num_basecurves
-        )
-        selected = set(candidate_snapshot.candidates)
-        class_gammas, class_gammadashes = _class_stacked_geometry(self.curves, plan.class_members)
-        batch_candidates = tuple(
-            _flags([pair in selected for pair in batch.pairs]) for batch in plan.batches
-        )
-        snapshot = _CurveCurveSnapshot(
-            key, plan,
-            (class_gammas, class_gammadashes, _as_jax_float64(self.minimum_distance), batch_candidates),
+        class_members = _quadrature_classes(tuple(int(curve.gamma().shape[0]) for curve in self.curves))
+        positions = _class_positions(class_members)
+        groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for first, second in sorted(candidate_snapshot.candidates):
+            (first_class, first_row), (second_class, second_row) = positions[first], positions[second]
+            groups.setdefault((first_class, second_class), []).append((first_row, second_row))
+        batch_classes, batches = _padded_candidate_batches(groups)
+        class_gammas, class_gammadashes = _class_stacked_geometry(self.curves, class_members)
+        snapshot = _DistanceOperands(
+            key, class_members, batch_classes,
+            (class_gammas, class_gammadashes, batches, _as_jax_float64(self.minimum_distance)),
         )
         self._distance_snapshot = snapshot
         return snapshot
 
-    def _operands(self):
-        snapshot = self._snapshot()
-        return snapshot.plan, snapshot.operands
+    @property
+    def candidates(self):
+        """The native candidate pairs at the current state.
+
+        Returns:
+            list[tuple[int, int]]: curve index pairs ``(i, j)`` with some sampled points closer
+                than ``minimum_distance``, in no fixed order.
+        """
+        return list(self._candidate_snapshot().candidates)
+
+    def compute_candidates(self):
+        """Run the native candidate search unless its result for the current state is cached."""
+        self._candidate_snapshot()
+
+    def shortest_distance_among_candidates(self):
+        """Find the native sampled shortest distance over the candidate pairs.
+
+        Returns:
+            float: the smaller of ``minimum_distance`` and the candidate pairs' shortest
+                sampled distance, in m.
+        """
+        samples = self._samples()
+        return min([self.minimum_distance] + [
+            np.min(cdist(samples[i], samples[j])) for i, j in self._candidate_snapshot().candidates
+        ])
 
     def shortest_distance(self):
         """Find the native sampled shortest distance.
 
         With candidates, return the minimum over candidates and the threshold;
-        without candidates, search all eligible geometry.
+        without candidates, search all curve pairs.
 
         Returns:
             float: sampled distance in m.
         """
+        if self._candidate_snapshot().candidates:
+            return self.shortest_distance_among_candidates()
         samples = self._samples()
-        candidates = self._candidate_snapshot().candidates
-        pairs = candidates or _curve_pairs(len(samples), len(samples))
-        distances = [np.min(cdist(samples[i], samples[j])) for i, j in pairs]
-        return min([self.minimum_distance] + distances) if candidates else min(distances)
+        return min(
+            np.min(cdist(samples[i], samples[j])) for i, j in _curve_pairs(len(samples), len(samples))
+        )
 
     def J(self):
         """Evaluate the native objective formula on the active JAX device.
@@ -568,10 +577,12 @@ class JaxCurveCurveDistance(Optimizable):
         Returns:
             float: objective value in m^4.
         """
-        plan, operands = self._operands()
-        return _host_float(
-            _curve_pair_penalty(*operands, plan=plan, downsample=self.downsample)
-        )
+        snapshot = self._snapshot()
+        if snapshot is None:
+            return 0.0
+        return _host_float(_curve_pair_penalty(
+            *snapshot.operands, batch_classes=snapshot.batch_classes, downsample=self.downsample,
+        ))
 
     @derivative_dec
     def dJ(self):
@@ -583,42 +594,43 @@ class JaxCurveCurveDistance(Optimizable):
         Returns:
             Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
         """
-        plan, operands = self._operands()
+        snapshot = self._snapshot()
+        if snapshot is None:
+            return _zero_curve_derivative(self.curves)
         class_dgammas, class_dgammadashes = _curve_pair_penalty_grad(
-            *operands, plan=plan, downsample=self.downsample
+            *snapshot.operands, batch_classes=snapshot.batch_classes, downsample=self.downsample,
         )
         return _class_geometry_derivative(
-            self.curves, plan.class_members, class_dgammas, class_dgammadashes
+            self.curves, snapshot.class_members, class_dgammas, class_dgammadashes
         )
 
     return_fn_map = {"J": J, "dJ": dJ}
 
 
 def _curve_surface_penalty_total(
-    class_gammas, class_gammadashes, class_candidates, surface_gamma, surface_normal, minimum_distance
+    class_gammas, class_gammadashes, batches, minimum_distance, surface_gamma, surface_normal,
+    batch_classes,
 ):
-    """Sum the curve-surface penalty over the curves of every quadrature class.
+    """Sum the curve-surface penalty over the candidate curves, one vmap per batch.
 
-    ``class_candidates[c][k]`` is the native candidate decision of curve ``k`` of class ``c``.
+    Batch ``b`` holds rows ``batches[b][0]`` of class ``batch_classes[b]``;
+    ``batches[b][1]`` is false on padding.
     """
     batched_kernel = jax.vmap(
         curve_surface_distance_penalty_pure, in_axes=(0, 0, None, None, None, 0)
     )
     total = jnp.zeros((), dtype=jnp.float64)
-    for gammas, gammadashes, candidates in zip(
-        class_gammas, class_gammadashes, class_candidates, strict=True
-    ):
-        total = total + jnp.sum(
-            batched_kernel(
-                gammas, gammadashes, surface_gamma, surface_normal, minimum_distance, candidates
-            )
-        )
+    for cls, (rows, valid) in zip(batch_classes, batches, strict=True):
+        total = total + jnp.sum(batched_kernel(
+            class_gammas[cls][rows], class_gammadashes[cls][rows],
+            surface_gamma, surface_normal, minimum_distance, valid,
+        ))
     return total
 
 
-_curve_surface_penalty = jax.jit(_curve_surface_penalty_total)
-_curve_surface_penalty_grad = jax.jit(
-    jax.grad(_curve_surface_penalty_total, argnums=(0, 1))
+_curve_surface_penalty = jit(_curve_surface_penalty_total, static_argnames=("batch_classes",))
+_curve_surface_penalty_grad = jit(
+    jax.grad(_curve_surface_penalty_total, argnums=(0, 1)), static_argnames=("batch_classes",)
 )
 
 
@@ -635,7 +647,10 @@ class JaxCurveSurfaceDistance(Optimizable):
     and :math:`d_{\min}` is ``minimum_distance``. The surface element uses the unnormalized
     normal :math:`\mathbf{N}`, :math:`ds = |\mathbf{N}|~d\varphi~d\theta`, and each integral is
     the mean over the quadrature points. As in the native class, only curves the native
-    candidate search finds within :math:`d_{\min}` are evaluated.
+    candidate search finds within :math:`d_{\min}` are evaluated; only they enter the compiled
+    program, and no candidate means no JAX work. ``candidates``, ``compute_candidates()`` and
+    ``shortest_distance_among_candidates()`` are native's; the search is cached per exact
+    geometry, so ``candidates`` is always current and read-only.
 
     The surface is not a dependency: only curve DOFs receive derivatives, and the surface
     geometry is read at each evaluation.
@@ -651,7 +666,7 @@ class JaxCurveSurfaceDistance(Optimizable):
         self.surface = surface
         self.minimum_distance = minimum_distance
         self._candidate_cache: _DistanceCandidates | None = None
-        self._distance_snapshot: _CurveSurfaceSnapshot | None = None
+        self._distance_snapshot: _DistanceOperands | None = None
         super().__init__(depends_on=curves)
 
     def _candidates(self, surface_points):
@@ -675,50 +690,77 @@ class JaxCurveSurfaceDistance(Optimizable):
         self._candidate_cache = snapshot
         return snapshot
 
-    def _snapshot(self) -> _CurveSurfaceSnapshot:
+    def _snapshot(self) -> _DistanceOperands | None:
+        """Placed operands of the candidate curves, or None without a candidate."""
         candidate_snapshot = self._candidate_snapshot()
+        if not candidate_snapshot.candidates:
+            return None
         key = _distance_operand_key(self.curves, candidate_snapshot.key) + (
             _array_snapshot_key(self.surface.normal()),
         )
         cached = self._distance_snapshot
         if cached is not None and cached.key == key:
             return cached
-        surface_points = self.surface.gamma().reshape((-1, 3))
-        class_members = _quadrature_classes(
-            tuple(int(curve.gamma().shape[0]) for curve in self.curves)
-        )
-        selected = {i for i, _ in candidate_snapshot.candidates}
+        class_members = _quadrature_classes(tuple(int(curve.gamma().shape[0]) for curve in self.curves))
+        positions = _class_positions(class_members)
+        groups: dict[int, list[tuple[int]]] = {}
+        for index, _ in sorted(candidate_snapshot.candidates):
+            cls, row = positions[index]
+            groups.setdefault(cls, []).append((row,))
+        batch_classes, batches = _padded_candidate_batches(groups)
         class_gammas, class_gammadashes = _class_stacked_geometry(self.curves, class_members)
         operands = (
             class_gammas,
             class_gammadashes,
-            tuple(_flags([index in selected for index in members]) for members in class_members),
-            _as_jax_float64(surface_points),
-            _as_jax_float64(self.surface.normal().reshape((-1, 3))),
+            batches,
             _as_jax_float64(self.minimum_distance),
+            _as_jax_float64(self.surface.gamma().reshape((-1, 3))),
+            _as_jax_float64(self.surface.normal().reshape((-1, 3))),
         )
-        snapshot = _CurveSurfaceSnapshot(key, class_members, operands)
+        snapshot = _DistanceOperands(key, class_members, batch_classes, operands)
         self._distance_snapshot = snapshot
         return snapshot
 
-    def _operands(self):
-        snapshot = self._snapshot()
-        return snapshot.class_members, snapshot.operands
+    @property
+    def candidates(self):
+        """The native candidate curves at the current state.
+
+        Returns:
+            list[tuple[int, int]]: pairs ``(i, 0)`` of curve ``i`` with some sampled point closer
+                than ``minimum_distance`` to the surface, in no fixed order.
+        """
+        return list(self._candidate_snapshot().candidates)
+
+    def compute_candidates(self):
+        """Run the native candidate search unless its result for the current state is cached."""
+        self._candidate_snapshot()
+
+    def shortest_distance_among_candidates(self):
+        """Find the native sampled shortest distance over the candidate curves.
+
+        Returns:
+            float: the smaller of ``minimum_distance`` and the candidate curves' shortest
+                sampled distance to the surface, in m.
+        """
+        surface_points = self.surface.gamma().reshape((-1, 3))
+        return min([self.minimum_distance] + [
+            np.min(cdist(self.curves[i].gamma(), surface_points))
+            for i, _ in self._candidate_snapshot().candidates
+        ])
 
     def shortest_distance(self):
         """Find the native sampled shortest distance.
 
         With candidates, return the minimum over candidates and the threshold;
-        without candidates, search all eligible geometry.
+        without candidates, search all curves.
 
         Returns:
             float: sampled distance in m.
         """
+        if self._candidate_snapshot().candidates:
+            return self.shortest_distance_among_candidates()
         surface_points = self.surface.gamma().reshape((-1, 3))
-        candidates = self._candidate_snapshot().candidates
-        indices = [i for i, _ in candidates] or range(len(self.curves))
-        distances = [np.min(cdist(self.curves[i].gamma(), surface_points)) for i in indices]
-        return min([self.minimum_distance] + distances) if candidates else min(distances)
+        return min(np.min(cdist(curve.gamma(), surface_points)) for curve in self.curves)
 
     def J(self):
         """Evaluate the native objective formula on the active JAX device.
@@ -726,8 +768,10 @@ class JaxCurveSurfaceDistance(Optimizable):
         Returns:
             float: objective value in m^5.
         """
-        _, operands = self._operands()
-        return _host_float(_curve_surface_penalty(*operands))
+        snapshot = self._snapshot()
+        if snapshot is None:
+            return 0.0
+        return _host_float(_curve_surface_penalty(*snapshot.operands, batch_classes=snapshot.batch_classes))
 
     @derivative_dec
     def dJ(self):
@@ -739,10 +783,14 @@ class JaxCurveSurfaceDistance(Optimizable):
         Returns:
             Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
         """
-        class_members, operands = self._operands()
-        class_dgammas, class_dgammadashes = _curve_surface_penalty_grad(*operands)
+        snapshot = self._snapshot()
+        if snapshot is None:
+            return _zero_curve_derivative(self.curves)
+        class_dgammas, class_dgammadashes = _curve_surface_penalty_grad(
+            *snapshot.operands, batch_classes=snapshot.batch_classes
+        )
         return _class_geometry_derivative(
-            self.curves, class_members, class_dgammas, class_dgammadashes
+            self.curves, snapshot.class_members, class_dgammas, class_dgammadashes
         )
 
     return_fn_map = {"J": J, "dJ": dJ}
