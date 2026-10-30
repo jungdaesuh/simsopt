@@ -279,7 +279,7 @@ def _native_in_field_order(native: Optimizable, field: JaxBiotSavart):
 def _run_both(native: Optimizable, field: JaxBiotSavart, problem, scale: float, options: dict):
     """L-BFGS-B on the native composite and on the fused objective from the field's DOFs."""
     order = _native_in_field_order(native, field)
-    x0 = field.x.copy()
+    x0 = np.array(field.x, dtype=np.float64)
 
     def native_fun(x):
         native.x = x[order]
