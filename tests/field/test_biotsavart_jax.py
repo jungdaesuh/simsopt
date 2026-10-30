@@ -23,6 +23,7 @@ with optional_jax_imports():
     from simsopt_jax.core import biotsavart as core_biotsavart
     from simsopt_jax.backend import get_field_kernel_tuning
     from simsopt_jax.backend.runtime import invalidate_backend_cache
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
 
 
 import os
@@ -314,6 +315,11 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
         np.testing.assert_array_equal(np.asarray(bs_jax.B()), native.B())
         self.assertTrue(np.all(np.isnan(native.GradAbsB())))
         np.testing.assert_array_equal(np.asarray(bs_jax.GradAbsB()), native.GradAbsB())
+        # The NaN is built on device, so it also holds under the strict guard.
+        bs_jax.set_points(points_np)
+        with disallow_host_transfers():
+            grad_abs_B = bs_jax.GradAbsB()
+        np.testing.assert_array_equal(np.asarray(grad_abs_B), native.GradAbsB())
 
     def test_B_vjp_parity_ncsx(self):
         """Native Biot-Savart parity on identical coils, points and cotangents."""

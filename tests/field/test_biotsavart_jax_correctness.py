@@ -328,6 +328,23 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         np.testing.assert_array_equal(actual, native.get_points_cart())
         np.testing.assert_allclose(adapter.B(), native.B(), rtol=1e-12, atol=1e-14)
 
+    def test_cleared_points_must_be_set_before_evaluation(self):
+        """After clear_points, evaluation raises until points are set again."""
+        coils = [Coil(_curves()[0], Current(1e5))]
+        adapter = JaxBiotSavart(coils)
+        adapter.clear_points()
+        for quantity in ("B", "GradAbsB", "B_cyl", "get_points_cart"):
+            with self.subTest(quantity=quantity), self.assertRaisesRegex(
+                RuntimeError, "call set_points"
+            ):
+                getattr(adapter, quantity)()
+        with self.assertRaisesRegex(RuntimeError, "call set_points"):
+            adapter.B_vjp(np.zeros((1, 3)))
+        native = BiotSavart(coils).set_points(_POINTS)
+        np.testing.assert_allclose(
+            adapter.set_points(_POINTS).B(), native.B(), rtol=1e-12, atol=1e-14
+        )
+
     def test_serialization_preserves_points_and_field(self):
         """GSON reconstruction and JSON loading preserve evaluation points and field
         values in either coordinate convention."""
@@ -356,6 +373,23 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
                 np.testing.assert_allclose(
                     result.B(), native.B(), rtol=1e-12, atol=1e-14
                 )
+
+    def test_payload_without_points_is_rejected_like_native(self):
+        """A payload without a points key raises KeyError in both fields; None
+        restores cleared points."""
+        coils = [Coil(_curves()[0], Current(1e5))]
+        for field in (BiotSavart(coils), JaxBiotSavart(coils)):
+            with self.subTest(field=type(field).__name__):
+                serialized = {}
+                payload = field.as_dict(serialized)
+                del payload["points"]
+                with self.assertRaises(KeyError):
+                    type(field).from_dict(payload, serialized, {})
+        adapter = JaxBiotSavart(coils)
+        adapter.clear_points()
+        serialized = {}
+        restored = JaxBiotSavart.from_dict(adapter.as_dict(serialized), serialized, {})
+        self.assertIsNone(restored.get_points_cart_ref())
 
     def test_native_symmetry_curve_converts_for_fields_and_vjps(self):
         """Native symmetry Fourier curves yield matching JAX fields and VJPs with or
@@ -562,7 +596,7 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         ]
         adapter = JaxBiotSavart(coils).set_points(_POINTS)
         cotangent = _cotangent(quantity)
-        dofs = adapter.x.copy()
+        dofs = np.array(adapter.x, dtype=np.float64)
         patches.callback(setattr, adapter, "x", dofs)
         analytic = _gradient(_vjp(adapter, quantity, cotangent), adapter)
         for exponent in range(5):

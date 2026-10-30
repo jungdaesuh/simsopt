@@ -29,8 +29,9 @@ Retained settings:
   ``SIMSOPT_DEBUG`` enables all diagnostics, disables JIT and disallows transfers.
   Eager JAX indexing can stage scalar indices; explicitly use the boundary
   owner's ``allow_host_transfers`` context when evaluating in that debug mode.
-* Every supported mode runs JAX in float64 (``jax_enable_x64``) with matrix
-  products at the highest precision.
+* Every supported mode runs JAX in float64 (``jax_enable_x64``, which
+  importing ``simsopt_jax`` enables) with matrix products at the highest
+  precision.
 * ``SIMSOPT_JAX_COIL_CHUNK_SIZE``, ``SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE``,
   ``SIMSOPT_JAX_POINT_CHUNK_SIZE`` and ``SIMSOPT_JAX_HESSIAN_VJP_POINT_CHUNK_SIZE``
   (the gradgradB VJP's point tile) override the mode's field tiling. A disallow
@@ -55,6 +56,7 @@ import os
 import shlex
 import sys
 import threading
+import traceback
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -455,10 +457,28 @@ def invalidate_backend_cache() -> None:
         _reset_backend_runtime_caches()
 
 
+def _warn_at_caller(message: str) -> None:
+    """Issue a RuntimeWarning located at the first caller outside this module.
+
+    The public entries (``set_backend``, ``apply_jax_runtime_config``, ...)
+    reach the warning sites at different depths, so a fixed ``stacklevel``
+    would name a line of this module for some of them.
+
+    Args:
+        message (str): Warning text.
+    """
+    stacklevel = next(
+        level
+        for level, (frame, _) in enumerate(traceback.walk_stack(sys._getframe(1)), start=2)
+        if frame.f_code.co_filename != __file__
+    )
+    warnings.warn(message, RuntimeWarning, stacklevel=stacklevel)
+
+
 def _raise_or_warn_runtime_issue(config: BackendConfig, message: str) -> None:
     if config.mode == "jax_gpu_parity" or config.strict:
         raise RuntimeError(message)
-    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    _warn_at_caller(message)
 
 
 def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
@@ -550,8 +570,10 @@ def _gpu_memory_runtime_env(
 
     Only settings ``config`` resolves (not None) appear, so a caller's own
     ``XLA_PYTHON_CLIENT_*`` value survives when no ``SIMSOPT_*`` override or
-    keyword sets it. A resolved memory fraction owns both fraction variables:
-    it goes to the one the allocator reads and clears the other (value None).
+    keyword sets it. A resolved memory fraction goes to
+    ``XLA_CLIENT_MEM_FRACTION``, which jaxlib reads for every allocator, and
+    clears its deprecated alias ``XLA_PYTHON_CLIENT_MEM_FRACTION`` (value
+    None), since jaxlib rejects both set at once.
     """
     env: list[tuple[str, str | None]] = []
     if config.xla_gpu_preallocate is not None:
@@ -564,10 +586,8 @@ def _gpu_memory_runtime_env(
     if config.xla_gpu_allocator is not None:
         env.append((_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator))
     if config.xla_gpu_mem_fraction is not None:
-        fraction = str(config.xla_gpu_mem_fraction)
-        vmm = config.xla_gpu_allocator == "vmm"
-        env.append((_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None if vmm else fraction))
-        env.append((_XLA_CLIENT_MEM_FRACTION_ENV, fraction if vmm else None))
+        env.append((_XLA_CLIENT_MEM_FRACTION_ENV, str(config.xla_gpu_mem_fraction)))
+        env.append((_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None))
     if config.tf_gpu_allocator is not None:
         env.append((_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator))
     return tuple(env)
@@ -579,7 +599,8 @@ def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
     XLA reads them when it initializes its backends. Afterwards they cannot
     change this process, so they are left alone (child processes still
     resolve the synchronized ``SIMSOPT_*`` variables) and a setting that
-    differs from the running process warns.
+    differs from its environment variable, the value XLA read at
+    initialization unless it changed since, warns.
     """
     if config.jax_platform != "cuda":
         return
@@ -592,12 +613,10 @@ def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
         name for name, value in runtime_env if os.environ.get(name) != value
     )
     if differing:
-        warnings.warn(
-            "JAX already initialized its backends, so the requested GPU memory "
-            f"settings ({', '.join(differing)}) do not apply to this process; "
-            "set them before touching JAX devices.",
-            RuntimeWarning,
-            stacklevel=3,
+        _warn_at_caller(
+            "JAX already initialized its backends, so the GPU memory settings "
+            f"of backend mode {config.mode!r} ({', '.join(differing)}) do not "
+            "apply to this process; set them before touching JAX devices."
         )
 
 
@@ -609,9 +628,16 @@ def _apply_cpu_compile_preset_env(config: BackendConfig, policy: BackendPolicy) 
     non-parity CPU lanes only: ``xla_cpu_opt_preset`` is inert on the CUDA
     backend (whose XLA flags carry the determinism contract), and the preset
     reduces XLA optimization passes -- which can shift CPU reduction order, so
-    it is withheld from the bit-exact ``*_parity`` lanes.
+    it is withheld from the bit-exact ``*_parity`` lanes. Once JAX initialized
+    its backends the preset cannot change this process, so ``XLA_FLAGS`` is
+    left alone rather than handed to child processes the parent never ran
+    with; it is a compile-speed default, not a request, so nothing warns.
     """
-    if config.jax_platform == "cuda" or policy.parity_mode:
+    if (
+        config.jax_platform == "cuda"
+        or policy.parity_mode
+        or _jax_backends_initialized()
+    ):
         return
     _set_runtime_env(
         _XLA_FLAGS_ENV,
@@ -696,15 +722,13 @@ def _apply_cuda_autotuner_env(config: BackendConfig) -> None:
         return
     previous = os.environ.get(_XLA_FLAGS_ENV)
     if apply_cuda_xla_flag_pins() != previous and _jax_backends_initialized():
-        warnings.warn(
+        _warn_at_caller(
             "XLA already initialized its backends before the CUDA autotuner pins "
             f"reached {_XLA_FLAGS_ENV}; this process compiles with XLA's default "
             "GPU autotuning, so fresh compiles are not bitwise-reproducible. "
             "Resolve the simsopt backend config (or call "
             "simsopt_jax.backend.runtime.apply_cuda_xla_flag_pins()) before "
-            "touching JAX devices.",
-            RuntimeWarning,
-            stacklevel=3,
+            "touching JAX devices."
         )
 
 
@@ -761,7 +785,6 @@ def apply_jax_runtime_config() -> None:
     # platform from becoming the default (or fail when CPU is not listed).
     # Clearing it makes the selected platform, listed first, the default.
     jax.config.update("jax_platform_name", "")
-    jax.config.update("jax_enable_x64", True)
     jax.config.update("jax_default_matmul_precision", "highest")
     jax.config.update("jax_debug_nans", config.debug_nans)
     jax.config.update("jax_disable_jit", config.disable_jit)
@@ -782,20 +805,6 @@ _SET_BACKEND_ENV_NAMES = (
     _XLA_CLIENT_MEM_FRACTION_ENV,
     _TF_GPU_ALLOCATOR_ENV,
 )
-_APPLIED_JAX_CONFIG_NAMES = (
-    "jax_platforms",
-    "jax_platform_name",
-    "jax_enable_x64",
-    "jax_default_matmul_precision",
-    "jax_debug_nans",
-    "jax_disable_jit",
-    "jax_transfer_guard",
-    "jax_compilation_cache_dir",
-    "jax_persistent_cache_min_compile_time_secs",
-    "jax_persistent_cache_min_entry_size_bytes",
-    "jax_persistent_cache_enable_xla_caches",
-    "jax_default_device",
-)
 
 
 @contextmanager
@@ -803,9 +812,8 @@ def _restore_backend_state_on_error() -> Iterator[None]:
     """Hold the runtime lock and undo every change if the body raises.
 
     Restores the installed configuration, the environment variables
-    ``set_backend`` synchronizes or exports, and the JAX settings
-    ``apply_jax_runtime_config`` updates, so a rejected call leaves the
-    process in the mode it had before.
+    ``set_backend`` synchronizes or exports, and every JAX setting, so a
+    rejected call leaves the process in the mode it had before.
     """
     global _cached_backend_config
     global _requested_jax_platforms_value, _exported_jax_platforms
@@ -813,20 +821,20 @@ def _restore_backend_state_on_error() -> Iterator[None]:
         config = _cached_backend_config
         platforms_state = (_requested_jax_platforms_value, _exported_jax_platforms)
         env = tuple((name, os.environ.get(name)) for name in _SET_BACKEND_ENV_NAMES)
-        jax_config = tuple(
-            (name, jax.config.values[name]) for name in _APPLIED_JAX_CONFIG_NAMES
-        )
+        jax_config = dict(jax.config.values)
         try:
             yield
         except BaseException:
-            for name, value in env:
-                _set_runtime_env(name, value)
-            for name, value in jax_config:
-                if jax.config.values[name] != value:
-                    jax.config.update(name, value)
             _cached_backend_config = config
             _requested_jax_platforms_value, _exported_jax_platforms = platforms_state
             _reset_backend_runtime_caches()
+            for name, value in env:
+                _set_runtime_env(name, value)
+            # The aggregate transfer guard sets the three directional ones,
+            # so it goes back first.
+            for name in ("jax_transfer_guard", *jax_config):
+                if jax.config.values[name] != jax_config[name]:
+                    jax.config.update(name, jax_config[name])
             raise
 
 
@@ -854,7 +862,9 @@ def set_backend(
     between mode defaults and these arguments. Once JAX initialized its backends they
     cannot change the process, so a differing setting warns instead. Also updates the
     config cache so subsequent ``get_backend_config()`` calls are free. A call that
-    raises leaves the previous configuration, environment and JAX settings in place.
+    raises leaves the previous configuration, environment and JAX settings in place;
+    JAX backends it initialized (selecting the default device does) stay initialized,
+    so later GPU allocator settings no longer apply.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
