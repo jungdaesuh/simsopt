@@ -60,6 +60,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
 
 from ._math_utils import as_jax_float64
@@ -414,7 +415,7 @@ def boozer_penalty_constraints(
     return result[0] if derivatives == 0 else result
 
 
-@partial(jax.jit, static_argnames=_STATIC_OPTIONS)
+@partial(jit, static_argnames=_STATIC_OPTIONS)
 def boozer_penalty_residual(
     problem: BoozerProblem,
     x: jax.Array,

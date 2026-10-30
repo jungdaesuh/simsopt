@@ -45,6 +45,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core.quasi_newton import (
         BFGS_MESSAGES,
         LBFGSB_MESSAGES,
@@ -181,12 +182,12 @@ def _problems():
     }
 
 
-@partial(jax.jit, static_argnames=("name",))
+@partial(jit, static_argnames=("name",))
 def _device_bfgs(x0, params, gtol, maxiter, name):
     return minimize_bfgs(partial(_value_and_grad, name, params=params), x0, gtol, maxiter)
 
 
-@partial(jax.jit, static_argnames=("name", "maxcor", "maxls"))
+@partial(jit, static_argnames=("name", "maxcor", "maxls"))
 def _device_lbfgsb(x0, params, ftol, gtol, maxiter, maxls, name, maxcor):
     return minimize_lbfgsb(
         partial(_value_and_grad, name, params=params), x0, ftol, gtol, maxiter, maxcor=maxcor, maxls=maxls
