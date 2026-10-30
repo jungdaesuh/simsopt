@@ -14,6 +14,8 @@ from simsopt_jax.backend.dtypes import (
     runtime_device_put,
 )
 
+from ._device_scalars import placement_zero
+
 __all__ = [
     "_explicit_device_array",
     "as_jax_array",
@@ -85,24 +87,22 @@ def zero_padding_like(array, *, axis: int, pad_width: int):
     """Construct trailing padding with the input dtype and execution placement.
 
     Args:
-        array (jax.Array): Finite input of any nonscalar shape supplying dtype and
-            placement.
+        array (jax.Array): Input of any nonscalar shape supplying dtype and
+            placement; its values are not read.
         axis (int): Axis to replace with a padding extent; negative axes count from the
             end.
         pad_width (int): Nonnegative number of padding entries.
 
     Returns:
-        jax.Array: Zeros with the input shape except for axis extent
-            pad_width; formed from the input reduction, so nonfinite/overflowing
-            inputs can yield NaNs.
+        jax.Array: Exact zeros with the input shape except for axis extent
+            pad_width, broadcast from :func:`placement_zero`, so nonfinite or
+            overflowing inputs still pad with zeros.
     """
     axis_index = int(axis) if axis >= 0 else array.ndim + int(axis)
-    zero_slice = jnp.sum(array, axis=axis_index, keepdims=True, dtype=array.dtype)
-    zero_slice = zero_slice - zero_slice
     target_shape = (
         array.shape[:axis_index] + (int(pad_width),) + array.shape[axis_index + 1 :]
     )
-    return jnp.broadcast_to(zero_slice, target_shape)
+    return jnp.broadcast_to(placement_zero(array), target_shape)
 
 
 def pad_axis(array, *, axis: int, padded_size: int):

@@ -39,7 +39,9 @@ Retained settings:
   backend reconfiguration clears registered in-process kernel and placement caches.
 * GPU allocation controls are ``SIMSOPT_JAX_GPU_PREALLOCATE``,
   ``SIMSOPT_JAX_GPU_MEM_FRACTION``, ``SIMSOPT_JAX_GPU_ALLOCATOR`` and
-  ``SIMSOPT_TF_GPU_ALLOCATOR``. Set these before initializing a GPU backend.
+  ``SIMSOPT_TF_GPU_ALLOCATOR``. Set these before initializing a GPU backend;
+  afterwards they cannot apply, and a differing setting warns. Standard XLA
+  allocator variables none of them sets keep the caller's value.
 * Field evaluation runs on the single runtime device (the first local device
   of the selected platform); it does not distribute work across devices.
 
@@ -54,6 +56,8 @@ import shlex
 import sys
 import threading
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Callable, Literal
 
 import jax
@@ -542,60 +546,59 @@ def _set_runtime_env(name: str, value: str | None) -> None:
 def _gpu_memory_runtime_env(
     config: BackendConfig,
 ) -> tuple[tuple[str, str | None], ...]:
-    if config.xla_gpu_preallocate is None:
-        preallocate = None
-    else:
-        preallocate = "true" if config.xla_gpu_preallocate else "false"
+    """The standard JAX/XLA allocator variables ``config`` resolves.
 
-    if config.xla_gpu_allocator == "vmm":
-        python_mem_fraction = None
-        client_mem_fraction = (
-            None
-            if config.xla_gpu_mem_fraction is None
-            else str(config.xla_gpu_mem_fraction)
+    Only settings ``config`` resolves (not None) appear, so a caller's own
+    ``XLA_PYTHON_CLIENT_*`` value survives when no ``SIMSOPT_*`` override or
+    keyword sets it. A resolved memory fraction owns both fraction variables:
+    it goes to the one the allocator reads and clears the other (value None).
+    """
+    env: list[tuple[str, str | None]] = []
+    if config.xla_gpu_preallocate is not None:
+        env.append(
+            (
+                _XLA_PYTHON_CLIENT_PREALLOCATE_ENV,
+                "true" if config.xla_gpu_preallocate else "false",
+            )
         )
-    else:
-        python_mem_fraction = (
-            None
-            if config.xla_gpu_mem_fraction is None
-            else str(config.xla_gpu_mem_fraction)
-        )
-        client_mem_fraction = None
-
-    return (
-        (_XLA_PYTHON_CLIENT_PREALLOCATE_ENV, preallocate),
-        (_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator),
-        (_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, python_mem_fraction),
-        (_XLA_CLIENT_MEM_FRACTION_ENV, client_mem_fraction),
-        (_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator),
-    )
-
-
-def _gpu_memory_runtime_env_matches(config: BackendConfig) -> bool:
-    return all(
-        os.environ.get(name) == expected
-        for name, expected in _gpu_memory_runtime_env(config)
-    )
-
-
-def _assert_jax_not_initialized_for_gpu_memory_config(config: BackendConfig) -> None:
-    if config.jax_platform != "cuda" or not _jax_backends_initialized():
-        return
-    if _gpu_memory_runtime_env_matches(config):
-        return
-    raise RuntimeError(
-        "JAX GPU memory environment variables must be resolved before "
-        "backend initialization. Call simsopt_jax.backend.set_backend(...) "
-        "before touching JAX devices."
-    )
+    if config.xla_gpu_allocator is not None:
+        env.append((_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator))
+    if config.xla_gpu_mem_fraction is not None:
+        fraction = str(config.xla_gpu_mem_fraction)
+        vmm = config.xla_gpu_allocator == "vmm"
+        env.append((_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None if vmm else fraction))
+        env.append((_XLA_CLIENT_MEM_FRACTION_ENV, fraction if vmm else None))
+    if config.tf_gpu_allocator is not None:
+        env.append((_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator))
+    return tuple(env)
 
 
 def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
+    """Export ``config``'s GPU allocator settings while they can still apply.
+
+    XLA reads them when it initializes its backends. Afterwards they cannot
+    change this process, so they are left alone (child processes still
+    resolve the synchronized ``SIMSOPT_*`` variables) and a setting that
+    differs from the running process warns.
+    """
     if config.jax_platform != "cuda":
         return
-    _assert_jax_not_initialized_for_gpu_memory_config(config)
-    for name, value in _gpu_memory_runtime_env(config):
-        _set_runtime_env(name, value)
+    runtime_env = _gpu_memory_runtime_env(config)
+    if not _jax_backends_initialized():
+        for name, value in runtime_env:
+            _set_runtime_env(name, value)
+        return
+    differing = tuple(
+        name for name, value in runtime_env if os.environ.get(name) != value
+    )
+    if differing:
+        warnings.warn(
+            "JAX already initialized its backends, so the requested GPU memory "
+            f"settings ({', '.join(differing)}) do not apply to this process; "
+            "set them before touching JAX devices.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def _apply_cpu_compile_preset_env(config: BackendConfig, policy: BackendPolicy) -> None:
@@ -768,6 +771,65 @@ def apply_jax_runtime_config() -> None:
     _select_initialized_jax_default_device(jax, config)
 
 
+# Process state a ``set_backend`` call changes, restored when the call is rejected.
+_SET_BACKEND_ENV_NAMES = (
+    *(env_name for env_name, _ in _SYNCED_RUNTIME_ENV_VALUES),
+    _JAX_PLATFORMS_ENV,
+    _XLA_FLAGS_ENV,
+    _XLA_PYTHON_CLIENT_PREALLOCATE_ENV,
+    _XLA_PYTHON_CLIENT_ALLOCATOR_ENV,
+    _XLA_PYTHON_CLIENT_MEM_FRACTION_ENV,
+    _XLA_CLIENT_MEM_FRACTION_ENV,
+    _TF_GPU_ALLOCATOR_ENV,
+)
+_APPLIED_JAX_CONFIG_NAMES = (
+    "jax_platforms",
+    "jax_platform_name",
+    "jax_enable_x64",
+    "jax_default_matmul_precision",
+    "jax_debug_nans",
+    "jax_disable_jit",
+    "jax_transfer_guard",
+    "jax_compilation_cache_dir",
+    "jax_persistent_cache_min_compile_time_secs",
+    "jax_persistent_cache_min_entry_size_bytes",
+    "jax_persistent_cache_enable_xla_caches",
+    "jax_default_device",
+)
+
+
+@contextmanager
+def _restore_backend_state_on_error() -> Iterator[None]:
+    """Hold the runtime lock and undo every change if the body raises.
+
+    Restores the installed configuration, the environment variables
+    ``set_backend`` synchronizes or exports, and the JAX settings
+    ``apply_jax_runtime_config`` updates, so a rejected call leaves the
+    process in the mode it had before.
+    """
+    global _cached_backend_config
+    global _requested_jax_platforms_value, _exported_jax_platforms
+    with _backend_runtime_lock:
+        config = _cached_backend_config
+        platforms_state = (_requested_jax_platforms_value, _exported_jax_platforms)
+        env = tuple((name, os.environ.get(name)) for name in _SET_BACKEND_ENV_NAMES)
+        jax_config = tuple(
+            (name, jax.config.values[name]) for name in _APPLIED_JAX_CONFIG_NAMES
+        )
+        try:
+            yield
+        except BaseException:
+            for name, value in env:
+                _set_runtime_env(name, value)
+            for name, value in jax_config:
+                if jax.config.values[name] != value:
+                    jax.config.update(name, value)
+            _cached_backend_config = config
+            _requested_jax_platforms_value, _exported_jax_platforms = platforms_state
+            _reset_backend_runtime_caches()
+            raise
+
+
 def set_backend(
     mode: BackendMode | Literal["jax"],
     *,
@@ -789,8 +851,10 @@ def set_backend(
     This keeps the legacy env vars in sync so existing scripts and subprocess
     helpers continue to work unchanged. GPU memory keywords resolve the
     pre-backend-initialization JAX/XLA allocator env vars explicitly; env overrides still sit
-    between mode defaults and these arguments. Also updates the config cache so
-    subsequent ``get_backend_config()`` calls are free.
+    between mode defaults and these arguments. Once JAX initialized its backends they
+    cannot change the process, so a differing setting warns instead. Also updates the
+    config cache so subsequent ``get_backend_config()`` calls are free. A call that
+    raises leaves the previous configuration, environment and JAX settings in place.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
@@ -828,6 +892,11 @@ def set_backend(
     Returns:
         BackendConfig object: Installed immutable configuration after
             resolving overrides.
+
+    Raises:
+        RuntimeError: GPU parity without the determinism ``XLA_FLAGS``, or a
+            platform JAX never initialized in strict or GPU parity mode.
+        ValueError: An invalid mode, selector or override.
     """
     global _cached_backend_config
     if mode == "jax":
@@ -855,13 +924,13 @@ def set_backend(
         xla_gpu_allocator=xla_gpu_allocator,
         tf_gpu_allocator=tf_gpu_allocator,
     )
-    with _backend_runtime_lock:
+    with _restore_backend_state_on_error():
         _cached_backend_config = config
         _reset_backend_runtime_caches()
         for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
             os.environ[env_name] = _runtime_env_value(getattr(config, attribute_name))
         _export_startup_jax_platforms(config)
         _apply_cuda_autotuner_env(config)
-    if configure_runtime:
-        apply_jax_runtime_config()
+        if configure_runtime:
+            apply_jax_runtime_config()
     return config
