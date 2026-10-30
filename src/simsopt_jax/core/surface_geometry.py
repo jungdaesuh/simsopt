@@ -18,7 +18,8 @@ Coefficient derivatives are JAX transforms of :func:`surface_quantity_of_dofs`
 at the native DOF vector, fixed DOFs included, which
 :func:`~simsopt_jax.core.surface_fourier_series.surface_get_dofs` reads from a
 spec. The DOF axes come last, as natively, so ``Derivative({surface: ...})``
-projects them onto the free DOFs. Jit them, with ``simsopt_jax.backend.jit.jit``, with the spec as an argument::
+projects them onto the free DOFs. Jit them with ``simsopt_jax.backend.jit.jit``,
+passing the spec as an argument::
 
     @jit
     def dgamma_by_dcoeff(spec):

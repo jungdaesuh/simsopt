@@ -172,8 +172,16 @@ def _fitted_surface(
     Returns:
         SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier: The
         fitted surface; its DOFs are the unique least-squares solution.
+
+    Raises:
+        AssertionError: If the fit grid leaves a DOF undetermined, so that the
+            fitted DOFs would depend on which native build solves the fit.
     """
     surface = _surface(kind, stellsym, nfp, clamped, fit_grid=True)
+    ndofs = surface.get_dofs().size
+    rank = np.linalg.matrix_rank(surface.dgamma_by_dcoeff().reshape(-1, ndofs))
+    if rank != ndofs:
+        raise AssertionError(f"{kind} fit grid determines {rank} of {ndofs} DOFs.")
     surface.fit_to_curve(axis, 0.1, flip_theta=True)
     return surface
 
@@ -370,19 +378,6 @@ def _assert_every_formulation_native(
 
 
 class TestBoozerResidualJax(JaxTestCase):
-    def test_fixture_fit_determines_every_surface_dof(self):
-        """Every fixture surface's fit has a full-rank least-squares matrix, so
-        its DOFs do not depend on which native build solves it."""
-        _, _, axis, nfp, _ = get_data("ncsx")
-        for kind in _SURFACE_CLASSES:
-            for stellsym in (True, False):
-                for clamped in (False, True) if kind == "tensor" else (False,):
-                    with self.subTest(kind=kind, stellsym=stellsym, clamped=clamped):
-                        surface = _fitted_surface(kind, stellsym, nfp, axis, clamped)
-                        ndofs = surface.get_dofs().size
-                        matrix = surface.dgamma_by_dcoeff().reshape(-1, ndofs)
-                        self.assertEqual(np.linalg.matrix_rank(matrix), ndofs)
-
     def test_surface_residual_matches_native(self):
         """Boozer residuals, Jacobians and Hessians agree with native formulations."""
         for name in _RESIDUAL_CASES:
@@ -463,6 +458,7 @@ class TestBoozerResidualJax(JaxTestCase):
             _outputs(results[0.7, 2]),
             _outputs(expected[7e4, 2]),
             _outputs(expected[0.7, 2]),
+            strict=True,
         )
         for order, (heavy, light, native_heavy, native_light) in enumerate(pairs):
             assert_matches_native(
@@ -1069,7 +1065,7 @@ class TestBoozerResidualJax(JaxTestCase):
             boozer_penalty_constraints(
                 replace(exact, constraint_weight=exact.targetlabel), x, optimize_G=True
             )
-        # As native asserts: no order the field model does not carry.
+        # No order the field model does not carry, and only integer orders.
         weighted = replace(exact, constraint_weight=exact.targetlabel)
         tensor = boozer_problem(
             tensor_setup.field, tensor_setup.surface, tensor_setup.label, tensor_setup.target
@@ -1083,21 +1079,21 @@ class TestBoozerResidualJax(JaxTestCase):
                 lambda order: jax_boozer_surface_residual(
                     exact, x, derivatives=order, optimize_G=False
                 ),
-                (-1, 3),
+                (-1, 3, 1.0, True),
             ],
             "penalty": [
                 lambda order: boozer_penalty_constraints(weighted, x, derivatives=order),
-                (-1, 3),
+                (-1, 3, 1.0, True),
             ],
             "exact constraints": [
                 lambda order: boozer_exact_constraints(tensor, tensor_xl, derivatives=order),
-                (-1, 2, 3),
+                (-1, 2, 3, 0.0, False),
             ],
             "exact residual": [
                 lambda order: boozer_exact_residual(
                     tensor, tensor_x, tensor_rows, derivatives=order
                 ),
-                (-1, 2, 3),
+                (-1, 2, 3, 0.0, False),
             ],
         }
         for name, (formulation, orders) in unsupported.items():
@@ -1281,29 +1277,74 @@ class TestBoozerResidualJax(JaxTestCase):
             with self.subTest(name=name), self.assertRaisesRegex(TypeError, "derivatives=1"):
                 derivative()
 
+        # The function itself, traced afresh on every call: patching the guard
+        # then changes what is traced without touching any compiled program.
+        traced = boozer_exact_constraints.__wrapped__
+
         def operations():
-            jax.clear_caches()
-            text = boozer_exact_constraints.lower(problem, xl).as_text()
+            text = jit(lambda p, point: traced(p, point)).lower(problem, xl).as_text()
             return Counter(re.findall(r"\b(?:stablehlo|chlo|func)\.[a-z_]+", text))
 
         guarded = operations()
         with mock.patch.object(
-            boozer_problem_module, "_without_derivatives_in_xl", lambda value: value
+            boozer_problem_module, "_not_differentiable_in_x", lambda value, refusal: value
         ):
             unguarded = operations()
-            # The unguarded program is the one whose derivative in xl was wrong.
-            jax.jacfwd(constraints)(xl)
-        jax.clear_caches()
+            unguarded_jacobian = host_array(jax.jacfwd(partial(traced, problem))(xl))
         self.assertGreater(sum(guarded.values()), 0)
         self.assertEqual(guarded, unguarded, "the guard adds operations")
+        # What the guard refuses is wrong: without it, the derivative in xl
+        # misses d2B/dXdX and differs from the Jacobian of derivatives=1.
+        jacobian = host_array(boozer_exact_constraints(problem, xl, derivatives=1)[1])
+        self.assertGreater(
+            np.max(np.abs(unguarded_jacobian - jacobian)), 1e-6 * np.max(np.abs(jacobian))
+        )
+
+    def test_derivative_outputs_refuse_derivatives_in_x(self):
+        """Outputs requested with ``derivatives >= 1`` use the field's Taylor
+        model of that order, so their derivative in ``x`` would miss the
+        field's next derivative: every formulation raises instead."""
+        setup = _setup("tensor", False, "toroidal_flux")
+        problem = boozer_problem(
+            setup.field, setup.surface, setup.label, setup.target, 5.0
+        )
+        x = place_float64(_decision(setup.surface, True), problem.targetlabel)
+        xl = place_float64(
+            _decision(setup.surface, True, (0.37, -0.23)), problem.targetlabel
+        )
+        rows = boozer_exact_residual_rows(setup.surface)
+        derivative_outputs = {
+            "residual": (
+                partial(jax_boozer_surface_residual, problem, derivatives=1, optimize_G=True),
+                x,
+            ),
+            "penalty": (
+                partial(boozer_penalty_constraints, problem, derivatives=1, optimize_G=True),
+                x,
+            ),
+            "exact constraints": (
+                partial(boozer_exact_constraints, problem, derivatives=1),
+                xl,
+            ),
+            "exact residual": (
+                partial(boozer_exact_residual, problem, residual_rows=rows, derivatives=1),
+                x,
+            ),
+        }
+        for name, (outputs, point) in derivative_outputs.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError, r"\(derivatives=1\) is not differentiable in x"
+            ):
+                jax.jacfwd(outputs)(point)
 
     def test_exact_constraint_values_have_exact_coil_derivatives(self):
         """At a fixed ``xl``, the coil derivatives of
-        ``boozer_exact_constraints(derivatives=0)`` (first and second order,
-        forward and reverse, jitted and vmapped) equal those of the same
-        Lagrangian gradient taken through the field kernel itself, built here
-        from the unweighted residual and constraints of
-        :func:`boozer_exact_residual` at every residual row."""
+        ``boozer_exact_constraints(derivatives=0)`` (first and second order
+        forward along one coil direction, jitted and vmapped over two steps,
+        and a first-order reverse pullback) equal those of the same Lagrangian
+        gradient taken through the field kernel itself, built here from the
+        unweighted residual and constraints of :func:`boozer_exact_residual` at
+        every residual row."""
         setup = _setup("tensor", False, "toroidal_flux")
         problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
         xl = place_float64(
