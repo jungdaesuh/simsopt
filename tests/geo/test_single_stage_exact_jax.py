@@ -25,6 +25,7 @@ with optional_jax_imports():
     )
     from simsopt.objectives import QuadraticPenalty
     from simsopt_jax.backend.dtypes import explicit_device_array
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core.single_stage_exact import (
         ExactSingleStageState,
         _absolute,
@@ -905,7 +906,7 @@ class TestSingleStageExactJax(JaxTestCase):
         values = explicit_device_array(
             [-np.inf, -2.0, -0.0, 0.0, 2.0, np.inf, np.nan], dtype=np.float64
         )
-        magnitude, derivative = jax.jit(jax.vmap(jax.value_and_grad(_absolute)))(values)
+        magnitude, derivative = jit(jax.vmap(jax.value_and_grad(_absolute)))(values)
         np.testing.assert_array_equal(host_array(magnitude), np.abs(host_array(values)))
         np.testing.assert_array_equal(
             host_array(derivative), np.sign(host_array(values))

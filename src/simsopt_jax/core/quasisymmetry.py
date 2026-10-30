@@ -24,6 +24,8 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 
+from simsopt_jax.backend.jit import jit
+
 from .field import grouped_biot_savart_B_from_spec
 from .specs import GroupedCoilSetSpec, SurfaceSpec
 from .surface_fourier_series import surface_get_dofs, surface_spec_with_dofs
@@ -43,7 +45,7 @@ def _ratio(surface: SurfaceSpec, coils: GroupedCoilSetSpec, axis: int) -> jax.Ar
     return jnp.mean(dS * B_nonQS**2) / jnp.mean(dS * B_QS**2)
 
 
-@partial(jax.jit, static_argnames=("axis",))
+@partial(jit, static_argnames=("axis",))
 def non_quasi_symmetric_ratio(
     surface: SurfaceSpec, coils: GroupedCoilSetSpec, *, axis: int
 ) -> tuple[jax.Array, jax.Array, GroupedCoilSetSpec]:

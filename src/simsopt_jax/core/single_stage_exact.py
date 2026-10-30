@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
 
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
 
 from .boozer_problem import BoozerProblem
@@ -234,7 +235,7 @@ def _length_penalty(
     return 0.5 * multiplier**2, total_length, gradient
 
 
-@jax.jit
+@jit
 def exact_single_stage_evaluate(
     problem: ExactSingleStageProblem,
     dofs: jax.Array,
