@@ -245,7 +245,7 @@ class TestNativeJaxDevice(JaxTestCase):
         wrapped = jit(scaled_norm, static_argnums=1)
         result = wrapped(x, 2.0)
         np.testing.assert_array_equal(
-            result, jax.jit(scaled_norm, static_argnums=1)(x, 2.0)
+            result, jax.jit(scaled_norm, static_argnums=1)(x, 2.0)  # noqa: TID251 raw jax.jit is the reference result
         )
         self.assertEqual(result.devices(), {native_jax_device()})
         self.assertIs(wrapped.__wrapped__, scaled_norm)

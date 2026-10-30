@@ -119,6 +119,15 @@ def taylor_field(
     return field
 
 
+def _require_derivative_order(derivatives: int, highest: int) -> None:
+    """Raise ``ValueError`` unless ``derivatives`` is an order from 0 to ``highest``,
+    as native asserts: a higher order would use a field model too short for it."""
+    if derivatives not in range(highest + 1):
+        raise ValueError(
+            f"derivatives must be an integer from 0 to {highest}; got {derivatives!r}."
+        )
+
+
 def residual_derivatives(
     residual: Callable[[jax.Array], jax.Array], x: jax.Array, derivatives: int
 ) -> tuple[jax.Array, ...]:
@@ -134,7 +143,11 @@ def residual_derivatives(
     Returns:
         tuple[jax.Array, ...]: Residual (nr,), optionally Jacobian (nr, nx) and
             Hessians (nr, nx, nx).
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0, 1 or 2.
     """
+    _require_derivative_order(derivatives, 2)
     if derivatives == 0:
         return (residual(x),)
 
@@ -168,7 +181,11 @@ def objective_derivatives(
 
     Returns:
         tuple[jax.Array, ...]: Value (), optionally gradient (nx,) and Hessian (nx, nx).
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0, 1 or 2.
     """
+    _require_derivative_order(derivatives, 2)
     if derivatives == 0:
         return (objective(x),)
     if derivatives == 1:
