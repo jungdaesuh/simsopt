@@ -142,18 +142,10 @@ def _cyl_points_to_cart(points_cyl):
     return jnp.stack((r * jnp.cos(phi), r * jnp.sin(phi), z), axis=1)
 
 
-def _point_independent_two_pi(points):
-    """2*pi placed like ``points`` but read from none of them, so a nonfinite
-    point cannot change any other point's angle."""
-    return _two_pi(_placement_zero(points))
-
-
 @jit
 def _canonical_set_points_cyl(points_cyl):
     points = _as_jax_float64(points_cyl)
-    return points.at[:, 1].set(
-        jnp.fmod(points[:, 1], _point_independent_two_pi(points))
-    )
+    return points.at[:, 1].set(jnp.fmod(points[:, 1], _two_pi(points)))
 
 
 @jit
@@ -162,9 +154,7 @@ def _cart_points_to_cyl(points_cart):
     x = points[:, 0]
     y = points[:, 1]
     phi = jnp.arctan2(y, x)
-    phi = jnp.where(
-        phi < _placement_zero(points), phi + _point_independent_two_pi(points), phi
-    )
+    phi = jnp.where(phi < _placement_zero(points), phi + _two_pi(points), phi)
     return jnp.stack(
         (
             jnp.sqrt(x * x + y * y),

@@ -106,6 +106,9 @@ def _placement_zero_jvp(primals, tangents):
 def two_pi(reference: jax.Array) -> jax.Array:
     """Return 2*pi with the reference dtype and placement.
 
+    Built from :func:`device_one`, so no value of ``reference`` is read and a
+    nonfinite entry (a point at infinity) cannot change it.
+
     Args:
         reference (jax.Array): Reference array of any shape whose dtype and execution
             placement are used.
