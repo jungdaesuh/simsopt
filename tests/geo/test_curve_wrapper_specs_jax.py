@@ -117,7 +117,7 @@ class TestCurveWrapperSpecs(JaxTestCase):
                 order2 = _terms(spec, 2)
                 for term, expected in zip(order2, _terms(reference, 2), strict=True):
                     np.testing.assert_allclose(term, expected, rtol=0, atol=1e-11)
-                np.testing.assert_array_equal(order2[1], order1[1])
+                np.testing.assert_allclose(order2[1], filament.gammadash(), rtol=0, atol=1e-13)
 
     def test_filament_second_derivative_is_derivative_of_tangent(self):
         """gammadashdash equals the spectral derivative of gammadash for both frames."""
