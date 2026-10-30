@@ -679,6 +679,23 @@ class TestQfmJax(JaxTestCase):
                 native.qfm_penalty_constraints(native.surface.x, 1, constraint_weight),
             )
 
+    def test_field_null_at_one_point_keeps_native_finite_gradient(self):
+        """A field point so far away that B underflows to zero keeps the native finite gradient.
+
+        |B| is not differentiable at B = 0, but its square is; native
+        differentiates B^2, so an isolated null contributes a zero term.
+        """
+        native, port = _pair()
+        points = native.surface.gamma().reshape(-1, 3).copy()
+        points[3] = [1e110, 0.0, 0.0]
+        for solver in (native, port):
+            solver.biotsavart.set_points(points)
+        np.testing.assert_array_equal(native.biotsavart.B()[3], 0.0)
+        expected = native.qfm.dJ_by_dsurfacecoefficients()
+        self.assertTrue(np.all(np.isfinite(expected)))
+        _assert_pair(port.qfm.J(), native.qfm.J())
+        _assert_pair(port.qfm.dJ_by_dsurfacecoefficients(), expected)
+
     def test_invalid_derivative_method_and_flux_index_match_native(self):
         """Invalid orders, method names and flux indices raise native exception classes."""
         native, port = _pair(label_class=ToroidalFlux)

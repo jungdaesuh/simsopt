@@ -82,12 +82,36 @@ def _norm(vectors: jax.Array) -> jax.Array:
     return jnp.sqrt(jnp.sum(vectors * vectors, axis=-1))
 
 
+@jax.custom_jvp
+def _squared_norm(vectors: jax.Array) -> jax.Array:
+    """Native ``np.linalg.norm(v, axis=-1)**2`` with the derivative of ``sum(v * v)``.
+
+    The value keeps native's rounding. Differentiating through the square root
+    would give ``inf * 0 = nan`` at a vector that is exactly zero, such as a
+    field null; the square itself is smooth there.
+
+    Args:
+        vectors (jax.Array): Shape (..., 3) vectors in any units.
+
+    Returns:
+        jax.Array: Shape (...) squared norms in the squared input units.
+    """
+    return _norm(vectors)**2
+
+
+@_squared_norm.defjvp
+def _squared_norm_jvp(
+    primals: tuple[jax.Array], tangents: tuple[jax.Array],
+) -> tuple[jax.Array, jax.Array]:
+    (vectors,), (vectors_dot,) = primals, tangents
+    return _norm(vectors)**2, 2 * jnp.sum(vectors * vectors_dot, axis=-1)
+
+
 def _residual(normal: jax.Array, field: jax.Array) -> jax.Array:
     norm_normal = _norm(normal)
     unit_normal = normal / norm_normal[..., None]
     field_normal = jnp.sum(field * unit_normal, axis=-1)
-    norm_field = _norm(field)
-    return jnp.sum(field_normal**2 * norm_normal) / jnp.sum(norm_field**2 * norm_normal)
+    return jnp.sum(field_normal**2 * norm_normal) / jnp.sum(_squared_norm(field) * norm_normal)
 
 
 def _residual_normal(spec: QfmSpec) -> jax.Array:
