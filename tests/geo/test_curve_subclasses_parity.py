@@ -50,8 +50,9 @@ from unittest_jax_support import host_array, parity_default_device, parity_rng
 import numpy as np
 
 from simsopt.geo.curvehelical import CurveHelical
-from simsopt.geo.curveplanarfourier import CurvePlanarFourier
+from simsopt.geo.curveplanarfourier import CurvePlanarFourier, JaxCurvePlanarFourier
 from simsopt.geo.curverzfourier import CurveRZFourier
+from simsopt.geo.curvexyzfourier import JaxCurveXYZFourier
 
 
 _GAMMA_ATOL = 1e-10
@@ -90,6 +91,17 @@ def _make_planar_curve(seed: int) -> CurvePlanarFourier:
     dofs += 0.01 * parity_rng(seed).normal(size=dofs.shape)
     curve.x = dofs
     return curve
+
+
+def _make_native_jax_curves(seed: int) -> tuple[JaxCurveXYZFourier, JaxCurvePlanarFourier]:
+    """Native JaxCurve twins of CurveXYZFourier and CurvePlanarFourier, same DOF layouts."""
+    xyz = JaxCurveXYZFourier(24, 3)
+    dofs = 0.05 * parity_rng(seed).normal(size=xyz.dof_size)
+    dofs[[2, 8, 15]] += (1.0, 1.0, 0.3)  # xc(1), ys(1), zs(1)
+    xyz.x = dofs
+    planar = JaxCurvePlanarFourier(20, 3)
+    planar.x = _make_planar_curve(seed).get_dofs()
+    return xyz, planar
 
 
 def _make_rzfourier_curve(seed: int, *, stellsym: bool) -> CurveRZFourier:
@@ -441,3 +453,23 @@ class TestCurveSubclassesParity(JaxTestCase):
         patches.enter_context(parity_default_device(parity_lane))
         curve = _make_rzfourier_curve(seed=125 if stellsym else 126, stellsym=stellsym)
         _assert_dof_round_trip(curve, seed=225 if stellsym else 226)
+
+    def test_native_jax_curve_twins_round_trip_to_matching_specs(self):
+        """JaxCurveXYZFourier and JaxCurvePlanarFourier map to their direct curve specs."""
+        for case_id_0, parity_lane in zip(
+            ("cpu_parity", "gpu_parity"), ("cpu", "gpu"), strict=True
+        ):
+            with self.subTest(
+                case_id_0=case_id_0, parity_lane=parity_lane
+            ), self.case() as patches:
+                self._case_native_jax_curve_twins_round_trip_to_matching_specs(
+                    parity_lane, patches
+                )
+
+    def _case_native_jax_curve_twins_round_trip_to_matching_specs(
+        self, parity_lane, patches
+    ):
+        """Run one row with case-local objects released before runtime cleanup."""
+        patches.enter_context(parity_default_device(parity_lane))
+        for curve in _make_native_jax_curves(seed=130):
+            _assert_dof_round_trip(curve, seed=230)

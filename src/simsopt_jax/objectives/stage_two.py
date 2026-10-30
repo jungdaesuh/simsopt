@@ -723,7 +723,9 @@ def stage_two_geometry(
     ``parameters`` is the field's free DOF vector; coils keep extraction order
     and each group of ``filaments_per_pack`` coils has one centerline. The
     filaments of a pack are offsets of their pack's frame, which is evaluated
-    once, from the pack's first coil (see :class:`StageTwoObjectiveConfig`).
+    once per set of filaments, from the first pack that lists them; a later
+    pack (a symmetry image) may list the same filaments in any order (see
+    :class:`StageTwoObjectiveConfig`).
 
     Args:
         extraction: CoilSetDofExtractionSpec object, ordered coil layout and fixed DOF snapshots.
@@ -738,8 +740,9 @@ def stage_two_geometry(
     # current's would otherwise be a symbolic zero) without coupling any
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
-    # Ordinary geometry is keyed by curve identity; pack centerlines retain
-    # the first filament's identity, with offsets cached per filament below.
+    # Ordinary geometry is keyed by curve identity. A pack's centerline and
+    # each filament's offset curve are cached per filament, because another
+    # pack (a symmetry image) may list the same filaments in another order.
     curve_geometry = _ordinary_curve_geometry(
         tuple(
             coil.curve
@@ -747,15 +750,14 @@ def stage_two_geometry(
             if not isinstance(coil.curve, CurveFilamentSpec)
         )
     )
-    filament_geometry: dict[int, tuple[jax.Array, jax.Array]] = {}
+    filament_geometry: dict[int, tuple[tuple[jax.Array, ...], jax.Array, jax.Array]] = {}
     coils: list[tuple[jax.Array, jax.Array, jax.Array]] = []
     centerlines: list[tuple[jax.Array, ...]] = []
     for index, coil_spec in enumerate(coil_specs):
         curve = coil_spec.curve
         if isinstance(curve, CurveFilamentSpec):
-            start = index - index % filaments_per_pack
-            source = coil_specs[start].curve
             if id(curve) not in filament_geometry:
+                start = index - index % filaments_per_pack
                 # _check_packs guarantees every curve in this pack is a filament.
                 pack = cast(
                     tuple[CurveFilamentSpec, ...],
@@ -764,12 +766,12 @@ def stage_two_geometry(
                 *base_geometry, pack_gammas, pack_gammadashs = curve_filament_pack_from_dofs(
                     pack[0], pack[0].dofs, tuple((filament.dn, filament.db) for filament in pack)
                 )
-                curve_geometry[id(source)] = tuple(base_geometry)
+                centerline = tuple(base_geometry)
                 filament_geometry.update(
-                    (id(filament), (pack_gammas[k], pack_gammadashs[k])) for k, filament in enumerate(pack)
+                    (id(filament), (centerline, pack_gammas[k], pack_gammadashs[k]))
+                    for k, filament in enumerate(pack)
                 )
-            geometry = curve_geometry[id(source)]
-            gamma, gammadash = filament_geometry[id(curve)]
+            geometry, gamma, gammadash = filament_geometry[id(curve)]
         else:
             geometry = curve_geometry[id(curve)]
             gamma, gammadash = geometry[0], geometry[1]

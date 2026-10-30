@@ -1,14 +1,16 @@
 """``device_one`` must add no derivative path.
 
-``device_one(r)`` builds a 1.0 on ``r``'s device as ``exp(sum(r - r))``.  Its
-derivative is zero, but when it was left differentiable reverse mode sent the
+``device_one(r)`` builds a 1.0 on ``r``'s device without reading ``r``.  Its
+derivative is zero, but when it was built as a differentiable ``exp(sum(r - r))``
+reverse mode sent the
 whole cotangent ``c`` of each product ``device_one(r) * y`` into ``r`` twice, as
 ``+c`` and ``-c``, beside ``r``'s own cotangent ``g``: the accumulated ``(g + c)
 - c`` then carries an error ``u |c|`` instead of ``u |g|``.  In Biot-Savart the
 product is ``mu0/4pi * (currents . integral)`` with the currents as reference,
 so ``c`` is the field's whole cotangent contraction and ``g = c / I``: the
 current gradient of a Stage-II flux lost five digits (relative error 1e-11 at
-``I = 1e5``, planar-coils profile 2026-09-29).
+``I = 1e5``, planar-coils profile 2026-09-29).  Reading ``r`` also turned the
+1.0 into NaN for one infinite current, which then spread to every coil.
 """
 
 from __future__ import annotations
@@ -53,6 +55,17 @@ def _coils(quadrature: int):
     return np.stack(gammas), np.stack(gammadashs)
 
 
+def _B_current_cotangent(points, gammas, gammadashs, currents, cotangent):
+    """``d(cotangent . B)/dI`` in T/A per unit cotangent, shape (C,)."""
+    _, pullback = jax.vjp(
+        lambda i: biot_savart_B(
+            jnp.asarray(points), jnp.asarray(gammas), jnp.asarray(gammadashs), i
+        ),
+        jnp.asarray(currents),
+    )
+    return np.asarray(pullback(jnp.asarray(cotangent))[0])
+
+
 class TestDeviceOneGradientPath(JaxTestCase):
     def test_device_one_has_a_zero_cotangent(self):
         """Multiplying by device_one leaves the reference gradient equal to that of the
@@ -83,13 +96,9 @@ class TestDeviceOneGradientPath(JaxTestCase):
         currents = np.array([1.0e5, -1.0e5])
         cotangent = np.random.default_rng(20260929).standard_normal(points.shape)
 
-        _, pullback = jax.vjp(
-            lambda i: biot_savart_B(
-                jnp.asarray(points), jnp.asarray(gammas), jnp.asarray(gammadashs), i
-            ),
-            jnp.asarray(currents),
+        current_cotangent = _B_current_cotangent(
+            points, gammas, gammadashs, currents, cotangent
         )
-        (current_cotangent,) = pullback(jnp.asarray(cotangent))
 
         difference = (
             points[None, None, :, :] - gammas[:, :, None, :]
@@ -106,7 +115,24 @@ class TestDeviceOneGradientPath(JaxTestCase):
         additions = 3 * points.shape[0] * quadrature - 1
         bound = 2.0 * _gamma(additions + 16) * magnitude
 
-        error = np.abs(np.asarray(current_cotangent) - expected)
+        error = np.abs(current_cotangent - expected)
         self.assertTrue(
             np.all(error <= bound), (error, bound, error / np.abs(expected))
         )
+
+    def test_an_infinite_current_leaves_the_other_coils_derivative_unchanged(self):
+        """B is linear in each current, so ``d(ct . B)/dI_1`` is coil 1's unit field
+        contraction whatever coil 0 carries, even an infinite current."""
+        gammas, gammadashs = _coils(16)
+        points = np.array([[1.0, 0.0, 0.1], [1.2, 0.3, -0.2]])
+        cotangent = np.random.default_rng(20261029).standard_normal(points.shape)
+
+        finite = _B_current_cotangent(
+            points, gammas, gammadashs, np.array([1.0e5, -1.0e5]), cotangent
+        )
+        infinite = _B_current_cotangent(
+            points, gammas, gammadashs, np.array([np.inf, -1.0e5]), cotangent
+        )
+
+        self.assertTrue(np.isfinite(finite[1]), finite)
+        np.testing.assert_array_equal(infinite[1], finite[1])

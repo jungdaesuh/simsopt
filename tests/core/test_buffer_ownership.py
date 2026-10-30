@@ -14,6 +14,7 @@ with optional_jax_imports():
     import jax  # noqa: F401
     import jax.numpy as jnp
     from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.backend.dtypes import (
         as_jax_array,
         as_jax_float64,
@@ -170,7 +171,7 @@ def make_execution_gate():
     """Queue enough CPU work for the warmed consumer to remain pending."""
     matrix = jnp.ones((_GATE_SIZE, _GATE_SIZE), dtype=jnp.float64)
 
-    @jax.jit
+    @jit
     def gate(value, matrix):
         product = jax.lax.fori_loop(
             0, 4, lambda _, x: (x @ matrix) / _GATE_SIZE, matrix
@@ -244,7 +245,7 @@ class TestBufferOwnership(JaxTestCase):
         )
         tree = snapshot_host_tree({"device": device, "host": np.arange(16)})
         self.assertTrue(tree["device"] is device, 'tree["device"] is device')
-        np.testing.assert_array_equal(jax.jit(snapshot_host_tree)(device), device)
+        np.testing.assert_array_equal(jit(snapshot_host_tree)(device), device)
         self.assertTrue(
             runtime_device_put_tree(device, preserve_placement=True) is device,
             "runtime_device_put_tree(device, preserve_placement=True) is device",
