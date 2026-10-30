@@ -752,6 +752,29 @@ class TestCurveObjectivesJax(JaxTestCase):
             self.assertNotEqual(_native_candidates(native), earlier)
             self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
 
+    def test_assigned_distance_candidates_act_as_native(self):
+        """Assigning ``candidates`` replaces the search as on native: an empty list gives
+        J = 0 and the all-pairs shortest distance, a subset only its terms, None the search
+        again; a DOF change discards the assignment."""
+        base, curves = _curves()
+        surface = _surface()
+        for native, adapter in _candidate_query_objectives(base, curves, surface, _CC_THRESHOLD):
+            name = type(native).__name__
+            native.compute_candidates()
+            for pairs in ([], _native_candidates(native)[:1], None):
+                with self.subTest(objective=name, pairs=pairs), self.case():
+                    native.candidates = pairs
+                    adapter.candidates = pairs
+                    _assert_matches_native_including_nans(name, native, adapter)
+                    self.assertEqual(adapter.shortest_distance(), native.shortest_distance())
+                    self.assertEqual(sorted(cast(list, adapter.candidates)), _native_candidates(native))
+            native.candidates = adapter.candidates = []
+            base[0].x = np.asarray(base[0].x) + 0.01
+            native.compute_candidates()
+            self.assertTrue(native.candidates, name)
+            self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
+            base[0].x = np.asarray(base[0].x) - 0.01
+
     def test_distance_terms_evaluate_every_point_of_a_native_candidate(self):
         """Within a candidate pair every point is evaluated, as native: a zero tangent
         far from the other curve still gives native's non-finite gradient."""
