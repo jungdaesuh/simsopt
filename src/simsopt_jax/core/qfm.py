@@ -181,6 +181,31 @@ def _jitted_qfm_label(spec: QfmLabelSpec) -> jax.Array:
     return jnp.sum(potential * tangent) / tangent.shape[0]
 
 
+@jax.custom_jvp
+def _with_value(traced: jax.Array, value: jax.Array) -> jax.Array:
+    """``value`` as the primal, with the tangent of ``traced``.
+
+    Unlike ``traced + stop_gradient(value - traced)``, this returns ``value``
+    exactly, including when either operand is infinite.
+
+    Args:
+        traced (jax.Array): Scalar shape () quantity whose derivative is kept.
+        value (jax.Array): Scalar shape () replacement value in the same units.
+
+    Returns:
+        jax.Array: Scalar shape () ``value``.
+    """
+    del traced
+    return value
+
+
+@_with_value.defjvp
+def _with_value_jvp(
+    primals: tuple[jax.Array, jax.Array], tangents: tuple[jax.Array, jax.Array],
+) -> tuple[jax.Array, jax.Array]:
+    return primals[1], tangents[0]
+
+
 def _label_value_and_grad(
     spec: QfmLabelSpec, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
@@ -214,7 +239,7 @@ def _label_value_and_grad(
 
     def label(dofs: jax.Array) -> jax.Array:
         value = evaluate(dofs)
-        return value if label_value is None else value + jax.lax.stop_gradient(label_value - value)
+        return value if label_value is None else _with_value(value, label_value)
 
     return jax.value_and_grad(label)(surface_get_dofs(spec.surface))
 

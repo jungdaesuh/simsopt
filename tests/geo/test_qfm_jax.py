@@ -716,6 +716,26 @@ class TestQfmJax(JaxTestCase):
                         getattr(native, name)(native.surface.x, derivatives=1),
                     )
 
+    def test_overflowing_label_value_is_the_same_for_both_derivative_orders(self):
+        """An infinite label gives the native infinite value with and without derivatives."""
+        for method in ["qfm_label_constraint", "qfm_penalty_constraints"]:
+            with self.subTest(method=method), self.case():
+                native, port = _pair(label_class=Area)
+                for solver in (native, port):
+                    # A separate, enormous label surface overflows the area
+                    # while the QFM residual surface stays finite.
+                    label_surface = _label_surface(solver)
+                    label_surface.x = 1e160 * np.asarray(label_surface.x)
+                    solver.label = Area(label_surface)
+                with np.errstate(all="ignore"):
+                    self.assertEqual(native.label.J(), np.inf)
+                    for derivatives in (0, 1):
+                        expected = getattr(native, method)(native.surface.x, derivatives)
+                        actual = getattr(port, method)(port.surface.x, derivatives)
+                        value = actual[0] if derivatives else actual
+                        self.assertEqual(value, np.inf)
+                        _assert_pair(actual, expected)
+
     def test_invalid_derivative_method_and_flux_index_match_native(self):
         """Invalid orders, method names and flux indices raise native exception classes."""
         native, port = _pair(label_class=ToroidalFlux)
