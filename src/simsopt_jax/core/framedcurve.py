@@ -208,7 +208,20 @@ def rotated_frenet_frame(
 
 
 def _rotation_alpha_impl(dofs: jax.Array, points: jax.Array, order: int) -> jax.Array:
-    """Return ``alpha(points)`` for a Fourier rotation Optimizable."""
+    """Rotation angle of a Fourier ``FrameRotation`` at curve parameters.
+
+    alpha(phi) = dofs[0] + sum_{m=1}^{order} (dofs[2m-1] sin(2 pi m phi)
+    + dofs[2m] cos(2 pi m phi)), as native ``FrameRotation.alpha`` without its
+    ``scale`` factor.
+
+    Args:
+        dofs (array-like): Fourier coefficients, shape (2*order+1,), in radians.
+        points (array-like): Normalized curve parameters phi in [0, 1), shape (Q,).
+        order (int): Highest Fourier mode; static under ``jit``.
+
+    Returns:
+        jax.Array: Rotation angles, shape (Q,), in radians, float64.
+    """
     dofs_jax = _as_jax_float64(dofs)
     points_jax = _as_jax_float64(points)
     rotation = jnp.broadcast_to(dofs_jax[0], points_jax.shape)
@@ -223,7 +236,20 @@ def _rotation_alpha_impl(dofs: jax.Array, points: jax.Array, order: int) -> jax.
 def _rotation_alphadash_impl(
     dofs: jax.Array, points: jax.Array, order: int
 ) -> jax.Array:
-    """Return ``d alpha / d phi`` at ``points`` as the JVP of ``alpha``."""
+    """Derivative of the ``FrameRotation`` angle with respect to the curve parameter.
+
+    Computed as the JVP of :func:`rotation_alpha`, matching native
+    ``FrameRotation.alphadash`` without its ``scale`` factor.
+
+    Args:
+        dofs (array-like): Fourier coefficients, shape (2*order+1,), in radians.
+        points (array-like): Normalized curve parameters phi in [0, 1), shape (Q,).
+        order (int): Highest Fourier mode; static under ``jit``.
+
+    Returns:
+        jax.Array: d alpha / d phi, shape (Q,), in radians per unit of the
+            normalized parameter, float64.
+    """
     points_jax = _as_jax_float64(points)
     _, alphadash = jax.jvp(
         lambda phi: _rotation_alpha_impl(dofs, phi, order),
