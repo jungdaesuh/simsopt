@@ -113,7 +113,7 @@ extend-exclude = ["thirdparty"]
 [tool.coverage.run]
 parallel = true
 relative_files = true
-source = ["simsopt"]
+source = ["simsopt", "simsopt_jax", "simsopt_jax_adapters"]
 
 [tool.coverage.paths]
 source = [
