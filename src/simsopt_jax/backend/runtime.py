@@ -861,7 +861,9 @@ def set_backend(
     between mode defaults and these arguments. Once JAX initialized its backends they
     cannot change the process, so a differing setting warns instead. Also updates the
     config cache so subsequent ``get_backend_config()`` calls are free. A call that
-    raises leaves the previous configuration, environment and JAX settings in place.
+    raises leaves the previous configuration, environment and JAX settings in place;
+    JAX backends it initialized (selecting the default device does) stay initialized,
+    so later GPU allocator settings no longer apply.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
