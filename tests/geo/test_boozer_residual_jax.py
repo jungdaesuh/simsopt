@@ -113,27 +113,70 @@ class _Setup:
 
 
 def _surface(
-    kind: str, stellsym: bool, nfp: int, clamped: bool = False
+    kind: str,
+    stellsym: bool,
+    nfp: int,
+    clamped: bool = False,
+    fit_grid: bool = False,
 ) -> _NativeSurface:
-    if kind == "tensor":
+    """An ``mpol = ntor = 2`` native surface on a test grid or on the fit grid.
+
+    Args:
+        kind (str): ``"rz"``, ``"xyz"`` or ``"tensor"``.
+        stellsym (bool): Whether the surface is stellarator symmetric.
+        nfp (int): Number of field periods.
+        clamped (bool): Clamp the tensor surface's ``x`` and ``z`` dimensions.
+        fit_grid (bool): Use the full-period ``8 x 9`` grid on which
+            ``fit_to_curve`` determines every DOF of every kind. The test grids
+            do not: for example, a non-stellarator-symmetric XYZ surface on its
+            half-period ``4 x 6`` grid has rank 60 of 75, and native's
+            ``FullPivHouseholderQR`` then picks build-dependent free DOFs.
+
+    Returns:
+        SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier: The
+        surface at zero DOFs.
+    """
+    if fit_grid:
+        quadpoints_phi = np.linspace(0, 1 / nfp, 8, endpoint=False)
+        quadpoints_theta = np.linspace(0, 1, 9, endpoint=False)
+    elif kind == "tensor":
         # The grid of SurfaceXYZTensorFourier.get_stellsym_mask(), so BoozerExact works too.
-        return SurfaceXYZTensorFourier(
-            mpol=2,
-            ntor=2,
-            stellsym=stellsym,
-            nfp=nfp,
-            quadpoints_phi=np.linspace(0, 1 / nfp, 5, endpoint=False),
-            quadpoints_theta=np.linspace(0, 1, 5, endpoint=False),
-            clamped_dims=(clamped, False, clamped),
-        )
+        quadpoints_phi = np.linspace(0, 1 / nfp, 5, endpoint=False)
+        quadpoints_theta = np.linspace(0, 1, 5, endpoint=False)
+    else:
+        quadpoints_phi = np.linspace(0, 1 / (2 * nfp), 4, endpoint=False)
+        quadpoints_theta = np.linspace(0, 1, 6, endpoint=False)
+    clamped_dims = {"clamped_dims": (clamped, False, clamped)} if kind == "tensor" else {}
     return _SURFACE_CLASSES[kind](
         mpol=2,
         ntor=2,
         stellsym=stellsym,
         nfp=nfp,
-        quadpoints_phi=np.linspace(0, 1 / (2 * nfp), 4, endpoint=False),
-        quadpoints_theta=np.linspace(0, 1, 6, endpoint=False),
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        **clamped_dims,
     )
+
+
+def _fitted_surface(
+    kind: str, stellsym: bool, nfp: int, axis, clamped: bool = False
+) -> _NativeSurface:
+    """A fit-grid surface fitted to a tube of minor radius 0.1 m about ``axis``.
+
+    Args:
+        kind (str): ``"rz"``, ``"xyz"`` or ``"tensor"``.
+        stellsym (bool): Whether the surface is stellarator symmetric.
+        nfp (int): Number of field periods.
+        axis (Curve): Magnetic axis the tube follows.
+        clamped (bool): Clamp the tensor surface's ``x`` and ``z`` dimensions.
+
+    Returns:
+        SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier: The
+        fitted surface; its DOFs are the unique least-squares solution.
+    """
+    surface = _surface(kind, stellsym, nfp, clamped, fit_grid=True)
+    surface.fit_to_curve(axis, 0.1, flip_theta=True)
+    return surface
 
 
 def _setup(
@@ -141,8 +184,7 @@ def _setup(
 ) -> _Setup:
     _, currents, axis, nfp, bs = get_data("ncsx")
     surface = _surface(kind, stellsym, nfp, clamped)
-    surface.fit_to_curve(axis, 0.1, flip_theta=True)
-    dofs = surface.get_dofs()
+    dofs = _fitted_surface(kind, stellsym, nfp, axis, clamped).get_dofs()
     surface.set_dofs(dofs + 1e-3 * parity_rng(seed).standard_normal(dofs.size))
     labels = {
         "volume": lambda: Volume(surface, nphi=6, ntheta=7),
@@ -329,6 +371,19 @@ def _assert_every_formulation_native(
 
 
 class TestBoozerResidualJax(JaxTestCase):
+    def test_fixture_fit_determines_every_surface_dof(self):
+        """Every fixture surface's fit has a full-rank least-squares matrix, so
+        its DOFs do not depend on which native build solves it."""
+        _, _, axis, nfp, _ = get_data("ncsx")
+        for kind in _SURFACE_CLASSES:
+            for stellsym in (True, False):
+                for clamped in (False, True) if kind == "tensor" else (False,):
+                    with self.subTest(kind=kind, stellsym=stellsym, clamped=clamped):
+                        surface = _fitted_surface(kind, stellsym, nfp, axis, clamped)
+                        ndofs = surface.get_dofs().size
+                        matrix = surface.dgamma_by_dcoeff().reshape(-1, ndofs)
+                        self.assertEqual(np.linalg.matrix_rank(matrix), ndofs)
+
     def test_surface_residual_matches_native(self):
         """Boozer residuals, Jacobians and Hessians agree with native formulations."""
         for name in _RESIDUAL_CASES:
@@ -377,7 +432,10 @@ class TestBoozerResidualJax(JaxTestCase):
         native_boozer = _native_boozer(setup, 1.0)
         x = _decision(setup.surface, case.optimize_G)
         results, expected = {}, {}
-        for weight in (0.7, 700.0):
+        # The weight difference must dominate the residual term it cancels:
+        # at 700 the value of some cases is 1.5e4 times its label penalty, so
+        # one ulp of the value exceeds 1e-12 of the difference.
+        for weight in (0.7, 7e4):
             problem = boozer_problem(
                 setup.field, setup.surface, setup.label, setup.target, weight
             )
@@ -402,9 +460,9 @@ class TestBoozerResidualJax(JaxTestCase):
                     results[weight, derivatives], expected[weight, derivatives], name
                 )
         pairs = zip(
-            _outputs(results[700.0, 2]),
+            _outputs(results[7e4, 2]),
             _outputs(results[0.7, 2]),
-            _outputs(expected[700.0, 2]),
+            _outputs(expected[7e4, 2]),
             _outputs(expected[0.7, 2]),
         )
         for order, (heavy, light, native_heavy, native_light) in enumerate(pairs):
