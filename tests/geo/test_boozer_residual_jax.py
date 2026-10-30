@@ -39,6 +39,8 @@ with optional_jax_imports():
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
     from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.jit import jit
+    from simsopt_jax.core import boozer_problem as boozer_problem_module
     from simsopt_jax.core.boozer_problem import (
         BoozerProblem,
         boozer_exact_constraints,
@@ -65,7 +67,11 @@ from unittest_jax_support import (
     place_float64,
 )
 
+from collections import Counter
 from dataclasses import dataclass, replace
+from functools import partial
+from unittest import mock
+import re
 
 import numpy as np
 
@@ -1146,6 +1152,122 @@ class TestBoozerResidualJax(JaxTestCase):
                 self.assertTrue(len(actual) == len(expected) > 0, "coil leaves")
                 for leaf, (a, e) in enumerate(zip(actual, expected)):
                     assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
+
+    def test_exact_constraint_values_refuse_derivatives_in_xl(self):
+        """``boozer_exact_constraints(derivatives=0)`` is a gradient built with the
+        field's first-order model, so its derivative in ``xl`` would miss
+        ``d2B/dXdX``: forward, reverse and total derivatives through an ``xl``
+        that depends on the coils raise and point to ``derivatives=1``. The
+        guard that raises compiles to no operation."""
+        setup = _setup("tensor", False, "toroidal_flux")
+        problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
+        xl = place_float64(
+            _decision(setup.surface, True, (0.37, -0.23)), problem.targetlabel
+        )
+
+        def constraints(point):
+            return boozer_exact_constraints(problem, point)
+
+        def through_the_coils(scale):
+            coils = jax.tree.map(lambda leaf: scale * leaf, problem.coils)
+            return boozer_exact_constraints(replace(problem, coils=coils), scale * xl)
+
+        one = place_float64(1.0, problem.targetlabel)
+        for name, derivative in (
+            ("jacfwd in xl", lambda: jax.jacfwd(constraints)(xl)),
+            ("jacrev in xl", lambda: jax.jacrev(constraints)(xl)),
+            ("total derivative", lambda: jax.jacfwd(through_the_coils)(one)),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(TypeError, "derivatives=1"):
+                derivative()
+
+        def operations():
+            jax.clear_caches()
+            text = boozer_exact_constraints.lower(problem, xl).as_text()
+            return Counter(re.findall(r"\b(?:stablehlo|chlo|func)\.[a-z_]+", text))
+
+        guarded = operations()
+        with mock.patch.object(
+            boozer_problem_module, "_without_derivatives_in_xl", lambda value: value
+        ):
+            unguarded = operations()
+            # The unguarded program is the one whose derivative in xl was wrong.
+            jax.jacfwd(constraints)(xl)
+        jax.clear_caches()
+        self.assertGreater(sum(guarded.values()), 0)
+        self.assertEqual(guarded, unguarded, "the guard adds operations")
+
+    def test_exact_constraint_values_have_exact_coil_derivatives(self):
+        """At a fixed ``xl``, the coil derivatives of
+        ``boozer_exact_constraints(derivatives=0)`` (first and second order,
+        forward and reverse, jitted and vmapped) equal those of the same
+        Lagrangian gradient taken through the field kernel itself, built here
+        from the unweighted residual and constraints of
+        :func:`boozer_exact_residual` at every residual row."""
+        setup = _setup("tensor", False, "toroidal_flux")
+        problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
+        xl = place_float64(
+            _decision(setup.surface, True, (0.37, -0.23)), problem.targetlabel
+        )
+        nx = xl.shape[0] - 2
+        npoints = setup.surface.gamma().size // 3
+        every_row = jnp.arange(3 * npoints, dtype=jnp.int32)
+
+        def reference(coils, point):
+            moved = replace(problem, coils=coils)
+
+            def lagrangian(x, multipliers):
+                system = boozer_exact_residual(moved, x, every_row)
+                residual, constraints = system[:-2], system[-2:]
+                return 0.5 * jnp.sum(residual * residual) - multipliers @ constraints
+
+            x, multipliers = point[:nx], point[nx:]
+            stationarity = jax.grad(lagrangian)(x, multipliers)
+            constraints = boozer_exact_residual(moved, x, every_row)[-2:]
+            return jnp.concatenate((stationarity, constraints))
+
+        def exact(coils, point):
+            return boozer_exact_constraints(replace(problem, coils=coils), point)
+
+        rng = parity_rng(7)
+        direction = jax.tree.map(
+            lambda leaf: place_float64(
+                1e-2 * host_array(leaf) * rng.standard_normal(leaf.shape),
+                problem.targetlabel,
+            ),
+            problem.coils,
+        )
+
+        def along(constraints):
+            """Value, first and second derivatives along ``direction`` at ``t``."""
+
+            def value(t):
+                coils = jax.tree.map(lambda c, d: c + t * d, problem.coils, direction)
+                return constraints(coils, xl)
+
+            def first(t):
+                return jax.jvp(value, (t,), (jnp.ones_like(t),))[1]
+
+            def second(t):
+                return jax.jvp(first, (t,), (jnp.ones_like(t),))[1]
+
+            return lambda t: (value(t), first(t), second(t))
+
+        steps = place_float64([0.0, 0.5], problem.targetlabel)
+        actual = jax.vmap(jit(along(exact)))(steps)
+        expected = jax.vmap(along(reference))(steps)
+        for order, (a, e) in enumerate(zip(actual, expected, strict=True)):
+            assert_matches_native(a, host_array(e), f"coil derivative of order {order}")
+
+        cotangent = place_float64(rng.standard_normal(xl.shape), problem.targetlabel)
+
+        def coil_pullback(constraints):
+            return jax.vjp(partial(constraints, point=xl), problem.coils)[1](cotangent)[0]
+
+        leaves = [jax.tree.leaves(coil_pullback(c)) for c in (exact, reference)]
+        self.assertTrue(len(leaves[0]) == len(leaves[1]) > 0, "coil leaves")
+        for leaf, (a, e) in enumerate(zip(*leaves, strict=True)):
+            assert_matches_native(a, host_array(e), f"coil VJP [{leaf}]")
 
     def test_formulations_cast_the_decision_vector_to_float64(self):
         """A float32 decision vector is evaluated in float64: every formulation

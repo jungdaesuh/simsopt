@@ -31,8 +31,15 @@ its Taylor model at the quadrature points
 (:func:`~simsopt_jax.core.boozer_residual.taylor_field`, coefficients from
 the fused ``B``/``dB/dX`` kernel and ``d2B/dXdX``) of the order requested:
 derivative outputs are exact at ``x`` and in the coils, but are not to be
-differentiated again in ``x``. Values evaluate the field itself, so they can
-be differentiated in ``x`` and the coils to any order.
+differentiated again in ``x``. The values (``derivatives=0``) of the residual,
+the penalty and the BoozerExact system evaluate the field itself, so they can
+be differentiated in ``x`` and the coils to any order. The exact constraints
+are themselves gradients of the Lagrangian, so their values come from the
+first-order model: their partial derivatives in the coils at a fixed ``xl``
+are exact to any order, their Jacobian in ``xl`` is ``derivatives=1``, and
+differentiating the values in ``xl`` raises ``TypeError``. Total derivatives
+through a surface that depends on the coils (a solved surface) are
+therefore not supported.
 
 Every function is jitted with the problem and ``x`` (cast to float64) as
 traced operands: new DOF, ``iota``, ``G``, coil, target and weight values
@@ -318,6 +325,25 @@ def _penalty_terms(
     return residual, sqrt_weight * _label_residual(problem, x), sqrt_weight * z
 
 
+@jax.custom_jvp
+def _without_derivatives_in_xl(xl: jax.Array) -> jax.Array:
+    """``xl`` itself, refusing any derivative in it: the exact constraints'
+    ``derivatives=0`` value is a gradient taken with the first-order field
+    model, whose derivative in ``xl`` would miss ``d2B/dXdX``. Coil
+    derivatives leave ``xl``'s tangent a symbolic zero and pass."""
+    return xl
+
+
+@_without_derivatives_in_xl.defjvp
+def _refuse_derivatives_in_xl(primals, tangents):
+    raise TypeError(
+        "boozer_exact_constraints(derivatives=0) is not differentiable in xl: its value "
+        "is a gradient evaluated with the first-order field model. Request its Jacobian "
+        "with derivatives=1; total derivatives through a surface that depends on the "
+        "coils are not supported."
+    )
+
+
 _STATIC_OPTIONS = ("derivatives", "optimize_G", "weight_inv_modB")
 
 
@@ -428,7 +454,11 @@ def boozer_exact_constraints(
     """Native ``boozer_exact_constraints``: ``res``, or ``(res, dres)``.
 
     ``xl`` is ``x`` followed by the multipliers of the label constraint and of
-    ``z(0, 0) = 0``; the residual is not weighted.
+    ``z(0, 0) = 0``; the residual is not weighted. ``res`` is the gradient of
+    the Lagrangian, evaluated with the field's first-order Taylor model: its
+    derivatives in the coils at a fixed ``xl`` are exact to any order, but it
+    is not differentiable in ``xl`` (use ``derivatives=1`` for the Jacobian),
+    so neither are total derivatives through a surface solved for the coils.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
@@ -447,6 +477,7 @@ def boozer_exact_constraints(
 
     Raises:
         ValueError: If ``derivatives`` is not 0 or 1.
+        TypeError: When ``res`` (``derivatives=0``) is differentiated in ``xl``.
     """
     _require_derivative_order(derivatives, 1)
     xl = as_jax_float64(xl)
@@ -472,7 +503,7 @@ def boozer_exact_constraints(
         return jnp.concatenate((stationarity, -constraints))
 
     if derivatives == 0:
-        return conditions(xl)
+        return conditions(_without_derivatives_in_xl(xl))
     value, jacobian = residual_derivatives(conditions, xl, derivatives)
     return value, jacobian
 
