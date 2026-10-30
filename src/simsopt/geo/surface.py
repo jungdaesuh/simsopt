@@ -968,11 +968,11 @@ class SurfaceClassifier():
         Evaluate the interpolated signed distance at cartesian points.
 
         Args:
-            xyz: array of shape ``(npoints, 3)`` with the cartesian coordinates
-                :math:`(x, y, z)` of the points, in meters.
+            xyz (array, shape (npoints, 3)): Cartesian coordinates
+                :math:`(x, y, z)` of the points [m].
 
         Returns:
-            Array of shape ``(npoints, 1)`` with the signed distance in meters:
+            array, shape (npoints, 1): Signed distance [m],
             positive inside the surface, negative outside, and -1 for a point
             outside the interpolation grid (which encloses the surface).
         """
@@ -987,13 +987,12 @@ class SurfaceClassifier():
         Evaluate the interpolated signed distance at cylindrical points.
 
         Args:
-            rphiz: array of shape ``(npoints, 3)`` with the cylindrical
-                coordinates :math:`(R, \phi, z)` of the points, with :math:`R`
-                and :math:`z` in meters and :math:`\phi \in [0, 2\pi]` in
-                radians.
+            rphiz (array, shape (npoints, 3)): Cylindrical coordinates
+                :math:`(R, \phi, z)` of the points, with :math:`R` and
+                :math:`z` in [m] and :math:`\phi \in [0, 2\pi]` in [rad].
 
         Returns:
-            Array of shape ``(npoints, 1)`` with the signed distance in meters:
+            array, shape (npoints, 1): Signed distance [m],
             positive inside the surface, negative outside, and -1 for a point
             outside the interpolation grid (which encloses the surface).
         """
@@ -1008,6 +1007,21 @@ class SurfaceClassifier():
     @SimsoptRequires(gridToVTK is not None,
                      "to_vtk method requires pyevtk module")
     def to_vtk(self, filename, h=0.01):
+        r"""
+        Write the interpolated signed distance to a VTK structured grid file.
+
+        The signed distance is sampled on a uniform :math:`(R, \phi, z)` grid
+        spanning the classifier's :math:`R` and :math:`z` ranges and
+        :math:`\phi \in [0, 2\pi]`, and stored as the point data
+        ``"levelset"``. As in :meth:`evaluate_rphiz`, it is -1 at samples
+        outside the interpolation grid.
+
+        Args:
+            filename (str): Output path without extension; ``pyevtk`` appends
+                ``.vts``.
+            h (float): Approximate sampling step [m] in :math:`R` and
+                :math:`z`; :math:`\phi` uses the same step in [rad].
+        """
 
         nr = int((self.rrange[1]-self.rrange[0])/h)
         nphi = int(2*np.pi/h)
