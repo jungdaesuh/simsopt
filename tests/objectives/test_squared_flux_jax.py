@@ -11,6 +11,7 @@ with optional_jax_imports():
     import jax.numpy as jnp
     import simsoptpp as sopp
     from simsopt._core.optimizable import Optimizable
+    from simsopt_jax.backend.jit import jit
     from simsopt.field import BiotSavart, Coil, Current, coils_via_symmetries
     from simsopt.geo import CurveXYZFourier, SurfaceRZFourier, create_equally_spaced_curves
     from simsopt.objectives import SquaredFlux
@@ -113,8 +114,8 @@ class TestSquaredFluxJax(JaxTestCase):
         for definition in _DEFINITIONS:
             with self.subTest(definition=definition):
                 evaluate = lambda field: integral_BdotN(field, target, normal, definition)
-                np.testing.assert_array_equal(jax.jit(evaluate)(B), evaluate(B))
-                np.testing.assert_allclose(jax.jit(jax.grad(evaluate))(B), jax.grad(evaluate)(B), rtol=1e-14, atol=1e-14)
+                np.testing.assert_array_equal(jit(evaluate)(B), evaluate(B))
+                np.testing.assert_allclose(jit(jax.grad(evaluate))(B), jax.grad(evaluate)(B), rtol=1e-14, atol=1e-14)
 
     def test_integral_bdotn_matches_cpp(self):
         """All flux definitions and target forms match the native C++ integral."""
@@ -157,6 +158,23 @@ class TestSquaredFluxJax(JaxTestCase):
         if not (case == "zero_field" and definition == "quadratic flux"):
             self.assertFalse(np.isfinite(expected))
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
+
+    def test_integral_bdotn_evaluates_float32_inputs_in_double_like_cpp(self):
+        """float32 inputs are evaluated in float64, as the C++ kernel does: at |B| ~ 1e20
+        the squared field overflows float32 (max 3.4e38) but not double."""
+        rng = np.random.default_rng(8)
+        B = (1e20 * rng.standard_normal((6, 7, 3))).astype(np.float32)
+        normal = rng.standard_normal((6, 7, 3)).astype(np.float32)
+        target = (1e19 * rng.standard_normal((6, 7))).astype(np.float32)
+        for definition in _DEFINITIONS:
+            with self.subTest(definition=definition):
+                expected = sopp.integral_BdotN(
+                    B.astype(np.float64), target.astype(np.float64), normal.astype(np.float64), definition
+                )
+                actual = integral_BdotN(B, target, normal, definition)
+                self.assertEqual(actual.dtype, np.float64)
+                self.assertTrue(np.isfinite(expected))
+                np.testing.assert_allclose(float(actual), expected, rtol=1e-12)
 
     def test_squared_flux_matches_native_value_gradient_and_partials(self):
         """Squared flux matches native values, free gradients and fixed partials."""
