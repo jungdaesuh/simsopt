@@ -697,7 +697,11 @@ register_backend_cache_clear(invalidate_kernel_cache)
 
 
 def _float64_inputs(*values):
-    """Snapshot host inputs and cast every input to float64 at the kernel boundary."""
+    """Cast every input to float64 at the kernel boundary.
+
+    Host inputs are snapshotted; a float64 JAX array is used as is, since JAX
+    arrays are immutable.
+    """
     return tuple(_as_jax_float64(value) for value in values)
 
 
@@ -709,7 +713,7 @@ def _apply_forward_kernel(
     gammadashs,
     currents,
 ):
-    """Apply one cached field kernel to float64 copies of its inputs."""
+    """Apply one cached field kernel to its inputs cast to float64."""
     inputs = _float64_inputs(points, gammas, gammadashs, currents)
     return _get_kernel(integrand_key, diff_mode)(*inputs)
 
