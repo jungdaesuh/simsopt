@@ -6,6 +6,7 @@ evaluate Biot-Savart on CPU or GPU without a native field object.
 
 All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
+The public kernels cast every input to float64 and compute in float64.
 """
 
 from __future__ import annotations
@@ -16,10 +17,10 @@ from typing import cast
 
 import jax
 from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_clear
+from simsopt_jax.backend.jit import jit
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 
 from ._device_scalars import device_one as _device_one
@@ -631,7 +632,7 @@ def _make_kernel(
         return _point_chunk_reduce(points, chunk_fn, kernel_point_cs)
 
     kernel.__name__ = "biotsavart_forward"
-    return jax.jit(kernel)
+    return jit(kernel)
 
 
 def _get_kernel(integrand_key, diff_mode):
@@ -670,7 +671,7 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
         return pullback(v)
 
     kernel.__name__ = "biotsavart_vjp"
-    return jax.jit(kernel)
+    return jit(kernel)
 
 
 def _get_B_vjp_kernel():
@@ -695,6 +696,11 @@ register_backend_cache_clear(invalidate_kernel_cache)
 # ── Public API ────────────────────────────────────────────────────────
 
 
+def _float64_inputs(*values):
+    """Snapshot host inputs and cast every input to float64 at the kernel boundary."""
+    return tuple(_as_jax_float64(value) for value in values)
+
+
 def _apply_forward_kernel(
     integrand_key,
     diff_mode,
@@ -703,9 +709,8 @@ def _apply_forward_kernel(
     gammadashs,
     currents,
 ):
-    """Apply one cached field kernel under the canonical forward trace scope."""
-
-    inputs = snapshot_host_tree((points, gammas, gammadashs, currents))
+    """Apply one cached field kernel to float64 copies of its inputs."""
+    inputs = _float64_inputs(points, gammas, gammadashs, currents)
     return _get_kernel(integrand_key, diff_mode)(*inputs)
 
 
@@ -927,7 +932,7 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
             those of the contracted scalar per meter or per ampere; points are
             held fixed.
     """
-    inputs = snapshot_host_tree((points, v, gammas, gammadashs, currents))
+    inputs = _float64_inputs(points, v, gammas, gammadashs, currents)
     return _get_B_vjp_kernel()(*inputs)
 
 
