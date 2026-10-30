@@ -816,12 +816,19 @@ class TestSingleStageExactJax(JaxTestCase):
         np.testing.assert_array_equal(
             np.isneginf(result.gradient), np.isneginf(expected_gradient)
         )
-        # A finite iota or radius multiplier keeps the fused adjoint, which
-        # sums in a different order from native.
         finite = np.isfinite(expected_gradient)
-        assert_matches_native(
-            result.gradient[finite], expected_gradient[finite], "finite gradient entries"
-        )
+        if target_index == 2:
+            # Finite iota and radius multipliers keep the fused adjoint, which
+            # sums in a different order from native.
+            assert_matches_native(
+                result.gradient[finite],
+                expected_gradient[finite],
+                "finite gradient entries",
+            )
+        else:
+            np.testing.assert_array_equal(
+                result.gradient[finite], expected_gradient[finite]
+            )
 
     def test_length_penalty_scales_each_owner_before_shared_dofs_combine(self):
         """Native scales each owner's length derivative before summing shared DOFs.
