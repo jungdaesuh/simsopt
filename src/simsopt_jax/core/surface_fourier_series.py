@@ -15,11 +15,7 @@ forward-mode derivatives in those angles.
 ``get_dofs`` and ``set_dofs``.
 
 ``SurfaceXYZTensorFourier`` clamping multiplies the cosine-cosine block of a
-clamped component by ``sin(nfp phi / 2)**2 + sin(theta / 2)**2``. Native
-``simsoptpp`` differentiates that factor twice with integer division
-(``nfp / 2`` and ``1 / 2``), so its clamped ``gammadash1dash1`` (odd ``nfp``)
-and ``gammadash2dash2`` are not the derivatives of its ``gammadash1`` and
-``gammadash2``; the derivatives here are.
+clamped component by ``sin(nfp phi / 2)**2 + sin(theta / 2)**2``.
 """
 
 from __future__ import annotations
@@ -30,6 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..backend.jit import jit
 from .specs import (
     SurfaceRZFourierSpec,
     SurfaceSpec,
@@ -226,7 +223,7 @@ def _dof_layout(spec: SurfaceSpec) -> tuple[tuple[str, np.ndarray], ...]:
     )
 
 
-@jax.jit
+@jit
 def surface_get_dofs(spec: SurfaceSpec) -> jax.Array:
     """The native ``get_dofs()`` vector, fixed DOFs included.
 
@@ -243,7 +240,7 @@ def surface_get_dofs(spec: SurfaceSpec) -> jax.Array:
     )
 
 
-@jax.jit
+@jit
 def surface_spec_with_dofs(spec: SurfaceSpecT, dofs: jax.Array) -> SurfaceSpecT:
     """``spec`` with its DOFs replaced by ``dofs``, as native ``set_dofs``.
 

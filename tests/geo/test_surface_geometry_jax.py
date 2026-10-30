@@ -36,6 +36,7 @@ with optional_jax_imports():
     from simsopt.geo.surfacerzfourier import SurfaceRZFourier
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import surface_geometry
     from simsopt_jax.core.specs import SurfaceSpec
     from simsopt_jax.core.surface_fourier_series import (
@@ -79,17 +80,6 @@ _VJPS = {
     f"d{name}_by_dcoeff_vjp": name
     for name in ("gamma", "gammadash1", "gammadash2", "normal")
 }
-# Native clamped second derivatives truncate nfp / 2 and 1 / 2 to integers
-# (simsoptpp/surfacexyztensorfourier.h); the clamped tests check these against
-# differences of native first derivatives instead.
-_NATIVE_CLAMPED_SECOND_DERIVATIVES = frozenset(
-    {
-        "gammadash1dash1",
-        "gammadash2dash2",
-        "dgammadash1dash1_by_dcoeff",
-        "dgammadash2dash2_by_dcoeff",
-    }
-)
 _RTOL = 1e-12
 _ATOL = 1e-12
 
@@ -172,7 +162,7 @@ if JAX_IMPORT_ERROR is None:
         "d2volume_by_dcoeffdcoeff": ("volume", jax.hessian),
     }
 
-    @partial(jax.jit, static_argnums=(0, 1))
+    @partial(jit, static_argnums=(0, 1))
     def _coefficient_derivative(
         quantity: str, transform: _Transform, spec: SurfaceSpec
     ) -> jax.Array:
@@ -181,7 +171,7 @@ if JAX_IMPORT_ERROR is None:
             surface_get_dofs(spec)
         )
 
-    @partial(jax.jit, static_argnums=0)
+    @partial(jit, static_argnums=0)
     def _coefficient_vjp(
         quantity: str, spec: SurfaceSpec, cotangent: jax.Array
     ) -> jax.Array:
@@ -300,10 +290,8 @@ def _evaluate_every_kernel(
 def _assert_every_kernel_native(
     results: dict[str, jax.Array], surface: _NativeSurface, cotangent: np.ndarray
 ) -> None:
-    clamped = isinstance(surface, SurfaceXYZTensorFourier) and any(surface.clamped_dims)
     for name in (*_VALUES, *_DERIVATIVES):
-        if not (clamped and name in _NATIVE_CLAMPED_SECOND_DERIVATIVES):
-            _assert_native(results[name], _native(surface, name), name)
+        _assert_native(results[name], _native(surface, name), name)
     for name in _VJPS:
         _assert_native(results[name], _native(surface, name, cotangent), name)
 
@@ -405,7 +393,7 @@ class TestSurfaceGeometryJax(JaxTestCase):
     def test_clamped_second_derivatives_are_derivatives_of_native_first_derivatives(
         self,
     ):
-        """Clamped second derivatives follow native first derivatives despite native integer truncation."""
+        """Clamped second derivatives are the derivatives of native first derivatives."""
         for case in _CLAMPED_CASES:
             with self.subTest(case=case), self.case() as patches:
                 self._case_clamped_second_derivatives_are_derivatives_of_native_first_derivatives(
