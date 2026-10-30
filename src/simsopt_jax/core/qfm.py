@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from simsopt_jax.backend import register_backend_cache_clear
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
@@ -97,7 +98,7 @@ def _residual_normal(spec: QfmSpec) -> jax.Array:
     return normal
 
 
-@jax.jit
+@jit
 def _jitted_qfm_residual(spec: QfmSpec) -> jax.Array:
     """Native QfmResidual.J; zero field/normal remains non-finite."""
     normal = _residual_normal(spec)
@@ -121,7 +122,7 @@ def _field_at_moving_points(
     return field(anchor) + jax.jvp(field, (anchor,), (displacement,))[1]
 
 
-@jax.jit
+@jit
 def _jitted_qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.Array]:
     """Value and native full-coefficient gradient, including fixed DOFs."""
     _residual_normal(spec)
@@ -138,7 +139,7 @@ def _jitted_qfm_residual_value_and_grad(spec: QfmSpec) -> tuple[jax.Array, jax.A
     return jax.value_and_grad(ratio)(surface_get_dofs(spec.surface))
 
 
-@jax.jit
+@jit
 def _jitted_qfm_label(spec: QfmLabelSpec) -> jax.Array:
     """Native label on its own surface grid and current flux-field points."""
     if spec.kind == "volume":
@@ -192,7 +193,7 @@ def _label_value_and_grad(
     return jax.value_and_grad(label)(surface_get_dofs(spec.surface))
 
 
-@jax.jit
+@jit
 def _jitted_qfm_label_constraint(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> jax.Array:
@@ -205,7 +206,7 @@ def _jitted_qfm_label_constraint(
     return 0.5 * (value - targetlabel)**2
 
 
-@jax.jit
+@jit
 def _jitted_qfm_label_constraint_value_and_grad(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
@@ -214,7 +215,7 @@ def _jitted_qfm_label_constraint_value_and_grad(
     return 0.5 * residual**2, residual * gradient
 
 
-@jax.jit
+@jit
 def _jitted_qfm_penalty_constraints(
     spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
@@ -222,7 +223,7 @@ def _jitted_qfm_penalty_constraints(
     return _jitted_qfm_residual(spec) + constraint_weight * _jitted_qfm_label_constraint(label, targetlabel, label_value)
 
 
-@jax.jit
+@jit
 def _jitted_qfm_penalty_constraints_value_and_grad(
     spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
