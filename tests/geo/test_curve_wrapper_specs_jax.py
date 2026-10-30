@@ -173,3 +173,17 @@ class TestCurveWrapperSpecs(JaxTestCase):
                 NotImplementedError, "RotatedCurve"
             ):
                 curve_spec_from_adapter_curve(inner_rotation)
+
+    def test_dof_map_segments_must_have_equal_lengths(self):
+        """Owner and target ranges of a DOF-map segment must match and fit the template."""
+        for segment in ((0, 3, 1, 3), (0, 2, 3, 5)):
+            with self.subTest(segment=segment), self.assertRaisesRegex(
+                ValueError, "equal-length target range"
+            ):
+                make_optimizable_dof_map_spec(
+                    template_full_dofs=np.zeros(4),
+                    owner_segments=(segment,),
+                    input_mode="full",
+                    input_start=0,
+                    input_end=4,
+                )

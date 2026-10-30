@@ -237,8 +237,8 @@ def _mapped_full_dofs(
         owner_dofs,
         reference=owner_dofs,
     )
-    for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
-        del target_end
+    # make_optimizable_dof_map_spec guarantees equal owner and target lengths.
+    for owner_start, owner_end, target_start, _target_end in map_spec.owner_segments:
         mapped = _update_1d_static(
             mapped,
             target_start,

@@ -908,7 +908,7 @@ def make_optimizable_dof_map_spec(
             including fixed entries.
         owner_segments (Iterable[tuple[int, int, int, int]]): Half-open (owner_start,
             owner_end, target_start, target_end) copy ranges from owner DOFs into the
-            full template.
+            full template; each owner range and its target range have equal length.
         input_mode (str): full selects all reconstructed DOFs; any other value selects
             the local slice input_start:input_end.
         input_start (int): Inclusive start index of the requested local slice.
@@ -918,18 +918,30 @@ def make_optimizable_dof_map_spec(
         OptimizableDofMapSpec object: Frozen pytree payload; newly converted
             array leaves retain their argument shape, use float64
             and snapshot host NumPy inputs.
+
+    Raises:
+        ValueError: A segment has unequal owner/target lengths or a target range
+            outside the template.
     """
-    return OptimizableDofMapSpec(
-        template_full_dofs=_as_float64_array(template_full_dofs),
-        owner_segments=tuple(
-            (
-                int(owner_start),
-                int(owner_end),
-                int(target_start),
-                int(target_end),
+    template = _as_float64_array(template_full_dofs)
+    segments = tuple(
+        (int(owner_start), int(owner_end), int(target_start), int(target_end))
+        for owner_start, owner_end, target_start, target_end in owner_segments
+    )
+    for owner_start, owner_end, target_start, target_end in segments:
+        if not (
+            0 <= owner_start <= owner_end
+            and 0 <= target_start <= target_end <= template.shape[0]
+            and owner_end - owner_start == target_end - target_start
+        ):
+            raise ValueError(
+                f"Owner segment {(owner_start, owner_end, target_start, target_end)} "
+                "must copy an owner range into an equal-length target range within "
+                f"the {template.shape[0]} template DOFs."
             )
-            for owner_start, owner_end, target_start, target_end in owner_segments
-        ),
+    return OptimizableDofMapSpec(
+        template_full_dofs=template,
+        owner_segments=segments,
         input_mode=str(input_mode),
         input_start=int(input_start),
         input_end=int(input_end),
