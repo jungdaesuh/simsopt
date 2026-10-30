@@ -407,7 +407,7 @@ class TestStageTwo(JaxTestCase):
             mean_squared_curvature_weight=1e-6,
         )
         field, _, native, problem = _problem(config, perturb=False)
-        x0 = field.x.copy()
+        x0 = np.array(field.x, dtype=np.float64)
         options = {"maxiter": 20, "maxcor": 300}
 
         def native_fun(x):
