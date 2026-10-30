@@ -111,13 +111,11 @@ but from outer products, in O(n^2) where SciPy's two matrix products cost
 O(n^3). So a decision that hinges on the last bit can go the other way than
 in SciPy: a memory reset under underflow, or a trial point equal to an
 earlier one, which SciPy does not count again. Run op by op, the port makes
-SciPy's decisions there too. A long walk magnifies the round-off. BFGS walks
-have ended where SciPy's do: on the LS663 Boozer least-squares benchmark
-(about 1100 iterations) one Newton step converges from the device's end
-point as from SciPy's. L-BFGS-B walks can part: on LS663 neither the device
-nor SciPy converged in 1500 iterations, and whether Newton then converged
-depended on rounding alone (it failed after the device run and after SciPy
-with 1 or 16 BLAS threads, and converged after SciPy with 8).
+SciPy's decisions there too. A long walk magnifies the round-off, so it can
+part from SciPy's, as SciPy's own run does when its sums round differently:
+the counts then differ, a converged walk ends at SciPy's solution only to
+what ``gtol`` allows, and a walk stopped by ``maxiter`` can end elsewhere.
+L-BFGS-B's walks part sooner than BFGS's.
 
 Known differences in counting: SciPy compares a point with its cached one by
 array equality, so a point with a NaN coordinate never matches it and is
