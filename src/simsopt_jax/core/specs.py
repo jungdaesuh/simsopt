@@ -1019,7 +1019,7 @@ def make_curve_perturbed_spec(
     sample_gammadash: object,
     sample_gammadashdash: object,
     sample_gammadashdashdash: object,
-    sample_derivatives: int = 3,
+    sample_derivatives: int,
 ) -> CurvePerturbedSpec:
     """Build an immutable CurvePerturbedSpec payload for JAX kernels.
 
@@ -1041,7 +1041,8 @@ def make_curve_perturbed_spec(
         sample_gammadashdashdash (array-like): Additive third parameter-derivative
             perturbation, shape (Q, 3), in meters.
         sample_derivatives (int): Number of parameter derivatives the sample provides,
-            1 to 3; pass zeros for the sample terms above it.
+            1 to 3; pass zeros for the sample terms above it. Required, so zero
+            placeholders are never mistaken for derivatives.
 
     Returns:
         CurvePerturbedSpec object: Frozen pytree payload; newly converted

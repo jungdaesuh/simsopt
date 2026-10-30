@@ -145,6 +145,7 @@ _SPEC_FACTORIES = [
             sample_gammadash=x.samples,
             sample_gammadashdash=x.samples,
             sample_gammadashdashdash=x.samples,
+            sample_derivatives=3,
         ),
     ),
     (
