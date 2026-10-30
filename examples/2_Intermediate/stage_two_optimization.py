@@ -40,7 +40,7 @@ from simsopt.util import in_github_actions
 
 try:
     import jax
-    from simsopt_jax.runtime.host_boundary import snapshot_host_tree
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.objectives import StageTwoObjectiveConfig, fused_stage_two_objective, make_stage_two_problem
     from simsopt_jax_adapters.geo import (
         JaxCurveCurveDistance, JaxCurveLength, JaxCurveSurfaceDistance,
@@ -183,7 +183,7 @@ def stage_two_problem():
 
 if args.fused:
     problem = stage_two_problem()
-    value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+    value_and_grad = jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
     # The fused kernel uses the field's DOF order; reporting uses the composite's.
     field_order = np.array([JF.dof_names.index(name) for name in bs.dof_names])
     objective_order = np.argsort(field_order)
@@ -191,9 +191,7 @@ if args.fused:
 
 def fused_value_and_grad(dofs):
     """Evaluate the frozen problem and return a host gradient in composite DOF order."""
-    value, gradient = jax.device_get(value_and_grad(
-        problem, jax.device_put(snapshot_host_tree(dofs[field_order])),
-    ))
+    value, gradient = jax.device_get(value_and_grad(problem, dofs[field_order]))
     return float(value), gradient[objective_order]
 
 
@@ -250,8 +248,8 @@ print("""
 ################################################################################
 """)
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+# The minimizer's last evaluation need not be at its result, so the outputs below use res.x.
+JF.x = res.x
 curves_to_vtk(curves, OUT_DIR + "curves_opt_short")
 pointData = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + "surf_opt_short", extra_data=pointData)
@@ -265,8 +263,7 @@ LENGTH_WEIGHT *= 0.1
 if args.fused:
     problem = stage_two_problem()
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+JF.x = res.x
 curves_to_vtk(curves, OUT_DIR + "curves_opt_long")
 pointData = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + "surf_opt_long", extra_data=pointData)

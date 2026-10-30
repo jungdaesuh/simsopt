@@ -29,7 +29,7 @@ SEEDS = (np.nan, np.inf, -np.inf, 1.0)
 
 
 def _placed(values) -> jax.Array:
-    return jax.device_put(np.asarray(values, dtype=np.float64))
+    return jnp.array(np.asarray(values, dtype=np.float64))
 
 
 class TestPlacementZero(JaxTestCase):

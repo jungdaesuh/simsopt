@@ -1,4 +1,6 @@
 import numpy as np
+from simsopt.geo.finitebuild import CurveFilament
+from simsopt.geo.framedcurve import FrameRotation
 
 
 def _is_scaled_current_like(current):
@@ -26,3 +28,27 @@ def _unwrap_coil_curve_and_current_objects(curve, current):
         curve = curve.curve
 
     return curve, rotmat, current, scale
+
+
+def coil_graph_parameters(optimizables) -> np.ndarray:
+    """Non-DOF parameters a JAX coil reconstruction captures from a coil graph.
+
+    These are the attributes native evaluation reads on every call but which
+    are not DOFs: ``ScaledCurrent.scale``, ``CurveFilament.dn`` and ``db``,
+    and ``FrameRotation.scale``. A changed entry means a captured
+    reconstruction is stale.
+
+    Args:
+        optimizables (Iterable[Optimizable]): Coil-graph nodes, in a fixed order.
+
+    Returns:
+        numpy.ndarray: Float64 parameters, shape (K,), in node order; scales
+            are dimensionless and filament offsets are in meters.
+    """
+    parameters = []
+    for opt in optimizables:
+        if _is_scaled_current_like(opt) or isinstance(opt, FrameRotation):
+            parameters.append(_as_float64_scalar(opt.scale))
+        elif isinstance(opt, CurveFilament):
+            parameters.extend((_as_float64_scalar(opt.dn), _as_float64_scalar(opt.db)))
+    return np.asarray(parameters, dtype=np.float64)
