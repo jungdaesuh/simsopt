@@ -443,10 +443,22 @@ class JaxBiotSavart(Optimizable):
     """
 
     def clear_points(self) -> None:
-        """Clear mutable point buffers without changing source geometry."""
+        """Clear mutable point buffers without changing source geometry.
+
+        Evaluating the field afterwards raises until points are set again.
+        """
         self._points_jax = None
         self._points_cyl_jax = None
         self._invalidate_point_outputs()
+
+    def _evaluation_points(self) -> jax.Array:
+        """The Cartesian points every evaluation needs, shape (P, 3), in meters."""
+        if self._points_jax is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no evaluation points after clear_points(); "
+                "call set_points() before evaluating it."
+            )
+        return self._points_jax
 
     def _invalidate_point_outputs(self) -> None:
         """Release outputs of the previous point set as soon as it is replaced."""
@@ -471,7 +483,7 @@ class JaxBiotSavart(Optimizable):
             self._field_outputs_key = (state, self._points_version)
         value = self._field_outputs.get(grouped_field)
         if value is None:
-            value = grouped_field(self._points_jax, state.coil_set_spec)
+            value = grouped_field(self._evaluation_points(), state.coil_set_spec)
             self._field_outputs[grouped_field] = value
         return value
 
@@ -1224,7 +1236,7 @@ class JaxBiotSavart(Optimizable):
             numpy.ndarray: Writable Cartesian coordinates, shape (P, 3), in
                 meters, materialized at the explicit host boundary.
         """
-        return host_array(self._points_jax, dtype=np.float64)
+        return host_array(self._evaluation_points(), dtype=np.float64)
 
     def get_points_cyl(self):
         """Materialize the current cylindrical evaluation points on the host.
@@ -1240,7 +1252,7 @@ class JaxBiotSavart(Optimizable):
         """Explicitly set cylindrical points, else those derived from the Cartesian ones."""
         if self._points_cyl_jax is not None:
             return self._points_cyl_jax
-        return _cart_points_to_cyl(self._points_jax)
+        return _cart_points_to_cyl(self._evaluation_points())
 
     def set_points_from_spec(self, field_eval_spec):
         """Set evaluation points from an immutable field-evaluation spec.
@@ -1264,7 +1276,7 @@ class JaxBiotSavart(Optimizable):
             FieldEvalSpec object: Float64 Cartesian point payload of
                 shape (P, 3), in meters.
         """
-        return make_field_eval_spec(self._points_jax)
+        return make_field_eval_spec(self._evaluation_points())
 
 
     def coil_set_spec(self):
@@ -1310,7 +1322,7 @@ class JaxBiotSavart(Optimizable):
                 cotangents with leaf shapes (C, Q, 3), (C, Q, 3), (C,) and static
                 public coil indices.
         """
-        points = self._points_jax
+        points = self._evaluation_points()
         v_jax = _as_jax_float64(v)
         coil_set_spec = self.coil_set_spec()
         d_coil_arrays = tuple(
@@ -1366,8 +1378,9 @@ class JaxBiotSavart(Optimizable):
         if not coil_arrays:
             return BiotSavartFieldPullback((), ())
 
+        points = self._evaluation_points()
         _, pullback = jax.vjp(
-            lambda grouped_inputs: grouped_forward(self._points_jax, grouped_inputs),
+            lambda grouped_inputs: grouped_forward(points, grouped_inputs),
             coil_arrays,
         )
         d_coil_arrays = pullback(_as_jax_float64(cotangent))[0]

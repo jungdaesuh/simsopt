@@ -328,6 +328,23 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         np.testing.assert_array_equal(actual, native.get_points_cart())
         np.testing.assert_allclose(adapter.B(), native.B(), rtol=1e-12, atol=1e-14)
 
+    def test_cleared_points_must_be_set_before_evaluation(self):
+        """After clear_points, evaluation raises until points are set again."""
+        coils = [Coil(_curves()[0], Current(1e5))]
+        adapter = JaxBiotSavart(coils)
+        adapter.clear_points()
+        for quantity in ("B", "GradAbsB", "B_cyl", "get_points_cart"):
+            with self.subTest(quantity=quantity), self.assertRaisesRegex(
+                RuntimeError, "call set_points"
+            ):
+                getattr(adapter, quantity)()
+        with self.assertRaisesRegex(RuntimeError, "call set_points"):
+            adapter.B_vjp(np.zeros((1, 3)))
+        native = BiotSavart(coils).set_points(_POINTS)
+        np.testing.assert_allclose(
+            adapter.set_points(_POINTS).B(), native.B(), rtol=1e-12, atol=1e-14
+        )
+
     def test_serialization_preserves_points_and_field(self):
         """GSON reconstruction and JSON loading preserve evaluation points and field
         values in either coordinate convention."""
