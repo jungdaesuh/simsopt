@@ -217,6 +217,21 @@ def _separated_circles(num_far, twins):
     return circles
 
 
+def _candidate_query_objectives(base, curves, surface, threshold):
+    """Native and adapter curve-curve (``downsample=2``) and curve-surface objectives."""
+    return (
+        (CurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2),
+         JaxCurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2)),
+        (CurveSurfaceDistance(curves, surface, threshold),
+         JaxCurveSurfaceDistance(curves, surface, threshold)),
+    )
+
+
+def _native_candidates(native):
+    """A native objective's computed candidates as sorted index tuples."""
+    return sorted(map(tuple, cast(list, native.candidates)))
+
+
 def _point_pair_distance_shapes(adapter):
     """Sorted shapes of the batched point-pair distance arrays the adapter's program computes."""
     snapshot = adapter._snapshot()
@@ -712,29 +727,30 @@ class TestCurveObjectivesJax(JaxTestCase):
 
     def test_distance_candidate_queries_match_native(self):
         """``candidates``, ``compute_candidates()`` and ``shortest_distance_among_candidates()``
-        match native, without candidates too, and follow DOF changes. ``simsoptpp``
-        returns the candidates in no fixed order."""
+        match native, without candidates too, and follow a DOF change that adds candidates to
+        both searches. ``simsoptpp`` returns the candidates in no fixed order."""
         base, curves = _curves()
         surface = _surface()
         for threshold in (0.05, _CC_THRESHOLD, 1.0):
             with self.subTest(threshold=threshold), self.case():
-                pairs = (
-                    (CurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2),
-                     JaxCurveCurveDistance(curves, threshold, num_basecurves=len(base), downsample=2)),
-                    (CurveSurfaceDistance(curves, surface, threshold),
-                     JaxCurveSurfaceDistance(curves, surface, threshold)),
-                )
-                for native, adapter in pairs:
+                for native, adapter in _candidate_query_objectives(base, curves, surface, threshold):
                     self.assertIsNone(adapter.compute_candidates())
                     native.compute_candidates()
-                    self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
+                    self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
                     self.assertEqual(
                         adapter.shortest_distance_among_candidates(), native.shortest_distance_among_candidates()
                     )
-        native, adapter = pairs[0]
+        objectives = _candidate_query_objectives(base, curves, surface, _CC_THRESHOLD)
+        before = []
+        for native, adapter in objectives:
+            native.compute_candidates()
+            before.append(_native_candidates(native))
+            self.assertEqual(sorted(adapter.candidates), before[-1])
         base[0].x = np.asarray(base[0].x) + 0.2
-        native.compute_candidates()
-        self.assertEqual(sorted(adapter.candidates), sorted(map(tuple, cast(list, native.candidates))))
+        for (native, adapter), earlier in zip(objectives, before, strict=True):
+            native.compute_candidates()
+            self.assertNotEqual(_native_candidates(native), earlier)
+            self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
 
     def test_distance_terms_evaluate_every_point_of_a_native_candidate(self):
         """Within a candidate pair every point is evaluated, as native: a zero tangent
