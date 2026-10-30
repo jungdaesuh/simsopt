@@ -66,9 +66,10 @@ class Testing(unittest.TestCase):
     def test_out_of_bounds(self):
         """
         Check that the interpolant behaves correctly when evaluated outside of
-        the defined domain.  If created with out_of_bounds_ok=True, then
-        nothing should happen, but if out_of_bounds_ok=False, then a runtime
-        error should be raised.
+        the defined domain.  If created with out_of_bounds_ok=True, then the
+        polynomial of the nearest boundary cell is extrapolated, which
+        reproduces a polynomial of the interpolation degree; if
+        out_of_bounds_ok=False, then a runtime error should be raised.
         """
         np.random.seed(0)
         xran = (1.0, 4.0, 20)
@@ -93,7 +94,8 @@ class Testing(unittest.TestCase):
         interpolant = sopp.RegularGridInterpolant3D(rule, xran, yran, zran, dim, True)
         interpolant.interpolate_batch(fun)
         interpolant.evaluate_batch(xyz, fhxyz)
-        assert np.allclose(fhxyz, 1., atol=1e-14, rtol=1e-14)
+        fxyz = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
+        np.testing.assert_allclose(fhxyz, fxyz, rtol=1e-10, atol=1e-10)
 
         interpolant = sopp.RegularGridInterpolant3D(rule, xran, yran, zran, dim, False)
         interpolant.interpolate_batch(fun)
@@ -104,9 +106,11 @@ class Testing(unittest.TestCase):
         """
         A point outside the domain in a single coordinate (beyond the 1e-13
         face tolerance, or NaN, infinite or huge) is out of bounds: it must not
-        wrap into a neighbouring cell or round into the first one. With
-        out_of_bounds_ok=True the output is left untouched; with
-        out_of_bounds_ok=False a runtime error is raised.
+        wrap into a neighbouring cell. With out_of_bounds_ok=True every query
+        overwrites the output: a finite point gets the nearest boundary cell's
+        polynomial, which reproduces ``fun`` exactly, and a non-finite or
+        overflowing one gets a non-finite value. With out_of_bounds_ok=False a
+        runtime error is raised.
         """
         np.random.seed(0)
         ranges = [(1.0, 4.0, 20), (1.1, 3.9, 10), (1.2, 3.8, 15)]
@@ -129,13 +133,17 @@ class Testing(unittest.TestCase):
 
         for axis, (lo, hi, n) in enumerate(ranges):
             cell = (hi - lo) / n
-            for value in (lo - 0.5 * cell, lo - 1.5 * cell, hi + 0.5 * cell,
+            for value in (lo - 0.5 * cell, lo - 1.5 * cell, hi + 0.5 * cell, hi + 2.5 * cell,
                           np.nan, np.inf, -np.inf, 1e300, -1e300):
                 with self.subTest(axis=axis, value=value):
                     xyz = point_at(axis, value)
                     fhxyz = np.ones((1, dim))
                     interpolant_ok.evaluate_batch(xyz, fhxyz)
-                    np.testing.assert_array_equal(fhxyz, 1.)
+                    if abs(value) < 1e3:
+                        expected = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
+                        np.testing.assert_allclose(fhxyz, expected, rtol=1e-10, atol=1e-10)
+                    else:
+                        self.assertFalse(np.any(np.isfinite(fhxyz)), fhxyz)
                     with self.assertRaisesRegex(RuntimeError, rf"{'xyz'[axis]}idxs=.* not within \[0, {n}\)"):
                         interpolant_strict.evaluate_batch(xyz, fhxyz)
 

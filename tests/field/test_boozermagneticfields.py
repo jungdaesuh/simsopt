@@ -114,6 +114,36 @@ class TestingAnalytic(unittest.TestCase):
         ba.set_K1(3.7)
         assert (ba.K1 == 3.7)
 
+    def test_interpolatedboozerfield_extrapolates_outside_the_grid(self):
+        """
+        With ``extrapolate=True`` a point outside the radial grid gets
+        :math:`|B|` extrapolated from the nearest boundary cell: close to the
+        analytic :math:`B_0(1 + \\bar\\eta\\sqrt{2s\\psi_0/\\bar B}\\cos(\\theta - N\\zeta))`
+        within a fraction of a cell, and independent of the points evaluated
+        before it.
+        """
+        ba = BoozerAnalytic(etabar=1.1, B0=1.0, N=1, G0=1.1, psi0=0.8, iota0=0.4)
+        srange = (0.25, 0.75, 8)
+        interpolated = InterpolatedBoozerField(ba, 3, srange, (0, np.pi, 8), (0, 2*np.pi, 16),
+                                               extrapolate=True, nfp=1, stellsym=True)
+        cell = (srange[1] - srange[0]) / srange[2]
+        # (s, theta, zeta): half a cell beyond either radial end, and three
+        # cells beyond the outer one
+        outside = np.array([[srange[1] + 0.5*cell, 0.4, 1.1],
+                            [srange[0] - 0.5*cell, 2.0, 4.0],
+                            [srange[1] + 3.0*cell, 1.0, 2.0]])
+
+        def modB_at(points):
+            interpolated.set_points(points)
+            return interpolated.modB()[:, 0].copy()
+
+        near = outside[:2]
+        ba.set_points(near)
+        np.testing.assert_allclose(modB_at(near), ba.modB()[:, 0], rtol=1e-3)
+        after_inner = modB_at(outside)
+        modB_at(np.array([[0.5, 0.7, 0.3]]))
+        np.testing.assert_array_equal(modB_at(outside), after_inner)
+
 
 @unittest.skipIf(vmec is None, "vmec python package is not found")
 class TestingVmec(unittest.TestCase):
