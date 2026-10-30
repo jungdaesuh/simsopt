@@ -136,13 +136,12 @@ def _field_at_moving_points(
     """First-order field model at buffer points that move with the surface.
 
     Native evaluates the field at its point buffer but differentiates as if
-    the points were the surface positions. The increment
-    positions - stop_gradient(positions) is exactly zero, so the value is the
-    buffer field, while reverse mode differentiates the field linearized at
-    the buffer points along the surface position derivative. The buffer and
-    the positions broadcast against each other, as native broadcasts its
-    field against the positions: a single flux point over a flux row, or a
-    flux row over a single-point label row.
+    the points were the surface positions. The value is exactly the buffer
+    field, whatever the positions are, while the derivative is that of the
+    field linearized at the buffer points along the surface position
+    derivative. The buffer and the positions broadcast against each other,
+    as native broadcasts its field against the positions: a single flux
+    point over a flux row, or a flux row over a single-point label row.
 
     Args:
         field (Callable[[jax.Array], jax.Array]): Maps shape (n, 3) Cartesian points
@@ -157,7 +156,8 @@ def _field_at_moving_points(
     shape = jnp.broadcast_shapes(jnp.shape(points), positions.shape)
     anchor = jnp.broadcast_to(jnp.asarray(points), shape)
     displacement = jnp.broadcast_to(positions - jax.lax.stop_gradient(positions), shape)
-    return field(anchor) + jax.jvp(field, (anchor,), (displacement,))[1]
+    linearized = jax.jvp(field, (anchor,), (displacement,))[1]
+    return _with_value(linearized, jnp.broadcast_to(field(jnp.asarray(points)), shape))
 
 
 @jit
@@ -203,11 +203,11 @@ def _with_value(traced: jax.Array, value: jax.Array) -> jax.Array:
     or integer ``value`` is returned in the dtype of a float64 ``traced``.
 
     Args:
-        traced (jax.Array): Scalar shape () quantity whose derivative is kept.
-        value (jax.Array): Scalar shape () replacement value in the same units.
+        traced (jax.Array): Quantity of any shape whose derivative is kept.
+        value (jax.Array): Replacement value of the same shape, in the same units.
 
     Returns:
-        jax.Array: Scalar shape () ``value`` in the promoted dtype.
+        jax.Array: ``value``, of the same shape, in the promoted dtype.
     """
     return jnp.asarray(value, jnp.result_type(traced, value))
 

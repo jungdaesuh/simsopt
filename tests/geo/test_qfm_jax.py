@@ -27,6 +27,7 @@ with optional_jax_imports():
     from simsopt_jax.backend import get_field_kernel_tuning, set_backend
     from simsopt_jax.backend.dtypes import explicit_device_array
     from simsopt_jax.core.qfm import (
+        _field_at_moving_points,
         qfm_label,
         qfm_label_constraint,
         qfm_label_constraint_value_and_grad,
@@ -818,6 +819,19 @@ class TestQfmJax(JaxTestCase):
                     getattr(port, name)(port.surface.x, derivatives),
                     getattr(native, name)(native.surface.x, derivatives),
                 )
+
+    def test_moving_point_field_value_is_the_buffer_field(self):
+        """The moving-point field value is the buffer field, even at nonfinite positions.
+
+        Native evaluates the field at its buffer whatever the surface
+        positions are; the positions enter only the derivative.
+        """
+        points = jnp.asarray([[1.0, 2.0, 3.0]])
+        positions = jnp.asarray([[np.inf, 0.0, 0.0], [0.5, 0.5, 0.5]])
+        np.testing.assert_array_equal(
+            host_array(_field_at_moving_points(lambda x: 2.0 * x, points, positions)),
+            [[2.0, 4.0, 6.0], [2.0, 4.0, 6.0]],
+        )
 
     def test_overflowing_label_value_is_the_same_for_both_derivative_orders(self):
         """An infinite label gives the native infinite value with and without derivatives."""
