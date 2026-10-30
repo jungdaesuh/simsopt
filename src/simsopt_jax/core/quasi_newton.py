@@ -1,3 +1,77 @@
+# This module ports SciPy 1.17's BFGS (scipy/optimize/_optimize.py and
+# _linesearch.py) and L-BFGS-B (scipy/optimize/__lbfgsb.c) to JAX. They are
+# distributed under the following licenses, whose notices, conditions and
+# disclaimers are retained here.
+#
+# SciPy (scipy/LICENSE.txt):
+#
+# Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above
+#    copyright notice, this list of conditions and the following
+#    disclaimer in the documentation and/or other materials provided
+#    with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its
+#    contributors may be used to endorse or promote products derived
+#    from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# SciPy's C translation of L-BFGS-B 3.0, with DCSRCH and DCSTEP
+# (scipy/optimize/__lbfgsb.c):
+#
+# Copyright (C) 2024 SciPy developers
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# a. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+# b. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+# c. Names of the SciPy Developers may not be used to endorse or promote
+#    products derived from this software without specific prior written
+#    permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
+# OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+# THE POSSIBILITY OF SUCH DAMAGE.
+#
+# L-BFGS-B 3.0 (BSD-3) is by Ciyou Zhu, Richard Byrd, Jorge Nocedal and Jose
+# Luis Morales (https://users.iems.northwestern.edu/~nocedal/lbfgsb.html).
+# DCSRCH and DCSTEP are from MINPACK-1 (Jorge J. More' and David J. Thuente,
+# Argonne National Laboratory, 1983) and MINPACK-2 (Brett M. Averick, Richard
+# G. Carter and Jorge J. More', Argonne National Laboratory and University of
+# Minnesota, 1993).
+
 """SciPy 1.17's BFGS and unbounded L-BFGS-B, each one compiled JAX loop.
 
 :func:`minimize_bfgs` is ``scipy.optimize.minimize(fun, x0, jac=True,
@@ -17,17 +91,24 @@ problem as an argument compiles it once.
 Statuses, messages (``BFGS_MESSAGES[message]``, ``LBFGSB_MESSAGES[message]``),
 iteration counts, ``nfev``/``njev`` (``ScalarFunction`` counts a point again
 only when it differs from the last one), ``hess_inv`` and SciPy's checks of
-its inputs without bounds are SciPy's. Iterates agree with SciPy to
-round-off, which a long walk magnifies: XLA sums dot and matrix products in
-its own order, and BFGS updates its inverse Hessian in the rank-two form ``H
-- rho (s (Hy)^T + (Hy) s^T) + (rho^2 y^T H y + rho) s s^T``, in exact
-arithmetic SciPy's ``A1 H A2 + rho s s^T``, which rounds differently (it
-costs O(n^2) where SciPy's two matrix products cost O(n^3)). Compiled code may
-also fuse a multiply and an add into one rounding (XLA does on CPU and GPU),
-so a decision that hinges on the last bit can go the other way than in SciPy:
-a memory reset under underflow, or a trial point equal to an earlier one,
-which SciPy does not count again. Run op by op, the port makes SciPy's
-decisions there too.
+its inputs without bounds are SciPy's. These claims are checked against
+SciPy 1.17 only; other SciPy versions may differ in them.
+
+Iterates agree with SciPy to round-off, not bitwise: XLA sums dot and matrix
+products in its own order and may fuse a multiply and an add into one
+rounding (it does on CPU and GPU), and BFGS forms SciPy's update ``A1 (H A2)
++ rho s s^T``, with ``A1 = I - rho s y^T`` and ``A2 = A1^T``, in SciPy's order
+but from outer products, in O(n^2) where SciPy's two matrix products cost
+O(n^3). So a decision that hinges on the last bit can go the other way than
+in SciPy: a memory reset under underflow, or a trial point equal to an
+earlier one, which SciPy does not count again. Run op by op, the port makes
+SciPy's decisions there too. A long walk magnifies the round-off. BFGS walks
+have ended where SciPy's do: on the LS663 Boozer least-squares benchmark
+(about 1100 iterations) one Newton step converges from the device's end
+point as from SciPy's. L-BFGS-B walks can part: on LS663 neither the device
+nor SciPy converged in 1500 iterations, and whether Newton then converged
+depended on rounding alone (it failed after the device run and after SciPy
+with 1 or 16 BLAS threads, and converged after SciPy with 8).
 
 Known differences in counting: SciPy compares a point with its cached one by
 array equality, so a point with a NaN coordinate never matches it and is
@@ -461,15 +542,14 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     stop = converged | small_step | non_finite
     rhok_inv = jnp.dot(yk, sk)
     rhok = jnp.where(rhok_inv == 0.0, _RHOK_DIVIDE_BY_ZERO, 1.0 / rhok_inv)
-    # SciPy's A1 H A2 + rho s s^T, with A1 = I - rho s y^T and A2 = A1^T, as a
-    # rank-two update of the symmetric H: equal in exact arithmetic, but it
-    # rounds differently.
-    Hy = s.H @ yk
-    H = (
-        s.H
-        - rhok * (jnp.outer(sk, Hy) + jnp.outer(Hy, sk))
-        + (rhok * rhok * jnp.dot(yk, Hy) + rhok) * jnp.outer(sk, sk)
-    )
+    # SciPy's A1 (H A2) + rho s s^T, with A1 = I - rho s y^T and A2 = A1^T,
+    # in SciPy's order: H A2 = H - rho (H y) s^T first, then A1 applied to it.
+    # Each factor nearly annihilates the s direction, so their errors multiply
+    # instead of adding as in the expanded rank-two form, whose terms of size
+    # |H| cancel and can leave H indefinite when rho s s^T is below their
+    # round-off. Outer products keep it O(n^2) instead of SciPy's O(n^3).
+    HA2 = s.H - rhok * jnp.outer(s.H @ yk, sk)
+    H = HA2 - rhok * jnp.outer(sk, yk @ HA2) + rhok * jnp.outer(sk, sk)
     iterate = accept & ~stop & (gnorm > gtol) & (k < maxiter)
     s = replace(s, 
         x=jnp.where(accept, x_t, s.x),

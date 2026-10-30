@@ -23,6 +23,7 @@ from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imp
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
+    import jax.numpy as jnp
     from simsopt.configs import get_data
     from simsopt.field.biotsavart import BiotSavart
     from simsopt.geo.boozersurface import BoozerSurface
@@ -38,11 +39,14 @@ with optional_jax_imports():
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
     from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.jit import jit
+    from simsopt_jax.core import boozer_problem as boozer_problem_module
     from simsopt_jax.core.boozer_problem import (
         BoozerProblem,
         boozer_exact_constraints,
         boozer_exact_residual,
         boozer_penalty_constraints,
+        boozer_penalty_residual,
     )
     from simsopt_jax.core.boozer_problem import (
         boozer_surface_residual as jax_boozer_surface_residual,
@@ -64,7 +68,11 @@ from unittest_jax_support import (
     place_float64,
 )
 
+from collections import Counter
 from dataclasses import dataclass, replace
+from functools import partial
+from unittest import mock
+import re
 
 import numpy as np
 
@@ -228,6 +236,27 @@ _EXACT_CONSTRAINT_CASES = {
     "xyz-nonsym-volume-G": _Case("xyz", False, "volume", True, False),
     "rz-stellsym-area": _Case("rz", True, "area", False, False),
 }
+
+
+def _closed_form_mean_cross_sectional_area(surface: _NativeSurface) -> float:
+    """Native's mean cross-sectional area in the closed form of its own
+    ``dmean_cross_sectional_area_by_dcoeff``, which needs no ``det``/``inv`` of
+    the cylindrical map and so stays defined where that map is singular.
+
+    Args:
+        surface (SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier):
+            Native surface at its current DOFs.
+
+    Returns:
+        float: Mean cross-sectional area in square meters.
+    """
+    gamma, xphi, xtheta = surface.gamma(), surface.gammadash1(), surface.gammadash2()
+    x, y = gamma[..., 0], gamma[..., 1]
+    section = (
+        xtheta[..., 2] * (x * xphi[..., 1] - y * xphi[..., 0])
+        - xphi[..., 2] * (x * xtheta[..., 1] - y * xtheta[..., 0])
+    ) / np.sqrt(x * x + y * y)
+    return float(np.abs(np.mean(section)) / (2 * np.pi))
 
 
 def _singular_section_surface() -> SurfaceXYZFourier:
@@ -652,17 +681,28 @@ class TestBoozerResidualJax(JaxTestCase):
             label.J()
         problem = boozer_problem(setup.field, surface, label, 5.0, 1.0)
         x = _decision(surface, False)
+        singular = _native_boozer(
+            replace(setup, surface=surface, label=label, target=5.0), 1.0
+        )
         with self.assertRaises(np.linalg.LinAlgError):
-            _native_boozer(
-                replace(setup, surface=surface, label=label, target=5.0), 1.0
-            ).boozer_penalty_constraints_vectorized(x.copy(), derivatives=2)
-        for output in boozer_penalty_constraints(
-            problem, place_float64(x, problem.targetlabel), derivatives=2
+            singular.boozer_penalty_constraints_vectorized(x.copy(), derivatives=2)
+        # Native with its mean cross-sectional area in the closed form of its own
+        # derivatives is the reference: value, gradient and Hessian.
+        with mock.patch.object(
+            surface,
+            "mean_cross_sectional_area",
+            lambda: _closed_form_mean_cross_sectional_area(surface),
         ):
-            self.assertTrue(
-                np.all(np.isfinite(host_array(output))),
-                "AspectRatio penalty is not finite",
+            expected = singular.boozer_penalty_constraints_vectorized(
+                x.copy(), derivatives=2
             )
+        _assert_all_native(
+            boozer_penalty_constraints(
+                problem, place_float64(x, problem.targetlabel), derivatives=2
+            ),
+            expected,
+            "AspectRatio penalty at a singular cylindrical map",
+        )
 
     def test_hessians_match_differences_of_native_derivatives(self):
         """Penalty and residual Hessians agree with central differences of native
@@ -780,6 +820,7 @@ class TestBoozerResidualJax(JaxTestCase):
         )
         first_results = _evaluate_every_formulation(first, x, xl)
         _assert_every_formulation_native(first_results, setup, 3.0, x, xl)
+        first_x, first_xl = x, xl
 
         setup.surface.set_dofs(
             setup.surface.get_dofs()
@@ -796,6 +837,7 @@ class TestBoozerResidualJax(JaxTestCase):
         )
         with jax_compilations() as compilations:
             second_results = _evaluate_every_formulation(second, x, xl)
+            first_again = _evaluate_every_formulation(first, first_x, first_xl)
         self.assertEqual(
             compilations, [], "new values retraced or recompiled a formulation"
         )
@@ -806,6 +848,14 @@ class TestBoozerResidualJax(JaxTestCase):
                 host_array(second_results["penalty"][0]),
             )
         )
+        # The first problem is a snapshot: the native changes leave it unchanged.
+        for name, results in first_results.items():
+            for order, (again, before) in enumerate(
+                zip(first_again[name], results, strict=True)
+            ):
+                assert_matches_native(
+                    again, host_array(before), f"first problem {name}[{order}]"
+                )
 
     def test_formulations_make_no_implicit_transfers(self):
         """Boozer formulations accept placed inputs without implicit host/device transfers."""
@@ -950,9 +1000,8 @@ class TestBoozerResidualJax(JaxTestCase):
         # As native solve_residual_equation_exactly_newton, only tensor surfaces have the exact system.
         with self.assertRaisesRegex(RuntimeError, "SurfaceXYZTensorFourier"):
             boozer_exact_residual_rows(setup.surface)
-        tensor_rows = boozer_exact_residual_rows(
-            _setup("tensor", True, "volume").surface
-        )
+        tensor_setup = _setup("tensor", True, "volume")
+        tensor_rows = boozer_exact_residual_rows(tensor_setup.surface)
         with self.assertRaisesRegex(RuntimeError, "SurfaceXYZTensorFourier"):
             boozer_exact_residual(
                 exact,
@@ -963,6 +1012,43 @@ class TestBoozerResidualJax(JaxTestCase):
             boozer_penalty_constraints(
                 replace(exact, constraint_weight=exact.targetlabel), x, optimize_G=True
             )
+        # As native asserts: no order the field model does not carry.
+        weighted = replace(exact, constraint_weight=exact.targetlabel)
+        tensor = boozer_problem(
+            tensor_setup.field, tensor_setup.surface, tensor_setup.label, tensor_setup.target
+        )
+        tensor_x = place_float64(_decision(tensor_setup.surface, True), tensor.targetlabel)
+        tensor_xl = place_float64(
+            _decision(tensor_setup.surface, True, (0.1, 0.2)), tensor.targetlabel
+        )
+        unsupported = {
+            "residual": [
+                lambda order: jax_boozer_surface_residual(
+                    exact, x, derivatives=order, optimize_G=False
+                ),
+                (-1, 3),
+            ],
+            "penalty": [
+                lambda order: boozer_penalty_constraints(weighted, x, derivatives=order),
+                (-1, 3),
+            ],
+            "exact constraints": [
+                lambda order: boozer_exact_constraints(tensor, tensor_xl, derivatives=order),
+                (-1, 2, 3),
+            ],
+            "exact residual": [
+                lambda order: boozer_exact_residual(
+                    tensor, tensor_x, tensor_rows, derivatives=order
+                ),
+                (-1, 2, 3),
+            ],
+        }
+        for name, (formulation, orders) in unsupported.items():
+            for order in orders:
+                with self.subTest(name=name, derivatives=order), self.assertRaisesRegex(
+                    ValueError, "derivatives must be"
+                ):
+                    formulation(order)
 
     def test_penalty_gradient_taylor(self):
         """The penalty gradient matches forward differences of the penalty at shrinking
@@ -1109,6 +1195,158 @@ class TestBoozerResidualJax(JaxTestCase):
                 self.assertTrue(len(actual) == len(expected) > 0, "coil leaves")
                 for leaf, (a, e) in enumerate(zip(actual, expected)):
                     assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
+
+    def test_exact_constraint_values_refuse_derivatives_in_xl(self):
+        """``boozer_exact_constraints(derivatives=0)`` is a gradient built with the
+        field's first-order model, so its derivative in ``xl`` would miss
+        ``d2B/dXdX``: forward, reverse and total derivatives through an ``xl``
+        that depends on the coils raise and point to ``derivatives=1``. The
+        guard that raises compiles to no operation."""
+        setup = _setup("tensor", False, "toroidal_flux")
+        problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
+        xl = place_float64(
+            _decision(setup.surface, True, (0.37, -0.23)), problem.targetlabel
+        )
+
+        def constraints(point):
+            return boozer_exact_constraints(problem, point)
+
+        def through_the_coils(scale):
+            coils = jax.tree.map(lambda leaf: scale * leaf, problem.coils)
+            return boozer_exact_constraints(replace(problem, coils=coils), scale * xl)
+
+        one = place_float64(1.0, problem.targetlabel)
+        for name, derivative in (
+            ("jacfwd in xl", lambda: jax.jacfwd(constraints)(xl)),
+            ("jacrev in xl", lambda: jax.jacrev(constraints)(xl)),
+            ("total derivative", lambda: jax.jacfwd(through_the_coils)(one)),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(TypeError, "derivatives=1"):
+                derivative()
+
+        def operations():
+            jax.clear_caches()
+            text = boozer_exact_constraints.lower(problem, xl).as_text()
+            return Counter(re.findall(r"\b(?:stablehlo|chlo|func)\.[a-z_]+", text))
+
+        guarded = operations()
+        with mock.patch.object(
+            boozer_problem_module, "_without_derivatives_in_xl", lambda value: value
+        ):
+            unguarded = operations()
+            # The unguarded program is the one whose derivative in xl was wrong.
+            jax.jacfwd(constraints)(xl)
+        jax.clear_caches()
+        self.assertGreater(sum(guarded.values()), 0)
+        self.assertEqual(guarded, unguarded, "the guard adds operations")
+
+    def test_exact_constraint_values_have_exact_coil_derivatives(self):
+        """At a fixed ``xl``, the coil derivatives of
+        ``boozer_exact_constraints(derivatives=0)`` (first and second order,
+        forward and reverse, jitted and vmapped) equal those of the same
+        Lagrangian gradient taken through the field kernel itself, built here
+        from the unweighted residual and constraints of
+        :func:`boozer_exact_residual` at every residual row."""
+        setup = _setup("tensor", False, "toroidal_flux")
+        problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
+        xl = place_float64(
+            _decision(setup.surface, True, (0.37, -0.23)), problem.targetlabel
+        )
+        nx = xl.shape[0] - 2
+        npoints = setup.surface.gamma().size // 3
+        every_row = jnp.arange(3 * npoints, dtype=jnp.int32)
+
+        def reference(coils, point):
+            moved = replace(problem, coils=coils)
+
+            def lagrangian(x, multipliers):
+                system = boozer_exact_residual(moved, x, every_row)
+                residual, constraints = system[:-2], system[-2:]
+                return 0.5 * jnp.sum(residual * residual) - multipliers @ constraints
+
+            x, multipliers = point[:nx], point[nx:]
+            stationarity = jax.grad(lagrangian)(x, multipliers)
+            constraints = boozer_exact_residual(moved, x, every_row)[-2:]
+            return jnp.concatenate((stationarity, constraints))
+
+        def exact(coils, point):
+            return boozer_exact_constraints(replace(problem, coils=coils), point)
+
+        rng = parity_rng(7)
+        direction = jax.tree.map(
+            lambda leaf: place_float64(
+                1e-2 * host_array(leaf) * rng.standard_normal(leaf.shape),
+                problem.targetlabel,
+            ),
+            problem.coils,
+        )
+
+        def along(constraints):
+            """Value, first and second derivatives along ``direction`` at ``t``."""
+
+            def value(t):
+                coils = jax.tree.map(lambda c, d: c + t * d, problem.coils, direction)
+                return constraints(coils, xl)
+
+            def first(t):
+                return jax.jvp(value, (t,), (jnp.ones_like(t),))[1]
+
+            def second(t):
+                return jax.jvp(first, (t,), (jnp.ones_like(t),))[1]
+
+            return lambda t: (value(t), first(t), second(t))
+
+        steps = place_float64([0.0, 0.5], problem.targetlabel)
+        actual = jax.vmap(jit(along(exact)))(steps)
+        expected = jax.vmap(along(reference))(steps)
+        for order, (a, e) in enumerate(zip(actual, expected, strict=True)):
+            assert_matches_native(a, host_array(e), f"coil derivative of order {order}")
+
+        cotangent = place_float64(rng.standard_normal(xl.shape), problem.targetlabel)
+
+        def coil_pullback(constraints):
+            return jax.vjp(partial(constraints, point=xl), problem.coils)[1](cotangent)[0]
+
+        leaves = [jax.tree.leaves(coil_pullback(c)) for c in (exact, reference)]
+        self.assertTrue(len(leaves[0]) == len(leaves[1]) > 0, "coil leaves")
+        for leaf, (a, e) in enumerate(zip(*leaves, strict=True)):
+            assert_matches_native(a, host_array(e), f"coil VJP [{leaf}]")
+
+    def test_formulations_cast_the_decision_vector_to_float64(self):
+        """A float32 decision vector is evaluated in float64: every formulation
+        and derivative equals its value at the same numbers in float64."""
+        setup = _setup("tensor", False, "volume")
+        problem = boozer_problem(
+            setup.field, setup.surface, setup.label, setup.target, 3.0
+        )
+        rows = boozer_exact_residual_rows(setup.surface)
+        formulations = {
+            "residual": lambda x, xl: jax_boozer_surface_residual(
+                problem, x, derivatives=2, optimize_G=True
+            ),
+            "penalty": lambda x, xl: boozer_penalty_constraints(
+                problem, x, derivatives=2, optimize_G=True
+            ),
+            "penalty residual": lambda x, xl: boozer_penalty_residual(
+                problem, x, derivatives=2, optimize_G=True
+            ),
+            "exact constraints": lambda x, xl: boozer_exact_constraints(
+                problem, xl, derivatives=1
+            ),
+            "exact residual": lambda x, xl: boozer_exact_residual(
+                problem, x, rows, derivatives=1
+            ),
+        }
+        decision = _decision(setup.surface, True, (0.37, -0.23))
+        rounded = place_float64(decision.astype(np.float32), problem.targetlabel)
+        single = rounded.astype(jnp.float32)
+        for name, formulation in formulations.items():
+            with self.subTest(name=name):
+                actual = formulation(single[:-2], single)
+                expected = formulation(rounded[:-2], rounded)
+                for order, (a, e) in enumerate(zip(actual, expected, strict=True)):
+                    self.assertEqual(a.dtype, jnp.float64, f"{name}[{order}] dtype")
+                    assert_matches_native(a, host_array(e), f"{name}[{order}]", rtol=1e-14)
 
     def test_second_derivatives_nest_forward_over_reverse(self):
         """The penalty Hessian and the BoozerExact KKT Jacobian compile, at
