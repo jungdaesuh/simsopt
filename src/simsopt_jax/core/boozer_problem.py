@@ -31,7 +31,10 @@ its Taylor model at the quadrature points
 (:func:`~simsopt_jax.core.boozer_residual.taylor_field`, coefficients from
 the fused ``B``/``dB/dX`` kernel and ``d2B/dXdX``) of the order requested:
 derivative outputs are exact at ``x`` and, to any order, in the coils at a
-fixed ``x``, and differentiating them again in ``x`` raises ``TypeError``. The
+fixed ``x``, and differentiating them again in ``x`` raises ``TypeError``.
+"At a fixed ``x``" means a transform that does not trace ``x``: one that
+traces it, even with a zero tangent for it (``jax.jvp`` with zeros for ``x``,
+``jax.vjp`` over the coils and ``x`` together), raises too. The
 values (``derivatives=0``) of the residual, the penalty and the BoozerExact
 system evaluate the field itself, so they can be differentiated in ``x`` and
 the coils to any order. The exact constraints are themselves gradients of the
@@ -331,8 +334,18 @@ def _not_differentiable_in_x(x: jax.Array, refusal: str) -> jax.Array:
 
     Outputs computed from it with the field's Taylor model of some order would
     otherwise give derivatives in ``x`` that miss the field's next derivative.
-    Coil derivatives at a fixed ``x`` leave its tangent a symbolic zero and
-    pass; the guard compiles to no operation."""
+    Derivatives in the coils alone do not trace ``x`` and pass. A transform
+    that traces ``x`` raises even when its tangent is zero, because the rule
+    cannot tell zero from nonzero tangents at trace time. The guard compiles
+    to no operation.
+
+    Args:
+        x (jax.Array): Decision vector, any shape.
+        refusal (str): Message of the ``TypeError``.
+
+    Returns:
+        jax.Array: ``x`` unchanged.
+    """
     return x
 
 
