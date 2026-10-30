@@ -12,6 +12,7 @@ from typing import Callable, NoReturn, cast
 
 import jax
 from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_clear
+from simsopt_jax.backend.jit import jit
 import jax.numpy as jnp
 import numpy as np
 
@@ -58,7 +59,10 @@ from simsopt_jax.core._math_utils import (
     as_jax_float64 as _as_jax_float64,
 )
 from simsopt_jax.core.curve_geometry import optimizable_input_dofs_from_map_spec
-from simsopt_jax.core._device_scalars import two_pi as _two_pi
+from simsopt_jax.core._device_scalars import (
+    placement_zero as _placement_zero,
+    two_pi as _two_pi,
+)
 from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
     GroupedCoilSetSpec,
@@ -67,6 +71,7 @@ from simsopt_jax.core.specs import (
 )
 from simsopt_jax_adapters.field._coil_graph import (
     _unwrap_coil_curve_and_current_objects,
+    coil_graph_parameters,
 )
 from simsopt_jax_adapters.geo.curve_contract import _optimizable_dof_layout
 from simsopt_jax_adapters.geo.curve_specs import (
@@ -116,7 +121,7 @@ class _CoilEvaluationState:
     coil_set_spec: GroupedCoilSetSpec
 
 
-@jax.jit
+@jit
 def _jitted_coil_set_spec_from_extraction_spec(coil_dof_extraction_spec, coil_dofs):
     """Owner free-DOF vector -> grouped coil geometry and currents, as one program."""
     return coil_set_spec_from_dof_extraction_spec(coil_dof_extraction_spec, coil_dofs)
@@ -128,7 +133,7 @@ __all__ = [
 ]
 
 
-@jax.jit
+@jit
 def _cyl_points_to_cart(points_cyl):
     points = _as_jax_float64(points_cyl)
     r = points[:, 0]
@@ -137,20 +142,19 @@ def _cyl_points_to_cart(points_cyl):
     return jnp.stack((r * jnp.cos(phi), r * jnp.sin(phi), z), axis=1)
 
 
-@jax.jit
+@jit
 def _canonical_set_points_cyl(points_cyl):
     points = _as_jax_float64(points_cyl)
     return points.at[:, 1].set(jnp.fmod(points[:, 1], _two_pi(points)))
 
 
-@jax.jit
+@jit
 def _cart_points_to_cyl(points_cart):
     points = _as_jax_float64(points_cart)
     x = points[:, 0]
     y = points[:, 1]
     phi = jnp.arctan2(y, x)
-    zero = jnp.sum(points - points)
-    phi = jnp.where(phi < zero, phi + _two_pi(points), phi)
+    phi = jnp.where(phi < _placement_zero(points), phi + _two_pi(points), phi)
     return jnp.stack(
         (
             jnp.sqrt(x * x + y * y),
@@ -161,7 +165,7 @@ def _cart_points_to_cyl(points_cart):
     )
 
 
-@jax.jit
+@jit
 def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     vectors = _as_jax_float64(vectors_cart)
     points = _as_jax_float64(points_cyl)
@@ -178,7 +182,7 @@ def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     )
 
 
-@partial(jax.jit, static_argnames=("kernel_tuning",))
+@partial(jit, static_argnames=("kernel_tuning",))
 def _jitted_grad_absB(points, coil_set_spec, kernel_tuning):
     """``jax.grad`` of ``|B|`` in each point, tiled like the field kernels.
 
@@ -199,6 +203,9 @@ def _jitted_grad_absB(points, coil_set_spec, kernel_tuning):
 
 
 def _grouped_grad_absB_from_spec(points, coil_set_spec):
+    if not coil_set_spec.groups:
+        # No coils: B is identically zero, and native's (B . dB/dX) / |B| is 0/0.
+        return jnp.full_like(points, jnp.nan)
     return _jitted_grad_absB(
         points, coil_set_spec, kernel_tuning=get_field_kernel_tuning(),
     )
@@ -342,7 +349,7 @@ def _extraction_input_cotangent(extraction_spec, d_coil_arrays, coil_indices, in
     return pullback(d_coil_arrays)[0]
 
 
-@partial(jax.jit, static_argnames=("coil_indices",))
+@partial(jit, static_argnames=("coil_indices",))
 def _jitted_coil_cotangents_to_owner_partials(
     projection_spec, owner_full_map, d_coil_arrays, coil_indices, coil_dofs,
 ):
@@ -352,7 +359,7 @@ def _jitted_coil_cotangents_to_owner_partials(
     )
 
 
-_jitted_coil_cotangents_to_dofs_gradient = jax.jit(
+_jitted_coil_cotangents_to_dofs_gradient = jit(
     _extraction_input_cotangent, static_argnames=("coil_indices",),
 )
 
@@ -428,7 +435,8 @@ class JaxBiotSavart(Optimizable):
     :class:`simsopt.field.BiotSavart`. Call
     :func:`simsopt_jax.backend.set_backend` before constructing it to choose
     the device. An instance holds mutable point state, so do not share it
-    across threads.
+    across threads. As in the native class, the evaluation points start as
+    one point at the origin.
     """
 
     def clear_points(self) -> None:
@@ -544,7 +552,8 @@ class JaxBiotSavart(Optimizable):
 
         Returns:
             jax.Array: Cartesian gradient of field magnitude, shape (P, 3), in
-                tesla per meter; zero field retains the division singularity.
+                tesla per meter; zero field retains the division singularity,
+                so an empty coil set gives NaN as native does.
         """
         return self._field_output(_grouped_grad_absB_from_spec)
 
@@ -737,15 +746,17 @@ class JaxBiotSavart(Optimizable):
         coils = decoder.process_decoded(d["coils"], serial_objs_dict, recon_objs)
         field = cls(coils)
         points = decoder.process_decoded(d.get("points"), serial_objs_dict, recon_objs)
-        if points is not None:
+        if points is None:
+            field.clear_points()
+        else:
             field.set_points(points)
         return field
 
     def __init__(self, coils):
         self._coils = list(coils)
-        self._points_jax = None
-        self._points_cyl_jax = None
         self._points_version = 0
+        # Native fields start with one evaluation point at the origin.
+        self.set_points(np.zeros((1, 3)))
         self._free_dof_layout_ready = False
         self._suppress_dependency_coil_dof_state = False
         self._fixed_dofs_maybe_changed = False
@@ -776,7 +787,9 @@ class JaxBiotSavart(Optimizable):
             self._fixed_dofs_maybe_changed = False
 
     def _current_captured_coil_state_fingerprint(self) -> tuple[bytes, ...]:
-        """Fixed coordinates, fingerprinted once at the first read after a DOF notification."""
+        """Fixed coordinates and non-DOF coil parameters (current scales, filament
+        offsets, frame-rotation scales), fingerprinted once at the first read
+        after a dependency notification."""
         return tuple(
             np.ascontiguousarray(
                 np.asarray(opt.local_full_x, dtype=np.float64)[
@@ -784,7 +797,7 @@ class JaxBiotSavart(Optimizable):
                 ]
             ).tobytes()
             for opt in self.unique_dof_lineage
-        )
+        ) + (coil_graph_parameters(self.ancestors).tobytes(),)
 
     def _perturbation_samples_changed(self) -> bool:
         return any(
@@ -870,8 +883,8 @@ class JaxBiotSavart(Optimizable):
 
         Args:
             parent (Optimizable or None): Dependency that triggered the recompute
-                notification; a non-None parent marks fixed DOFs for re-check on
-                the next read.
+                notification; a non-None parent marks fixed DOFs and non-DOF
+                coil parameters for re-check on the next read.
         """
         if (
             parent is not None
@@ -1085,7 +1098,8 @@ class JaxBiotSavart(Optimizable):
 
         Returns:
             CoilSetDofExtractionSpec object: Cached reconstruction contract,
-                refreshed when captured fixed DOFs, samples or layout change.
+                refreshed when captured fixed DOFs, non-DOF coil parameters,
+                samples or layout change.
         """
         # Direct sample replacement can bypass the native curve notification.
         previous_spec = self._coil_dof_extraction_spec

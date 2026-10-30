@@ -8,6 +8,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax_adapters.field import biotsavart_backend as _backend
 
 
@@ -39,7 +40,7 @@ class TestBiotsavartFieldPullback(JaxTestCase):
             restored.coil_indices == ((2, 0), (1,)),
             "restored.coil_indices == ((2, 0), (1,))",
         )
-        compiled = jax.jit(lambda value: jax.tree.map(lambda leaf: 2 * leaf, value))(
+        compiled = jit(lambda value: jax.tree.map(lambda leaf: 2 * leaf, value))(
             restored
         )
         self.assertTrue(

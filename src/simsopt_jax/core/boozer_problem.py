@@ -31,13 +31,21 @@ its Taylor model at the quadrature points
 (:func:`~simsopt_jax.core.boozer_residual.taylor_field`, coefficients from
 the fused ``B``/``dB/dX`` kernel and ``d2B/dXdX``) of the order requested:
 derivative outputs are exact at ``x`` and in the coils, but are not to be
-differentiated again in ``x``. Values evaluate the field itself, so they can
-be differentiated in ``x`` and the coils to any order.
+differentiated again in ``x``. The values (``derivatives=0``) of the residual,
+the penalty and the BoozerExact system evaluate the field itself, so they can
+be differentiated in ``x`` and the coils to any order. The exact constraints
+are themselves gradients of the Lagrangian, so their values come from the
+first-order model: their partial derivatives in the coils at a fixed ``xl``
+are exact to any order, their Jacobian in ``xl`` is ``derivatives=1``, and
+differentiating the values in ``xl`` raises ``TypeError``. Total derivatives
+through a surface that depends on the coils (a solved surface) are
+therefore not supported.
 
-Every function is jitted with the problem and ``x`` as traced operands: new
-DOF, ``iota``, ``G``, coil, target and weight values reuse the compiled
-program, while ``derivatives``, ``optimize_G``, ``weight_inv_modB`` and the
-problem's shapes, surface class and label kind select one. Build problems with
+Every function is jitted with the problem and ``x`` (cast to float64) as
+traced operands: new DOF, ``iota``, ``G``, coil, target and weight values
+reuse the compiled program, while ``derivatives``, ``optimize_G``,
+``weight_inv_modB`` and the problem's shapes, surface class and label kind
+select one. Build problems with
 :func:`simsopt_jax_adapters.geo.boozer_problem.boozer_problem` and pass ``x``
 already on the device. Second derivatives evaluate ``d2B/dXdX`` at every
 quadrature point: call ``simsopt_jax.backend.set_backend("jax", device=...)``
@@ -57,10 +65,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
 
 from ._math_utils import as_jax_float64
 from .boozer_residual import (
+    _require_derivative_order,
     boozer_point_residual,
     objective_derivatives,
     residual_derivatives,
@@ -315,10 +325,29 @@ def _penalty_terms(
     return residual, sqrt_weight * _label_residual(problem, x), sqrt_weight * z
 
 
+@jax.custom_jvp
+def _without_derivatives_in_xl(xl: jax.Array) -> jax.Array:
+    """``xl`` itself, refusing any derivative in it: the exact constraints'
+    ``derivatives=0`` value is a gradient taken with the first-order field
+    model, whose derivative in ``xl`` would miss ``d2B/dXdX``. Coil
+    derivatives leave ``xl``'s tangent a symbolic zero and pass."""
+    return xl
+
+
+@_without_derivatives_in_xl.defjvp
+def _refuse_derivatives_in_xl(primals, tangents):
+    raise TypeError(
+        "boozer_exact_constraints(derivatives=0) is not differentiable in xl: its value "
+        "is a gradient evaluated with the first-order field model. Request its Jacobian "
+        "with derivatives=1; total derivatives through a surface that depends on the "
+        "coils are not supported."
+    )
+
+
 _STATIC_OPTIONS = ("derivatives", "optimize_G", "weight_inv_modB")
 
 
-@partial(jax.jit, static_argnames=_STATIC_OPTIONS)
+@partial(jit, static_argnames=_STATIC_OPTIONS)
 def boozer_surface_residual(
     problem: BoozerProblem,
     x: jax.Array,
@@ -350,6 +379,8 @@ def boozer_surface_residual(
             x.
     """
 
+    x = as_jax_float64(x)
+
     def residual(point):
         return _boozer_terms(
             problem,
@@ -363,7 +394,7 @@ def boozer_surface_residual(
     return residual_derivatives(residual, x, derivatives)
 
 
-@partial(jax.jit, static_argnames=_STATIC_OPTIONS)
+@partial(jit, static_argnames=_STATIC_OPTIONS)
 def boozer_penalty_constraints(
     problem: BoozerProblem,
     x: jax.Array,
@@ -395,6 +426,8 @@ def boozer_penalty_constraints(
             units follow the residual and native constraint coefficient.
     """
 
+    x = as_jax_float64(x)
+
     def penalty(point):
         residual, label_residual, z_residual = _penalty_terms(
             problem,
@@ -410,7 +443,7 @@ def boozer_penalty_constraints(
     return result[0] if derivatives == 0 else result
 
 
-@partial(jax.jit, static_argnames=("derivatives", "optimize_G"))
+@partial(jit, static_argnames=("derivatives", "optimize_G"))
 def boozer_exact_constraints(
     problem: BoozerProblem,
     xl: jax.Array,
@@ -421,7 +454,11 @@ def boozer_exact_constraints(
     """Native ``boozer_exact_constraints``: ``res``, or ``(res, dres)``.
 
     ``xl`` is ``x`` followed by the multipliers of the label constraint and of
-    ``z(0, 0) = 0``; the residual is not weighted.
+    ``z(0, 0) = 0``; the residual is not weighted. ``res`` is the gradient of
+    the Lagrangian, evaluated with the field's first-order Taylor model: its
+    derivatives in the coils at a fixed ``xl`` are exact to any order, but it
+    is not differentiable in ``xl`` (use ``derivatives=1`` for the Jacobian),
+    so neither are total derivatives through a surface solved for the coils.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
@@ -437,7 +474,13 @@ def boozer_exact_constraints(
         jax.Array | tuple[jax.Array, jax.Array]: Lagrangian stationarity and label/z
             constraints, shape (nx + 2,), optionally with Jacobian (nx + 2, nx + 2);
             rows have their native stationarity and constraint units.
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0 or 1.
+        TypeError: When ``res`` (``derivatives=0``) is differentiated in ``xl``.
     """
+    _require_derivative_order(derivatives, 1)
+    xl = as_jax_float64(xl)
     nx = xl.shape[0] - 2
 
     def lagrangian(x, multipliers):
@@ -460,12 +503,12 @@ def boozer_exact_constraints(
         return jnp.concatenate((stationarity, -constraints))
 
     if derivatives == 0:
-        return conditions(xl)
+        return conditions(_without_derivatives_in_xl(xl))
     value, jacobian = residual_derivatives(conditions, xl, derivatives)
     return value, jacobian
 
 
-@partial(jax.jit, static_argnames=("derivatives",))
+@partial(jit, static_argnames=("derivatives",))
 def boozer_exact_residual(
     problem: BoozerProblem, x: jax.Array, residual_rows: jax.Array, *, derivatives: int = 0
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
@@ -491,11 +534,17 @@ def boozer_exact_residual(
             constraint, plus z without stellarator symmetry, shape (nb,), optionally
             Jacobian (nb, nx). Boozer rows have tesla squared meter units; constraint
             rows use label units and meters.
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0 or 1.
+        RuntimeError: If the problem's surface is not a ``SurfaceXYZTensorFourier``.
     """
+    _require_derivative_order(derivatives, 1)
     if not isinstance(problem.surface, SurfaceXYZTensorFourierSpec):
         raise RuntimeError(
             "Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier"
         )
+    x = as_jax_float64(x)
     axis = not problem.surface.stellsym
 
     def system(point):

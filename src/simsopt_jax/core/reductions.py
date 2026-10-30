@@ -31,8 +31,7 @@ def pairwise_sum_axis(array, *, axis: int):
     """Reduce ``array`` along ``axis`` using a fixed binary addition tree.
 
     Args:
-        array (jax.Array): Input of any nonscalar shape; finite values are assumed for
-            zero padding.
+        array (jax.Array): Input of any nonscalar shape.
         axis (int): Reduction axis; negative values count from the end.
 
     Returns:
