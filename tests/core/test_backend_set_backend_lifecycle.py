@@ -128,6 +128,8 @@ class TestSetBackendLifecycle(JaxTestCase):
             any("XLA_PYTHON_CLIENT_PREALLOCATE" in text for text in messages),
             messages,
         )
+        # Every warning names this call site, not a line inside simsopt.
+        self.assertEqual({warning.filename for warning in caught}, {__file__}, messages)
         if {"cuda", "gpu"} & set(jax.extend.backend.backends()):
             self.assertEqual(jax.numpy.zeros(3).devices(), {jax.devices("gpu")[0]})
 

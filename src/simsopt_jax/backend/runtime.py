@@ -55,6 +55,7 @@ import os
 import shlex
 import sys
 import threading
+import traceback
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -455,10 +456,28 @@ def invalidate_backend_cache() -> None:
         _reset_backend_runtime_caches()
 
 
+def _warn_at_caller(message: str) -> None:
+    """Issue a RuntimeWarning located at the first caller outside this module.
+
+    The public entries (``set_backend``, ``apply_jax_runtime_config``, ...)
+    reach the warning sites at different depths, so a fixed ``stacklevel``
+    would name a line of this module for some of them.
+
+    Args:
+        message (str): Warning text.
+    """
+    stacklevel = next(
+        level
+        for level, (frame, _) in enumerate(traceback.walk_stack(sys._getframe(1)), start=2)
+        if frame.f_code.co_filename != __file__
+    )
+    warnings.warn(message, RuntimeWarning, stacklevel=stacklevel)
+
+
 def _raise_or_warn_runtime_issue(config: BackendConfig, message: str) -> None:
     if config.mode == "jax_gpu_parity" or config.strict:
         raise RuntimeError(message)
-    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    _warn_at_caller(message)
 
 
 def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
@@ -579,7 +598,8 @@ def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
     XLA reads them when it initializes its backends. Afterwards they cannot
     change this process, so they are left alone (child processes still
     resolve the synchronized ``SIMSOPT_*`` variables) and a setting that
-    differs from the running process warns.
+    differs from its environment variable, the value XLA read at
+    initialization unless it changed since, warns.
     """
     if config.jax_platform != "cuda":
         return
@@ -592,12 +612,10 @@ def _apply_jax_gpu_memory_env(config: BackendConfig) -> None:
         name for name, value in runtime_env if os.environ.get(name) != value
     )
     if differing:
-        warnings.warn(
-            "JAX already initialized its backends, so the requested GPU memory "
-            f"settings ({', '.join(differing)}) do not apply to this process; "
-            "set them before touching JAX devices.",
-            RuntimeWarning,
-            stacklevel=3,
+        _warn_at_caller(
+            "JAX already initialized its backends, so the GPU memory settings "
+            f"of backend mode {config.mode!r} ({', '.join(differing)}) do not "
+            "apply to this process; set them before touching JAX devices."
         )
 
 
@@ -703,15 +721,13 @@ def _apply_cuda_autotuner_env(config: BackendConfig) -> None:
         return
     previous = os.environ.get(_XLA_FLAGS_ENV)
     if apply_cuda_xla_flag_pins() != previous and _jax_backends_initialized():
-        warnings.warn(
+        _warn_at_caller(
             "XLA already initialized its backends before the CUDA autotuner pins "
             f"reached {_XLA_FLAGS_ENV}; this process compiles with XLA's default "
             "GPU autotuning, so fresh compiles are not bitwise-reproducible. "
             "Resolve the simsopt backend config (or call "
             "simsopt_jax.backend.runtime.apply_cuda_xla_flag_pins()) before "
-            "touching JAX devices.",
-            RuntimeWarning,
-            stacklevel=3,
+            "touching JAX devices."
         )
 
 
