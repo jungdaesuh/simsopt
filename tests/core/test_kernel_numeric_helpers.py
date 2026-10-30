@@ -8,6 +8,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core.biotsavart import (
         _radius_squared,
         biot_savart_A,
@@ -64,7 +65,7 @@ class TestKernelNumericHelpers(JaxTestCase):
     def test_constant_row_builds_its_row_from_a_traced_reference(self):
         """The row is selected statically but sourced from the reference's device."""
 
-        @jax.jit
+        @jit
         def rows_for(reference):
             return (
                 _constant_row(3, is_one=True, reference=reference),
