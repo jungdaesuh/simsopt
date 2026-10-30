@@ -138,6 +138,43 @@ def _assert_cylindrical_accessors_match_cpu(jax_field, cpu_field):
     )
 
 
+class TestBiotSavartJaxPhysics(JaxTestCase):
+    """Field properties that hold independently of the native implementation."""
+
+    def test_circular_loop_on_axis_field_is_analytic(self):
+        """On the axis of a circular loop of radius R carrying I,
+        B = (0, 0, mu0 I R^2 / (2 (R^2 + z^2)^(3/2))).
+
+        The integrand is constant along the loop for points on its axis, so the
+        quadrature is exact and only round-off remains.
+        """
+        radius, current = 1.3, 2.0e5
+        curve = CurveXYZFourier(64, 1)
+        curve.x = np.array(
+            [radius if name in ("xc(1)", "ys(1)") else 0.0 for name in curve.local_dof_names]
+        )
+        z = np.array([-2.0, -0.4, 0.0, 0.25, 3.0])
+        points = np.stack((np.zeros_like(z), np.zeros_like(z), z), axis=1)
+        field = JaxBiotSavart([Coil(curve, Current(current))]).set_points(points)
+        mu0 = 4.0e-7 * np.pi
+        expected = np.zeros_like(points)
+        expected[:, 2] = mu0 * current * radius**2 / (2.0 * (radius**2 + z**2) ** 1.5)
+        np.testing.assert_allclose(
+            np.asarray(field.B()), expected, rtol=1e-14, atol=1e-14 * expected[:, 2].max()
+        )
+
+    def test_field_is_divergence_free(self):
+        """The trace of dB/dX vanishes to round-off of its largest entry at each
+        point, around the NCSX magnetic axis."""
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        field = JaxBiotSavart(list(bs._coils)).set_points(points_np)
+        dB = np.asarray(field.dB_by_dX())
+        divergence = np.trace(dB, axis1=1, axis2=2)
+        self.assertLess(
+            np.max(np.abs(divergence) / np.max(np.abs(dB), axis=(1, 2))), 1e-13
+        )
+
+
 class TestBiotSavartJaxCppParity(JaxTestCase):
     """Compare against the installed C++ simsoptpp kernel."""
 
