@@ -21,7 +21,12 @@ with optional_jax_imports():
     )
     from simsopt_jax.core.specs import CoilGroupSpec, GroupedCoilSetSpec
     from simsopt_jax.core import biotsavart as core_biotsavart
+    from simsopt_jax.backend import get_field_kernel_tuning
+    from simsopt_jax.backend.runtime import invalidate_backend_cache
 
+
+import os
+from unittest import mock
 
 import numpy as np
 from typing import cast
@@ -296,6 +301,55 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
                     "JaxBiotSavart.B_vjp() does not match BiotSavart.B_vjp() "
                     "on the NCSX parity fixture"
                 ),
+            )
+
+    def test_coil_chunked_kernels_and_pullback_match_native_ncsx(self):
+        """Coil chunking leaves B, dB/dX and the B pullback at native values.
+
+        The 18 NCSX coils form two chunks of 10 and 8 (the exact two-chunk
+        path), or two chunks of 7 and a 4-coil tail (the padded loop).
+        """
+        for chunk_size in (10, 7):
+            with self.subTest(chunk_size=chunk_size), self.case() as patches:
+                patches.enter_context(
+                    mock.patch.dict(
+                        os.environ, {"SIMSOPT_JAX_COIL_CHUNK_SIZE": str(chunk_size)}
+                    )
+                )
+                invalidate_backend_cache()
+                self._case_coil_chunked_kernels_and_pullback_match_native_ncsx(
+                    chunk_size
+                )
+
+    def _case_coil_chunked_kernels_and_pullback_match_native_ncsx(self, chunk_size):
+        """Run one row with case-local objects released before runtime cleanup."""
+        bs, points_np, gammas_np, gds_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
+        self.assertEqual(get_field_kernel_tuning().coil_chunk_size, chunk_size)
+        self.assertEqual(len(currents_np), 18)
+        np.testing.assert_allclose(
+            np.asarray(biot_savart_B(points_np, gammas_np, gds_np, currents_np)),
+            bs.B(),
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+        np.testing.assert_allclose(
+            np.asarray(biot_savart_dB_by_dX(points_np, gammas_np, gds_np, currents_np)),
+            bs.dB_by_dX(),
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+        bs_jax = JaxBiotSavart(list(bs._coils)).set_points(points_np)
+        v = np.asarray(bs.B(), dtype=np.float64).copy()
+        expected = cast(Derivative, bs.B_vjp(v))
+        actual = bs_jax.B_vjp(v)
+        for coil in bs._coils:
+            np.testing.assert_allclose(
+                np.asarray(actual(coil)),
+                np.asarray(expected(coil)),
+                rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
             )
 
     def test_adapter_derivative_parity_ncsx(self):
