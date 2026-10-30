@@ -859,7 +859,8 @@ class BoozerSurfaceTests(unittest.TestCase):
     def test_penalty_newton_divergence_factor(self):
         """
         The penalty Newton solve stops once the gradient norm exceeds
-        divergence_factor times its starting value, and not before.
+        divergence_factor times its starting value, and not before. By
+        default it does not stop early.
         """
         _, boozer_surface = get_boozer_surface(boozer_type="ls", converge=False)
         dofs = boozer_surface.surface.get_dofs()
@@ -868,13 +869,13 @@ class BoozerSurfaceTests(unittest.TestCase):
             # Each Newton step multiplies x, and so the gradient norm, by -19.
             return 0.5 * x @ x, x, 0.05 * np.eye(x.size)
 
-        for divergence_factor, iterations in [(1e3, 3), (None, 40)]:
-            with self.subTest(divergence_factor=divergence_factor):
+        for options, iterations in [({'divergence_factor': 1e3}, 3), ({'divergence_factor': None}, 40), ({}, 40)]:
+            with self.subTest(**options):
                 boozer_surface.surface.set_dofs(dofs)
                 boozer_surface.need_to_run_code = True
                 with mock.patch.object(boozer_surface, 'boozer_penalty_constraints_vectorized', side_effect=exploding):
                     res = boozer_surface.minimize_boozer_penalty_constraints_newton(
-                        tol=1e-14, maxiter=40, iota=-0.406, G=-2.0, divergence_factor=divergence_factor)
+                        tol=1e-14, maxiter=40, iota=-0.406, G=-2.0, **options)
                 self.assertEqual(res['iter'], iterations)
                 self.assertFalse(res['success'])
                 np.testing.assert_array_equal(boozer_surface.surface.get_dofs(), dofs)

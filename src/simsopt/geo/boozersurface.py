@@ -480,7 +480,7 @@ class BoozerSurface(Optimizable):
 
         return resdict
 
-    def minimize_boozer_penalty_constraints_newton(self, tol=1e-12, maxiter=10, constraint_weight=1., iota=0., G=None, stab=0., weight_inv_modB=True, verbose=False, divergence_factor=1e3):
+    def minimize_boozer_penalty_constraints_newton(self, tol=1e-12, maxiter=10, constraint_weight=1., iota=0., G=None, stab=0., weight_inv_modB=True, verbose=False, divergence_factor=None):
         """
         This function does the same as :mod:`minimize_boozer_penalty_constraints_LBFGS`, but instead of LBFGS it uses
         Newton's method.
@@ -495,7 +495,7 @@ class BoozerSurface(Optimizable):
             weight_inv_modB (bool, Optional): If True, weight the residual by modB so that it does not scale with coil currents. Defaults to True.
             verbose (bool, Optional): If True, print the optimization progress. Defaults to False.
             divergence_factor (float, Optional): Stop, unsuccessfully, once the gradient norm exceeds this multiple
-                of its value at the starting point. ``None`` disables the check. Defaults to 1e3.
+                of its value at the starting point. ``None`` disables the check. Defaults to None.
         
         Returns:
             dict: A dictionary containing the results of the optimization. The dictionary contains the following keys in addition
