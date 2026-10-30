@@ -511,9 +511,13 @@ class JaxCurveCurveDistance(Optimizable):
         return snapshot
 
     def _snapshot(self) -> _DistanceOperands | None:
-        """Placed operands of the candidate pairs, or None without a candidate."""
+        """Placed operands of the candidate pairs, or None without a candidate.
+
+        Without a candidate the operands of an earlier state are released too.
+        """
         candidate_snapshot = self._candidate_snapshot()
         if not candidate_snapshot.candidates:
+            self._distance_snapshot = None
             return None
         key = _distance_operand_key(self.curves, candidate_snapshot.key)
         cached = self._distance_snapshot
@@ -696,9 +700,13 @@ class JaxCurveSurfaceDistance(Optimizable):
         return snapshot
 
     def _snapshot(self) -> _DistanceOperands | None:
-        """Placed operands of the candidate curves, or None without a candidate."""
+        """Placed operands of the candidate curves, or None without a candidate.
+
+        Without a candidate the operands of an earlier state are released too.
+        """
         candidate_snapshot = self._candidate_snapshot()
         if not candidate_snapshot.candidates:
+            self._distance_snapshot = None
             return None
         key = _distance_operand_key(self.curves, candidate_snapshot.key) + (
             _array_snapshot_key(self.surface.normal()),

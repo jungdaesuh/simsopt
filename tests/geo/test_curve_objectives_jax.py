@@ -695,6 +695,21 @@ class TestCurveObjectivesJax(JaxTestCase):
             self.assertEqual(adapter.J(), 0.0)
             self.assertFalse(np.any(adapter.dJ()), name)
 
+    def test_distance_operands_are_released_without_candidates(self):
+        """Once no pair is a candidate, the placed operands of the last candidate state are
+        dropped rather than held until the next one."""
+        surface = _surface()
+        curves = [_circle((0.0, 0.0, 0.0), 1.0), _circle((0.0, 0.0, 0.05), 1.0)]
+        adapters = (JaxCurveCurveDistance(curves, 0.1), JaxCurveSurfaceDistance(curves, surface, 0.4))
+        for adapter in adapters:
+            self.assertGreater(adapter.J(), 0.0)
+            self.assertIsNotNone(adapter._distance_snapshot)
+        for k, curve in enumerate(curves):
+            curve.x = _circle((0.0, 0.0, 50.0 + 5.0 * k), 1.0).x
+        for adapter in adapters:
+            self.assertEqual(adapter.J(), 0.0)
+            self.assertIsNone(adapter._distance_snapshot)
+
     def test_distance_candidate_queries_match_native(self):
         """``candidates``, ``compute_candidates()`` and ``shortest_distance_among_candidates()``
         match native, without candidates too, and follow DOF changes. ``simsoptpp``
