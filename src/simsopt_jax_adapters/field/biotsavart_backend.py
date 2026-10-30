@@ -200,6 +200,9 @@ def _jitted_grad_absB(points, coil_set_spec, kernel_tuning):
 
 
 def _grouped_grad_absB_from_spec(points, coil_set_spec):
+    if not coil_set_spec.groups:
+        # No coils: B is identically zero, and native's (B . dB/dX) / |B| is 0/0.
+        return jnp.full_like(points, jnp.nan)
     return _jitted_grad_absB(
         points, coil_set_spec, kernel_tuning=get_field_kernel_tuning(),
     )
@@ -545,7 +548,8 @@ class JaxBiotSavart(Optimizable):
 
         Returns:
             jax.Array: Cartesian gradient of field magnitude, shape (P, 3), in
-                tesla per meter; zero field retains the division singularity.
+                tesla per meter; zero field retains the division singularity,
+                so an empty coil set gives NaN as native does.
         """
         return self._field_output(_grouped_grad_absB_from_spec)
 

@@ -234,6 +234,15 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
 
         _assert_cylindrical_points_match_cpu(bs_jax, bs)
 
+    def test_empty_coil_set_GradAbsB_is_nan_like_native(self):
+        """With no coils |B| is identically zero and its gradient is native's 0/0."""
+        _, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        native = BiotSavart([]).set_points(points_np)
+        bs_jax = JaxBiotSavart([]).set_points(points_np)
+        np.testing.assert_array_equal(np.asarray(bs_jax.B()), native.B())
+        self.assertTrue(np.all(np.isnan(native.GradAbsB())))
+        np.testing.assert_array_equal(np.asarray(bs_jax.GradAbsB()), native.GradAbsB())
+
     def test_B_vjp_parity_ncsx(self):
         """Native Biot-Savart parity on identical coils, points and cotangents."""
 
