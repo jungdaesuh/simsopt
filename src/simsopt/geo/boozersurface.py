@@ -468,16 +468,7 @@ class BoozerSurface(Optimizable):
         resdict = {
             "fun": fsol, "gradient": gsol, "iter": res.nit, "info": res, "success": res.success, "G": None, 'weight_inv_modB': weight_inv_modB, 'type': 'ls'
         }
-        if G is None:
-            s.set_dofs(xsol[:-1])
-            iota = xsol[-1]
-        else:
-            s.set_dofs(xsol[:-2])
-            iota = xsol[-2]
-            G = xsol[-1]
-            resdict['G'] = G
-        # The solver's last evaluation need not be at xsol.
-        self.biotsavart.set_points(s.gamma().reshape((-1, 3)))
+        iota, resdict['G'] = self._set_penalty_solution(xsol, G is not None)
         resdict['s'] = s
         resdict['iota'] = iota
 
@@ -674,16 +665,7 @@ class BoozerSurface(Optimizable):
             "info": res, "residual": rsol, "gradient": gsol, "jacobian": Jsol, "success": res.status > 0,
             "G": None,
         }
-        if G is None:
-            s.set_dofs(xsol[:-1])
-            iota = xsol[-1]
-        else:
-            s.set_dofs(xsol[:-2])
-            iota = xsol[-2]
-            G = xsol[-1]
-            resdict['G'] = G
-        # The solver's last evaluation need not be at xsol.
-        self.biotsavart.set_points(s.gamma().reshape((-1, 3)))
+        iota, resdict['G'] = self._set_penalty_solution(xsol, G is not None)
         resdict['s'] = s
         resdict['iota'] = iota
 
@@ -725,6 +707,40 @@ class BoozerSurface(Optimizable):
 
         J = np.vstack((J, np.sqrt(constraint_weight) * dl[None, :], np.sqrt(constraint_weight) * drz[None, :]))
         return r, J
+
+    def _set_penalty_solution(self, xsol, optimize_G):
+        """
+        Set the surface dofs from a penalty solve's ``xsol`` = (surface dofs, iota[, G]) and put the
+        Biot-Savart points on the new surface, since the solver's last evaluation need not be at ``xsol``.
+        Returns iota and G, which is None unless ``optimize_G``.
+        """
+        s = self.surface
+        if optimize_G:
+            s.set_dofs(xsol[:-2])
+            iota, G = xsol[-2], xsol[-1]
+        else:
+            s.set_dofs(xsol[:-1])
+            iota, G = xsol[-1], None
+        self.biotsavart.set_points(s.gamma().reshape((-1, 3)))
+        return iota, G
+
+    def _exact_residual(self, r, mask):
+        """
+        The BoozerExact Newton system's right-hand side: the masked residual ``r``, the label
+        constraint and, without stellarator symmetry, the constraint z(phi=0, theta=0) = 0.
+        """
+        constraints = [self.label.J() - self.targetlabel]
+        if not self.surface.stellsym:
+            constraints.append(self.surface.gamma()[0, 0, 2])
+        return np.concatenate((r[mask], constraints))
+
+    def _exact_residual_jacobian(self, J, mask):
+        """Jacobian of :meth:`_exact_residual` given the Jacobian ``J`` of the full residual."""
+        s = self.surface
+        rows = [J[mask, :], np.concatenate((self.dlabel_dsurface(), [0., 0.]))]
+        if not s.stellsym:
+            rows.append(np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.])))
+        return np.vstack(rows)
 
     def minimize_boozer_exact_constraints_newton(self, tol=1e-12, maxiter=10, iota=0., G=None, lm=[0., 0.]):
         r"""
@@ -821,7 +837,7 @@ class BoozerSurface(Optimizable):
         self.need_to_run_code = False
         return res
 
-    def solve_residual_equation_exactly_newton(self, tol=1e-10, maxiter: float = 10, iota=0., G=None, verbose=False):
+    def solve_residual_equation_exactly_newton(self, tol=1e-10, maxiter=10, iota=0., G=None, verbose=False):
         """
         The function implements the BoozerExact approach by solving residual equation exactly using Newtons 
         method.  
@@ -935,7 +951,6 @@ class BoozerSurface(Optimizable):
             mask[0, 0, 0] = False
         mask = mask.flatten()
 
-        label = self.label
         if G is None:
             G = 2. * np.pi * np.sum(np.abs([c.current.get_value() for c in self.biotsavart.coils])) * (4 * np.pi * 10**(-7) / (2 * np.pi))
         x = np.concatenate((s.get_dofs(), [iota, G]))
@@ -944,26 +959,13 @@ class BoozerSurface(Optimizable):
         r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
         norm = initial_norm = 1e6
         while i < maxiter:
-            if s.stellsym:
-                b = np.concatenate((r[mask], [(label.J()-self.targetlabel)]))
-            else:
-                b = np.concatenate((r[mask], [(label.J()-self.targetlabel), s.gamma()[0, 0, 2]]))
+            b = self._exact_residual(r, mask)
             norm = np.linalg.norm(b)
             if i == 0:
                 initial_norm = norm
             if norm <= tol:
                 break
-            if s.stellsym:
-                J = np.vstack((
-                    J[mask, :],
-                    np.concatenate((self.dlabel_dsurface(), [0., 0.])),
-                ))
-            else:
-                J = np.vstack((
-                    J[mask, :],
-                    np.concatenate((self.dlabel_dsurface(), [0., 0.])),
-                    np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
-                ))
+            J = self._exact_residual_jacobian(J, mask)
             dx = np.linalg.solve(J, b)
             dx += np.linalg.solve(J, b-J@dx)
             x -= dx
@@ -974,10 +976,7 @@ class BoozerSurface(Optimizable):
             r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
 
         if i > 0:
-            if s.stellsym:
-                b = np.concatenate((r[mask], [(label.J()-self.targetlabel)]))
-            else:
-                b = np.concatenate((r[mask], [(label.J()-self.targetlabel), s.gamma()[0, 0, 2]]))
+            b = self._exact_residual(r, mask)
             norm = np.linalg.norm(b)
 
         if not _keep_iterate(norm, initial_norm):
@@ -985,17 +984,7 @@ class BoozerSurface(Optimizable):
             iota, G = x0[-2:]
             r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
 
-        if s.stellsym:
-            J = np.vstack((
-                J[mask, :],
-                np.concatenate((self.dlabel_dsurface(), [0., 0.])),
-            ))
-        else:
-            J = np.vstack((
-                J[mask, :],
-                np.concatenate((self.dlabel_dsurface(), [0., 0.])),
-                np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
-            ))
+        J = self._exact_residual_jacobian(J, mask)
 
         P, L, U = lu(J)
         res = {
