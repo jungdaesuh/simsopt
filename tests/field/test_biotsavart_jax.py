@@ -234,6 +234,19 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
 
         _assert_cylindrical_points_match_cpu(bs_jax, bs)
 
+    def test_default_evaluation_point_is_origin_like_native(self):
+        """Without set_points the field is evaluated at one point at the origin."""
+        bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        native = BiotSavart(list(bs._coils))
+        bs_jax = JaxBiotSavart(list(bs._coils))
+        np.testing.assert_array_equal(bs_jax.get_points_cart(), np.zeros((1, 3)))
+        np.testing.assert_allclose(
+            np.asarray(bs_jax.B()),
+            native.B(),
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+
     def test_empty_coil_set_GradAbsB_is_nan_like_native(self):
         """With no coils |B| is identically zero and its gradient is native's 0/0."""
         _, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()

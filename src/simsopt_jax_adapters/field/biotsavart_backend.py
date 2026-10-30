@@ -432,7 +432,8 @@ class JaxBiotSavart(Optimizable):
     :class:`simsopt.field.BiotSavart`. Call
     :func:`simsopt_jax.backend.set_backend` before constructing it to choose
     the device. An instance holds mutable point state, so do not share it
-    across threads.
+    across threads. As in the native class, the evaluation points start as
+    one point at the origin.
     """
 
     def clear_points(self) -> None:
@@ -742,15 +743,17 @@ class JaxBiotSavart(Optimizable):
         coils = decoder.process_decoded(d["coils"], serial_objs_dict, recon_objs)
         field = cls(coils)
         points = decoder.process_decoded(d.get("points"), serial_objs_dict, recon_objs)
-        if points is not None:
+        if points is None:
+            field.clear_points()
+        else:
             field.set_points(points)
         return field
 
     def __init__(self, coils):
         self._coils = list(coils)
-        self._points_jax = None
-        self._points_cyl_jax = None
         self._points_version = 0
+        # Native fields start with one evaluation point at the origin.
+        self.set_points(np.zeros((1, 3)))
         self._free_dof_layout_ready = False
         self._suppress_dependency_coil_dof_state = False
         self._fixed_dofs_maybe_changed = False
