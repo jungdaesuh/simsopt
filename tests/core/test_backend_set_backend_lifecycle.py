@@ -1,7 +1,7 @@
 """Regression tests for ``set_backend`` process-state changes.
 
-1. A rejected call leaves the previous mode, environment and JAX settings in
-   place, and the field still evaluates as before.
+1. A rejected call leaves the previous mode, environment and every JAX
+   setting in place, and the field still evaluates as before.
 2. In a process whose JAX backends are initialized, GPU allocator settings
    cannot apply: selecting the GPU warns instead of raising and leaves the
    caller's allocator variables alone.
@@ -45,33 +45,23 @@ def _field_B() -> np.ndarray:
 
 
 _OBSERVED_ENV_PREFIXES = ("SIMSOPT_", "JAX_", "XLA_", "TF_GPU_")
-_OBSERVED_JAX_CONFIG_NAMES = (
-    "jax_platforms",
-    "jax_platform_name",
-    "jax_enable_x64",
-    "jax_default_matmul_precision",
-    "jax_debug_nans",
-    "jax_disable_jit",
-    "jax_transfer_guard",
-    "jax_compilation_cache_dir",
-    "jax_default_device",
-)
+_DIRECTIONAL_TRANSFER_GUARD = "jax_transfer_guard_host_to_device"
 
 
 def _process_state() -> tuple[dict[str, str], dict[str, object]]:
-    """The backend environment variables and JAX settings of this process."""
+    """The backend environment variables and every JAX setting of this process."""
     env = {
         name: value
         for name, value in os.environ.items()
         if name.startswith(_OBSERVED_ENV_PREFIXES)
     }
-    jax_config = {name: jax.config.values[name] for name in _OBSERVED_JAX_CONFIG_NAMES}
-    return env, jax_config
+    return env, dict(jax.config.values)
 
 
 class TestSetBackendLifecycle(JaxTestCase):
     def test_rejected_set_backend_keeps_the_previous_mode(self):
-        """An early or a late rejection restores the CPU parity mode and its field."""
+        """An early or a late rejection restores the CPU parity mode, every JAX
+        setting (a directional transfer guard included) and the field."""
         rows = [
             (
                 "determinism flags missing",
@@ -88,15 +78,26 @@ class TestSetBackendLifecycle(JaxTestCase):
                     side_effect=RuntimeError("rejected"),
                 ),
                 lambda: set_backend(
-                    "jax", device="gpu", debug_nans=True, disable_jit=True
+                    "jax",
+                    device="gpu",
+                    debug_nans=True,
+                    disable_jit=True,
+                    transfer_guard="disallow",
                 ),
             ),
         ]
         for name, message, rejection, request in rows:
-            with self.subTest(name), self.case():
+            with self.subTest(name), self.case() as patches:
                 os.environ.pop("XLA_FLAGS", None)
                 config = set_backend("jax", device="cpu", intent="parity")
                 reference_B = _field_B()
+                # The rejected aggregate transfer guard overwrites this one.
+                patches.callback(
+                    jax.config.update,
+                    _DIRECTIONAL_TRANSFER_GUARD,
+                    jax.config.values[_DIRECTIONAL_TRANSFER_GUARD],
+                )
+                jax.config.update(_DIRECTIONAL_TRANSFER_GUARD, "log")
                 state = _process_state()
                 with rejection, self.assertRaisesRegex(RuntimeError, message):
                     request()

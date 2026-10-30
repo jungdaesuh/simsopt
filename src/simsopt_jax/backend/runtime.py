@@ -781,19 +781,6 @@ _SET_BACKEND_ENV_NAMES = (
     _XLA_CLIENT_MEM_FRACTION_ENV,
     _TF_GPU_ALLOCATOR_ENV,
 )
-_APPLIED_JAX_CONFIG_NAMES = (
-    "jax_platforms",
-    "jax_platform_name",
-    "jax_default_matmul_precision",
-    "jax_debug_nans",
-    "jax_disable_jit",
-    "jax_transfer_guard",
-    "jax_compilation_cache_dir",
-    "jax_persistent_cache_min_compile_time_secs",
-    "jax_persistent_cache_min_entry_size_bytes",
-    "jax_persistent_cache_enable_xla_caches",
-    "jax_default_device",
-)
 
 
 @contextmanager
@@ -801,9 +788,8 @@ def _restore_backend_state_on_error() -> Iterator[None]:
     """Hold the runtime lock and undo every change if the body raises.
 
     Restores the installed configuration, the environment variables
-    ``set_backend`` synchronizes or exports, and the JAX settings
-    ``apply_jax_runtime_config`` updates, so a rejected call leaves the
-    process in the mode it had before.
+    ``set_backend`` synchronizes or exports, and every JAX setting, so a
+    rejected call leaves the process in the mode it had before.
     """
     global _cached_backend_config
     global _requested_jax_platforms_value, _exported_jax_platforms
@@ -811,20 +797,20 @@ def _restore_backend_state_on_error() -> Iterator[None]:
         config = _cached_backend_config
         platforms_state = (_requested_jax_platforms_value, _exported_jax_platforms)
         env = tuple((name, os.environ.get(name)) for name in _SET_BACKEND_ENV_NAMES)
-        jax_config = tuple(
-            (name, jax.config.values[name]) for name in _APPLIED_JAX_CONFIG_NAMES
-        )
+        jax_config = dict(jax.config.values)
         try:
             yield
         except BaseException:
-            for name, value in env:
-                _set_runtime_env(name, value)
-            for name, value in jax_config:
-                if jax.config.values[name] != value:
-                    jax.config.update(name, value)
             _cached_backend_config = config
             _requested_jax_platforms_value, _exported_jax_platforms = platforms_state
             _reset_backend_runtime_caches()
+            for name, value in env:
+                _set_runtime_env(name, value)
+            # The aggregate transfer guard sets the three directional ones,
+            # so it goes back first.
+            for name in ("jax_transfer_guard", *jax_config):
+                if jax.config.values[name] != jax_config[name]:
+                    jax.config.update(name, jax_config[name])
             raise
 
 
