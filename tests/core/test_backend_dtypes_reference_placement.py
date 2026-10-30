@@ -242,6 +242,27 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         self.assertTrue(placement is None, "placement is None")
         self.assertTrue(placements == [None], "placements == [None]")
 
+    def test_importing_simsopt_jax_alone_computes_the_raw_kernels_in_float64(self):
+        """Without ``simsopt.geo`` or ``set_backend``, the raw B kernel matches the
+        analytic on-axis loop field to float64 precision, also with x64 disabled
+        in the environment."""
+        child = _PLACEMENT_CHILD.with_name("raw_kernel_float64.py")
+        for x64_setting in (None, "false"):
+            with self.subTest(JAX_ENABLE_X64=x64_setting):
+                environment = dict(os.environ, JAX_PLATFORMS="cpu")
+                environment.pop("JAX_ENABLE_X64", None)
+                if x64_setting is not None:
+                    environment["JAX_ENABLE_X64"] = x64_setting
+                completed = subprocess.run(
+                    (sys.executable, str(child)),
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_explicit_device_array_rejects_reduced_precision_floats(self):
         """An exact-dtype placement accepts float64 as its only floating dtype."""
         patches = self.patches

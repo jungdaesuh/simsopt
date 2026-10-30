@@ -145,6 +145,7 @@ _SPEC_FACTORIES = [
             sample_gammadash=x.samples,
             sample_gammadashdash=x.samples,
             sample_gammadashdashdash=x.samples,
+            sample_derivatives=3,
         ),
     ),
     (
@@ -433,8 +434,9 @@ class TestBufferOwnership(JaxTestCase):
         """Run one row with case-local objects released before runtime cleanup."""
         gate = make_execution_gate()
         field = _field()
-        source = _host_array(field.x.shape)
-        source[:] = field.x
+        dofs = np.array(field.x, dtype=np.float64)
+        source = _host_array(dofs.shape)
+        source[:] = dofs
         call = getattr(field, entry)
         expected = jax.tree.map(
             lambda x: np.array(x, copy=True),
