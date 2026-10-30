@@ -48,6 +48,7 @@ from simsopt.util import in_github_actions, calculate_modB_on_major_radius
 
 try:
     import jax
+    from simsopt_jax.backend.dtypes import as_jax_float64
     from simsopt_jax.backend.jit import jit
     from simsopt_jax.objectives import StageTwoObjectiveConfig, fused_stage_two_objective, make_stage_two_problem
     from simsopt_jax_adapters.geo import (
@@ -231,6 +232,9 @@ if args.fused:
 def fused_value_and_grad(dofs):
     """Evaluate the frozen fused problem and return a host gradient in composite DOF order.
 
+    The DOFs are placed on the device explicitly, so the evaluation also runs
+    under ``SIMSOPT_JAX_TRANSFER_GUARD=disallow``.
+
     Args:
         dofs (np.ndarray): Free DOFs of ``JF`` in its order, shape ``(len(JF.x),)``:
             curve Fourier coefficients in metres and coil currents in amperes.
@@ -239,7 +243,7 @@ def fused_value_and_grad(dofs):
         tuple[float, np.ndarray]: The value of ``JF`` and its gradient with respect
             to ``dofs``, shape ``(len(JF.x),)``, in ``JF``'s DOF order.
     """
-    value, gradient = jax.device_get(value_and_grad(problem, dofs[field_order]))
+    value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(dofs[field_order])))
     return float(value), gradient[objective_order]
 
 
