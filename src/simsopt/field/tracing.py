@@ -729,7 +729,9 @@ def particles_to_vtk(res_tys, filename):
 class LevelsetStoppingCriterion(sopp.LevelsetStoppingCriterion):
     r"""
     Based on a scalar function :math:`f:R^3\to R`, this criterion checks whether
-    :math:`f(x, y, z) < 0` and stops the iteration once this is true.
+    :math:`f(x, y, z) < 0` and stops the iteration once this is true. It also
+    stops at a point outside the grid of the interpolant of :math:`f`, where
+    :math:`f` is not defined.
 
     The idea is to use this for example with signed distance functions to a surface.
     """

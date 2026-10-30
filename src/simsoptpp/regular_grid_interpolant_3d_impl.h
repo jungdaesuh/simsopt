@@ -83,8 +83,7 @@ int RegularGridInterpolant3D<Array>::locate_unsafe(double x, double y, double z)
 }
 
 template<class Array>
-void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, double z, double* res){
-
+std::array<double, 3> RegularGridInterpolant3D<Array>::scaled_coordinates(double& x, double& y, double& z) const {
     // to avoid funny business when the data is just a tiny bit out of bounds
     // due to machine precision, we perform this check and shift
     if(x >= xmax) x -= _EPS_;
@@ -93,11 +92,19 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
     else if (y <= ymin) y += _EPS_;
     if(z >= zmax) z -= _EPS_;
     else if (z <= zmin) z += _EPS_;
+    return {nx*(x-xmin)/(xmax-xmin), ny*(y-ymin)/(ymax-ymin), nz*(z-zmin)/(zmax-zmin)};
+}
 
-    const std::array<double, 3> scaled_indices = {
-        nx*(x-xmin)/(xmax-xmin),
-        ny*(y-ymin)/(ymax-ymin),
-        nz*(z-zmin)/(zmax-zmin)};
+template<class Array>
+bool RegularGridInterpolant3D<Array>::in_bounds(double x, double y, double z) const {
+    const std::array<double, 3> scaled_indices = scaled_coordinates(x, y, z);
+    return inside_axis(scaled_indices[0], nx) && inside_axis(scaled_indices[1], ny)
+        && inside_axis(scaled_indices[2], nz);
+}
+
+template<class Array>
+void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, double z, double* res){
+    const std::array<double, 3> scaled_indices = scaled_coordinates(x, y, z);
     const std::array<int, 3> cell_counts = {nx, ny, nz};
     std::array<int, 3> cell_indices;
     // A point is inside when every scaled index is in [0, n); NaN fails the
@@ -107,7 +114,7 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
     // overlaps a memcpy when it formats a double.)
     for (int axis = 0; axis < 3; ++axis) {
         const double scaled = scaled_indices[axis];
-        if (!(scaled >= 0 && scaled < cell_counts[axis])) {
+        if (!inside_axis(scaled, cell_counts[axis])) {
             if(!out_of_bounds_ok)
                 throw std::runtime_error(std::string(1, "xyz"[axis]) + "idxs="
                     + std::to_string(scaled) + " not within [0, "
