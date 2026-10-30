@@ -39,7 +39,7 @@ directly.
 """
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -182,16 +182,19 @@ def _problems():
     }
 
 
-@partial(jit, static_argnames=("name",))
-def _device_bfgs(x0, params, gtol, maxiter, name):
-    return minimize_bfgs(partial(_value_and_grad, name, params=params), x0, gtol, maxiter)
+if JAX_IMPORT_ERROR is None:
+    # The compiled solvers exist only where the JAX runtime does, so discovery
+    # can import this module and skip it without JAX.
 
+    @partial(jit, static_argnames=("name",))
+    def _device_bfgs(x0, params, gtol, maxiter, name):
+        return minimize_bfgs(partial(_value_and_grad, name, params=params), x0, gtol, maxiter)
 
-@partial(jit, static_argnames=("name", "maxcor", "maxls"))
-def _device_lbfgsb(x0, params, ftol, gtol, maxiter, maxls, name, maxcor):
-    return minimize_lbfgsb(
-        partial(_value_and_grad, name, params=params), x0, ftol, gtol, maxiter, maxcor=maxcor, maxls=maxls
-    )
+    @partial(jit, static_argnames=("name", "maxcor", "maxls"))
+    def _device_lbfgsb(x0, params, ftol, gtol, maxiter, maxls, name, maxcor):
+        return minimize_lbfgsb(
+            partial(_value_and_grad, name, params=params), x0, ftol, gtol, maxiter, maxcor=maxcor, maxls=maxls
+        )
 
 
 def _scipy(name, x0, params, method, options) -> OptimizeResult:
