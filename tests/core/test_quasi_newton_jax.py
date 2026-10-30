@@ -60,9 +60,11 @@ from unittest_jax_support import (
 )
 
 from functools import partial
+import unittest
 import warnings
 
 import numpy as np
+import scipy
 from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, minimize
 from scipy.optimize import _linesearch as scipy_linesearch
 
@@ -239,6 +241,15 @@ def _options(method, maxiter, **extra):
     return {"gtol": _GTOL, "ftol": 1e-14, "maxiter": maxiter, "maxcor": 3, **extra}
 
 
+# The port's claims, and so these comparisons (records, messages and the
+# private _linesearch helpers), are SciPy 1.17's; another SciPy is not their reference.
+_SCIPY_REFERENCE = (1, 17)
+
+
+@unittest.skipUnless(
+    tuple(int(part) for part in scipy.__version__.split(".")[:2]) == _SCIPY_REFERENCE,
+    f"compares with SciPy {'.'.join(map(str, _SCIPY_REFERENCE))}, not {scipy.__version__}",
+)
 class TestQuasiNewtonJax(JaxTestCase):
     def _assert_scipy_record(self, expected: OptimizeResult, result, message: str, name: str):
         """Status, message, nit, nfev and njev are SciPy's."""
