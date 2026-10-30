@@ -1344,11 +1344,12 @@ class TestBoozerResidualJax(JaxTestCase):
 
     def test_exact_constraint_values_have_exact_coil_derivatives(self):
         """At a fixed ``xl``, the coil derivatives of
-        ``boozer_exact_constraints(derivatives=0)`` (first and second order,
-        forward and reverse, jitted and vmapped) equal those of the same
-        Lagrangian gradient taken through the field kernel itself, built here
-        from the unweighted residual and constraints of
-        :func:`boozer_exact_residual` at every residual row."""
+        ``boozer_exact_constraints(derivatives=0)`` (first and second order
+        forward along one coil direction, jitted and vmapped over two steps,
+        and a first-order reverse pullback) equal those of the same Lagrangian
+        gradient taken through the field kernel itself, built here from the
+        unweighted residual and constraints of :func:`boozer_exact_residual` at
+        every residual row."""
         setup = _setup("tensor", False, "toroidal_flux")
         problem = boozer_problem(setup.field, setup.surface, setup.label, setup.target)
         xl = place_float64(
