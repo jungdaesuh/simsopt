@@ -46,6 +46,7 @@ with optional_jax_imports():
         boozer_exact_constraints,
         boozer_exact_residual,
         boozer_penalty_constraints,
+        boozer_penalty_residual,
     )
     from simsopt_jax.core.boozer_problem import (
         boozer_surface_residual as jax_boozer_surface_residual,
@@ -1324,6 +1325,9 @@ class TestBoozerResidualJax(JaxTestCase):
                 problem, x, derivatives=2, optimize_G=True
             ),
             "penalty": lambda x, xl: boozer_penalty_constraints(
+                problem, x, derivatives=2, optimize_G=True
+            ),
+            "penalty residual": lambda x, xl: boozer_penalty_residual(
                 problem, x, derivatives=2, optimize_G=True
             ),
             "exact constraints": lambda x, xl: boozer_exact_constraints(

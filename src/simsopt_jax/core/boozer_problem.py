@@ -484,6 +484,8 @@ def boozer_penalty_residual(
             boozer_penalty_constraints.
     """
 
+    x = as_jax_float64(x)
+
     def residuals(point):
         residual, label_residual, z_residual = _penalty_terms(
             problem,
