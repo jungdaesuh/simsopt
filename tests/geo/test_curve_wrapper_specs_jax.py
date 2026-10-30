@@ -40,8 +40,8 @@ _ORDER = 3
 _FRAMES = (FramedCurveCentroid, FramedCurveFrenet)
 
 
-def _xyz_curve(coefficients: dict[str, float]) -> CurveXYZFourier:
-    curve = CurveXYZFourier(_NQUAD, _ORDER)
+def _xyz_curve(coefficients: dict[str, float], nquad: int = _NQUAD) -> CurveXYZFourier:
+    curve = CurveXYZFourier(nquad, _ORDER)
     dofs = np.zeros(curve.dof_size)
     for name, value in coefficients.items():
         dofs[curve.local_dof_names.index(name)] = value
@@ -118,6 +118,23 @@ class TestCurveWrapperSpecs(JaxTestCase):
                 )
                 np.testing.assert_allclose(_spectral_derivative(gamma), gammadash, rtol=0, atol=1e-10)
                 np.testing.assert_allclose(_spectral_derivative(gammadash), gammadashdash, rtol=0, atol=1e-7)
+
+    def test_filament_over_filament_derivatives_are_derivatives_of_lower_terms(self):
+        """Nested filaments: each derivative is the spectral derivative of the term below.
+
+        Native filaments provide no second derivative, so native evaluates only
+        the position of a centroid filament over another filament. The grid is
+        fine enough to resolve the Frenet frame's spectrum.
+        """
+        inner = _filament(_xyz_curve(_BASE, nquad=256), FramedCurveCentroid)
+        for frame in _FRAMES:
+            with self.subTest(frame=frame.__name__):
+                outer = _filament(inner, frame)
+                gamma, gammadash, gammadashdash = _terms(curve_spec_from_adapter_curve(outer), 2)
+                if frame is FramedCurveCentroid:
+                    np.testing.assert_allclose(gamma, outer.gamma(), rtol=0, atol=1e-13)
+                np.testing.assert_allclose(_spectral_derivative(gamma), gammadash, rtol=0, atol=1e-11)
+                np.testing.assert_allclose(_spectral_derivative(gammadash), gammadashdash, rtol=0, atol=1e-11)
 
     def test_sample_without_frame_derivatives_raises_like_native(self):
         """A sample lacking the derivative a frame needs is rejected at conversion, as native raises."""
