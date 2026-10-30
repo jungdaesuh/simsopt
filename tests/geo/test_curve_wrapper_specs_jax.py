@@ -141,6 +141,18 @@ class TestCurveWrapperSpecs(JaxTestCase):
                 with self.assertRaisesRegex(ValueError, f"has {n_derivs} derivatives"):
                     curve_spec_from_adapter_curve(filament)
 
+    def test_perturbed_curve_without_second_sample_derivative_raises_like_native(self):
+        """Order-2 geometry of a perturbed curve needs the sample's second derivative."""
+        base = _xyz_curve(_BASE)
+        sampler = GaussianSampler(base.quadpoints, 0.05, 0.3, n_derivs=1)
+        perturbed = CurvePerturbed(base, PerturbationSample(sampler))
+        spec = curve_spec_from_adapter_curve(perturbed)
+        np.testing.assert_allclose(_terms(spec, 1)[1], perturbed.gammadash(), rtol=0, atol=1e-13)
+        with self.assertRaises(ValueError):
+            perturbed.gammadashdash()
+        with self.assertRaisesRegex(ValueError, "has 1 derivatives, but derivative 2"):
+            curve_geometry_from_dofs(spec, spec.dofs)
+
     def test_unsupported_frames_and_wrapper_orders_raise(self):
         """Custom frames, unknown frame kinds and inner RotatedCurve placements are rejected."""
         base = _xyz_curve(_BASE)

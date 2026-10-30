@@ -634,13 +634,35 @@ def _filament_base_derivative_order(frame_kind: str, order: int) -> int:
     return order + _FILAMENT_FRAME_EXTRA_DERIVATIVES[frame_kind]
 
 
+def _require_sample_derivatives(spec: CurvePerturbedSpec, order: int) -> None:
+    """Reject a perturbed curve whose sample lacks a needed derivative.
+
+    Native ``PerturbationSample`` raises when a derivative above its sampler's
+    ``n_derivs`` is requested; the zero placeholders above
+    ``spec.sample_derivatives`` are not derivatives and must not be used.
+
+    Args:
+        spec (CurvePerturbedSpec): Immutable perturbed-curve payload.
+        order (int): Number of parameter derivatives of the curve position needed.
+
+    Raises:
+        ValueError: The sample provides fewer than ``order`` derivatives.
+    """
+    if order > spec.sample_derivatives:
+        raise ValueError(
+            f"The perturbation sample has {spec.sample_derivatives} derivatives, "
+            f"but derivative {order} is needed. Adjust the `n_derivs` parameter "
+            "of the sampler to access higher derivatives (the JAX spec carries "
+            "at most 3)."
+        )
+
+
 def _require_curve_derivatives(spec: CurveSpec, order: int) -> None:
     """Reject a curve whose perturbation samples lack derivatives a filament needs.
 
-    Native ``PerturbationSample`` raises when a derivative above its sampler's
-    ``n_derivs`` is requested; this applies the same rule to every perturbed
-    layer below a filament frame, including the extra base derivatives the frame
-    consumes.
+    Applies ``_require_sample_derivatives`` to every perturbed layer below a
+    filament frame, including the extra base derivatives the frame consumes,
+    so a filament spec is rejected when it is built rather than evaluated.
 
     Args:
         spec (CurveSpec): Immutable curve geometry.
@@ -650,13 +672,7 @@ def _require_curve_derivatives(spec: CurveSpec, order: int) -> None:
         ValueError: A perturbed layer provides fewer than the needed derivatives.
     """
     if isinstance(spec, CurvePerturbedSpec):
-        if order > spec.sample_derivatives:
-            raise ValueError(
-                f"The perturbation sample has {spec.sample_derivatives} derivatives, "
-                f"but derivative {order} is needed. Adjust the `n_derivs` parameter "
-                "of the sampler to access higher derivatives (the JAX spec carries "
-                "at most 3)."
-            )
+        _require_sample_derivatives(spec, order)
         _require_curve_derivatives(spec.base_curve, order)
     elif isinstance(spec, CurveFilamentSpec):
         _require_curve_derivatives(

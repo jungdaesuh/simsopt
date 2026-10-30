@@ -39,7 +39,7 @@ from .specs import (
     RotationSpec,
     ZeroRotationSpec,
     _filament_base_derivative_order,
-    _require_curve_derivatives,
+    _require_sample_derivatives,
 )
 
 __all__ = [
@@ -307,8 +307,11 @@ def _curve_geometry_terms_from_dofs(spec: CurveSpec, dofs, order: int) -> tuple[
     """Return gamma and its first ``order`` parameter derivatives for any curve spec.
 
     A filament spec supports orders 1 and 2; order 3 raises ``TypeError``.
+    A perturbed layer whose sample lacks a needed derivative raises
+    ``ValueError``, as native ``PerturbationSample`` does.
     """
     if isinstance(spec, CurvePerturbedSpec):
+        _require_sample_derivatives(spec, order)
         base_geometry = _curve_geometry_terms_from_dofs(
             spec.base_curve,
             optimizable_input_dofs_from_map_spec(spec.base_curve_map, dofs),
@@ -357,7 +360,6 @@ def _curve_filament_input_jets(spec: CurveFilamentSpec, dofs, order: int):
     themselves, so perturbation samples (constant arrays, not functions of the
     curve parameter) contribute their own derivatives.
     """
-    _require_curve_derivatives(spec, order)
     base_order = _filament_base_derivative_order(spec.frame_kind, order)
     base_terms = _curve_geometry_terms_from_dofs(
         spec.base_curve,
@@ -488,6 +490,10 @@ def curve_geometry_from_dofs(
     Returns:
         tuple[jax.Array, ...]: Position and its first 2 normalized-parameter
             derivative(s), each shape (Q, 3), in meters.
+
+    Raises:
+        ValueError: A perturbation sample in the spec provides fewer than two
+            parameter derivatives, as native ``PerturbationSample`` raises.
     """
     return _curve_geometry_terms_from_dofs(spec, dofs, 2)
 
@@ -574,6 +580,10 @@ def curve_gammadashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
     Returns:
         jax.Array: Coefficient cotangent, shape (D,), in the input DOF
             ordering; quadrature nodes are held fixed.
+
+    Raises:
+        ValueError: A perturbation sample in the spec provides fewer than two
+            parameter derivatives, as native ``PerturbationSample`` raises.
     """
     return _curve_geometry_term_vjp_from_dofs(
         spec,
@@ -597,6 +607,10 @@ def curve_gammadashdashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
     Returns:
         jax.Array: Coefficient cotangent, shape (D,), in the input DOF
             ordering; quadrature nodes are held fixed.
+
+    Raises:
+        ValueError: A perturbation sample in the spec provides fewer than three
+            parameter derivatives, as native ``PerturbationSample`` raises.
     """
     return _curve_geometry_term_vjp_from_dofs(
         spec,
