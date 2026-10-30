@@ -10,8 +10,10 @@ explicit transfers, and the penalty with its gradient runs as one jitted JAX
 program. Curvature is computed from ``gammadash`` and ``gammadashdash`` in that
 program rather than by the curve. Distance penalties use the native C++
 candidate search, then evaluate every point pair within each selected pair;
-only selected pairs enter the program, gathered into batches padded to
-power-of-two lengths, so a sparse search costs little and an empty one nothing.
+only selected pairs enter the point-pair distance computation, gathered into
+batches padded to power-of-two lengths. Placing and differentiating the full
+curve geometry still costs O(curves x quadrature points); without a candidate
+no penalty program runs and no geometry is placed.
 For C++ curves (and their rotated copies) these paths make no
 implicit transfer; JAX-backed native curves (``JaxCurve`` subclasses) still
 compute their own geometry and VJPs with implicit transfers.
@@ -379,7 +381,8 @@ def _padded_candidate_batches(groups):
 
     A group of ``n`` rows is padded to ``2**ceil(log2(n))`` rows that repeat
     row 0 and are flagged invalid, so the penalty kernel gives them zero value
-    and zero gradient. ``simsoptpp`` returns candidates in no fixed order;
+    and, for finite geometry, zero gradient. Padding evaluates up to about
+    twice the ``n`` rows. ``simsoptpp`` returns candidates in no fixed order;
     callers group them sorted, so equal candidate sets give bitwise-equal sums.
     Batches follow the sorted group keys, so candidate sets with the same keys
     and padded lengths share one static key and one compiled program.
@@ -474,8 +477,12 @@ class JaxCurveCurveDistance(Optimizable):
 
     with :math:`n_i`, :math:`n_j` the numbers of sampled points. As in the native class, only
     pairs the native candidate search finds within :math:`d_{\min}` are evaluated; the others
-    contribute zero. Only candidate pairs enter the compiled program, so its work and memory
-    scale with the number of candidates, and no candidate means no JAX work. ``candidates``,
+    contribute zero. Only candidate pairs enter the point-pair distance computation, so its
+    O(:math:`n_i n_j`) work and memory scale with the number of candidates (padded to a power
+    of two per pair of quadrature counts). The placed geometry, its transfers and the gradient
+    pull-back cover every curve, O(curves x quadrature points). Without a candidate the adapter
+    places nothing and runs no penalty program; JAX-backed curves still evaluate their own
+    geometry and VJPs. ``candidates``,
     ``compute_candidates()`` and ``shortest_distance_among_candidates()`` are native's; the
     search is cached per exact geometry and settings, so ``candidates`` is always current
     unless assigned (see ``candidates``).
@@ -677,8 +684,11 @@ class JaxCurveSurfaceDistance(Optimizable):
     and :math:`d_{\min}` is ``minimum_distance``. The surface element uses the unnormalized
     normal :math:`\mathbf{N}`, :math:`ds = |\mathbf{N}|~d\varphi~d\theta`, and each integral is
     the mean over the quadrature points. As in the native class, only curves the native
-    candidate search finds within :math:`d_{\min}` are evaluated; only they enter the compiled
-    program, and no candidate means no JAX work. ``candidates``, ``compute_candidates()`` and
+    candidate search finds within :math:`d_{\min}` are evaluated: only they enter the
+    point-pair distance computation, while the placed curve geometry, its transfers and the
+    gradient pull-back cover every curve. Without a candidate the adapter places nothing and
+    runs no penalty program; JAX-backed curves still evaluate their own geometry and VJPs.
+    ``candidates``, ``compute_candidates()`` and
     ``shortest_distance_among_candidates()`` are native's; the search is cached per exact
     geometry, so ``candidates`` is always current unless assigned (see ``candidates``).
 
