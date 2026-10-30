@@ -999,7 +999,14 @@ class JaxBiotSavart(Optimizable):
                     width += owner.local_full_dof_size
                 owner_start, owner_end = owner_slices[owner]
                 segments.append((owner_start, owner_end, start, end))
-            return replace(source_map, owner_segments=tuple(segments))
+            # The validating constructor keeps owner and target lengths equal.
+            return make_optimizable_dof_map_spec(
+                template_full_dofs=source_map.template_full_dofs,
+                owner_segments=segments,
+                input_mode=source_map.input_mode,
+                input_start=source_map.input_start,
+                input_end=source_map.input_end,
+            )
 
         projection_coils = []
         for coil, spec in zip(self._coils, extraction_spec.coils, strict=True):
