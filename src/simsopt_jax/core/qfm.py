@@ -244,6 +244,22 @@ def _label_value_and_grad(
     return jax.value_and_grad(label)(surface_get_dofs(spec.surface))
 
 
+def _label_error(
+    spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None,
+) -> jax.Array:
+    """Native label error ``rl = label - targetlabel``, in the label units."""
+    value = _jitted_qfm_label(spec) if label_value is None else label_value
+    return value - targetlabel
+
+
+def _label_error_and_grad(
+    spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None,
+) -> tuple[jax.Array, jax.Array]:
+    """Native label error and the full label gradient ``dl``, shape (ndofs,)."""
+    value, label_gradient = _label_value_and_grad(spec, label_value)
+    return value - targetlabel, label_gradient
+
+
 @jit
 def _jitted_qfm_label_constraint(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
@@ -253,17 +269,15 @@ def _jitted_qfm_label_constraint(
     Native SLSQP's zero-Jacobian failure depends on exact label subtraction.
     The adapter supplies that value explicitly; standalone kernels compute it.
     """
-    value = _jitted_qfm_label(spec) if label_value is None else label_value
-    return 0.5 * (value - targetlabel)**2
+    return 0.5 * _label_error(spec, targetlabel, label_value)**2
 
 
 @jit
 def _jitted_qfm_label_constraint_value_and_grad(
     spec: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    value, gradient = _label_value_and_grad(spec, label_value)
-    residual = value - targetlabel
-    return 0.5 * residual**2, residual * gradient
+    residual, label_gradient = _label_error_and_grad(spec, targetlabel, label_value)
+    return 0.5 * residual**2, residual * label_gradient
 
 
 @jit
@@ -271,7 +285,8 @@ def _jitted_qfm_penalty_constraints(
     spec: QfmSpec, label: QfmLabelSpec, targetlabel: jax.Array | np.ndarray, constraint_weight: jax.Array | np.ndarray,
     label_value: jax.Array | None = None,
 ) -> jax.Array:
-    return _jitted_qfm_residual(spec) + constraint_weight * _jitted_qfm_label_constraint(label, targetlabel, label_value)
+    # Native operation order: r + 0.5 * constraint_weight * rl**2.
+    return _jitted_qfm_residual(spec) + 0.5 * constraint_weight * _label_error(label, targetlabel, label_value)**2
 
 
 @jit
@@ -280,8 +295,13 @@ def _jitted_qfm_penalty_constraints_value_and_grad(
     label_value: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     value, gradient = _jitted_qfm_residual_value_and_grad(spec)
-    constraint, label_gradient = _jitted_qfm_label_constraint_value_and_grad(label, targetlabel, label_value)
-    return value + constraint_weight * constraint, gradient + constraint_weight * label_gradient
+    residual, label_gradient = _label_error_and_grad(label, targetlabel, label_value)
+    # Native operation order: dr + constraint_weight*rl*dl scales the label
+    # error before the label gradient, which avoids an intermediate overflow.
+    return (
+        value + 0.5 * constraint_weight * residual**2,
+        gradient + constraint_weight * residual * label_gradient,
+    )
 
 
 def qfm_residual(spec: QfmSpec) -> jax.Array:

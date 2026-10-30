@@ -736,6 +736,17 @@ class TestQfmJax(JaxTestCase):
                         self.assertEqual(value, np.inf)
                         _assert_pair(actual, expected)
 
+    def test_penalty_gradient_scales_the_label_error_first_like_native(self):
+        """The penalty gradient forms (weight * label error) first, so it stays finite where native does."""
+        native, port = _pair_with_nonzero_label_gradient()
+        native.targetlabel = port.targetlabel = np.float64(1.7e308)
+        name = "qfm_penalty_constraints"
+        with np.errstate(all="ignore"):
+            expected = getattr(native, name)(native.surface.x, 1, 1e-300)
+            actual = getattr(port, name)(port.surface.x, 1, 1e-300)
+        self.assertTrue(np.all(np.isfinite(expected[1])))
+        _assert_pair(actual, expected)
+
     def test_invalid_derivative_method_and_flux_index_match_native(self):
         """Invalid orders, method names and flux indices raise native exception classes."""
         native, port = _pair(label_class=ToroidalFlux)
