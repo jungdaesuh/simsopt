@@ -1,6 +1,7 @@
 import numpy as np
 import numbers
 import collections
+from functools import wraps
 
 __all__ = ['Derivative']
 
@@ -228,6 +229,7 @@ def derivative_dec(func):
     assemble gradients.
     """
 
+    @wraps(func)
     def _derivative_dec(self, *args, partials=False, **kwargs):
         if partials:
             return func(self, *args, **kwargs)
