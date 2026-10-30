@@ -35,15 +35,17 @@ def coil_graph_parameters(optimizables) -> np.ndarray:
 
     These are the attributes native evaluation reads on every call but which
     are not DOFs: ``ScaledCurrent.scale``, ``CurveFilament.dn`` and ``db``,
-    and ``FrameRotation.scale``. A changed entry means a captured
-    reconstruction is stale.
+    ``FrameRotation.scale`` and the ``RotatedCurve.rotmat`` the
+    reconstruction captures. A changed entry means a captured reconstruction
+    is stale.
 
     Args:
         optimizables (Iterable[Optimizable]): Coil-graph nodes, in a fixed order.
 
     Returns:
         numpy.ndarray: Float64 parameters, shape (K,), in node order; scales
-            are dimensionless and filament offsets are in meters.
+            and rotation-matrix entries are dimensionless and filament offsets
+            are in meters.
     """
     parameters = []
     for opt in optimizables:
@@ -51,4 +53,6 @@ def coil_graph_parameters(optimizables) -> np.ndarray:
             parameters.append(_as_float64_scalar(opt.scale))
         elif isinstance(opt, CurveFilament):
             parameters.extend((_as_float64_scalar(opt.dn), _as_float64_scalar(opt.db)))
+        elif _is_rotated_curve_like(opt):
+            parameters.extend(np.asarray(opt.rotmat, dtype=np.float64).ravel())
     return np.asarray(parameters, dtype=np.float64)
