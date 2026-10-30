@@ -1069,7 +1069,7 @@ class TestBoozerResidualJax(JaxTestCase):
             boozer_penalty_constraints(
                 replace(exact, constraint_weight=exact.targetlabel), x, optimize_G=True
             )
-        # As native asserts: no order the field model does not carry.
+        # No order the field model does not carry, and only integer orders.
         weighted = replace(exact, constraint_weight=exact.targetlabel)
         tensor = boozer_problem(
             tensor_setup.field, tensor_setup.surface, tensor_setup.label, tensor_setup.target
@@ -1083,21 +1083,21 @@ class TestBoozerResidualJax(JaxTestCase):
                 lambda order: jax_boozer_surface_residual(
                     exact, x, derivatives=order, optimize_G=False
                 ),
-                (-1, 3),
+                (-1, 3, 1.0, True),
             ],
             "penalty": [
                 lambda order: boozer_penalty_constraints(weighted, x, derivatives=order),
-                (-1, 3),
+                (-1, 3, 1.0, True),
             ],
             "exact constraints": [
                 lambda order: boozer_exact_constraints(tensor, tensor_xl, derivatives=order),
-                (-1, 2, 3),
+                (-1, 2, 3, 0.0, False),
             ],
             "exact residual": [
                 lambda order: boozer_exact_residual(
                     tensor, tensor_x, tensor_rows, derivatives=order
                 ),
-                (-1, 2, 3),
+                (-1, 2, 3, 0.0, False),
             ],
         }
         for name, (formulation, orders) in unsupported.items():
