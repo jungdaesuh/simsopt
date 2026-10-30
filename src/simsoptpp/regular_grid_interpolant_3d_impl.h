@@ -110,8 +110,9 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
     // A point is inside when every scaled index is in [0, n); NaN fails the
     // comparisons too. Outside, out_of_bounds_ok extrapolates the polynomial of
     // the nearest boundary cell, so every query writes res; a non-finite scaled
-    // index has no such value and gives NaN. (std::to_string: the bundled fmt
-    // overlaps a memcpy when it formats a double.)
+    // index has no such value and gives NaN, and so does a skipped cell (see
+    // evaluate_local). (std::to_string: the bundled fmt overlaps a memcpy when
+    // it formats a double.)
     for (int axis = 0; axis < 3; ++axis) {
         const double scaled = scaled_indices[axis];
         if (!inside_axis(scaled, cell_counts[axis])) {
@@ -142,10 +143,11 @@ void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double 
     int degree = rule.degree;
     auto got = all_local_vals_map.find(cell_idx);
     if (got == all_local_vals_map.end()) {
-        if(out_of_bounds_ok)
-            return;
-        else
+        // a skipped cell holds no interpolant
+        if(!out_of_bounds_ok)
             throw std::runtime_error(fmt::format("cell_idx={} not in all_local_vals_map", cell_idx));
+        std::fill(res, res + value_size, std::numeric_limits<double>::quiet_NaN());
+        return;
     }
 
     double* vals_local = got->second.data();
