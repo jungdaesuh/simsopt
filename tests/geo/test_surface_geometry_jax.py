@@ -36,6 +36,7 @@ with optional_jax_imports():
     from simsopt.geo.surfacerzfourier import SurfaceRZFourier
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import surface_geometry
     from simsopt_jax.core.specs import SurfaceSpec
     from simsopt_jax.core.surface_fourier_series import (
@@ -172,7 +173,7 @@ if JAX_IMPORT_ERROR is None:
         "d2volume_by_dcoeffdcoeff": ("volume", jax.hessian),
     }
 
-    @partial(jax.jit, static_argnums=(0, 1))
+    @partial(jit, static_argnums=(0, 1))
     def _coefficient_derivative(
         quantity: str, transform: _Transform, spec: SurfaceSpec
     ) -> jax.Array:
@@ -181,7 +182,7 @@ if JAX_IMPORT_ERROR is None:
             surface_get_dofs(spec)
         )
 
-    @partial(jax.jit, static_argnums=0)
+    @partial(jit, static_argnums=0)
     def _coefficient_vjp(
         quantity: str, spec: SurfaceSpec, cotangent: jax.Array
     ) -> jax.Array:

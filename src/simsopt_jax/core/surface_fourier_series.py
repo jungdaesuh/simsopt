@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..backend.jit import jit
 from .specs import (
     SurfaceRZFourierSpec,
     SurfaceSpec,
@@ -226,7 +227,7 @@ def _dof_layout(spec: SurfaceSpec) -> tuple[tuple[str, np.ndarray], ...]:
     )
 
 
-@jax.jit
+@jit
 def surface_get_dofs(spec: SurfaceSpec) -> jax.Array:
     """The native ``get_dofs()`` vector, fixed DOFs included.
 
@@ -243,7 +244,7 @@ def surface_get_dofs(spec: SurfaceSpec) -> jax.Array:
     )
 
 
-@jax.jit
+@jit
 def surface_spec_with_dofs(spec: SurfaceSpecT, dofs: jax.Array) -> SurfaceSpecT:
     """``spec`` with its DOFs replaced by ``dofs``, as native ``set_dofs``.
 

@@ -18,9 +18,9 @@ Coefficient derivatives are JAX transforms of :func:`surface_quantity_of_dofs`
 at the native DOF vector, fixed DOFs included, which
 :func:`~simsopt_jax.core.surface_fourier_series.surface_get_dofs` reads from a
 spec. The DOF axes come last, as natively, so ``Derivative({surface: ...})``
-projects them onto the free DOFs. Jit them with the spec as an argument::
+projects them onto the free DOFs. Jit them, with ``simsopt_jax.backend.jit.jit``, with the spec as an argument::
 
-    @jax.jit
+    @jit
     def dgamma_by_dcoeff(spec):
         dofs = surface_get_dofs(spec)
         return jax.jacfwd(surface_quantity_of_dofs(surface_gamma, spec))(dofs)
@@ -45,6 +45,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..backend.jit import jit
 from .specs import SurfaceSpec
 from .surface_fourier_series import (
     _rotating_frame_components,
@@ -131,7 +132,7 @@ def _norm(vectors: jax.Array) -> jax.Array:
     return jnp.sqrt(x * x + y * y + z * z)
 
 
-@jax.jit
+@jit
 def surface_gamma(spec: SurfaceSpec) -> jax.Array:
     """Evaluate gamma on the surface quadrature grid.
 
@@ -145,7 +146,7 @@ def surface_gamma(spec: SurfaceSpec) -> jax.Array:
     return _position_derivative(spec, 0, 0)
 
 
-@jax.jit
+@jit
 def surface_gammadash1(spec: SurfaceSpec) -> jax.Array:
     """Evaluate gammadash1 on the surface quadrature grid.
 
@@ -160,7 +161,7 @@ def surface_gammadash1(spec: SurfaceSpec) -> jax.Array:
     return _position_derivative(spec, 1, 0)
 
 
-@jax.jit
+@jit
 def surface_gammadash2(spec: SurfaceSpec) -> jax.Array:
     """Evaluate gammadash2 on the surface quadrature grid.
 
@@ -175,7 +176,7 @@ def surface_gammadash2(spec: SurfaceSpec) -> jax.Array:
     return _position_derivative(spec, 0, 1)
 
 
-@jax.jit
+@jit
 def surface_gammadash1dash1(spec: SurfaceSpec) -> jax.Array:
     """Evaluate gammadash1dash1 on the surface quadrature grid.
 
@@ -190,7 +191,7 @@ def surface_gammadash1dash1(spec: SurfaceSpec) -> jax.Array:
     return _position_derivative(spec, 2, 0)
 
 
-@jax.jit
+@jit
 def surface_gammadash1dash2(spec: SurfaceSpec) -> jax.Array:
     """Evaluate gammadash1dash2 on the surface quadrature grid.
 
@@ -205,7 +206,7 @@ def surface_gammadash1dash2(spec: SurfaceSpec) -> jax.Array:
     return _position_derivative(spec, 1, 1)
 
 
-@jax.jit
+@jit
 def surface_gammadash2dash2(spec: SurfaceSpec) -> jax.Array:
     """Evaluate gammadash2dash2 on the surface quadrature grid.
 
@@ -220,7 +221,7 @@ def surface_gammadash2dash2(spec: SurfaceSpec) -> jax.Array:
     return _position_derivative(spec, 0, 2)
 
 
-@jax.jit
+@jit
 def surface_normal(spec: SurfaceSpec) -> jax.Array:
     """Evaluate normal on the surface quadrature grid.
 
@@ -235,7 +236,7 @@ def surface_normal(spec: SurfaceSpec) -> jax.Array:
     return jnp.cross(surface_gammadash1(spec), surface_gammadash2(spec))
 
 
-@jax.jit
+@jit
 def surface_unitnormal(spec: SurfaceSpec) -> jax.Array:
     """Evaluate unitnormal on the surface quadrature grid.
 
@@ -251,7 +252,7 @@ def surface_unitnormal(spec: SurfaceSpec) -> jax.Array:
     return normal / _norm(normal)[..., None]
 
 
-@jax.jit
+@jit
 def surface_area(spec: SurfaceSpec) -> jax.Array:
     """Evaluate area on the surface quadrature grid.
 
@@ -266,7 +267,7 @@ def surface_area(spec: SurfaceSpec) -> jax.Array:
     return jnp.sum(norms) / norms.size
 
 
-@jax.jit
+@jit
 def surface_volume(spec: SurfaceSpec) -> jax.Array:
     """Evaluate volume on the surface quadrature grid.
 
