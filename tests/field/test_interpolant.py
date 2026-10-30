@@ -163,7 +163,9 @@ class Testing(unittest.TestCase):
     def test_skip(self):
         """
         Check that the interpolant correctly identifies which regions in the
-        domain to skip
+        domain to skip, and that with out_of_bounds_ok=True a query in a skipped
+        cell, including one outside the domain whose nearest boundary cell is
+        skipped, writes NaN.
         """
         np.random.seed(0)
         xran = (1.0, 4.0, 30)
@@ -197,6 +199,7 @@ class Testing(unittest.TestCase):
             [1.3, 1.3, 1.3],  # do not keep
             [1.3, 2.9, 3.5],  # do not keep
             [3.5, 1.3, 1.3],  # do not keep
+            [0.5, 2.5, 2.5],  # outside the domain, nearest boundary cell skipped
         ])
         fhxyz = 100*np.ones((xyz.shape[0], dim))
 
@@ -205,7 +208,7 @@ class Testing(unittest.TestCase):
 
         fxyz = fun(xyz[:, 0], xyz[:, 1], xyz[:, 2], flatten=False)
         assert np.allclose(fhxyz[:3, :], fxyz[:3, :], atol=1e-12, rtol=1e-12)
-        assert np.allclose(fhxyz[3:, :], 100, atol=1e-12, rtol=1e-12)
+        assert np.all(np.isnan(fhxyz[3:, :]))
 
     def test_convergence_order(self):
         for dim in [1, 4, 6]:

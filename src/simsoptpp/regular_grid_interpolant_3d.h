@@ -79,8 +79,10 @@ class RegularGridInterpolant3D {
      * rectangular domain D so that Ω⊂D, and then defines a function `skip`
      * that returns true outside of Ω and false inside of Ω. Internally, we
      * then skip all cells for which the function returns true on all eight
-     * corners. For some pictures that explain the idea behind the skip
-     * function and its caveats, please check the discussion under
+     * corners. A skipped cell holds no interpolant: a query that lands in
+     * one gives NaN with out_of_bounds_ok and throws otherwise. For some
+     * pictures that explain the idea behind the skip function and its caveats,
+     * please check the discussion under
      * https://github.com/hiddenSymmetries/simsopt/pull/227
      */
     private:
@@ -91,7 +93,7 @@ class RegularGridInterpolant3D {
         const int value_size; // number of output dimensions of the interpolant, i.e. space that is mapped into
         const InterpolationRule rule; // the interpolation rule to use on each cell in the grid
         // whether an out-of-bounds query extrapolates from the nearest boundary cell (NaN for a
-        // non-finite coordinate) or throws an error
+        // non-finite coordinate or a skipped cell) or throws an error
         const bool out_of_bounds_ok;
 
         // location of the mesh nodes in [xmin, xmax], [ymin, ymax], and [zmin, zmax]
