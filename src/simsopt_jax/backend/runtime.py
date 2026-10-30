@@ -550,8 +550,10 @@ def _gpu_memory_runtime_env(
 
     Only settings ``config`` resolves (not None) appear, so a caller's own
     ``XLA_PYTHON_CLIENT_*`` value survives when no ``SIMSOPT_*`` override or
-    keyword sets it. A resolved memory fraction owns both fraction variables:
-    it goes to the one the allocator reads and clears the other (value None).
+    keyword sets it. A resolved memory fraction goes to
+    ``XLA_CLIENT_MEM_FRACTION``, which jaxlib reads for every allocator, and
+    clears its deprecated alias ``XLA_PYTHON_CLIENT_MEM_FRACTION`` (value
+    None), since jaxlib rejects both set at once.
     """
     env: list[tuple[str, str | None]] = []
     if config.xla_gpu_preallocate is not None:
@@ -564,10 +566,8 @@ def _gpu_memory_runtime_env(
     if config.xla_gpu_allocator is not None:
         env.append((_XLA_PYTHON_CLIENT_ALLOCATOR_ENV, config.xla_gpu_allocator))
     if config.xla_gpu_mem_fraction is not None:
-        fraction = str(config.xla_gpu_mem_fraction)
-        vmm = config.xla_gpu_allocator == "vmm"
-        env.append((_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None if vmm else fraction))
-        env.append((_XLA_CLIENT_MEM_FRACTION_ENV, fraction if vmm else None))
+        env.append((_XLA_CLIENT_MEM_FRACTION_ENV, str(config.xla_gpu_mem_fraction)))
+        env.append((_XLA_PYTHON_CLIENT_MEM_FRACTION_ENV, None))
     if config.tf_gpu_allocator is not None:
         env.append((_TF_GPU_ALLOCATOR_ENV, config.tf_gpu_allocator))
     return tuple(env)
