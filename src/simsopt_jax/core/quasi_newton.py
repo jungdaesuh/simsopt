@@ -36,6 +36,15 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
+# scipy/optimize/_optimize.py, whose _minimize_bfgs minimize_bfgs ports:
+#
+# ******NOTICE***************
+# optimize.py module by Travis E. Oliphant
+#
+# You may copy and use this module as you see fit with no
+# guarantee implied provided you keep this notice in all copies.
+# *****END NOTICE************
+#
 # SciPy's C translation of L-BFGS-B 3.0, with DCSRCH and DCSTEP
 # (scipy/optimize/__lbfgsb.c):
 #
