@@ -335,7 +335,9 @@ def trace_particles_starting_on_curve(curve, field, nparticles, tmax=1e-4,
         Ekin: kinetic energy in Joule, defaults to 3.52MeV
         tol: tolerance for the adaptive ode solver
         comm: MPI communicator to parallelize over
-        seed: random seed
+        seed: seed of the local ``np.random.RandomState`` that draws the
+              initial positions and parallel speeds; the global NumPy
+              random state is neither read nor reseeded
         umin: the parallel speed is defined as  ``v_par = u * speed_total``
               where  ``u`` is drawn uniformly in ``[umin, umax]``
         umax: see ``umin``
@@ -391,7 +393,9 @@ def trace_particles_starting_on_surface(surface, field, nparticles, tmax=1e-4,
         Ekin: kinetic energy in Joule, defaults to 3.52MeV
         tol: tolerance for the adaptive ode solver
         comm: MPI communicator to parallelize over
-        seed: random seed
+        seed: seed of the local ``np.random.RandomState`` that draws the
+              initial positions and parallel speeds; the global NumPy
+              random state is neither read nor reseeded
         umin: the parallel speed is defined as  ``v_par = u * speed_total``
               where  ``u`` is drawn uniformly in ``[umin, umax]``.
         umax: see ``umin``
