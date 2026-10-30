@@ -24,6 +24,7 @@ with optional_jax_imports():
 from typing import cast
 
 import numpy as np
+from numpy.random import PCG64DXSM, Generator
 from simsopt.geo import (
     CurveFilament,
     CurvePerturbed,
@@ -51,6 +52,12 @@ def _xyz_curve(coefficients: dict[str, float], nquad: int = _NQUAD) -> CurveXYZF
 
 _BASE = {"xc(1)": 1.0, "ys(1)": 1.0, "zs(2)": 0.2, "xs(3)": 0.05}
 _PERTURBATION = {"xs(2)": 0.03, "yc(3)": -0.02, "zs(1)": 0.04}
+
+
+def _gaussian_sample(curve, n_derivs: int) -> PerturbationSample:
+    """Seeded Gaussian-process sample, so value comparisons see one fixed draw."""
+    sampler = GaussianSampler(curve.quadpoints, 0.05, 0.3, n_derivs=n_derivs)
+    return PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(670)))
 
 
 def _perturbed_and_equivalent() -> tuple[CurvePerturbed, CurveXYZFourier]:
@@ -147,8 +154,7 @@ class TestCurveWrapperSpecs(JaxTestCase):
             (2, FramedCurveCentroid, False),
         ):
             with self.subTest(n_derivs=n_derivs, frame=frame.__name__):
-                sampler = GaussianSampler(base.quadpoints, 0.05, 0.3, n_derivs=n_derivs)
-                filament = _filament(CurvePerturbed(base, PerturbationSample(sampler)), frame)
+                filament = _filament(CurvePerturbed(base, _gaussian_sample(base, n_derivs)), frame)
                 if not native_raises:
                     spec = curve_spec_from_adapter_curve(filament)
                     np.testing.assert_allclose(_terms(spec, 1)[1], filament.gammadash(), rtol=0, atol=1e-13)
@@ -161,8 +167,7 @@ class TestCurveWrapperSpecs(JaxTestCase):
     def test_perturbed_curve_without_second_sample_derivative_raises_like_native(self):
         """Order-2 geometry of a perturbed curve needs the sample's second derivative."""
         base = _xyz_curve(_BASE)
-        sampler = GaussianSampler(base.quadpoints, 0.05, 0.3, n_derivs=1)
-        perturbed = CurvePerturbed(base, PerturbationSample(sampler))
+        perturbed = CurvePerturbed(base, _gaussian_sample(base, 1))
         spec = curve_spec_from_adapter_curve(perturbed)
         np.testing.assert_allclose(_terms(spec, 1)[1], perturbed.gammadash(), rtol=0, atol=1e-13)
         with self.assertRaises(ValueError):
@@ -193,9 +198,8 @@ class TestCurveWrapperSpecs(JaxTestCase):
                 db=valid.db,
             )
         rotated = RotatedCurve(base, np.pi / 3, flip=False)
-        sampler = GaussianSampler(base.quadpoints, 0.05, 0.3, n_derivs=3)
         for inner_rotation in (
-            CurvePerturbed(rotated, PerturbationSample(sampler)),
+            CurvePerturbed(rotated, _gaussian_sample(base, 3)),
             _filament(rotated, FramedCurveCentroid),
         ):
             with self.subTest(wrapper=type(inner_rotation).__name__), self.assertRaisesRegex(
