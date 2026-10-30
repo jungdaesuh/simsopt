@@ -1291,7 +1291,7 @@ class TestBoozerResidualJax(JaxTestCase):
 
         guarded = operations()
         with mock.patch.object(
-            boozer_problem_module, "_without_derivatives_in_xl", lambda value: value
+            boozer_problem_module, "_not_differentiable_in_x", lambda value, refusal: value
         ):
             unguarded = operations()
             unguarded_jacobian = host_array(jax.jacfwd(partial(traced, problem))(xl))
@@ -1303,6 +1303,43 @@ class TestBoozerResidualJax(JaxTestCase):
         self.assertGreater(
             np.max(np.abs(unguarded_jacobian - jacobian)), 1e-6 * np.max(np.abs(jacobian))
         )
+
+    def test_derivative_outputs_refuse_derivatives_in_x(self):
+        """Outputs requested with ``derivatives >= 1`` use the field's Taylor
+        model of that order, so their derivative in ``x`` would miss the
+        field's next derivative: every formulation raises instead."""
+        setup = _setup("tensor", False, "toroidal_flux")
+        problem = boozer_problem(
+            setup.field, setup.surface, setup.label, setup.target, 5.0
+        )
+        x = place_float64(_decision(setup.surface, True), problem.targetlabel)
+        xl = place_float64(
+            _decision(setup.surface, True, (0.37, -0.23)), problem.targetlabel
+        )
+        rows = boozer_exact_residual_rows(setup.surface)
+        derivative_outputs = {
+            "residual": (
+                partial(jax_boozer_surface_residual, problem, derivatives=1, optimize_G=True),
+                x,
+            ),
+            "penalty": (
+                partial(boozer_penalty_constraints, problem, derivatives=1, optimize_G=True),
+                x,
+            ),
+            "exact constraints": (
+                partial(boozer_exact_constraints, problem, derivatives=1),
+                xl,
+            ),
+            "exact residual": (
+                partial(boozer_exact_residual, problem, residual_rows=rows, derivatives=1),
+                x,
+            ),
+        }
+        for name, (outputs, point) in derivative_outputs.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                TypeError, r"\(derivatives=1\) is not differentiable in x"
+            ):
+                jax.jacfwd(outputs)(point)
 
     def test_exact_constraint_values_have_exact_coil_derivatives(self):
         """At a fixed ``xl``, the coil derivatives of
