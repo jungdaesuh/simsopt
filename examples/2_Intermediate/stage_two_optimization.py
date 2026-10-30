@@ -250,8 +250,8 @@ print("""
 ################################################################################
 """)
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+# The minimizer's last evaluation need not be at its result, so the outputs below use res.x.
+JF.x = res.x
 curves_to_vtk(curves, OUT_DIR + "curves_opt_short")
 pointData = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + "surf_opt_short", extra_data=pointData)
@@ -265,8 +265,7 @@ LENGTH_WEIGHT *= 0.1
 if args.fused:
     problem = stage_two_problem()
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+JF.x = res.x
 curves_to_vtk(curves, OUT_DIR + "curves_opt_long")
 pointData = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + "surf_opt_long", extra_data=pointData)
