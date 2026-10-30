@@ -23,6 +23,7 @@ from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imp
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
+    import jax.numpy as jnp
     from simsopt.configs import get_data
     from simsopt.field.biotsavart import BiotSavart
     from simsopt.geo.boozersurface import BoozerSurface
@@ -1145,6 +1146,39 @@ class TestBoozerResidualJax(JaxTestCase):
                 self.assertTrue(len(actual) == len(expected) > 0, "coil leaves")
                 for leaf, (a, e) in enumerate(zip(actual, expected)):
                     assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
+
+    def test_formulations_cast_the_decision_vector_to_float64(self):
+        """A float32 decision vector is evaluated in float64: every formulation
+        and derivative equals its value at the same numbers in float64."""
+        setup = _setup("tensor", False, "volume")
+        problem = boozer_problem(
+            setup.field, setup.surface, setup.label, setup.target, 3.0
+        )
+        rows = boozer_exact_residual_rows(setup.surface)
+        formulations = {
+            "residual": lambda x, xl: jax_boozer_surface_residual(
+                problem, x, derivatives=2, optimize_G=True
+            ),
+            "penalty": lambda x, xl: boozer_penalty_constraints(
+                problem, x, derivatives=2, optimize_G=True
+            ),
+            "exact constraints": lambda x, xl: boozer_exact_constraints(
+                problem, xl, derivatives=1
+            ),
+            "exact residual": lambda x, xl: boozer_exact_residual(
+                problem, x, rows, derivatives=1
+            ),
+        }
+        decision = _decision(setup.surface, True, (0.37, -0.23))
+        rounded = place_float64(decision.astype(np.float32), problem.targetlabel)
+        single = rounded.astype(jnp.float32)
+        for name, formulation in formulations.items():
+            with self.subTest(name=name):
+                actual = formulation(single[:-2], single)
+                expected = formulation(rounded[:-2], rounded)
+                for order, (a, e) in enumerate(zip(actual, expected, strict=True)):
+                    self.assertEqual(a.dtype, jnp.float64, f"{name}[{order}] dtype")
+                    assert_matches_native(a, host_array(e), f"{name}[{order}]", rtol=1e-14)
 
     def test_second_derivatives_nest_forward_over_reverse(self):
         """The penalty Hessian and the BoozerExact KKT Jacobian compile, at

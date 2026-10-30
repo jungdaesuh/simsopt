@@ -34,10 +34,11 @@ derivative outputs are exact at ``x`` and in the coils, but are not to be
 differentiated again in ``x``. Values evaluate the field itself, so they can
 be differentiated in ``x`` and the coils to any order.
 
-Every function is jitted with the problem and ``x`` as traced operands: new
-DOF, ``iota``, ``G``, coil, target and weight values reuse the compiled
-program, while ``derivatives``, ``optimize_G``, ``weight_inv_modB`` and the
-problem's shapes, surface class and label kind select one. Build problems with
+Every function is jitted with the problem and ``x`` (cast to float64) as
+traced operands: new DOF, ``iota``, ``G``, coil, target and weight values
+reuse the compiled program, while ``derivatives``, ``optimize_G``,
+``weight_inv_modB`` and the problem's shapes, surface class and label kind
+select one. Build problems with
 :func:`simsopt_jax_adapters.geo.boozer_problem.boozer_problem` and pass ``x``
 already on the device. Second derivatives evaluate ``d2B/dXdX`` at every
 quadrature point: call ``simsopt_jax.backend.set_backend("jax", device=...)``
@@ -352,6 +353,8 @@ def boozer_surface_residual(
             x.
     """
 
+    x = as_jax_float64(x)
+
     def residual(point):
         return _boozer_terms(
             problem,
@@ -396,6 +399,8 @@ def boozer_penalty_constraints(
             with shapes (), (nx,), (nx, nx). The Boozer term is divided by 3 * npoints;
             units follow the residual and native constraint coefficient.
     """
+
+    x = as_jax_float64(x)
 
     def penalty(point):
         residual, label_residual, z_residual = _penalty_terms(
@@ -444,6 +449,7 @@ def boozer_exact_constraints(
         ValueError: If ``derivatives`` is not 0 or 1.
     """
     _require_derivative_order(derivatives, 1)
+    xl = as_jax_float64(xl)
     nx = xl.shape[0] - 2
 
     def lagrangian(x, multipliers):
@@ -507,6 +513,7 @@ def boozer_exact_residual(
         raise RuntimeError(
             "Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier"
         )
+    x = as_jax_float64(x)
     axis = not problem.surface.stellsym
 
     def system(point):
