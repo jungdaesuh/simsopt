@@ -57,6 +57,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.pytree import pytree_dataclass
 
 from ._math_utils import as_jax_float64
@@ -318,7 +319,7 @@ def _penalty_terms(
 _STATIC_OPTIONS = ("derivatives", "optimize_G", "weight_inv_modB")
 
 
-@partial(jax.jit, static_argnames=_STATIC_OPTIONS)
+@partial(jit, static_argnames=_STATIC_OPTIONS)
 def boozer_surface_residual(
     problem: BoozerProblem,
     x: jax.Array,
@@ -363,7 +364,7 @@ def boozer_surface_residual(
     return residual_derivatives(residual, x, derivatives)
 
 
-@partial(jax.jit, static_argnames=_STATIC_OPTIONS)
+@partial(jit, static_argnames=_STATIC_OPTIONS)
 def boozer_penalty_constraints(
     problem: BoozerProblem,
     x: jax.Array,
@@ -410,7 +411,7 @@ def boozer_penalty_constraints(
     return result[0] if derivatives == 0 else result
 
 
-@partial(jax.jit, static_argnames=("derivatives", "optimize_G"))
+@partial(jit, static_argnames=("derivatives", "optimize_G"))
 def boozer_exact_constraints(
     problem: BoozerProblem,
     xl: jax.Array,
@@ -465,7 +466,7 @@ def boozer_exact_constraints(
     return value, jacobian
 
 
-@partial(jax.jit, static_argnames=("derivatives",))
+@partial(jit, static_argnames=("derivatives",))
 def boozer_exact_residual(
     problem: BoozerProblem, x: jax.Array, residual_rows: jax.Array, *, derivatives: int = 0
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
