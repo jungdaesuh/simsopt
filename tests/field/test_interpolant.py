@@ -109,9 +109,11 @@ class Testing(unittest.TestCase):
         wrap into a neighbouring cell, and ``in_bounds_batch`` reports it as
         outside. With out_of_bounds_ok=True every query overwrites the output:
         a finite point gets the nearest boundary cell's polynomial, which
-        reproduces ``fun`` exactly, and a non-finite coordinate gets NaN. A
-        huge finite coordinate is also evaluated with that polynomial, which
-        overflows here because ``fun`` is quadratic. With out_of_bounds_ok=False
+        reproduces ``fun`` exactly, and a coordinate whose scaled grid index is
+        not finite (a non-finite coordinate, or one so far out that the index
+        overflows) gets NaN. A huge finite coordinate whose index stays finite
+        is also evaluated with that polynomial, which overflows here because
+        ``fun`` is quadratic. With out_of_bounds_ok=False
         a runtime error is raised.
         """
         np.random.seed(0)
