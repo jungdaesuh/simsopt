@@ -1026,8 +1026,10 @@ def make_curve_perturbed_spec(
     Args:
         dofs (array-like): Wrapper DOFs, shape (D,), including dependencies in the
             layout described by base_curve_map.
-        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,),
-            conventionally in [0, 1).
+        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,):
+            the base curve's grid, on which the sample is drawn, as for native
+            ``CurvePerturbed``. Geometry is evaluated on that grid; this field does
+            not resample it.
         base_curve (CurveSpec): Immutable geometry of the unperturbed or centerline
             curve.
         base_curve_map (OptimizableDofMapSpec): Map from wrapper DOFs to base-curve
@@ -1086,8 +1088,9 @@ def make_curve_filament_spec(
     Args:
         dofs (array-like): Wrapper DOFs, shape (D,), including curve and rotation
             dependencies in their mapped layouts.
-        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,),
-            conventionally in [0, 1).
+        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,):
+            the base curve's and rotation's grid, as for native ``CurveFilament``.
+            Geometry is evaluated on those grids; this field does not resample them.
         base_curve (CurveSpec): Immutable geometry of the unperturbed or centerline
             curve.
         base_curve_map (OptimizableDofMapSpec): Map from wrapper DOFs to base-curve
