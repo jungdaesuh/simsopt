@@ -99,9 +99,10 @@ def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
 
 
 def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, kernel):
+    points = _as_jax_float64(points)
     coil_arrays = grouped_field_inputs_from_spec(coil_spec)
     if not coil_arrays:
-        return _empty_grouped_field_result(cast(jax.Array, points), kernel)
+        return _empty_grouped_field_result(points, kernel)
     result = _evaluate_grouped_field_group(points, *coil_arrays[0], kernel)
     for gammas, gammadashs, currents in coil_arrays[1:]:
         result = _tree_add(

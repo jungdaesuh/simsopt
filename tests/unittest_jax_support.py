@@ -12,13 +12,20 @@ import gc
 
 import numpy as np
 
+# simsopt_jax imports its requirement gate (Python, jax and jaxlib versions)
+# before anything else. Only a failure of that gate, or a missing jax, means
+# the optional runtime is unavailable; once the gate has loaded, an ImportError
+# is a broken package import and must fail the run instead of skipping it.
 JAX_IMPORT_ERROR: str | None = None
 try:
     import simsopt_jax  # noqa: F401
+except ImportError as error:
+    if "simsopt_jax._requirements" in sys.modules:
+        raise
+    JAX_IMPORT_ERROR = str(error)
+else:
     import jax
     import jax.extend.backend
-except ImportError as error:
-    JAX_IMPORT_ERROR = str(error)
 
 
 @contextmanager

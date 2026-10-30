@@ -7,6 +7,7 @@ from unittest_jax_support import JaxTestCase, optional_jax_imports
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import (
         OrientedCurveXYZFourierSpec,
         curve_gamma_and_gammadash_from_spec,
@@ -110,7 +111,7 @@ class TestOrientedcurveJaxSpec(JaxTestCase):
             isinstance(spec, OrientedCurveXYZFourierSpec),
             "isinstance(spec, OrientedCurveXYZFourierSpec)",
         )
-        gamma, gammadash = jax.jit(curve_gamma_and_gammadash_from_spec)(spec)
+        gamma, gammadash = jit(curve_gamma_and_gammadash_from_spec)(spec)
         expected_gamma, expected_gammadash = _oriented_curve_numpy(dofs, quadpoints, 2)
 
         np.testing.assert_allclose(
