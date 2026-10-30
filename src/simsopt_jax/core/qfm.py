@@ -104,7 +104,7 @@ def _squared_norm_jvp(
     primals: tuple[jax.Array], tangents: tuple[jax.Array],
 ) -> tuple[jax.Array, jax.Array]:
     (vectors,), (vectors_dot,) = primals, tangents
-    return _norm(vectors)**2, 2 * jnp.sum(vectors * vectors_dot, axis=-1)
+    return _squared_norm(vectors), 2 * jnp.sum(vectors * vectors_dot, axis=-1)
 
 
 def _residual(normal: jax.Array, field: jax.Array) -> jax.Array:

@@ -11,6 +11,7 @@ from unittest_jax_support import (
 )
 
 with optional_jax_imports():
+    import jax
     import simsopt_jax  # noqa: F401
     from simsopt.configs import get_data
     from simsopt.field import BiotSavart, coils_via_symmetries
@@ -24,14 +25,27 @@ with optional_jax_imports():
     from simsopt.geo.surfaceobjectives import Area, ToroidalFlux, Volume
     from simsopt_jax.backend import get_field_kernel_tuning, set_backend
     from simsopt_jax.backend.dtypes import explicit_device_array
-    from simsopt_jax.core.qfm import qfm_label, qfm_residual
-    from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_array
+    from simsopt_jax.core.qfm import (
+        qfm_label,
+        qfm_residual,
+        qfm_residual_value_and_grad,
+    )
+    from simsopt_jax.core.surface_fourier_series import (
+        surface_get_dofs,
+        surface_spec_with_dofs,
+    )
+    from simsopt_jax.runtime.host_boundary import (
+        disallow_host_transfers,
+        host_array,
+        host_value,
+    )
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.qfm import JaxQfmSurface
 from unittest import mock
 import os
 
 from copy import copy
+from dataclasses import replace
 
 import numpy as np
 
@@ -134,6 +148,17 @@ def _assert_pair(actual, expected):
             _assert_pair(a, e)
     else:
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def _forward_derivatives(kernel, spec, *operands):
+    """Forward-mode derivatives of every kernel output in the spec's full surface DOFs."""
+
+    def outputs(dofs):
+        return kernel(
+            replace(spec, surface=surface_spec_with_dofs(spec.surface, dofs)), *operands
+        )
+
+    return host_value(jax.jacfwd(outputs)(surface_get_dofs(spec.surface)))
 
 
 def _evaluate(port):
@@ -695,6 +720,21 @@ class TestQfmJax(JaxTestCase):
         self.assertTrue(np.all(np.isfinite(expected)))
         _assert_pair(port.qfm.J(), native.qfm.J())
         _assert_pair(port.qfm.dJ_by_dsurfacecoefficients(), expected)
+
+    def test_field_null_keeps_finite_second_derivatives(self):
+        """An isolated field null keeps the second derivatives of the residual finite.
+
+        B^2 is smooth at B = 0, so differentiating the gradient again stays
+        finite there, and the derivative of the returned value is the gradient.
+        """
+        _, port = _pair()
+        points = port.surface.gamma().reshape(-1, 3).copy()
+        points[3] = [1e110, 0.0, 0.0]
+        port.biotsavart.set_points(points)
+        spec = port.qfm._spec()
+        value_derivative, hessian = _forward_derivatives(qfm_residual_value_and_grad, spec)
+        self.assertTrue(np.all(np.isfinite(hessian)))
+        _assert_pair(value_derivative, host_array(qfm_residual_value_and_grad(spec)[1]))
 
     def test_one_point_flux_field_broadcasts_like_native(self):
         """An independent one-point flux field broadcasts over the flux row as in native."""
