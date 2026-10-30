@@ -349,6 +349,16 @@ class CurveSurfaceDistance(Optimizable):
     parent as well, so its free DOFs are DOFs of the penalty and ``dJ``
     includes their derivatives.
 
+    With ``surface_derivatives=False`` the surface is not a parent: ``J`` and
+    ``dJ`` read its current geometry, but cached consumers such as
+    :obj:`~simsopt.objectives.LeastSquaresProblem` are not notified when the
+    surface moves, and keep returning the value from before the move until
+    their own DOFs change. A caller who moves the target surface and needs
+    that notification passes ``surface_derivatives=True`` and fixes the
+    surface DOFs: the surface is then a parent with no DOFs in ``x``, and the
+    gradient is with respect to the curve DOFs only.
+
+
     Args:
         curves (list[Curve]): the curves to penalize, positions in m.
         surface (Surface): the surface, positions in m.

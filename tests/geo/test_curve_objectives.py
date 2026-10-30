@@ -15,6 +15,7 @@ from simsopt.geo.curveobjectives import CurveLength, LpCurveCurvature, \
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.surfacehenneberg import SurfaceHenneberg
 from simsopt.configs.zoo import get_data
+from simsopt.objectives import LeastSquaresProblem
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 import simsoptpp as sopp
 
@@ -420,6 +421,19 @@ class Testing(unittest.TestCase):
                 # The candidates may come in another order, which changes the sum by rounding.
                 np.testing.assert_allclose(J.J(), fresh.J(), rtol=1e-13, atol=0)
                 np.testing.assert_allclose(np.asarray(J.dJ()), np.asarray(fresh.dJ()), rtol=1e-13, atol=0)
+        # A cached consumer learns of the move only when the surface is a
+        # parent; fixing its dofs keeps them out of the problem's x.
+        surface.set_rc(1, 0, 0.2)
+        surface.set_zs(1, 0, 0.2)
+        surface.fix_all()
+        J = CurveSurfaceDistance(curves, surface, 0.1, surface_derivatives=True)
+        problem = LeastSquaresProblem.from_tuples([(J.J, 0., 1.)])
+        self.assertEqual(problem.dof_size, CurveSurfaceDistance(curves, surface, 0.1).dof_size)
+        self.assertEqual(problem.objective(), 0.)
+        surface.set_rc(1, 0, 0.3)
+        surface.set_zs(1, 0, 0.3)
+        self.assertGreater(J.J(), 0.)
+        np.testing.assert_allclose(problem.objective(), J.J()**2, rtol=1e-13, atol=0)
 
     def test_curve_surface_distance_fixed_surface_without_dof_derivatives(self):
         """
