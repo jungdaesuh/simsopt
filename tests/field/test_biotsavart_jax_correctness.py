@@ -374,6 +374,23 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
                     result.B(), native.B(), rtol=1e-12, atol=1e-14
                 )
 
+    def test_payload_without_points_is_rejected_like_native(self):
+        """A payload without a points key raises KeyError in both fields; None
+        restores cleared points."""
+        coils = [Coil(_curves()[0], Current(1e5))]
+        for field in (BiotSavart(coils), JaxBiotSavart(coils)):
+            with self.subTest(field=type(field).__name__):
+                serialized = {}
+                payload = field.as_dict(serialized)
+                del payload["points"]
+                with self.assertRaises(KeyError):
+                    type(field).from_dict(payload, serialized, {})
+        adapter = JaxBiotSavart(coils)
+        adapter.clear_points()
+        serialized = {}
+        restored = JaxBiotSavart.from_dict(adapter.as_dict(serialized), serialized, {})
+        self.assertIsNone(restored.get_points_cart_ref())
+
     def test_native_symmetry_curve_converts_for_fields_and_vjps(self):
         """Native symmetry Fourier curves yield matching JAX fields and VJPs with or
         without stellarator symmetry."""

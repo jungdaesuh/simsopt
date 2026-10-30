@@ -749,18 +749,23 @@ class JaxBiotSavart(Optimizable):
         """Reconstruct a field and its points from a GSON payload.
 
         Args:
-            d (dict): Decoded GSON field payload containing coils and optional points.
+            d (dict): Decoded GSON field payload with coils and points; as in
+                native BiotSavart the points key is required, and None in it
+                restores cleared points.
             serial_objs_dict (dict): Serialized-object registry used by GSONDecoder.
             recon_objs (dict): Registry of objects already reconstructed by GSONDecoder.
 
         Returns:
             JaxBiotSavart object: Reconstructed field with its serialized
                 evaluation points restored.
+
+        Raises:
+            KeyError: The payload has no points key.
         """
         decoder = GSONDecoder()
         coils = decoder.process_decoded(d["coils"], serial_objs_dict, recon_objs)
         field = cls(coils)
-        points = decoder.process_decoded(d.get("points"), serial_objs_dict, recon_objs)
+        points = decoder.process_decoded(d["points"], serial_objs_dict, recon_objs)
         if points is None:
             field.clear_points()
         else:
