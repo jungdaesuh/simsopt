@@ -19,11 +19,10 @@ iteration counts, ``nfev``/``njev`` (``ScalarFunction`` counts a point again
 only when it differs from the last one), ``hess_inv`` and SciPy's checks of
 its inputs without bounds are SciPy's. Iterates agree with SciPy to
 round-off, which a long walk magnifies: XLA sums dot and matrix products in
-its own order, and BFGS updates its inverse Hessian in the rank-two form ``H
-- rho (s (Hy)^T + (Hy) s^T) + (rho^2 y^T H y + rho) s s^T``, in exact
-arithmetic SciPy's ``A1 H A2 + rho s s^T``, which rounds differently (it
-costs O(n^2) where SciPy's two matrix products cost O(n^3)). Compiled code may
-also fuse a multiply and an add into one rounding (XLA does on CPU and GPU),
+its own order, and BFGS forms SciPy's update ``A1 (H A2) + rho s s^T``,
+with ``A1 = I - rho s y^T`` and ``A2 = A1^T``, in SciPy's order but from outer
+products (in O(n^2) where SciPy's two matrix products cost O(n^3)). Compiled
+code may also fuse a multiply and an add into one rounding (XLA does on CPU and GPU),
 so a decision that hinges on the last bit can go the other way than in SciPy:
 a memory reset under underflow, or a trial point equal to an earlier one,
 which SciPy does not count again. Run op by op, the port makes SciPy's
@@ -461,15 +460,14 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     stop = converged | small_step | non_finite
     rhok_inv = jnp.dot(yk, sk)
     rhok = jnp.where(rhok_inv == 0.0, _RHOK_DIVIDE_BY_ZERO, 1.0 / rhok_inv)
-    # SciPy's A1 H A2 + rho s s^T, with A1 = I - rho s y^T and A2 = A1^T, as a
-    # rank-two update of the symmetric H: equal in exact arithmetic, but it
-    # rounds differently.
-    Hy = s.H @ yk
-    H = (
-        s.H
-        - rhok * (jnp.outer(sk, Hy) + jnp.outer(Hy, sk))
-        + (rhok * rhok * jnp.dot(yk, Hy) + rhok) * jnp.outer(sk, sk)
-    )
+    # SciPy's A1 (H A2) + rho s s^T, with A1 = I - rho s y^T and A2 = A1^T,
+    # in SciPy's order: H A2 = H - rho (H y) s^T first, then A1 applied to it.
+    # Each factor nearly annihilates the s direction, so their errors multiply
+    # instead of adding as in the expanded rank-two form, whose terms of size
+    # |H| cancel and can leave H indefinite when rho s s^T is below their
+    # round-off. Outer products keep it O(n^2) instead of SciPy's O(n^3).
+    HA2 = s.H - rhok * jnp.outer(s.H @ yk, sk)
+    H = HA2 - rhok * jnp.outer(sk, yk @ HA2) + rhok * jnp.outer(sk, sk)
     iterate = accept & ~stop & (gnorm > gtol) & (k < maxiter)
     s = replace(s, 
         x=jnp.where(accept, x_t, s.x),

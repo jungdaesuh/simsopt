@@ -7,10 +7,9 @@ Capped after k = 1, ..., 10 iterations, each solve stops at ``maxiter``
 (status 1) with SciPy's message, iteration and evaluation counts, and its
 iterate and ``hess_inv`` (BFGS's matrix; L-BFGS-B's correction pairs in the
 order of SciPy's ring buffer) agree with SciPy's, relative to the largest
-entry, to 1e-12 on the quadratic and the Rosenbrock function (measured worst
-1.2e-13) and to 5e-9 on the quartic, whose conditioning magnifies round-off
-(measured worst 7.7e-10, BFGS on the GPU). L-BFGS-B holds three corrections
-there, so its memory wraps. Run to convergence (ten corrections), status,
+entry, to 1e-12 (measured worst 3.9e-13, BFGS on the quartic on the GPU).
+Capped, L-BFGS-B holds three corrections, so its memory wraps. Run to
+convergence (ten corrections), status,
 message, counts, ``x``, ``fun`` and ``jac`` (to the same bounds, ``fun`` and
 ``jac`` relative to their size at ``x0``) are SciPy's and ``hess_inv`` agrees
 to 1e-7 after forty or more updates; L-BFGS-B's 100 to 200 iterations on the
@@ -67,18 +66,17 @@ from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, minimize
 from scipy.optimize import _linesearch as scipy_linesearch
 
 _EARLY_ITERATIONS = 10
-_EARLY_RTOL = {"quadratic": 1e-12, "rosenbrock": 1e-12, "ill-conditioned": 5e-9}
+_EARLY_RTOL = 1e-12
 _FINAL_RTOL = 1e-5
 _FAILURE_RTOL = 1e-12
 _TINY_RTOL = 1e-14
 # hess_inv after a converged walk: forty or more updates, each rounded
-# differently (BFGS's rank-two form, XLA's sums); measured worst 5.5e-9 of the
+# differently (XLA's sums and fused multiply-adds); measured worst 1.1e-9 of the
 # largest entry, BFGS on the Rosenbrock function.
 _CONVERGED_HESS_INV_RTOL = 1e-7
-# fun and jac magnify an iterate's difference (measured worst 2.1e-12 and
-# 9.6e-13 of their size on the quadratic and the Rosenbrock function, 2.2e-10 on
-# the quartic).
-_EARLY_FUN_JAC_RTOL = {name: 10 * rtol for name, rtol in _EARLY_RTOL.items()}
+# fun and jac magnify an iterate's difference (measured worst 3.0e-12 of their
+# size, L-BFGS-B on the quadratic at k = 10).
+_EARLY_FUN_JAC_RTOL = 10 * _EARLY_RTOL
 # At a converged solution fun and jac are near zero, so they are compared
 # absolutely (measured worst 3.3e-24 and 4.5e-14 where the walks match).
 _CONVERGED_FUN_ATOL = 1e-14
@@ -139,6 +137,10 @@ def _tiny_scale(x, params):
     return jnp.sum(1e-200 * (u**2 / 2 + 0.1 * jnp.sin(u)))
 
 
+def _badly_scaled(x, params):
+    return 5e17 * jnp.sum(x**2)
+
+
 _OBJECTIVES = {
     "quadratic": _quadratic,
     "rosenbrock": _rosenbrock,
@@ -149,6 +151,7 @@ _OBJECTIVES = {
     "linear": _linear,
     "steep": _steep,
     "tiny-scale": _tiny_scale,
+    "badly-scaled": _badly_scaled,
     "unavailable": _unavailable,
 }
 
@@ -265,11 +268,11 @@ class TestQuasiNewtonJax(JaxTestCase):
             self.assertEqual(expected.status, 1, f"{name}: SciPy converged before k={k}")
             result, message = _device(name, x0, params, method, options, lane)
             self._assert_scipy_record(expected, result, message, f"{method} {name} k={k}")
-            assert_matches_native(result.x, expected.x, f"{method} {name} x at k={k}", _EARLY_RTOL[name])
-            rtol = _EARLY_FUN_JAC_RTOL[name]
+            assert_matches_native(result.x, expected.x, f"{method} {name} x at k={k}", _EARLY_RTOL)
+            rtol = _EARLY_FUN_JAC_RTOL
             assert_matches_native(result.fun, expected.fun, f"{method} {name} fun at k={k}", rtol, abs(expected.fun))
             assert_matches_native(result.jac, expected.jac, f"{method} {name} jac at k={k}", rtol)
-            self._assert_scipy_hess_inv(expected, result, f"{method} {name} k={k}", _EARLY_RTOL[name])
+            self._assert_scipy_hess_inv(expected, result, f"{method} {name} k={k}", _EARLY_RTOL)
 
     def test_converged_solves_match_scipy(self):
         """Run to convergence, both solvers end as SciPy does: status,
@@ -297,9 +300,8 @@ class TestQuasiNewtonJax(JaxTestCase):
             )
             assert_matches_native(result.x, expected.x, f"{method} {name} solution", _FINAL_RTOL)
             return
-        rtol = _EARLY_RTOL[name]
         self._assert_scipy_record(expected, result, message, f"{method} {name}")
-        assert_matches_native(result.x, expected.x, f"{method} {name} solution", rtol)
+        assert_matches_native(result.x, expected.x, f"{method} {name} solution", _EARLY_RTOL)
         assert_matches_native(result.fun, expected.fun, f"{method} {name} fun", _CONVERGED_FUN_ATOL, 1.0)
         assert_matches_native(result.jac, expected.jac, f"{method} {name} jac", _CONVERGED_JAC_ATOL, 1.0)
         self._assert_scipy_hess_inv(expected, result, f"{method} {name}", _CONVERGED_HESS_INV_RTOL)
@@ -342,6 +344,29 @@ class TestQuasiNewtonJax(JaxTestCase):
                     result, message = _device(name, x0, np.zeros(0), "BFGS", options, lane)
                     self._assert_scipy_record(expected, result, message, case)
                     assert_matches_native(result.x, expected.x, f"{case} x", _FAILURE_RTOL)
+
+    def test_bfgs_update_keeps_badly_scaled_inverse_hessian(self):
+        """On f = 5e17 x^2 from x = 1 the first update's rho s s^T (1e-18) lies
+        below the round-off of terms the size of H = 1. SciPy's factored update
+        keeps H = 1 / (2 * 5e17); so does the port, after that first update
+        (with SciPy's record) and to convergence (with SciPy's status). An
+        expanded rank-two update leaves H negative and ends with status 2. The
+        iteration count to convergence is not compared: the second step lands
+        within round-off of x = 0, exactly on it on the GPU, which then stops
+        one iteration before SciPy."""
+        x0 = np.ones(1)
+        for lane in _LANES:
+            for maxiter in (1, 100):
+                with self.subTest(lane=lane, maxiter=maxiter), self.case():
+                    options = _options("BFGS", maxiter)
+                    expected = _scipy("badly-scaled", x0, np.zeros(0), "BFGS", options)
+                    self.assertEqual(expected.status, 1 if maxiter == 1 else 0, "SciPy's status changed")
+                    result, message = _device("badly-scaled", x0, np.zeros(0), "BFGS", options, lane)
+                    if maxiter == 1:
+                        self._assert_scipy_record(expected, result, message, "badly scaled, one update")
+                    else:
+                        self.assertEqual((int(result.status), message), (expected.status, expected.message))
+                    self._assert_scipy_hess_inv(expected, result, f"badly scaled, maxiter={maxiter}", _FAILURE_RTOL)
 
     def test_zoom_interpolants_match_scipy(self):
         """The cubic and quadratic minimizers are SciPy's, ``None`` where SciPy's
