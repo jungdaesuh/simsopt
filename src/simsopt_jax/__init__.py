@@ -1,6 +1,8 @@
 """Canonical namespace for Simsopt JAX implementations.
 
 Requires Python 3.11 or newer, like the JAX 0.10 it uses (``pip install simsopt[jax]``).
+Importing it enables JAX float64 (``jax_enable_x64``) for the process, as
+importing ``simsopt.geo`` does.
 """
 
 # _requirements (the Python and JAX version gate) must load first: tests treat
