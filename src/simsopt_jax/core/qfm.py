@@ -186,24 +186,26 @@ def _with_value(traced: jax.Array, value: jax.Array) -> jax.Array:
     """``value`` as the primal, with the tangent of ``traced``.
 
     Unlike ``traced + stop_gradient(value - traced)``, this returns ``value``
-    exactly, including when either operand is infinite.
+    exactly, including when either operand is infinite. As that arithmetic
+    did, the result takes the promoted dtype of both operands, so a float32
+    or integer ``value`` is returned in the dtype of a float64 ``traced``.
 
     Args:
         traced (jax.Array): Scalar shape () quantity whose derivative is kept.
         value (jax.Array): Scalar shape () replacement value in the same units.
 
     Returns:
-        jax.Array: Scalar shape () ``value``.
+        jax.Array: Scalar shape () ``value`` in the promoted dtype.
     """
-    del traced
-    return value
+    return jnp.asarray(value, jnp.result_type(traced, value))
 
 
 @_with_value.defjvp
 def _with_value_jvp(
     primals: tuple[jax.Array, jax.Array], tangents: tuple[jax.Array, jax.Array],
 ) -> tuple[jax.Array, jax.Array]:
-    return _with_value(*primals), tangents[0]
+    value = _with_value(*primals)
+    return value, jnp.asarray(tangents[0], value.dtype)
 
 
 def _label_value_and_grad(

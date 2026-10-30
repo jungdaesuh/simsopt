@@ -12,6 +12,7 @@ from unittest_jax_support import (
 
 with optional_jax_imports():
     import jax
+    import jax.numpy as jnp
     import simsopt_jax  # noqa: F401
     from simsopt.configs import get_data
     from simsopt.field import BiotSavart, coils_via_symmetries
@@ -27,6 +28,7 @@ with optional_jax_imports():
     from simsopt_jax.backend.dtypes import explicit_device_array
     from simsopt_jax.core.qfm import (
         qfm_label,
+        qfm_label_constraint,
         qfm_label_constraint_value_and_grad,
         qfm_residual,
         qfm_residual_value_and_grad,
@@ -752,6 +754,27 @@ class TestQfmJax(JaxTestCase):
             ),
             _forward_derivatives(qfm_label_constraint_value_and_grad, spec, target),
         )
+
+    def test_label_value_of_any_real_dtype_promotes_like_the_label(self):
+        """A float32 or integer label value is promoted, at both derivative orders.
+
+        The value path subtracts it from the float64 target; the gradient path
+        must accept the same value and agree with it in float64.
+        """
+        _, port = _pair_with_nonzero_label_gradient()
+        spec = port._label_spec()
+        target = port._target(spec)
+        label = float(host_array(qfm_label(spec)))
+        for supplied in (jnp.asarray(label, jnp.float32), jnp.asarray(round(label))):
+            promoted = jnp.asarray(supplied, jnp.float64)
+            value, gradient = qfm_label_constraint_value_and_grad(spec, target, supplied)
+            expected_value, expected_gradient = qfm_label_constraint_value_and_grad(spec, target, promoted)
+            self.assertEqual(value.dtype, jnp.float64)
+            np.testing.assert_array_equal(host_array(value), host_array(expected_value))
+            np.testing.assert_array_equal(host_array(gradient), host_array(expected_gradient))
+            np.testing.assert_array_equal(
+                host_array(value), host_array(qfm_label_constraint(spec, target, supplied))
+            )
 
     def test_one_point_flux_field_broadcasts_like_native(self):
         """An independent one-point flux field broadcasts over the flux row as in native."""
