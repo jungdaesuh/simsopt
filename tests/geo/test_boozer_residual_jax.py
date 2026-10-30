@@ -237,6 +237,27 @@ _EXACT_CONSTRAINT_CASES = {
 }
 
 
+def _closed_form_mean_cross_sectional_area(surface: _NativeSurface) -> float:
+    """Native's mean cross-sectional area in the closed form of its own
+    ``dmean_cross_sectional_area_by_dcoeff``, which needs no ``det``/``inv`` of
+    the cylindrical map and so stays defined where that map is singular.
+
+    Args:
+        surface (SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier):
+            Native surface at its current DOFs.
+
+    Returns:
+        float: Mean cross-sectional area in square meters.
+    """
+    gamma, xphi, xtheta = surface.gamma(), surface.gammadash1(), surface.gammadash2()
+    x, y = gamma[..., 0], gamma[..., 1]
+    section = (
+        xtheta[..., 2] * (x * xphi[..., 1] - y * xphi[..., 0])
+        - xphi[..., 2] * (x * xtheta[..., 1] - y * xtheta[..., 0])
+    ) / np.sqrt(x * x + y * y)
+    return float(np.abs(np.mean(section)) / (2 * np.pi))
+
+
 def _singular_section_surface() -> SurfaceXYZFourier:
     """A smooth surface whose cylindrical angle stops advancing with phi at
     every quadrature point (``J00 = 0`` in native ``mean_cross_sectional_area``)."""
@@ -659,17 +680,28 @@ class TestBoozerResidualJax(JaxTestCase):
             label.J()
         problem = boozer_problem(setup.field, surface, label, 5.0, 1.0)
         x = _decision(surface, False)
+        singular = _native_boozer(
+            replace(setup, surface=surface, label=label, target=5.0), 1.0
+        )
         with self.assertRaises(np.linalg.LinAlgError):
-            _native_boozer(
-                replace(setup, surface=surface, label=label, target=5.0), 1.0
-            ).boozer_penalty_constraints_vectorized(x.copy(), derivatives=2)
-        for output in boozer_penalty_constraints(
-            problem, place_float64(x, problem.targetlabel), derivatives=2
+            singular.boozer_penalty_constraints_vectorized(x.copy(), derivatives=2)
+        # Native with its mean cross-sectional area in the closed form of its own
+        # derivatives is the reference: value, gradient and Hessian.
+        with mock.patch.object(
+            surface,
+            "mean_cross_sectional_area",
+            lambda: _closed_form_mean_cross_sectional_area(surface),
         ):
-            self.assertTrue(
-                np.all(np.isfinite(host_array(output))),
-                "AspectRatio penalty is not finite",
+            expected = singular.boozer_penalty_constraints_vectorized(
+                x.copy(), derivatives=2
             )
+        _assert_all_native(
+            boozer_penalty_constraints(
+                problem, place_float64(x, problem.targetlabel), derivatives=2
+            ),
+            expected,
+            "AspectRatio penalty at a singular cylindrical map",
+        )
 
     def test_hessians_match_differences_of_native_derivatives(self):
         """Penalty and residual Hessians agree with central differences of native
@@ -787,6 +819,7 @@ class TestBoozerResidualJax(JaxTestCase):
         )
         first_results = _evaluate_every_formulation(first, x, xl)
         _assert_every_formulation_native(first_results, setup, 3.0, x, xl)
+        first_x, first_xl = x, xl
 
         setup.surface.set_dofs(
             setup.surface.get_dofs()
@@ -803,6 +836,7 @@ class TestBoozerResidualJax(JaxTestCase):
         )
         with jax_compilations() as compilations:
             second_results = _evaluate_every_formulation(second, x, xl)
+            first_again = _evaluate_every_formulation(first, first_x, first_xl)
         self.assertEqual(
             compilations, [], "new values retraced or recompiled a formulation"
         )
@@ -813,6 +847,14 @@ class TestBoozerResidualJax(JaxTestCase):
                 host_array(second_results["penalty"][0]),
             )
         )
+        # The first problem is a snapshot: the native changes leave it unchanged.
+        for name, results in first_results.items():
+            for order, (again, before) in enumerate(
+                zip(first_again[name], results, strict=True)
+            ):
+                assert_matches_native(
+                    again, host_array(before), f"first problem {name}[{order}]"
+                )
 
     def test_formulations_make_no_implicit_transfers(self):
         """Boozer formulations accept placed inputs without implicit host/device transfers."""
