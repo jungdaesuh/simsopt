@@ -28,9 +28,7 @@ projects them onto the free DOFs. Jit them, with ``simsopt_jax.backend.jit.jit``
 ``jax.vjp`` gives ``dgamma_by_dcoeff_vjp``; ``jax.grad`` and ``jax.hessian``
 of ``surface_area`` give ``darea_by_dcoeff`` and ``d2area_by_dcoeffdcoeff``.
 
-Clamped ``SurfaceXYZTensorFourier`` second derivatives differ from native's,
-which are wrong (:mod:`simsopt_jax.core.surface_fourier_series`). Where
-squared normal components, or derivative intermediates such as the cube of
+Where squared normal components, or derivative intermediates such as the cube of
 the normal's length, underflow or overflow float64, unit normals, areas and
 their derivatives can differ from native in finiteness: XLA on CPU flushes
 subnormal results to zero, and autodiff orders the arithmetic differently from

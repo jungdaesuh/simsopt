@@ -15,11 +15,7 @@ forward-mode derivatives in those angles.
 ``get_dofs`` and ``set_dofs``.
 
 ``SurfaceXYZTensorFourier`` clamping multiplies the cosine-cosine block of a
-clamped component by ``sin(nfp phi / 2)**2 + sin(theta / 2)**2``. Native
-``simsoptpp`` differentiates that factor twice with integer division
-(``nfp / 2`` and ``1 / 2``), so its clamped ``gammadash1dash1`` (odd ``nfp``)
-and ``gammadash2dash2`` are not the derivatives of its ``gammadash1`` and
-``gammadash2``; the derivatives here are.
+clamped component by ``sin(nfp phi / 2)**2 + sin(theta / 2)**2``.
 """
 
 from __future__ import annotations
