@@ -343,19 +343,41 @@ class CurveSurfaceDistance(Optimizable):
     points on all coils :math:`i` and on the surface lie more than
     :math:`d_\min` away from one another.
 
+    By default the surface is the fixed target of a coil optimization: the
+    penalty depends on the curve DOFs only, and the surface geometry is read
+    at each evaluation. With ``surface_derivatives=True`` the surface is a
+    parent as well, so its free DOFs are DOFs of the penalty and ``dJ``
+    includes their derivatives.
+
+    With ``surface_derivatives=False`` the surface is not a parent: ``J`` and
+    ``dJ`` read its current geometry, but cached consumers such as
+    :obj:`~simsopt.objectives.LeastSquaresProblem` are not notified when the
+    surface moves, and keep returning the value from before the move until
+    their own DOFs change. A caller who moves the target surface and needs
+    that notification passes ``surface_derivatives=True`` and fixes the
+    surface DOFs: the surface is then a parent with no DOFs in ``x``, and the
+    gradient is with respect to the curve DOFs only.
+
+    Args:
+        curves (list[Curve]): the curves to penalize, positions in m.
+        surface (Surface): the surface, positions in m.
+        minimum_distance (float): the threshold distance :math:`d_\min` in m.
+        surface_derivatives (bool): whether the surface DOFs are DOFs of the
+            penalty. Defaults to False.
     """
 
-    def __init__(self, curves, surface, minimum_distance):
+    def __init__(self, curves, surface, minimum_distance, surface_derivatives=False):
         self.curves = curves
         self.surface = surface
         self.minimum_distance = minimum_distance
+        self.surface_derivatives = surface_derivatives
 
         self.J_jax = jit(lambda gammac, lc, gammas, ns: cs_distance_pure(gammac, lc, gammas, ns, minimum_distance))
-        self.dJ_dgamma = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=0)(gammac, lc, gammas, ns))
-        self.dJ_dlc = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=1)(gammac, lc, gammas, ns))
+        self.dJ_dcurve = jit(grad(self.J_jax, argnums=(0, 1)))
+        self.dJ_dcurve_and_surface = jit(grad(self.J_jax, argnums=(0, 1, 2, 3)))
         self.candidates = None
         self._candidates_surface_gamma = np.zeros((0, 3))
-        super().__init__(depends_on=curves)  # Bharat's comment: Shouldn't we add surface here
+        super().__init__(depends_on=[*curves, surface] if surface_derivatives else curves)
 
     def recompute_bell(self, parent=None):
         self.candidates = None
@@ -391,8 +413,15 @@ class CurveSurfaceDistance(Optimizable):
         return min([np.min(cdist(self.curves[i].gamma(), xyz_surf)) for i in range(len(self.curves))])
 
     def J(self):
-        """
-        This returns the value of the quantity.
+        r"""
+        Evaluate the penalty on the current curves and surface.
+
+        Returns:
+            float: the penalty :math:`J` in m^5: for each curve, the squared
+            threshold violation (m^2) times the curve speed
+            :math:`\|\mathbf{r}_i'\|` (m) and the surface area element
+            :math:`\|\mathbf{n}\|` (m^2), averaged over the curve and
+            surface quadrature points, summed over the curves.
         """
         self.compute_candidates()
         res = 0
@@ -407,22 +436,48 @@ class CurveSurfaceDistance(Optimizable):
     @derivative_dec
     def dJ(self):
         """
-        This returns the derivative of the quantity with respect to the curve dofs.
+        Evaluate the derivative of the penalty.
+
+        Args:
+            partials (bool): Keyword added by ``derivative_dec``. If True,
+                return the :obj:`~simsopt._core.derivative.Derivative` instead
+                of the assembled gradient. Defaults to False.
+
+        Returns:
+            np.ndarray, shape (dof_size,): the gradient of :math:`J` with
+            respect to the free DOFs of the penalty, in m^5 divided by the unit
+            of each DOF. With ``partials=True``, the ``Derivative`` keyed by
+            the objects that own the curve DOFs (a ``RotatedCurve`` or
+            ``CurveFilament`` contributes under the curve it wraps, so read it
+            with ``D(curve)``, not ``D.data[curve]``) and, with
+            ``surface_derivatives`` and free surface DOFs, by the surface.
         """
         self.compute_candidates()
+        with_surface = self.surface_derivatives and self.surface.dof_size > 0
+        dJ_dargs = self.dJ_dcurve_and_surface if with_surface else self.dJ_dcurve
         dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
         dgammadash_by_dcoeff_vjp_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]
-        gammas = self.surface.gamma().reshape((-1, 3))
-
-        gammas = self.surface.gamma().reshape((-1, 3))
+        gamma = self.surface.gamma()
+        gammas = gamma.reshape((-1, 3))
         ns = self.surface.normal().reshape((-1, 3))
+        if with_surface:
+            dgammas_vjp = np.zeros_like(gammas)
+            dns_vjp = np.zeros_like(ns)
         for i, _ in self.candidates:
             gammac = self.curves[i].gamma()
             lc = self.curves[i].gammadash()
-            dgamma_by_dcoeff_vjp_vecs[i] += self.dJ_dgamma(gammac, lc, gammas, ns)
-            dgammadash_by_dcoeff_vjp_vecs[i] += self.dJ_dlc(gammac, lc, gammas, ns)
+            grads = dJ_dargs(gammac, lc, gammas, ns)
+            dgamma_by_dcoeff_vjp_vecs[i] += grads[0]
+            dgammadash_by_dcoeff_vjp_vecs[i] += grads[1]
+            if with_surface:
+                dgammas_vjp += grads[2]
+                dns_vjp += grads[3]
         res = [self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i]) + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i]) for i in range(len(self.curves))]
-        return sum(res)
+        if not with_surface:
+            return sum(res)
+        dsurface = self.surface.dgamma_by_dcoeff_vjp(dgammas_vjp.reshape(gamma.shape)) \
+            + self.surface.dnormal_by_dcoeff_vjp(dns_vjp.reshape(gamma.shape))
+        return sum(res) + Derivative({self.surface: dsurface})
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
