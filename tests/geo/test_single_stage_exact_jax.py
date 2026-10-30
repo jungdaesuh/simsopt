@@ -746,36 +746,41 @@ class TestSingleStageExactJax(JaxTestCase):
             evaluator.evaluate(dofs, evaluator.initial_state)
 
     def test_infinite_penalty_target_keeps_native_value_and_gradient(self):
-        """Native solves finite component adjoints before multiplying by infinity."""
-        for case_id_0, target in zip(
-            ["negative-infinity", "positive-infinity"], [-np.inf, np.inf], strict=True
-        ):
-            for case_id_1, component in zip(
-                ["iota", "radius"], [Iotas, MajorRadius], strict=True
-            ):
-                with self.subTest(
-                    case_id_0=case_id_0,
-                    target=target,
-                    case_id_1=case_id_1,
-                    component=component,
-                ), self.case():
-                    self._case_infinite_penalty_target_keeps_native_value_and_gradient(
-                        target, component
-                    )
+        """Native finishes each component derivative before multiplying by infinity.
+
+        The length penalty is one-sided (``max``), so only a negative-infinity
+        length target makes its multiplier infinite.
+        """
+        cases = [
+            ("iota", -np.inf, 0),
+            ("iota", np.inf, 0),
+            ("radius", -np.inf, 1),
+            ("radius", np.inf, 1),
+            ("length", -np.inf, 2),
+        ]
+        for component, target, target_index in cases:
+            with self.subTest(component=component, target=target), self.case():
+                self._case_infinite_penalty_target_keeps_native_value_and_gradient(
+                    target, target_index
+                )
 
     def _case_infinite_penalty_target_keeps_native_value_and_gradient(
-        self, target, component
+        self, target, target_index
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         evaluator, _, objective, _ = _problem(active_penalties=True)
-        penalty = next(
-            obj
-            for obj in objective.ancestors
-            if isinstance(obj, QuadraticPenalty) and isinstance(obj.obj, component)
-        )
+        penalties = [
+            obj for obj in objective.ancestors if isinstance(obj, QuadraticPenalty)
+        ]
+        is_target = (
+            lambda penalty: isinstance(penalty.obj, Iotas),
+            lambda penalty: isinstance(penalty.obj, MajorRadius),
+            lambda penalty: penalty.f == "max",
+        )[target_index]
+        (penalty,) = [penalty for penalty in penalties if is_target(penalty)]
         penalty.cons = target
         targets = host_array(evaluator.problem.targets)
-        targets[0 if component is Iotas else 1] = target
+        targets[target_index] = target
         evaluator = replace(
             evaluator,
             problem=replace(
@@ -805,9 +810,11 @@ class TestSingleStageExactJax(JaxTestCase):
         np.testing.assert_array_equal(
             np.isneginf(result.gradient), np.isneginf(expected_gradient)
         )
+        # A finite iota or radius multiplier keeps the fused adjoint, which
+        # sums in a different order from native.
         finite = np.isfinite(expected_gradient)
-        np.testing.assert_array_equal(
-            result.gradient[finite], expected_gradient[finite]
+        assert_matches_native(
+            result.gradient[finite], expected_gradient[finite], "finite gradient entries"
         )
 
     def test_device_result_exposes_exactly_singular_newton(self):

@@ -195,13 +195,43 @@ def _major_radius(surface: SurfaceSpec) -> tuple[jax.Array, jax.Array]:
 
 def _length_penalty(
     problem: ExactSingleStageProblem, dofs: jax.Array,
-) -> tuple[jax.Array, jax.Array]:
-    total_length = jnp.zeros((), dofs.dtype)
-    for index in problem.length_indices:
-        coil = problem.extraction.coils[index]
-        curve_dofs = optimizable_input_dofs_from_map_spec(coil.curve_map, dofs)
-        total_length = total_length + curve_length_from_dofs(coil.curve, curve_dofs)
-    return 0.5 * jnp.maximum(total_length - problem.targets[2], 0)**2, total_length
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Native ``QuadraticPenalty(total_length, target, "max")`` value and gradient.
+
+    As native does, the total-length derivative is completed with a unit
+    cotangent and then scaled by the multiplier ``max(L - target, 0)``. An
+    infinite multiplier (target ``-inf``) therefore gives ``+/-inf`` where the
+    derivative is nonzero and NaN where it is zero on DOFs the lengths read,
+    instead of NaNs spread through the length VJP. DOFs no length reads keep
+    exact zeros, as native's per-optimizable derivative does.
+
+    Args:
+        problem (ExactSingleStageProblem): Problem snapshot; ``targets[2]`` is the
+            total-length target in meters.
+        dofs (jax.Array): Shape (nfree,) free coil DOFs.
+
+    Returns:
+        tuple[jax.Array, jax.Array, jax.Array]: Penalty value in square meters,
+            total length in meters, and the penalty gradient of shape (nfree,).
+    """
+    coils = tuple(problem.extraction.coils[index] for index in problem.length_indices)
+
+    def curve_inputs(dofs: jax.Array) -> tuple[jax.Array, ...]:
+        return tuple(optimizable_input_dofs_from_map_spec(coil.curve_map, dofs) for coil in coils)
+
+    def total_length_of(inputs: tuple[jax.Array, ...]) -> jax.Array:
+        total_length = jnp.zeros((), dofs.dtype)
+        for coil, curve_dofs in zip(coils, inputs):
+            total_length = total_length + curve_length_from_dofs(coil.curve, curve_dofs)
+        return total_length
+
+    inputs, inputs_pullback = jax.vjp(curve_inputs, dofs)
+    total_length, length_pullback = jax.vjp(total_length_of, inputs)
+    (length_derivative,) = inputs_pullback(length_pullback(jnp.ones_like(total_length))[0])
+    (reads,) = inputs_pullback(tuple(jnp.ones_like(curve_dofs) for curve_dofs in inputs))
+    multiplier = jnp.maximum(total_length - problem.targets[2], 0)
+    gradient = jnp.where(reads != 0, multiplier * length_derivative, 0)
+    return 0.5 * multiplier**2, total_length, gradient
 
 
 @jax.jit
@@ -298,9 +328,7 @@ def exact_single_stage_evaluate(
         return gradient, adjoint_finite(component_rhs, component_adjoints)
 
     gradient, finite = jax.lax.cond(jnp.all(jnp.isfinite(multipliers)), composed_gradient, component_gradient)
-    (length_penalty, total_length), length_gradient = jax.value_and_grad(
-        _length_penalty, argnums=1, has_aux=True,
-    )(problem, dofs)
+    length_penalty, total_length, length_gradient = _length_penalty(problem, dofs)
     success = solved.norm <= problem.tol
     return ExactSingleStageResult(
         value=jnp.where(success, value + length_penalty, 1e3),
