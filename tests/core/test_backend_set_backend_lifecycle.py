@@ -5,6 +5,7 @@
 2. In a process whose JAX backends are initialized, GPU allocator settings
    cannot apply: selecting the GPU warns instead of raising and leaves the
    caller's allocator variables alone.
+3. ``SIMSOPT_JAX_DEBUG_NANS`` is parsed like every other boolean setting.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import simsopt_jax.backend.runtime as runtime_module
     from simsopt_jax.backend.runtime import (
+        _config_from_mode,
         get_backend_config,
         get_backend_mode,
         set_backend,
@@ -126,3 +128,17 @@ class TestSetBackendLifecycle(JaxTestCase):
         )
         if {"cuda", "gpu"} & set(jax.extend.backend.backends()):
             self.assertEqual(jax.numpy.zeros(3).devices(), {jax.devices("gpu")[0]})
+
+    def test_debug_nans_env_is_a_strict_boolean(self):
+        """SIMSOPT_JAX_DEBUG_NANS accepts the boolean spellings and rejects others."""
+        rows = [("on", True), ("0", False), ("maybe", None)]
+        for raw, expected in rows:
+            with self.subTest(raw=raw), self.case():
+                os.environ["SIMSOPT_JAX_DEBUG_NANS"] = raw
+                os.environ.pop("SIMSOPT_DEBUG", None)
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                        _config_from_mode("jax_cpu_fast", strict=False)
+                else:
+                    config = _config_from_mode("jax_cpu_fast", strict=False)
+                    self.assertIs(config.debug_nans, expected)
