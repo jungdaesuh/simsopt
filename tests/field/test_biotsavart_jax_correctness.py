@@ -6,6 +6,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.core import biotsavart as core_biotsavart
     from simsopt_jax.core import curve_gamma_and_gammadash_from_spec
     from simsopt_jax.core.field import (
         group_biot_savart_B_vjp,
@@ -568,6 +569,45 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
                 rtol=1e-9,
                 atol=1e-14,
             )
+
+    def test_raw_kernels_evaluate_single_precision_inputs_in_float64(self):
+        """Raw kernels and the B pullback upcast float32 inputs and compute in float64.
+
+        The float32 inputs are exact in float64, so each result must equal, bit
+        for bit, the evaluation of their float64 upcast.
+        """
+        coils = [Coil(curve, Current(1e5)) for curve in _curves()]
+        single = (
+            _POINTS.astype(np.float32),
+            _cotangent("B").astype(np.float32),
+            np.stack([coil.curve.gamma() for coil in coils]).astype(np.float32),
+            np.stack([coil.curve.gammadash() for coil in coils]).astype(np.float32),
+            np.array([coil.current.get_value() for coil in coils], dtype=np.float32),
+        )
+        double = tuple(value.astype(np.float64) for value in single)
+
+        def evaluate(name, points, cotangent, *coil_data):
+            if name == "biot_savart_B_vjp":
+                return core_biotsavart.biot_savart_B_vjp(points, cotangent, *coil_data)
+            return getattr(core_biotsavart, name)(points, *coil_data)
+
+        for name in (
+            "biot_savart_B",
+            "biot_savart_A",
+            "biot_savart_dB_by_dX",
+            "biot_savart_B_and_dB",
+            "biot_savart_B_vjp",
+        ):
+            with self.subTest(kernel=name):
+                for actual, expected in zip(
+                    jax.tree.leaves(evaluate(name, *single)),
+                    jax.tree.leaves(evaluate(name, *double)),
+                    strict=True,
+                ):
+                    self.assertEqual(actual.dtype, np.float64)
+                    np.testing.assert_array_equal(
+                        np.asarray(actual), np.asarray(expected)
+                    )
 
     def test_grouped_field_evaluates_single_precision_points_in_float64(self):
         """Grouped B and its pullback evaluate float32 points and cotangents in float64."""
