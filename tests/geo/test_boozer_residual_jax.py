@@ -1331,6 +1331,10 @@ class TestBoozerResidualJax(JaxTestCase):
                 partial(boozer_penalty_constraints, problem, derivatives=1, optimize_G=True),
                 x,
             ),
+            "penalty residual": (
+                partial(boozer_penalty_residual, problem, derivatives=1, optimize_G=True),
+                x,
+            ),
             "exact constraints": (
                 partial(boozer_exact_constraints, problem, derivatives=1),
                 xl,

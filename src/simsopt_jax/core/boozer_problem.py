@@ -519,9 +519,18 @@ def boozer_penalty_residual(
             divided by sqrt(3 * npoints); the label and z entries are multiplied by
             sqrt(constraint_weight). Squaring and halving its norm gives
             boozer_penalty_constraints.
+
+    Raises:
+        ValueError: If ``derivatives`` is not 0, 1 or 2, or the problem has no
+            ``constraint_weight``.
+        TypeError: When the ``derivatives >= 1`` outputs are differentiated in ``x``.
     """
 
     x = as_jax_float64(x)
+    if derivatives:
+        x = _not_differentiable_in_x(
+            x, _derivative_outputs_refusal("boozer_penalty_residual", derivatives)
+        )
 
     def residuals(point):
         residual, label_residual, z_residual = _penalty_terms(
