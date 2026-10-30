@@ -192,7 +192,18 @@ if args.fused:
 
 
 def fused_value_and_grad(dofs):
-    """Evaluate the frozen problem and return a host gradient in composite DOF order."""
+    """Evaluate the frozen fused problem and return a host gradient in composite DOF order.
+
+    Args:
+        dofs (np.ndarray): Free DOFs of ``JF`` in its order, shape ``(len(JF.x),)``:
+            curve Fourier coefficients in metres, frame rotation coefficients in
+            radians and unscaled current DOFs (each filament carries
+            ``1e5 / nfil`` amperes per unit).
+
+    Returns:
+        tuple[float, np.ndarray]: The value of ``JF`` and its gradient with respect
+            to ``dofs``, shape ``(len(JF.x),)``, in ``JF``'s DOF order.
+    """
     value, gradient = jax.device_get(value_and_grad(problem, dofs[field_order]))
     return float(value), gradient[objective_order]
 
