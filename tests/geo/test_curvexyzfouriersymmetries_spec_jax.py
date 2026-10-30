@@ -12,6 +12,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import (
         CurveXYZFourierSymmetriesSpec,
         curve_gamma_vjp_from_dofs,
@@ -463,9 +464,9 @@ class TestCurvexyzfouriersymmetriesSpecJax(JaxTestCase):
     def test_spec_geometry_runs_under_strict_transfer_guard(self):
         """Spec-driven geometry executes under ``jax.transfer_guard('disallow')``.
 
-        The spec is placed on-device via ``jax.device_put`` and a compiled
-        callable evaluates ``curve_geometry_from_dofs`` without implicit
-        host-to-device transfers.
+        The spec's leaves are already device arrays, and a compiled callable
+        evaluates ``curve_geometry_from_dofs`` without implicit host-to-device
+        transfers.
         """
         rng = np.random.default_rng(_RNG_SEED + 5)
         curve = _build_curve(
@@ -475,9 +476,9 @@ class TestCurvexyzfouriersymmetriesSpecJax(JaxTestCase):
             ntor=2,
             rng=rng,
         )
-        spec = jax.device_put(_curve_spec(curve))
+        spec = _curve_spec(curve)
 
-        @jax.jit
+        @jit
         def evaluate(spec_arg):
             gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
                 spec_arg, spec_arg.dofs
@@ -516,17 +517,17 @@ class TestCurvexyzfouriersymmetriesSpecJax(JaxTestCase):
         strict transfer guard."""
         values_host = np.linspace(-2.0, 3.0, num=6, dtype=np.float64)
         replacement_host = np.array([10.0, 20.0, 30.0], dtype=np.float64)
-        values = jax.device_put(jnp.asarray(values_host))
-        replacement = jax.device_put(jnp.asarray(replacement_host))
+        values = jnp.asarray(values_host)
+        replacement = jnp.asarray(replacement_host)
 
         def objective(values_arg, replacement_arg):
             segment = _slice_1d_static(values_arg, 2, 5)
             updated = _update_1d_static(values_arg, 1, replacement_arg)
             return jnp.sum(segment * segment) + jnp.sum(updated)
 
-        value_fn = jax.jit(objective).lower(values, replacement).compile()
+        value_fn = jit(objective).lower(values, replacement).compile()
         grad_fn = (
-            jax.jit(jax.grad(objective, argnums=(0, 1)))
+            jit(jax.grad(objective, argnums=(0, 1)))
             .lower(values, replacement)
             .compile()
         )
