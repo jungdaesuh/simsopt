@@ -17,6 +17,7 @@ from typing import cast
 
 import jax
 from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_clear
+from simsopt_jax.backend.jit import jit
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
@@ -631,7 +632,7 @@ def _make_kernel(
         return _point_chunk_reduce(points, chunk_fn, kernel_point_cs)
 
     kernel.__name__ = "biotsavart_forward"
-    return jax.jit(kernel)
+    return jit(kernel)
 
 
 def _get_kernel(integrand_key, diff_mode):
@@ -670,7 +671,7 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
         return pullback(v)
 
     kernel.__name__ = "biotsavart_vjp"
-    return jax.jit(kernel)
+    return jit(kernel)
 
 
 def _get_B_vjp_kernel():

@@ -75,7 +75,7 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
         arrays, indices = pullback.d_coil_arrays, pullback.coil_indices
         field.coil_cotangents_to_derivative(arrays, indices)
         placements = []
-        put = jax.device_put
+        put = jax.device_put  # noqa: TID251 - wraps the raw primitive to count placements
 
         def counted_put(value, *args, **kwargs):
             placements.extend(

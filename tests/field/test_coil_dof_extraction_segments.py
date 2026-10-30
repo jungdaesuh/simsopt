@@ -8,6 +8,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import coil_specs_from_dof_extraction_spec
     from simsopt_jax_adapters.field.biotsavart_backend import (
         JaxBiotSavart,
@@ -54,7 +55,7 @@ def _owner_start(bs_jax, opt) -> int:
 def _lowered_extraction_text(bs_jax) -> str:
     spec = bs_jax.coil_dof_extraction_spec()
     free_dofs = jnp.asarray(np.linspace(-1.0, 1.0, bs_jax.dof_size))
-    lowered = jax.jit(lambda dofs: coil_specs_from_dof_extraction_spec(spec, dofs))
+    lowered = jit(lambda dofs: coil_specs_from_dof_extraction_spec(spec, dofs))
     return lowered.lower(free_dofs).as_text()
 
 
@@ -142,7 +143,7 @@ class TestCoilDofExtractionSegments(JaxTestCase):
         expected_currents = [float(current.get_value()) for current in currents]
 
         compiled = (
-            jax.jit(lambda dofs: coil_specs_from_dof_extraction_spec(spec, dofs))
+            jit(lambda dofs: coil_specs_from_dof_extraction_spec(spec, dofs))
             .lower(jnp.asarray(free_dofs))
             .compile()
         )

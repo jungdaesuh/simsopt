@@ -12,6 +12,7 @@ from typing import Callable, NoReturn, cast
 
 import jax
 from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_clear
+from simsopt_jax.backend.jit import jit
 import jax.numpy as jnp
 import numpy as np
 
@@ -120,7 +121,7 @@ class _CoilEvaluationState:
     coil_set_spec: GroupedCoilSetSpec
 
 
-@jax.jit
+@jit
 def _jitted_coil_set_spec_from_extraction_spec(coil_dof_extraction_spec, coil_dofs):
     """Owner free-DOF vector -> grouped coil geometry and currents, as one program."""
     return coil_set_spec_from_dof_extraction_spec(coil_dof_extraction_spec, coil_dofs)
@@ -132,7 +133,7 @@ __all__ = [
 ]
 
 
-@jax.jit
+@jit
 def _cyl_points_to_cart(points_cyl):
     points = _as_jax_float64(points_cyl)
     r = points[:, 0]
@@ -147,7 +148,7 @@ def _point_independent_two_pi(points):
     return _two_pi(_placement_zero(points))
 
 
-@jax.jit
+@jit
 def _canonical_set_points_cyl(points_cyl):
     points = _as_jax_float64(points_cyl)
     return points.at[:, 1].set(
@@ -155,7 +156,7 @@ def _canonical_set_points_cyl(points_cyl):
     )
 
 
-@jax.jit
+@jit
 def _cart_points_to_cyl(points_cart):
     points = _as_jax_float64(points_cart)
     x = points[:, 0]
@@ -174,7 +175,7 @@ def _cart_points_to_cyl(points_cart):
     )
 
 
-@jax.jit
+@jit
 def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     vectors = _as_jax_float64(vectors_cart)
     points = _as_jax_float64(points_cyl)
@@ -191,7 +192,7 @@ def _cart_vectors_to_cyl(vectors_cart, points_cyl):
     )
 
 
-@partial(jax.jit, static_argnames=("kernel_tuning",))
+@partial(jit, static_argnames=("kernel_tuning",))
 def _jitted_grad_absB(points, coil_set_spec, kernel_tuning):
     """``jax.grad`` of ``|B|`` in each point, tiled like the field kernels.
 
@@ -358,7 +359,7 @@ def _extraction_input_cotangent(extraction_spec, d_coil_arrays, coil_indices, in
     return pullback(d_coil_arrays)[0]
 
 
-@partial(jax.jit, static_argnames=("coil_indices",))
+@partial(jit, static_argnames=("coil_indices",))
 def _jitted_coil_cotangents_to_owner_partials(
     projection_spec, owner_full_map, d_coil_arrays, coil_indices, coil_dofs,
 ):
@@ -368,7 +369,7 @@ def _jitted_coil_cotangents_to_owner_partials(
     )
 
 
-_jitted_coil_cotangents_to_dofs_gradient = jax.jit(
+_jitted_coil_cotangents_to_dofs_gradient = jit(
     _extraction_input_cotangent, static_argnames=("coil_indices",),
 )
 
