@@ -358,7 +358,6 @@ class CurveSurfaceDistance(Optimizable):
     surface DOFs: the surface is then a parent with no DOFs in ``x``, and the
     gradient is with respect to the curve DOFs only.
 
-
     Args:
         curves (list[Curve]): the curves to penalize, positions in m.
         surface (Surface): the surface, positions in m.
@@ -411,8 +410,15 @@ class CurveSurfaceDistance(Optimizable):
         return min([np.min(cdist(self.curves[i].gamma(), xyz_surf)) for i in range(len(self.curves))])
 
     def J(self):
-        """
-        This returns the value of the quantity.
+        r"""
+        Evaluate the penalty on the current curves and surface.
+
+        Returns:
+            float: the penalty :math:`J` in m^5: for each curve, the squared
+            threshold violation (m^2) times the curve speed
+            :math:`\|\mathbf{r}_i'\|` (m) and the surface area element
+            :math:`\|\mathbf{n}\|` (m^2), averaged over the curve and
+            surface quadrature points, summed over the curves.
         """
         self.compute_candidates()
         res = 0
@@ -427,8 +433,12 @@ class CurveSurfaceDistance(Optimizable):
     @derivative_dec
     def dJ(self):
         """
-        This returns the derivative of the quantity with respect to the curve dofs and,
-        with ``surface_derivatives``, the free surface dofs.
+        Evaluate the derivative of the penalty.
+
+        Returns:
+            Derivative: the gradient of :math:`J` (m^5 divided by the unit of
+            each DOF), keyed by the curves and, with ``surface_derivatives``
+            and free surface DOFs, by the surface.
         """
         self.compute_candidates()
         with_surface = self.surface_derivatives and self.surface.dof_size > 0
