@@ -234,6 +234,23 @@ class TestBiotSavartJaxCppParity(JaxTestCase):
 
         _assert_cylindrical_points_match_cpu(bs_jax, bs)
 
+    def test_nonfinite_point_leaves_other_cylindrical_angles_native(self):
+        """A nonfinite point does not change the cylindrical angle of finite points,
+        for Cartesian input (wrap to [0, 2*pi)) and cylindrical input (fmod)."""
+        bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        bs_jax = JaxBiotSavart(list(bs._coils))
+        for setter, points in (
+            ("set_points_cart", [[1.0, -1.0, 0.0], [np.inf, 0.0, 0.0]]),
+            ("set_points_cyl", [[1.0, 7.0, 0.0], [1.0, np.nan, 0.0]]),
+        ):
+            with self.subTest(setter=setter):
+                points = np.ascontiguousarray(points, dtype=np.float64)
+                getattr(bs, setter)(points)
+                getattr(bs_jax, setter)(points)
+                np.testing.assert_array_equal(
+                    bs_jax.get_points_cyl()[0], bs.get_points_cyl()[0]
+                )
+
     def test_default_evaluation_point_is_origin_like_native(self):
         """Without set_points the field is evaluated at one point at the origin."""
         bs, _, _, _, _ = _ncsx_biotsavart_parity_fixture()
