@@ -205,7 +205,10 @@ def _jitted_grad_absB(points, coil_set_spec, kernel_tuning):
 def _grouped_grad_absB_from_spec(points, coil_set_spec):
     if not coil_set_spec.groups:
         # No coils: B is identically zero, and native's (B . dB/dX) / |B| is 0/0.
-        return jnp.full_like(points, jnp.nan)
+        # The 0/0 is formed from a placed zero, so no host literal crosses the
+        # strict transfer guard.
+        zero = _placement_zero(points)
+        return jnp.broadcast_to(zero / zero, points.shape)
     return _jitted_grad_absB(
         points, coil_set_spec, kernel_tuning=get_field_kernel_tuning(),
     )
