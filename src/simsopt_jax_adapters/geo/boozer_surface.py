@@ -41,8 +41,7 @@ surface and ``res`` and belongs to one thread.
 
 Differences from native: the label must be ``Volume``, ``Area``,
 ``AspectRatio`` or ``ToroidalFlux`` on the surface or a surface sharing its
-DOFs; the exact ``vjp``
-also handles surfaces without stellarator symmetry (native raises); the
+DOFs; the
 BoozerLS ``vjp`` is the derivative of the whole penalty, including a
 ``ToroidalFlux`` label's coil dependence and ``G``'s dependence on the
 currents, which native's ``boozer_surface_dlsqgrad_dcoils_vjp`` drops (a
@@ -704,6 +703,7 @@ class JaxBoozerSurface(Optimizable):
             "PLU": lu(result.jacobian),
             "mask": mask,
             "type": "exact",
+            "weight_inv_modB": False,
             "vjp": _exact_coil_vjp,
         }
         if verbose:
@@ -721,7 +721,7 @@ def _coil_derivative(field: JaxBiotSavart, cotangents) -> Derivative:
 
 class JaxBoozerResidual(Optimizable):
     r"""JAX version of :class:`simsopt.geo.BoozerResidual`: the Boozer residual penalty of a solved
-    BoozerLS :class:`JaxBoozerSurface`,
+    BoozerLS or BoozerExact :class:`JaxBoozerSurface`,
 
     .. math::
 
@@ -731,7 +731,8 @@ class JaxBoozerResidual(Optimizable):
     ``weight_inv_modB``) at the solved :math:`\iota` and :math:`G` on a
     ``SurfaceXYZTensorFourier`` copy of the solved surface with the same quadrature points,
     :math:`n_r = 3 n_\varphi n_\theta`, :math:`l` the solver's label with target :math:`l_0`, and
-    :math:`w_c` the solver's ``constraint_weight`` at construction. Unlike the solver's penalty, it
+    :math:`w_c` the solver's ``constraint_weight`` at construction (0 for BoozerExact, whose
+    ``constraint_weight`` is None, as natively). Unlike the solver's penalty, it
     has no :math:`z(\varphi=0, \theta=0)` term. The surface is re-solved first when it needs to be.
 
     ``dJ`` is the total coil derivative through the solve, the explicit coil derivative of
@@ -746,14 +747,14 @@ class JaxBoozerResidual(Optimizable):
         J. Plasma Phys. 88(4), 905880401 (2022), doi:10.1017/S0022377822000563.
 
     Args:
-        boozer_surface (JaxBoozerSurface): Mutable BoozerLS solver; the objective owns a
-            separate copy of its solved geometry.
+        boozer_surface (JaxBoozerSurface): Mutable BoozerLS or BoozerExact solver; the
+            objective owns a separate copy of its solved geometry.
         bs (JaxBiotSavart): Field with the solver's coils; evaluating this objective
             leaves its evaluation points unchanged except for shared label callbacks
             during re-solves.
 
-    The solver must be BoozerLS (a truthy ``constraint_weight``); with a ``ToroidalFlux`` label use
-    this class rather than native ``BoozerResidual``.
+    With a ``ToroidalFlux`` label on a BoozerLS solver use this class rather than native
+    ``BoozerResidual``.
     """
 
     def __init__(self, boozer_surface: JaxBoozerSurface, bs: JaxBiotSavart):
@@ -769,7 +770,8 @@ class JaxBoozerResidual(Optimizable):
             quadpoints_theta=in_surface.quadpoints_theta,
         )
         surface.set_dofs(in_surface.get_dofs())
-        self.constraint_weight = boozer_surface.constraint_weight
+        # BoozerExact surfaces have no label penalty (constraint_weight is None), as natively.
+        self.constraint_weight = 0.0 if boozer_surface.constraint_weight is None else boozer_surface.constraint_weight
         self.in_surface = in_surface
         self.surface = surface
         self.biotsavart = bs

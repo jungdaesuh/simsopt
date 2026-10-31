@@ -15,8 +15,9 @@ labels with optimized ``G``. ``JaxBoozerResidual`` also differentiates the
 explicit ToroidalFlux and current-derived ``G`` terms that native misses,
 checked through re-solves. Then: settings
 read at every solve, no recompilation for new values, no implicit transfers,
-fixed surface DOFs solved for as natively, the documented difference (the
-BoozerExact adjoint without stellarator symmetry) and unsupported inputs. BFGS and L-BFGS-B run SciPy's
+fixed surface DOFs solved for as natively, the BoozerExact adjoint without
+stellarator symmetry, ``BoozerResidual`` on BoozerExact solves, and
+unsupported inputs. BFGS and L-BFGS-B run SciPy's
 algorithms on the device by default; the ``host_bfgs`` option runs SciPy
 itself on the jitted penalty, as before, and the device programs' scratch
 memory is the penalty's plus their quasi-Newton state.
@@ -39,6 +40,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
+    from simsopt._core.derivative import Derivative
     from simsopt.configs import get_data
     from simsopt.field.biotsavart import BiotSavart
     from simsopt.geo.boozersurface import BoozerSurface
@@ -51,7 +53,6 @@ with optional_jax_imports():
         ToroidalFlux,
         Volume,
         boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
-        boozer_surface_residual_dB,
     )
     from simsopt.geo.surfacerzfourier import SurfaceRZFourier
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
@@ -75,6 +76,7 @@ with optional_jax_imports():
 from unittest_jax_support import (
     assert_errors_shrink,
     assert_matches_native,
+    host_array,
     jax_compilations,
     parity_default_device,
     parity_rng,
@@ -1039,8 +1041,10 @@ class TestBoozerSurfaceJax(JaxTestCase):
         ``res['PLU']`` and ``res['vjp']``) as with native ``BoozerSurface``. With
         a Volume label and ``G`` optimized or the currents fixed,
         ``JaxBoozerResidual`` is native ``BoozerResidual`` too, also after a coil
-        change that makes both re-solve; on BoozerExact both raise ``KeyError``
-        (exact results have no ``weight_inv_modB``)."""
+        change that makes both re-solve. On a converged BoozerExact surface the
+        Boozer residual is round-off (``J`` about 1e-29), so ``BoozerResidual`` is
+        compared on capped BoozerExact solves instead
+        (``test_boozer_residual_on_capped_boozer_exact_solves_matches_native``)."""
         for name in _OBJECTIVE_CASES:
             with self.subTest(name=name), self.case():
                 self._case_native_objectives_use_the_jax_surface(name)
@@ -1057,7 +1061,6 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
         for problem in (native, jax_problem):
             problem.boozer.run_code(_IOTA, G=problem.G0)
-        # Exact results have no ``weight_inv_modB``, which BoozerResidual reads (below).
         objectives = {
             objective_name: make
             for objective_name, make in _NATIVE_OBJECTIVES.items()
@@ -1073,15 +1076,12 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 native_objective.dJ(),
                 f"{name} {objective_name} coil gradient",
             )
+        if boozer_type == "exact":
+            return
         native_residual = BoozerResidual(native.boozer, BiotSavart(native.coils))
         jax_residual = JaxBoozerResidual(
             jax_problem.boozer, jax_problem.boozer.biotsavart
         )
-        if boozer_type == "exact":
-            for objective in (native_residual, jax_residual):
-                with self.assertRaisesRegex(KeyError, "weight_inv_modB"):
-                    objective.J()
-            return
         for change in ("solved", "after a coil change"):
             value = jax_residual.J()
             self.assertTrue(
@@ -1416,40 +1416,20 @@ class TestBoozerSurfaceJax(JaxTestCase):
         native_handle.x = x0
         native.boozer.surface.set_dofs(solution)
 
-    def test_exact_adjoint_without_stellsym_where_native_raises(self):
-        """Native's BoozerExact ``vjp`` takes the label multiplier from the last
-        entry and fails without stellarator symmetry, where the system has a
-        ``z(0, 0)`` row too. The JAX ``vjp`` is checked against native's own pieces
-        with the label multiplier second to last (simsopt PR #669's correction)."""
+    def test_exact_adjoint_without_stellsym_matches_native(self):
+        """Without stellarator symmetry the BoozerExact system has a ``z(0, 0)``
+        row after the label row: the JAX ``vjp`` matches native's, which takes the
+        label multiplier second to last."""
         native, jax_problem = _pair(
             "exact", "ToroidalFlux", stellsym=False, newton_tol=1e-10
         )
         for problem in (native, jax_problem):
             problem.boozer.run_code(_IOTA, G=problem.G0)
-        res = native.boozer.res
+        res, jax_res = native.boozer.res, jax_problem.boozer.res
         lm = parity_rng(3).standard_normal(res["jacobian"].shape[0])
-        with self.assertRaises(ValueError):
-            boozer_surface_dexactresidual_dcoils_dcurrents_vjp(
-                lm, native.boozer, res["iota"], res["G"]
-            )
-
-        residual_dB = boozer_surface_residual_dB(
-            native.boozer.surface, res["iota"], res["G"], native.boozer.biotsavart
+        expected = boozer_surface_dexactresidual_dcoils_dcurrents_vjp(
+            lm, native.boozer, res["iota"], res["G"]
         )
-        self.assertIsNotNone(residual_dB)
-        dres_dB = cast(tuple, residual_dB)[1]
-        multipliers = np.zeros(res["mask"].shape)
-        multipliers[res["mask"]] = lm[:-2]
-        field_cotangent = np.sum(
-            multipliers.reshape((-1, 3))[:, :, None] * dres_dB.reshape((-1, 3, 3)),
-            axis=1,
-        )
-        expected = native.boozer.biotsavart.B_vjp(field_cotangent) + lm[
-            -2
-        ] * native.boozer.label.dJ(partials=True)(
-            native.boozer.biotsavart, as_derivative=True
-        )
-        jax_res = jax_problem.boozer.res
         actual = jax_res["vjp"](lm, jax_problem.boozer, jax_res["iota"], jax_res["G"])
         assert_matches_native(
             actual(BiotSavart(jax_problem.coils)),
@@ -1457,6 +1437,42 @@ class TestBoozerSurfaceJax(JaxTestCase):
             "non-stellsym exact vjp",
             _RTOL_NONSYM,
         )
+
+    def test_boozer_residual_on_capped_boozer_exact_solves_matches_native(self):
+        """``BoozerResidual`` on a BoozerExact surface (no label penalty) after two
+        Newton steps, where the residual is not yet round-off, with and without
+        stellarator symmetry and a ToroidalFlux label: native ``BoozerResidual``
+        and ``JaxBoozerResidual`` on the JAX surface give native's value and coil
+        gradient (through the exact ``PLU`` and ``vjp``). The residual depends on
+        the coils and the surface only through the Newton system's rows, which the
+        adjoint holds fixed, so the coil gradient is zero: its explicit and adjoint
+        terms cancel (to 1e-15 of the explicit term here), and it is compared on
+        the scale of those terms."""
+        for stellsym in (True, False):
+            with self.subTest(stellsym=stellsym), self.case():
+                self._case_boozer_residual_on_capped_boozer_exact_solves_matches_native(stellsym)
+
+    def _case_boozer_residual_on_capped_boozer_exact_solves_matches_native(self, stellsym):
+        """Run one row with case-local objects released before runtime cleanup."""
+        native, jax_problem = _pair("exact", "ToroidalFlux", stellsym=stellsym)
+        for problem in (native, jax_problem):
+            problem.boozer.solve_residual_equation_exactly_newton(
+                tol=1e-10, maxiter=2, iota=_IOTA, G=problem.G0
+            )
+        rtol = _RTOL if stellsym else _RTOL_NONSYM
+        native_residual = BoozerResidual(native.boozer, BiotSavart(native.coils))
+        native_gradient = native_residual.dJ()
+        field = native_residual.biotsavart
+        # Native's B_vjp sums Derivatives, which type checkers read as an int.
+        explicit_term = cast(Derivative, field.B_vjp(native_residual.dJ_by_dB()))
+        explicit = np.max(np.abs(host_array(explicit_term(field), dtype=np.float64)))
+        assert_matches_native(native_gradient, np.zeros_like(native_gradient), "native gradient", rtol, explicit)
+        for name, residual in (
+            ("BoozerResidual", BoozerResidual(jax_problem.boozer, BiotSavart(jax_problem.coils))),
+            ("JaxBoozerResidual", JaxBoozerResidual(jax_problem.boozer, jax_problem.boozer.biotsavart)),
+        ):
+            assert_matches_native(residual.J(), native_residual.J(), name, rtol)
+            assert_matches_native(residual.dJ(), native_gradient, f"{name} gradient", rtol, explicit)
 
     def test_exact_adjoint_is_the_derivative_of_the_solve_taylor(self):
         """BoozerExact coil gradients are second-order limits of central differences through re-solves."""
