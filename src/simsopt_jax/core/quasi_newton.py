@@ -81,7 +81,7 @@
 # G. Carter and Jorge J. More', Argonne National Laboratory and University of
 # Minnesota, 1993).
 
-"""SciPy 1.17's BFGS and unbounded L-BFGS-B, each one compiled JAX loop.
+"""SciPy's BFGS and unbounded L-BFGS-B, each one compiled JAX loop.
 
 :func:`minimize_bfgs` is ``scipy.optimize.minimize(fun, x0, jac=True,
 method="BFGS")``: ``_minimize_bfgs`` with its ``_line_search_wolfe12``
@@ -101,7 +101,7 @@ Statuses, messages (``BFGS_MESSAGES[message]``, ``LBFGSB_MESSAGES[message]``),
 iteration counts, ``nfev``/``njev`` (``ScalarFunction`` counts a point again
 only when it differs from the last one), ``hess_inv`` and SciPy's checks of
 its inputs without bounds are SciPy's. These claims are checked against
-SciPy 1.17 only; other SciPy versions may differ in them.
+SciPy 1.17 and 1.18 only; other SciPy versions may differ in them.
 
 Iterates agree with SciPy to round-off, not bitwise: XLA sums dot and matrix
 products in its own order and may fuse a multiply and an add into one
@@ -114,7 +114,8 @@ earlier one, which SciPy does not count again. Run op by op, the port makes
 SciPy's decisions there too. A long walk magnifies the round-off, so it can
 part from SciPy's, as SciPy's own run does when its sums round differently:
 the counts then differ, a converged walk ends at SciPy's solution only to
-what ``gtol`` allows, and a walk stopped by ``maxiter`` can end elsewhere.
+what ``gtol`` allows (L-BFGS-B's possibly by its other convergence test), and
+a walk stopped by ``maxiter`` can end elsewhere.
 L-BFGS-B's walks part sooner than BFGS's.
 
 Known differences in counting: SciPy compares a point with its cached one by
