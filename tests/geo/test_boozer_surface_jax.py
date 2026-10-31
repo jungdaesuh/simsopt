@@ -15,8 +15,8 @@ labels with optimized ``G``. ``JaxBoozerResidual`` also differentiates the
 explicit ToroidalFlux and current-derived ``G`` terms that native misses,
 checked through re-solves. Then: settings
 read at every solve, no recompilation for new values, no implicit transfers,
-the documented differences (fixed DOFs, the BoozerExact adjoint without
-stellarator symmetry) and unsupported inputs. BFGS and L-BFGS-B run SciPy's
+fixed surface DOFs solved for as natively, the documented difference (the
+BoozerExact adjoint without stellarator symmetry) and unsupported inputs. BFGS and L-BFGS-B run SciPy's
 algorithms on the device by default; the ``host_bfgs`` option runs SciPy
 itself on the jitted penalty, as before, and the device programs' scratch
 memory is the penalty's plus their quasi-Newton state.
@@ -1498,21 +1498,35 @@ class TestBoozerSurfaceJax(JaxTestCase):
             # Measured 2.6e-5 (Iotas) and 2.9e-6 (MajorRadius) relative at the last step.
             self.assertLess(errors[name][-1], 1e-4 * abs(gradient), name)
 
-    def test_fixed_surface_dofs_are_solved_for_as_with_every_dof_free(self):
-        """Native ``BoozerSurface`` at 9e027eac3 cannot solve with fixed surface
-        DOFs (its label gradient has the free DOFs only and does not fit; PR #669's
-        ``dlabel_dsurface`` fixes that). The JAX solve treats every DOF as an
-        unknown, as native does with every DOF free."""
-        native, jax_problem = _pair("exact", newton_tol=1e-10)
-        native.boozer.surface.fix("x(0,0)")
-        with self.assertRaises(ValueError):
-            native.boozer.run_code(_IOTA, G=native.G0)
-        native.boozer.surface.unfix_all()
-        native_res = native.boozer.run_code(_IOTA, G=native.G0)
-        jax_problem.boozer.surface.fix("x(0,0)")
-        jax_res = jax_problem.boozer.run_code(_IOTA, G=jax_problem.G0)
+    def test_fixed_surface_dofs_are_solved_for_as_natively(self):
+        """Native ``BoozerSurface`` solves for every surface DOF, fixed or free,
+        with the label differentiated in all of them (``dlabel_dsurface``), and so
+        does the JAX solve: the penalty Newton from a BFGS iterate with a fixed
+        DOF matches native's; native ``BoozerResidual`` then reads the JAX
+        surface's ``dlabel_dsurface``, which is native's."""
+        native, jax_problem = _pair("ls")
+        for problem in (native, jax_problem):
+            problem.boozer.surface.fix("x(0,0)")
+        iota, G = _same_start(native, jax_problem, 200)
+        native_res, jax_res = (
+            problem.boozer.minimize_boozer_penalty_constraints_newton(
+                tol=1e-11,
+                maxiter=20,
+                constraint_weight=_WEIGHT,
+                iota=iota,
+                G=G,
+                weight_inv_modB=False,
+            )
+            for problem in (native, jax_problem)
+        )
+        self.assertTrue(native_res["success"])
         _assert_same_solve(
-            jax_problem, native, jax_res, native_res, ("jacobian",), "fixed DOFs"
+            jax_problem, native, jax_res, native_res, ("hessian",), "fixed DOFs"
+        )
+        assert_matches_native(
+            jax_problem.boozer.dlabel_dsurface(),
+            native.boozer.dlabel_dsurface(),
+            "label gradient with fixed DOFs",
         )
 
     def test_settings_are_read_at_every_solve(self):

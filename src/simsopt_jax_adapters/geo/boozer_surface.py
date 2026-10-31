@@ -41,7 +41,7 @@ surface and ``res`` and belongs to one thread.
 
 Differences from native: the label must be ``Volume``, ``Area``,
 ``AspectRatio`` or ``ToroidalFlux`` on the surface or a surface sharing its
-DOFs; fixed surface DOFs are solved for (native raises); the exact ``vjp``
+DOFs; the exact ``vjp``
 also handles surfaces without stellarator symmetry (native raises); the
 BoozerLS ``vjp`` is the derivative of the whole penalty, including a
 ``ToroidalFlux`` label's coil dependence and ``G``'s dependence on the
@@ -83,6 +83,7 @@ from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, least_squares, m
 
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
+from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo.surfaceobjectives import Area, AspectRatio, ToroidalFlux, Volume
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -280,6 +281,10 @@ class JaxBoozerSurface(Optimizable):
                 unused.
         """
         self.need_to_run_code = True
+
+    # Native's, so native objectives get the label row their adjoints expect: shape
+    # (surface.local_full_dof_size,), in the label's units per meter.
+    dlabel_dsurface = BoozerSurface.dlabel_dsurface
 
     def run_code(self, iota, G=None):
         """Native ``run_code``: BoozerExact Newton, or BFGS then the penalty
