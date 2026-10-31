@@ -24,8 +24,11 @@ so new values reuse the program. ``x`` is cast to float64, as the
 formulations cast it, so the iterates and ``dJ/dx`` are float64 too. Where native's ``np.linalg.solve`` raises
 ``LinAlgError`` (an exactly zero LU pivot of a finite matrix), the loop stops
 with ``singular`` set and ``x`` at the iterate that met it; the caller
-raises. NaN steps continue, as natively. There is no damping, divergence
-guard or restore of the starting point.
+raises. NaN steps continue, as natively. As natively, the penalty Newton and
+the damped Gauss-Newton restore their starting point, with its derivatives,
+when they end (without a singular step) at a larger or non-finite ``norm``
+than they started from (:func:`keep_iterate`); ``norm`` stays the final one,
+so ``success`` is False. There is no damping.
 
 The coil adjoints are ``res['vjp']`` as cotangents of ``problem.coils``:
 :func:`boozer_exact_residual_coil_vjp` is native's;
@@ -75,6 +78,7 @@ __all__ = [
     "boozer_penalty_lbfgsb",
     "boozer_penalty_newton",
     "boozer_residual_objective",
+    "keep_iterate",
 ]
 
 # Native refines the penalty Newton step with a second solve below this gradient norm.
@@ -183,6 +187,31 @@ def _lu(matrix: jax.Array):
     return (lu, pivots), jnp.all(jnp.isfinite(matrix)) & jnp.any(jnp.diagonal(lu) == 0)
 
 
+def keep_iterate(norm: jax.Array, initial_norm: jax.Array) -> jax.Array:
+    """Native ``_keep_iterate``: whether a solve keeps its final iterate rather
+    than restoring its starting point.
+
+    Args:
+        norm (jax.Array): Scalar shape () final value of the solve's convergence
+            measure, in that measure's units.
+        initial_norm (jax.Array): Scalar shape () value of the same measure at the
+            starting point.
+
+    Returns:
+        jax.Array: Scalar shape () bool, True when ``norm`` is finite and at most
+            ``initial_norm``.
+    """
+    return jnp.isfinite(norm) & (norm <= initial_norm)
+
+
+def _restore_on_failure(final, initial, norm, initial_norm, singular):
+    """``initial`` (a pytree of the starting point's values) where native restores
+    its starting point, else ``final``: without a singular step, unless
+    :func:`keep_iterate`."""
+    restore = ~singular & ~keep_iterate(norm, initial_norm)
+    return jax.tree.map(partial(jnp.where, restore), initial, final)
+
+
 def _advance(x, step, iterations, singular):
     """Native leaves ``x`` and its count as they were when the solve raises."""
     return jnp.where(singular, x, x - step), jnp.where(singular, iterations, iterations + 1)
@@ -283,6 +312,8 @@ def boozer_penalty_newton(
 ) -> BoozerPenaltyNewtonResult:
     """Native ``minimize_boozer_penalty_constraints_newton`` from ``x``, with
     the problem's ``constraint_weight``; ``norm`` is the final gradient norm.
+    A walk that ends with a larger or non-finite gradient norm than it started
+    with returns its starting point and the derivatives there, as natively.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
@@ -300,8 +331,9 @@ def boozer_penalty_newton(
             magnitude in teslas.
 
     Returns:
-        BoozerPenaltyNewtonResult: Result object with the final iterate and unshifted derivatives, gradient
-            norm and singular-step flag; input problem is unchanged.
+        BoozerPenaltyNewtonResult: Result object with the final (or restored starting)
+            iterate and its unshifted derivatives, the final gradient norm and the
+            singular-step flag; input problem is unchanged.
     """
     x = as_jax_float64(x)
 
@@ -334,15 +366,13 @@ def boozer_penalty_newton(
         return x, gradient, hessian, iterations, jnp.linalg.norm(gradient), singular
 
     gradient, hessian = derivatives(x)
-    initial = (
-        x,
-        gradient,
-        hessian,
-        jnp.asarray(0, jnp.int32),
-        jnp.linalg.norm(gradient),
-        jnp.asarray(False),
+    initial_norm = jnp.linalg.norm(gradient)
+    initial = (x, gradient, hessian, jnp.asarray(0, jnp.int32), initial_norm, jnp.asarray(False))
+    x_final, gradient_final, hessian_final, iterations, norm, singular = lax.while_loop(proceed, step, initial)
+    x, gradient, hessian = _restore_on_failure(
+        (x_final, gradient_final, hessian_final), (x, gradient, hessian), norm, initial_norm, singular
     )
-    return BoozerPenaltyNewtonResult(*lax.while_loop(proceed, step, initial))
+    return BoozerPenaltyNewtonResult(x, gradient, hessian, iterations, norm, singular)
 
 
 @partial(jit, static_argnames=("optimize_G", "weight_inv_modB"))
@@ -357,7 +387,9 @@ def boozer_penalty_gauss_newton(
 ) -> BoozerGaussNewtonResult:
     """Native ``minimize_boozer_penalty_constraints_ls(method='manual')`` from
     ``x``: steps ``(J^T J + lam diag(J^T J))^{-1} J^T r`` with ``lam = 1, 1/3,
-    1/9, ...``; ``norm`` is the final ``|J^T r|``.
+    1/9, ...``; ``norm`` is the final ``|J^T r|``. A walk that ends with a larger
+    or non-finite ``|J^T r|`` than it started with returns its starting point and
+    the normal equations there, as natively.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
@@ -373,8 +405,9 @@ def boozer_penalty_gauss_newton(
             magnitude in teslas.
 
     Returns:
-        BoozerGaussNewtonResult: Result object with the final iterate, residual and normal equations, gradient
-            norm and singular-step flag; input problem is unchanged.
+        BoozerGaussNewtonResult: Result object with the final (or restored starting)
+            iterate, its residual and normal equations, the final gradient norm and the
+            singular-step flag; input problem is unchanged.
     """
     x = as_jax_float64(x)
 
@@ -396,20 +429,17 @@ def boozer_penalty_gauss_newton(
         norm = jnp.linalg.norm(gradient)
         return x, residual, gradient, normal_matrix, iterations, norm, damping * (1 / 3), singular
 
-    residual, gradient, normal_matrix = normal_equations(x)
+    start = (x, *normal_equations(x))
+    initial_norm = jnp.linalg.norm(start[2])
     initial = (
-        x,
-        residual,
-        gradient,
-        normal_matrix,
+        *start,
         jnp.asarray(0, jnp.int32),
-        jnp.linalg.norm(gradient),
+        initial_norm,
         jnp.asarray(1.0, x.dtype),
         jnp.asarray(False),
     )
-    x, residual, gradient, normal_matrix, iterations, norm, _, singular = lax.while_loop(
-        proceed, step, initial
-    )
+    *final, iterations, norm, _, singular = lax.while_loop(proceed, step, initial)
+    x, residual, gradient, normal_matrix = _restore_on_failure(tuple(final), start, norm, initial_norm, singular)
     return BoozerGaussNewtonResult(x, residual, gradient, normal_matrix, iterations, norm, singular)
 
 

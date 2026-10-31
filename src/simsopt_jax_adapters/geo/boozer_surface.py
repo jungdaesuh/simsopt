@@ -82,7 +82,7 @@ from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, least_squares, m
 
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
-from simsopt.geo.boozersurface import BoozerSurface
+from simsopt.geo.boozersurface import BoozerSurface, _keep_iterate
 from simsopt.geo.surfaceobjectives import Area, AspectRatio, ToroidalFlux, Volume
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -400,7 +400,10 @@ class JaxBoozerSurface(Optimizable):
 
         Returns:
             dict: Cached or newly stored native-style result, including value, gradient,
-                iteration count, success, iota and G; updates the surface DOFs.
+                iteration count, success, iota and G; updates the surface DOFs. As
+                natively, a failed solve whose final penalty value is larger than its
+                starting one, or not finite, keeps the starting point (``info`` is the
+                solver's own result).
         """
         if not self.need_to_run_code:
             return self.res
@@ -413,19 +416,19 @@ class JaxBoozerSurface(Optimizable):
         if limited_memory:
             options["maxcor"] = 200
             options["ftol"] = tol
-        if host_bfgs:
 
-            def penalty(x):
-                return host_tree(
-                    boozer_penalty_constraints(
-                        problem,
-                        _place(x, problem),
-                        derivatives=1,
-                        optimize_G=optimize_G,
-                        weight_inv_modB=weight_inv_modB,
-                    )
+        def penalty(x):
+            return host_tree(
+                boozer_penalty_constraints(
+                    problem,
+                    _place(x, problem),
+                    derivatives=1,
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
                 )
+            )
 
+        if host_bfgs:
             res = minimize(penalty, x, jac=True, method=method, options=options)
         elif limited_memory:
             res = _optimize_result(
@@ -453,10 +456,16 @@ class JaxBoozerSurface(Optimizable):
                 ),
                 BFGS_MESSAGES,
             )
+        # As natively, a failed solve that ended at a larger or non-finite value restores its start.
+        xsol, fsol, gsol = res.x, res.fun, res.jac
+        if not res.success:
+            f0, g0 = penalty(x)
+            if not _keep_iterate(fsol, f0):
+                xsol, fsol, gsol = x, f0, g0
 
         resdict = {
-            "fun": res.fun,
-            "gradient": res.jac,
+            "fun": fsol,
+            "gradient": gsol,
             "iter": res.nit,
             "info": res,
             "success": res.success,
@@ -464,7 +473,7 @@ class JaxBoozerSurface(Optimizable):
             "weight_inv_modB": weight_inv_modB,
             "type": "ls",
         }
-        iota, G = self._commit(res.x, optimize_G)
+        iota, G = self._commit(xsol, optimize_G)
         resdict = self._store(resdict, iota, G, with_surface=True)
         if verbose:
             print(
@@ -507,7 +516,9 @@ class JaxBoozerSurface(Optimizable):
         Returns:
             dict: Cached or newly stored native-style result with final derivatives,
                 success, LU factors and coil VJP; updates the surface, including the last
-                iterate before a singular-step error.
+                iterate before a singular-step error. As natively, a walk that ends with a
+                larger or non-finite gradient norm than it started with keeps its starting
+                point and the derivatives there, and fails.
         """
         if not self.need_to_run_code:
             return self.res
@@ -583,7 +594,10 @@ class JaxBoozerSurface(Optimizable):
         Returns:
             dict: Native-style least-squares result after updating the surface. SciPy
                 results are cached in res; the manual result is returned without storing it,
-                as natively.
+                as natively. As natively, a failed SciPy solve (``status <= 0``) whose final
+                residual norm is larger than its starting one, or not finite, keeps the
+                starting point and its residuals, as does a manual walk ending with a larger
+                or non-finite ``|J^T r|``.
         """
         if not self.need_to_run_code:
             return self.res
@@ -624,12 +638,12 @@ class JaxBoozerSurface(Optimizable):
                 derivatives=derivatives,
                 optimize_G=optimize_G,
                 weight_inv_modB=weight_inv_modB,
-            )[derivatives]
+            )
 
         res = _least_squares(
-            lambda x: host_tree(residuals(x, 0)),
+            lambda x: host_tree(residuals(x, 0)[0]),
             x,
-            jac=lambda x: host_tree(residuals(x, 1)),
+            jac=lambda x: host_tree(residuals(x, 1)[1]),
             method=method,
             ftol=tol,
             xtol=tol,
@@ -637,15 +651,21 @@ class JaxBoozerSurface(Optimizable):
             x_scale=1.0,
             max_nfev=maxiter,
         )
+        # As natively, a failed solve that ended at a larger or non-finite residual restores its start.
+        xsol, rsol, gsol, Jsol = res.x, res.fun, res.grad, res.jac
+        if res.status <= 0:
+            r0, J0 = host_tree(residuals(x, 1))
+            if not _keep_iterate(np.linalg.norm(rsol), np.linalg.norm(r0)):
+                xsol, rsol, gsol, Jsol = x, r0, J0.T @ r0, J0
         resdict = {
             "info": res,
-            "residual": res.fun,
-            "gradient": res.grad,
-            "jacobian": res.jac,
+            "residual": rsol,
+            "gradient": gsol,
+            "jacobian": Jsol,
             "success": res.status > 0,
             "G": None,
         }
-        iota, G = self._commit(res.x, optimize_G)
+        iota, G = self._commit(xsol, optimize_G)
         return self._store(resdict, iota, G, with_surface=True)
 
     def solve_residual_equation_exactly_newton(self, tol=1e-10, maxiter=10, iota=0.0, G=None, verbose=False):

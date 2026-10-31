@@ -1,4 +1,5 @@
-"""The compiled solver loops of ``simsopt_jax.core.boozer_solvers`` at a singular second step.
+"""The compiled solver loops of ``simsopt_jax.core.boozer_solvers`` at a singular
+second step and on a growing walk.
 
 No Boozer problem gives an exactly singular matrix after a regular first
 step, so each loop is driven by a synthetic two-unknown system substituted
@@ -6,7 +7,12 @@ for its formulation: the matrix is the identity at the start and loses its
 second pivot once the first unknown reaches zero, which the first step
 does exactly. Native's ``np.linalg.solve`` raises on that matrix; the loop
 must stop there, flag ``singular`` and keep the iterate it reached (not
-step past it), on each lane.
+step past it, and not restore its start although its norm grew, since
+native raises before that), on each lane. A second synthetic system, ``x`` with the
+constant matrix ``0.05 I``, multiplies the norm at every step (native's
+``test_penalty_newton_divergence_factor`` uses it): as natively, the loop
+runs to ``maxiter``, reports the final norm and restores its start with the
+values there.
 """
 
 from __future__ import annotations
@@ -39,8 +45,14 @@ def _matrix(x: jax.Array) -> jax.Array:
     return jnp.diag(jnp.stack((jnp.ones_like(x[0]), x[0])))
 
 
+def _growth(x: jax.Array) -> jax.Array:
+    """``1 + x[1]^2``: 1 at the start, 2 at the first exact and Newton iterate,
+    so those walks end at a larger norm than they started with."""
+    return 1 + x[1] ** 2
+
+
 def _exact_system(problem, x, residual_rows, *, derivatives=0):
-    return jnp.ones(2, x.dtype), _matrix(x)
+    return _growth(x) * jnp.ones(2, x.dtype), _matrix(x)
 
 
 def _exact_final_residual(problem, x, *, optimize_G, weight_inv_modB=False):
@@ -50,14 +62,15 @@ def _exact_final_residual(problem, x, *, optimize_G, weight_inv_modB=False):
 def _penalty_derivatives(
     problem, x, *, derivatives=0, optimize_G=False, weight_inv_modB=True
 ):
-    return jnp.zeros((), x.dtype), jnp.ones(2, x.dtype), _matrix(x)
+    return jnp.zeros((), x.dtype), _growth(x) * jnp.ones(2, x.dtype), _matrix(x)
 
 
 def _penalty_residuals(
     problem, x, *, derivatives=0, optimize_G=False, weight_inv_modB=True
 ):
-    # J^T r = [2, x[0]]: the damped first step (lam = 1) is [1, 1/2].
-    return jnp.array([2.0, 1.0], x.dtype), _matrix(x)
+    # J^T r = [2, x[0]] at the start: the damped first step (lam = 1) is [1, 1/2];
+    # at the iterate it reaches, |J^T r| = 2.5 > |[2, 1]|.
+    return _growth(x) * jnp.array([2.0, 1.0], x.dtype), _matrix(x)
 
 
 # Per loop: the formulation(s) substituted, the iterate after the first step and
@@ -84,24 +97,62 @@ _CASES = {
 }
 
 
+_GROWTH = 0.05
+
+
+def _growing_penalty_derivatives(
+    problem, x, *, derivatives=0, optimize_G=False, weight_inv_modB=True
+):
+    # Newton steps x - x / 0.05 = -19 x.
+    return 0.5 * x @ x, x, _GROWTH * jnp.eye(2, dtype=x.dtype)
+
+
+def _growing_penalty_residuals(
+    problem, x, *, derivatives=0, optimize_G=False, weight_inv_modB=True
+):
+    # J^T r = 0.05 x and J^T J = 0.0025 I: the damped first step (lam = 1) gives -9 x.
+    return x, _GROWTH * jnp.eye(2, dtype=x.dtype)
+
+
+# Per loop: the formulation substituted, the norm after two steps (penalty
+# Newton: x = 361 x0; Gauss-Newton: steps 10 x and 15 x give x = 126 x0, where
+# |J^T r| = 0.05 * 126) and the values at the start that the restored result carries.
+_GROWING_CASES = {
+    "penalty-newton": (
+        {"boozer_penalty_constraints": _growing_penalty_derivatives},
+        361.0,
+        {"gradient": _START, "hessian": _GROWTH * np.eye(2)},
+    ),
+    "gauss-newton": (
+        {"boozer_penalty_residual": _growing_penalty_residuals},
+        _GROWTH * 126.0,
+        {
+            "residual": _START,
+            "gradient": _GROWTH * _START,
+            "normal_matrix": _GROWTH**2 * np.eye(2),
+        },
+    ),
+}
+
+
 def _compiled_afresh(solver, static_argnames: tuple[str, ...]):
     """``solver``'s body compiled anew, so it traces the substituted formulation."""
     body: Callable[..., object] = inspect.unwrap(solver)
     return jit(body, static_argnames=static_argnames)
 
 
-def _run(name: str, x: jax.Array):
+def _run(name: str, x: jax.Array, maxiter: float = _MAXITER):
     """The loop ``name`` compiled afresh (so it traces the substituted formulation)."""
-    tol, maxiter = jnp.asarray(_TOL), jnp.asarray(_MAXITER)
+    tol, cap = jnp.asarray(_TOL), jnp.asarray(maxiter)
     if name == "exact":
         loop = _compiled_afresh(boozer_solvers.boozer_exact_newton, ("G_from_currents",))
-        return loop(None, x, jnp.arange(2, dtype=jnp.int32), tol, maxiter)
+        return loop(None, x, jnp.arange(2, dtype=jnp.int32), tol, cap)
     options = {"optimize_G": True, "weight_inv_modB": False}
     if name == "penalty-newton":
         loop = _compiled_afresh(boozer_solvers.boozer_penalty_newton, tuple(options))
-        return loop(None, x, tol, maxiter, jnp.asarray(0.0), **options)
+        return loop(None, x, tol, cap, jnp.asarray(0.0), **options)
     loop = _compiled_afresh(boozer_solvers.boozer_penalty_gauss_newton, tuple(options))
-    return loop(None, x, tol, maxiter, **options)
+    return loop(None, x, tol, cap, **options)
 
 
 class TestBoozerSolverLoopsJax(JaxTestCase):
@@ -145,3 +196,39 @@ class TestBoozerSolverLoopsJax(JaxTestCase):
         np.testing.assert_array_equal(
             x, reached, err_msg=f"{name}: the loop did not keep the iterate it reached"
         )
+
+    def test_growing_walk_runs_to_maxiter_and_restores_its_start(self):
+        """A walk whose norm grows at every step ends at ``maxiter`` with its final
+        norm and returns its start and the values there, on each lane."""
+        for case_id_0, parity_lane in zip(
+            ("cpu_parity", "gpu_parity"), ("cpu", "gpu"), strict=True
+        ):
+            for name in _GROWING_CASES:
+                with self.subTest(
+                    case_id_0=case_id_0, parity_lane=parity_lane, name=name
+                ), self.case() as patches:
+                    self._case_growing_walk_runs_to_maxiter_and_restores_its_start(
+                        parity_lane, name, patches
+                    )
+
+    def _case_growing_walk_runs_to_maxiter_and_restores_its_start(
+        self, parity_lane, name, patches
+    ):
+        """Run one row with case-local objects released before runtime cleanup."""
+        formulations, norm, restored = _GROWING_CASES[name]
+        for attribute, formulation in formulations.items():
+            patches.enter_context(
+                mock.patch.object(boozer_solvers, attribute, formulation)
+            )
+        with parity_default_device(parity_lane):
+            result = _run(name, jnp.asarray(_START), maxiter=2.0)
+            values = {
+                key: host_array(getattr(result, key))
+                for key in ("x", "iterations", "norm", "singular", *restored)
+            }
+        self.assertEqual(int(values["iterations"]), 2, name)
+        self.assertFalse(bool(values["singular"]), name)
+        np.testing.assert_allclose(values["norm"], norm, rtol=1e-12, err_msg=name)
+        np.testing.assert_array_equal(values["x"], _START, err_msg=f"{name}: start not restored")
+        for key, expected in restored.items():
+            np.testing.assert_array_equal(values[key], expected, err_msg=f"{name} {key}")
