@@ -28,9 +28,9 @@ with optional_jax_imports():
         BackendPolicy,
         FieldKernelTuning,
         _config_from_mode,
+        _default_device_updates,
         _initialized_runtime_platform,
         _policy_from_config,
-        _select_initialized_jax_default_device,
         get_field_kernel_tuning,
         get_runtime_jax_device,
         set_backend,
@@ -370,8 +370,10 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                     self.assertEqual(
                         _initialized_runtime_platform(fake_jax, config), platform
                     )
-                    _select_initialized_jax_default_device(fake_jax, config, platform)
-                self.assertEqual(fake_jax.config.updates, expected)
+                    updates = _default_device_updates(fake_jax, config, platform)
+                self.assertEqual(list(updates), expected)
+                # Deciding changes no setting.
+                self.assertEqual(fake_jax.config.updates, [])
 
     def test_default_device_for_a_never_initialized_platform_warns_or_raises(self):
         """A platform JAX never initialized warns, and raises in strict and GPU parity modes."""

@@ -10,6 +10,8 @@ the call, and an implicit host-to-device transfer must still work although the
 rejected request asked to disallow it.
 """
 
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,6 +22,15 @@ _CONTEXTS = (
     ("NaN debugging", lambda: jax.debug_nans(False)),
     ("JIT", lambda: jax.disable_jit(False)),
 )
+
+
+def changed_settings(settings: dict[str, object]) -> dict[str, tuple[object, object]]:
+    """Every JAX setting that differs from ``settings``, as (before, now) pairs."""
+    return {
+        setting: (settings[setting], value)
+        for setting, value in jax.config.values.items()
+        if settings[setting] != value
+    }
 
 
 def main() -> None:
@@ -41,11 +52,7 @@ def main() -> None:
                 assert "Requested JAX platform 'cuda'" in str(error), (name, error)
             else:
                 raise AssertionError(f"{name}: the GPU request was not rejected")
-        changed = {
-            setting: (settings[setting], value)
-            for setting, value in jax.config.values.items()
-            if settings[setting] != value
-        }
+        changed = changed_settings(settings)
         assert not changed, (name, changed)
         assert get_backend_mode() == "jax_cpu_parity", (name, get_backend_mode())
     np.testing.assert_array_equal(jnp.ones(2) + np.ones(2), np.full(2, 2.0))

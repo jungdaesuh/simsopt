@@ -530,21 +530,31 @@ def _initialized_runtime_platform(jax_module, config: BackendConfig) -> str | No
     return platform
 
 
-def _select_initialized_jax_default_device(
+def _default_device_updates(
     jax_module, config: BackendConfig, platform: str
-) -> None:
-    """Make the requested platform JAX's default device in an initialized process.
+) -> tuple[tuple[str, object], ...]:
+    """The ``jax_default_device`` update that makes the requested platform JAX's default.
 
     ``jax_platforms`` only decides which platforms JAX initializes, so once a
     process has several, the requested one becomes the default through
     ``jax_default_device``; a stale selection is cleared when JAX's own default
-    backend already matches.
+    backend already matches. This only decides, so it runs among the checks of
+    :func:`apply_jax_runtime_config`: looking up JAX's default backend raises
+    when a deprecated selector (``jax_xla_backend``) names a platform JAX never
+    initialized, and that must reject the call before a setting changes.
 
     Args:
         jax_module (module): The ``jax`` module.
         config (BackendConfig): Configuration being applied, with a JAX platform.
         platform (str): Initialized backend that runs ``config.jax_platform``,
             as :func:`_initialized_runtime_platform` returns it.
+
+    Returns:
+        tuple of (str, object) pairs: The ``(name, value)`` JAX setting updates to
+            apply, none or one ``("jax_default_device", device or None)``.
+
+    Raises:
+        RuntimeError: JAX cannot resolve its default backend.
     """
     expected_backends = _expected_runtime_backend_names(config.jax_platform)
     selected_device = jax_module.config.jax_default_device
@@ -555,11 +565,10 @@ def _select_initialized_jax_default_device(
         else _device_platform(selected_device)
     )
     if effective_backend in expected_backends:
-        return
+        return ()
     if default_backend in expected_backends:
-        jax_module.config.update("jax_default_device", None)
-        return
-    jax_module.config.update("jax_default_device", jax_module.devices(platform)[0])
+        return (("jax_default_device", None),)
+    return (("jax_default_device", jax_module.devices(platform)[0]),)
 
 
 def _validate_cuda_parity_determinism_env(config: BackendConfig) -> None:
@@ -816,17 +825,17 @@ def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process.
 
     Every check that can reject the configuration (the CUDA determinism flags,
-    then the platform) runs before the first JAX setting changes. A rejected
-    call therefore changes no JAX setting, also when a JAX context such as
-    ``jax.transfer_guard(...)`` hides a setting's process-wide value. The
-    exception is ``jax_platforms`` before JAX initializes its backends: it
-    decides which platforms the platform check initializes, and
-    ``set_backend`` restores it when the call is rejected. Does nothing when
-    the resolved backend is native.
+    the platform, then the default-backend lookup) runs before a JAX setting
+    that a JAX context can hide changes. A rejected call therefore changes no
+    such setting, also inside a context such as ``jax.transfer_guard(...)``.
+    The exceptions are :data:`_PRE_CHECK_JAX_SETTINGS`, which the checks need
+    first, and which ``set_backend`` restores when the call is rejected. Does
+    nothing when the resolved backend is native.
 
     Raises:
-        RuntimeError: GPU parity without the determinism ``XLA_FLAGS``, or a
-            platform JAX never initialized in strict or GPU parity mode.
+        RuntimeError: GPU parity without the determinism ``XLA_FLAGS``, a
+            platform JAX never initialized in strict or GPU parity mode, or a
+            default backend JAX cannot resolve.
     """
     config = get_backend_config()
     if config.backend != "jax":
@@ -841,21 +850,31 @@ def apply_jax_runtime_config() -> None:
     if not _jax_backends_initialized():
         jax.config.update("jax_platforms", _startup_jax_platforms(config))
     platform = _initialized_runtime_platform(jax, config)
-    enable_float64()
     # JAX resolves the default backend from the deprecated ``jax_platform_name``
     # before ``jax_platforms``. ``simsopt.geo`` sets it to ``"cpu"`` when no JAX
     # platform environment variable is set, which would keep the selected
     # platform from becoming the default (or fail when CPU is not listed).
     # Clearing it makes the selected platform, listed first, the default.
     jax.config.update("jax_platform_name", "")
+    default_device_updates = (
+        () if platform is None else _default_device_updates(jax, config, platform)
+    )
+    enable_float64()
     jax.config.update("jax_default_matmul_precision", "highest")
     jax.config.update("jax_debug_nans", config.debug_nans)
     jax.config.update("jax_disable_jit", config.disable_jit)
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     _apply_compilation_cache_config(jax, config)
-    if platform is not None:
-        _select_initialized_jax_default_device(jax, config, platform)
+    for name, value in default_device_updates:
+        jax.config.update(name, value)
+
+
+# JAX settings ``apply_jax_runtime_config`` changes before its last check:
+# ``jax_platforms`` (before backends initialize) decides which platforms the
+# platform check initializes, and ``jax_platform_name`` must be cleared before
+# the default-backend lookup. A rejected ``set_backend`` restores them.
+_PRE_CHECK_JAX_SETTINGS = ("jax_platforms", "jax_platform_name")
 
 
 # Process state a ``set_backend`` call changes, restored when the call is rejected.
@@ -876,10 +895,10 @@ def _restore_backend_state_on_error() -> Iterator[None]:
     """Hold the runtime lock and undo every change if the body raises.
 
     Restores the installed configuration, the environment variables
-    ``set_backend`` synchronizes or exports, and ``jax_platforms``, so a
-    rejected call leaves the process in the mode it had before. No other JAX
-    setting needs restoring: :func:`apply_jax_runtime_config` runs every check
-    that can reject before it changes one.
+    ``set_backend`` synchronizes or exports, and :data:`_PRE_CHECK_JAX_SETTINGS`,
+    so a rejected call leaves the process in the mode it had before. No other
+    JAX setting needs restoring: :func:`apply_jax_runtime_config` runs every
+    check that can reject before it changes one.
     """
     global _cached_backend_config
     global _requested_jax_platforms_value, _exported_jax_platforms
@@ -887,7 +906,9 @@ def _restore_backend_state_on_error() -> Iterator[None]:
         config = _cached_backend_config
         platforms_state = (_requested_jax_platforms_value, _exported_jax_platforms)
         env = tuple((name, os.environ.get(name)) for name in _SET_BACKEND_ENV_NAMES)
-        jax_platforms = jax.config.values["jax_platforms"]
+        jax_settings = tuple(
+            (name, jax.config.values[name]) for name in _PRE_CHECK_JAX_SETTINGS
+        )
         try:
             yield
         except BaseException:
@@ -896,8 +917,9 @@ def _restore_backend_state_on_error() -> Iterator[None]:
             _reset_backend_runtime_caches()
             for name, value in env:
                 _set_runtime_env(name, value)
-            if jax.config.values["jax_platforms"] != jax_platforms:
-                jax.config.update("jax_platforms", jax_platforms)
+            for name, value in jax_settings:
+                if jax.config.values[name] != value:
+                    jax.config.update(name, value)
             raise
 
 
