@@ -9,7 +9,8 @@ program (a ``lax.while_loop`` on the problem's device):
   success judged on the final iterate;
 - :func:`boozer_penalty_newton` is ``minimize_boozer_penalty_constraints_newton``:
   Newton on :func:`boozer_penalty_constraints` with its analytic Hessian
-  shifted by ``stab``, refined once the gradient norm is below ``1e-9``;
+  shifted by ``stab``, refined once the gradient norm is below ``1e-9``, with
+  native's optional ``divergence_factor`` stop;
 - :func:`boozer_penalty_gauss_newton` is the damped Gauss-Newton of
   ``minimize_boozer_penalty_constraints_ls(method='manual')`` on
   :func:`boozer_penalty_residual`;
@@ -29,7 +30,8 @@ raises. NaN steps continue, as natively. As natively, every Newton-type loop
 restores its starting point, with its derivatives or system,
 when it ends (without a singular step) at a larger or non-finite ``norm``
 than they started from (:func:`keep_iterate`); ``norm`` stays the final one,
-so ``success`` is False. There is no damping.
+so ``success`` is False. There is no damping; only the penalty Newton has a
+divergence stop, native's ``divergence_factor``.
 
 The coil adjoints are ``res['vjp']`` as cotangents of ``problem.coils``:
 :func:`boozer_exact_residual_coil_vjp` is native's;
@@ -313,14 +315,17 @@ def boozer_penalty_newton(
     tol: jax.Array,
     maxiter: jax.Array,
     stab: jax.Array,
+    divergence_factor: jax.Array | None = None,
     *,
     optimize_G: bool,
     weight_inv_modB: bool,
 ) -> BoozerPenaltyNewtonResult:
     """Native ``minimize_boozer_penalty_constraints_newton`` from ``x``, with
     the problem's ``constraint_weight``; ``norm`` is the final gradient norm.
-    A walk that ends with a larger or non-finite gradient norm than it started
-    with returns its starting point and the derivatives there, as natively.
+    As natively, the walk also stops once the gradient norm exceeds
+    ``divergence_factor`` times its starting value (never when it is None), and
+    a walk that ends with a larger or non-finite gradient norm than it started
+    with returns its starting point and the derivatives there.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
@@ -332,6 +337,9 @@ def boozer_penalty_newton(
             infinite.
         stab (jax.Array): Scalar shape () diagonal Hessian shift in native units,
             applied only to the step solve.
+        divergence_factor (jax.Array | None): Scalar shape () dimensionless bound on
+            the gradient norm relative to its starting value, beyond which the walk
+            stops; None (the default, a separate program) disables the check.
         optimize_G (bool): Include G as the last decision variable; otherwise use mu0
             times the sum of absolute coil currents.
         weight_inv_modB (bool): Divide each point's Boozer residual by the field
@@ -350,9 +358,15 @@ def boozer_penalty_newton(
         )
         return gradient, hessian
 
+    gradient, hessian = derivatives(x)
+    initial_norm = jnp.linalg.norm(gradient)
+
     def proceed(state):
         _, _, _, iterations, norm, singular = state
-        return _continues(iterations, norm, singular, tol, maxiter)
+        continues = _continues(iterations, norm, singular, tol, maxiter)
+        if divergence_factor is None:
+            return continues
+        return continues & (norm <= divergence_factor * initial_norm)
 
     def step(state):
         x, gradient, hessian, iterations, norm, _ = state
@@ -372,8 +386,6 @@ def boozer_penalty_newton(
         gradient, hessian = derivatives(x)
         return x, gradient, hessian, iterations, jnp.linalg.norm(gradient), singular
 
-    gradient, hessian = derivatives(x)
-    initial_norm = jnp.linalg.norm(gradient)
     initial = (x, gradient, hessian, jnp.asarray(0, jnp.int32), initial_norm, jnp.asarray(False))
     x_final, gradient_final, hessian_final, iterations, norm, singular = lax.while_loop(proceed, step, initial)
     x, gradient, hessian = _restore_on_failure(

@@ -815,6 +815,55 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 1e-9 if maxiter == 2 else _RTOL,
             )
 
+    def test_penalty_newton_divergence_factor_as_natively(self):
+        """``divergence_factor`` has native's meaning: from an early BFGS iterate
+        (where the walk diverges) a factor of 10 stops the walk at native's step,
+        before ``maxiter``, and the start is restored. On a converging walk (from a later iterate) None and a
+        factor that never fires give the default call's iterates bit for bit,
+        and native's."""
+        for bfgs_maxiter, factor in ((40, 10.0), (200, None), (200, 1e3)):
+            with self.subTest(bfgs_maxiter=bfgs_maxiter, factor=factor), self.case():
+                self._case_penalty_newton_divergence_factor_as_natively(bfgs_maxiter, factor)
+
+    def _case_penalty_newton_divergence_factor_as_natively(self, bfgs_maxiter, factor):
+        """Run one row with case-local objects released before runtime cleanup."""
+        native, jax_problem = _pair("ls")
+        iota, G = _same_start(native, jax_problem, bfgs_maxiter)
+        start = native.boozer.surface.get_dofs()
+        options = {
+            "tol": 1e-11,
+            "maxiter": 40,
+            "constraint_weight": _WEIGHT,
+            "iota": iota,
+            "G": G,
+            "weight_inv_modB": False,
+        }
+        native_res, jax_res = (
+            problem.boozer.minimize_boozer_penalty_constraints_newton(
+                **options, divergence_factor=factor
+            )
+            for problem in (native, jax_problem)
+        )
+        if bfgs_maxiter == 40:
+            self.assertFalse(native_res["success"])
+            self.assertLess(native_res["iter"], 40)
+            np.testing.assert_array_equal(jax_problem.boozer.surface.get_dofs(), start)
+        else:
+            self.assertTrue(native_res["success"])
+        # A converged gradient is round-off, so only the Hessian is compared there.
+        arrays = ("jacobian", "hessian") if bfgs_maxiter == 40 else ("hessian",)
+        _assert_same_solve(
+            jax_problem, native, jax_res, native_res, arrays, f"factor={factor}"
+        )
+        if bfgs_maxiter == 200:
+            solved = jax_problem.boozer.surface.get_dofs()
+            jax_problem.boozer.surface.set_dofs(start)
+            jax_problem.boozer.recompute_bell()
+            default = jax_problem.boozer.minimize_boozer_penalty_constraints_newton(**options)
+            np.testing.assert_array_equal(jax_problem.boozer.surface.get_dofs(), solved)
+            self.assertEqual(default["iter"], jax_res["iter"])
+            np.testing.assert_array_equal(default["hessian"], jax_res["hessian"])
+
     def test_penalty_newton_with_a_non_finite_shift_restores_its_start_as_natively(self):
         """Native's ``H + stab * I`` is NaN off the diagonal too (IEEE ``inf * 0``),
         so the first step is NaN and the loop stops on the NaN gradient norm: as

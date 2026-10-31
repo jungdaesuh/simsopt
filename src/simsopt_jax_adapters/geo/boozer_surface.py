@@ -494,6 +494,7 @@ class JaxBoozerSurface(Optimizable):
         stab=0.0,
         weight_inv_modB=True,
         verbose=False,
+        divergence_factor=None,
     ):
         """Native's: Newton on the penalty with its analytic Hessian.
 
@@ -512,6 +513,9 @@ class JaxBoozerSurface(Optimizable):
             weight_inv_modB (bool): Divide each point's Boozer residual by the field
                 magnitude in teslas; default True.
             verbose (bool): Print the native-style solver summary; default False.
+            divergence_factor (float | None): Stop, unsuccessfully, once the Euclidean
+                penalty-gradient norm exceeds this dimensionless multiple of its value at
+                the starting point, as natively; default None disables the check.
 
         Returns:
             dict: Cached or newly stored native-style result with final derivatives,
@@ -531,6 +535,7 @@ class JaxBoozerSurface(Optimizable):
                 _place(tol, problem),
                 _place(maxiter, problem),
                 _place(stab, problem),
+                None if divergence_factor is None else _place(divergence_factor, problem),
                 optimize_G=optimize_G,
                 weight_inv_modB=weight_inv_modB,
             )

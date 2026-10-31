@@ -154,8 +154,9 @@ def _compiled_afresh(solver, static_argnames: tuple[str, ...]):
     return jit(body, static_argnames=static_argnames)
 
 
-def _run(name: str, x: jax.Array, maxiter: float = _MAXITER):
-    """The loop ``name`` compiled afresh (so it traces the substituted formulation)."""
+def _run(name: str, x: jax.Array, maxiter: float = _MAXITER, divergence_factor=None):
+    """The loop ``name`` compiled afresh (so it traces the substituted formulation);
+    ``divergence_factor`` goes to the penalty Newton."""
     tol, cap = jnp.asarray(_TOL), jnp.asarray(maxiter)
     if name == "exact":
         loop = _compiled_afresh(boozer_solvers.boozer_exact_newton, ("G_from_currents",))
@@ -163,7 +164,8 @@ def _run(name: str, x: jax.Array, maxiter: float = _MAXITER):
     options = {"optimize_G": True, "weight_inv_modB": False}
     if name == "penalty-newton":
         loop = _compiled_afresh(boozer_solvers.boozer_penalty_newton, tuple(options))
-        return loop(None, x, tol, cap, jnp.asarray(0.0), **options)
+        factor = None if divergence_factor is None else jnp.asarray(divergence_factor)
+        return loop(None, x, tol, cap, jnp.asarray(0.0), factor, **options)
     loop = _compiled_afresh(boozer_solvers.boozer_penalty_gauss_newton, tuple(options))
     return loop(None, x, tol, cap, **options)
 
@@ -245,3 +247,22 @@ class TestBoozerSolverLoopsJax(JaxTestCase):
         np.testing.assert_array_equal(values["x"], _START, err_msg=f"{name}: start not restored")
         for key, expected in restored.items():
             np.testing.assert_array_equal(values[key], expected, err_msg=f"{name} {key}")
+
+    def test_divergence_factor_stops_a_growing_penalty_newton_walk(self):
+        """As in native's ``test_penalty_newton_divergence_factor``: the gradient
+        norm grows 19-fold per step, so a factor of 1e3 stops the walk after three
+        steps (norm 6859); None runs to ``maxiter``. Both restore the start."""
+        formulations, _, restored = _GROWING_CASES["penalty-newton"]
+        for factor, steps in ((1e3, 3), (None, 40)):
+            with self.subTest(factor=factor), self.case() as patches:
+                for attribute, formulation in formulations.items():
+                    patches.enter_context(
+                        mock.patch.object(boozer_solvers, attribute, formulation)
+                    )
+                result = _run(
+                    "penalty-newton", jnp.asarray(_START), maxiter=40.0, divergence_factor=factor
+                )
+                self.assertEqual(int(host_array(result.iterations)), steps)
+                np.testing.assert_allclose(host_array(result.norm), 19.0**steps, rtol=1e-12)
+                np.testing.assert_array_equal(host_array(result.x), _START)
+                np.testing.assert_array_equal(host_array(result.gradient), restored["gradient"])
