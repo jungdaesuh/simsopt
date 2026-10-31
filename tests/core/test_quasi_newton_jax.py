@@ -3,13 +3,13 @@
 Each solver runs beside ``scipy.optimize.minimize(jac=True)`` on a quadratic
 (eigenvalues 1 to 1e3), the Rosenbrock function and an ill-conditioned
 quartic (scales 1 to 1e6), SciPy evaluating the same JAX objective on the CPU.
-Capped after k = 1, ..., 10 iterations (9 for L-BFGS-B on the quadratic,
-see ``_EARLY_ITERATIONS``), each solve stops at ``maxiter`` (status 1) with
-SciPy's message, iteration and evaluation counts, and its iterate and
-``hess_inv`` (BFGS's matrix; L-BFGS-B's correction pairs in the order of
-SciPy's ring buffer) agree with SciPy's, relative to the largest entry, to
-1e-12, ``fun`` and ``jac`` to 1e-11. Capped, L-BFGS-B holds three
-corrections, so its memory wraps. Run to convergence (ten corrections),
+Capped after k = 1, ..., 10 iterations, each solve stops at ``maxiter``
+(status 1) with SciPy's message, iteration and evaluation counts, and its
+iterate and ``hess_inv`` (BFGS's matrix; L-BFGS-B's correction pairs in the
+order of SciPy's ring buffer) agree with SciPy's, relative to the largest
+entry, to 1e-12, ``fun`` and ``jac`` to 1e-11 (up to k = 9 for L-BFGS-B on
+the quadratic, see ``_EARLY_NUMERIC_ITERATIONS``). Capped, L-BFGS-B holds
+three corrections, so its memory wraps. Run to convergence (ten corrections),
 status, message, counts and ``x`` (to 1e-12) are SciPy's, ``fun`` and ``jac``
 agree absolutely to 1e-14 and 1e-12, and ``hess_inv`` agrees
 to 1e-7 after forty or more updates; L-BFGS-B's 100 to 200 iterations on the
@@ -68,9 +68,11 @@ import scipy
 from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, minimize
 from scipy.optimize import _linesearch as scipy_linesearch
 
-# Early iterations compared per (method, problem), 10 unless listed; see
-# test_early_iterates_match_scipy for why L-BFGS-B on the quadratic stops at 9.
-_EARLY_ITERATIONS = {("L-BFGS-B", "quadratic"): 9}
+# Early iterations: status, message and counts are compared up to k = 10;
+# iterates, fun, jac and hess_inv up to k = 10 unless listed here (see
+# test_early_iterates_match_scipy for why L-BFGS-B on the quadratic stops at 9).
+_EARLY_ITERATIONS = 10
+_EARLY_NUMERIC_ITERATIONS = {("L-BFGS-B", "quadratic"): 9}
 _EARLY_RTOL = 1e-12
 _FINAL_RTOL = 1e-5
 _FAILURE_RTOL = 1e-12
@@ -274,7 +276,8 @@ class TestQuasiNewtonJax(JaxTestCase):
     def test_early_iterates_match_scipy(self):
         """Capped at k iterations, both solvers stop as SciPy does with its
         iterate to round-off, at every k where round-off determines SciPy's
-        own iterate to these bounds.
+        own iterate to these bounds, and with SciPy's status, message and
+        counts at every k.
 
         SciPy's runs from ``x0`` moved by one ulp per entry (nine sign
         patterns) differ from its run from ``x0`` by at most 8.6e-14 (``yk``)
@@ -283,9 +286,10 @@ class TestQuasiNewtonJax(JaxTestCase):
         beyond the bounds: ten iterations there magnify round-off about
         1e4-fold, so a run that rounds differently from SciPy, as compiled XLA
         does, can miss the bounds with no error in its algorithm (on JAX
-        0.10.2's CPU lane ``yk`` differs by 1.2e-12). The comparison stops at
-        nine there (``_EARLY_ITERATIONS``); the converged comparison still
-        follows that walk to its end."""
+        0.10.2's CPU lane ``yk`` differs by 1.2e-12). The numerical comparison
+        stops at nine there (``_EARLY_NUMERIC_ITERATIONS``); the record is still
+        compared at ten, and the converged comparison follows that walk to its
+        end."""
         for lane in _LANES:
             for method in ("BFGS", "L-BFGS-B"):
                 for name in _problems():
@@ -294,12 +298,15 @@ class TestQuasiNewtonJax(JaxTestCase):
 
     def _case_early_iterates_match_scipy(self, lane, method, name):
         x0, params = _problems()[name]
-        for k in range(1, _EARLY_ITERATIONS.get((method, name), 10) + 1):
+        numeric_iterations = _EARLY_NUMERIC_ITERATIONS.get((method, name), _EARLY_ITERATIONS)
+        for k in range(1, _EARLY_ITERATIONS + 1):
             options = _options(method, k)
             expected = _scipy(name, x0, params, method, options)
             self.assertEqual(expected.status, 1, f"{name}: SciPy converged before k={k}")
             result, message = _device(name, x0, params, method, options, lane)
             self._assert_scipy_record(expected, result, message, f"{method} {name} k={k}")
+            if k > numeric_iterations:
+                continue
             assert_matches_native(result.x, expected.x, f"{method} {name} x at k={k}", _EARLY_RTOL)
             rtol = _EARLY_FUN_JAC_RTOL
             assert_matches_native(result.fun, expected.fun, f"{method} {name} fun at k={k}", rtol, abs(expected.fun))
