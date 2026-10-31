@@ -28,11 +28,12 @@ doublings end its loop; a first step below ``amin`` (gradients of 1e110)
 stops DCSRCH at its start. A NaN wall ends BFGS with status 3, and
 ``maxiter=0`` ends BFGS at once and L-BFGS-B after one iteration, as in SciPy.
 Corrections near 1e-100 underflow formt's products and reset L-BFGS-B's memory
-as in SciPy (compared op by op, see that test). Invalid inputs end or raise as
-in SciPy. Each case runs on the CPU and, when present, the GPU lane. The
-zoom's interpolants and trial steps, which these objectives reach only partly,
-are checked against SciPy's ``_cubicmin``, ``_quadmin`` and ``_zoom``
-directly.
+as in SciPy (compared op by op, see that test), and a BFGS update by a step
+whose s s^T underflows is SciPy's (compared with SciPy's expression).
+Invalid inputs end or raise as in SciPy. Each case runs on the CPU and, when
+present, the GPU lane. The zoom's interpolants and trial steps, which these
+objectives reach only partly, are checked against SciPy's ``_cubicmin``,
+``_quadmin`` and ``_zoom`` directly.
 """
 from __future__ import annotations
 
@@ -46,6 +47,7 @@ with optional_jax_imports():
     from simsopt_jax.core.quasi_newton import (
         BFGS_MESSAGES,
         LBFGSB_MESSAGES,
+        _bfgs_inverse_hessian_update,
         _cubicmin,
         _quadmin,
         _zoom_trial,
@@ -410,6 +412,34 @@ class TestQuasiNewtonJax(JaxTestCase):
                     else:
                         self.assertEqual((int(result.status), message), (expected.status, expected.message))
                     self._assert_scipy_hess_inv(expected, result, f"badly scaled, maxiter={maxiter}", _FAILURE_RTOL)
+
+    def test_bfgs_update_is_scipys_where_s_s_underflows(self):
+        """A step s ~ 1e-165 with y ~ 1e27 s: s s^T and (H y) s^T underflow to zero,
+        while y^T s ~ 1e-303, SciPy's s y^T and the updated H ~ 1e-27 are normal.
+        The update is SciPy's to round-off there, as for a step of unit size; forming
+        s s^T or (H y) s^T before scaling by rho loses rank-one terms (here errors of
+        4 and 11 times the largest entry). Iterates reach such steps only along
+        round-off-driven walks (BFGS on (a x)^2 / 2 after about a dozen iterations,
+        a walk the port does not follow bit for bit), so the update is compared
+        directly with SciPy 1.17's expression in ``_minimize_bfgs``."""
+        curvature = np.array([1.0e27, 2.5e27])
+        for case, scale in (("underflowing step", 1e-165), ("unit step", 1.0)):
+            sk = scale * np.array([2.0, -1.3])
+            yk = curvature * sk + scale * np.array([0.3e26, -0.1e26])
+            hess_inv = np.array([[0.8e-27, 0.1e-27], [0.1e-27, 0.4e-27]])
+            if scale < 1.0:
+                self.assertTrue(np.all(np.outer(sk, sk) == 0.0) and np.dot(yk, sk) > 1e-307, case)
+            rhok = 1.0 / np.dot(yk, sk)
+            identity = np.eye(2)
+            A1 = identity - sk[:, np.newaxis] * yk[np.newaxis, :] * rhok
+            A2 = identity - yk[:, np.newaxis] * sk[np.newaxis, :] * rhok
+            expected = np.dot(A1, np.dot(hess_inv, A2)) + (rhok * sk[:, np.newaxis] * sk[np.newaxis, :])
+            for lane in _LANES:
+                with self.subTest(case=case, lane=lane), self.case(), parity_default_device(lane):
+                    updated = host_array(_bfgs_inverse_hessian_update(
+                        jnp.asarray(hess_inv), jnp.asarray(sk), jnp.asarray(yk)
+                    ))
+                    assert_matches_native(updated, expected, f"{case} H", _FAILURE_RTOL)
 
     def test_zoom_interpolants_match_scipy(self):
         """The cubic and quadratic minimizers are SciPy's, ``None`` where SciPy's
