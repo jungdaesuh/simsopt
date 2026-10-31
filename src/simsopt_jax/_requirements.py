@@ -40,7 +40,19 @@ import jax
 
 _require_jax_version("jax", jax.__version__)
 
-# Every simsopt_jax kernel computes in float64. Importing simsopt_jax enables it
-# for the process, as importing simsopt.geo does, here so that no array a kernel
-# module builds at import is float32.
-jax.config.update("jax_enable_x64", True)
+
+
+def enable_float64() -> None:
+    """Run JAX in float64 (``jax_enable_x64``), the precision every kernel computes in.
+
+    The one place ``simsopt_jax`` sets it: this module calls it at import, and
+    ``apply_jax_runtime_config`` calls it again, so ``set_backend`` restores
+    float64 when something disabled it after the import.
+    """
+    jax.config.update("jax_enable_x64", True)
+
+
+# Importing simsopt_jax enables float64 for the process, as importing
+# simsopt.geo does, here so that no array a kernel module builds at import is
+# float32.
+enable_float64()

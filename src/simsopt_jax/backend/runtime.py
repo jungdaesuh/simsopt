@@ -30,8 +30,8 @@ Retained settings:
   Eager JAX indexing can stage scalar indices; explicitly use the boundary
   owner's ``allow_host_transfers`` context when evaluating in that debug mode.
 * Every supported mode runs JAX in float64 (``jax_enable_x64``, which
-  importing ``simsopt_jax`` enables) with matrix products at the highest
-  precision.
+  importing ``simsopt_jax`` enables and ``set_backend`` enables again) with
+  matrix products at the highest precision.
 * ``SIMSOPT_JAX_COIL_CHUNK_SIZE``, ``SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE`` and
   ``SIMSOPT_JAX_POINT_CHUNK_SIZE`` override the mode's field tiling. A disallow
   transfer guard selects dense audit kernels (zero chunk sizes).
@@ -63,6 +63,8 @@ from typing import Callable, Literal
 
 import jax
 import jax.extend.backend
+
+from simsopt_jax._requirements import enable_float64
 
 # Public + private re-exports: callers and tests keep importing from this facade.
 from simsopt_jax.backend._runtime_policy import (
@@ -815,6 +817,7 @@ def apply_jax_runtime_config() -> None:
     if not _jax_backends_initialized():
         jax.config.update("jax_platforms", _startup_jax_platforms(config))
     platform = _initialized_runtime_platform(jax, config)
+    enable_float64()
     # JAX resolves the default backend from the deprecated ``jax_platform_name``
     # before ``jax_platforms``. ``simsopt.geo`` sets it to ``"cpu"`` when no JAX
     # platform environment variable is set, which would keep the selected
