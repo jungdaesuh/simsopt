@@ -16,7 +16,9 @@ to 1e-7 after forty or more updates; L-BFGS-B's 100 to 200 iterations on the
 quadratic and the quartic follow round-off instead (their counts change with
 how XLA compiles the loop), and there the solutions agree to 1e-5, what
 ``gtol = 1e-6`` leaves two points with unit smallest curvature (measured worst
-3.1e-7).
+3.1e-7); on the quadratic round-off also picks the convergence test that stops
+the walk, for SciPy as for the port, so either convergence message passes
+there (``_ROUND_OFF_WALKS``).
 
 A gradient that contradicts the value fails every line search: BFGS ends with
 SciPy's status 2 ("precision loss", after DCSRCH and then
@@ -92,14 +94,23 @@ _EARLY_FUN_JAC_RTOL = 10 * _EARLY_RTOL
 # absolutely (measured worst 3.3e-24 and 4.5e-14 where the walks match).
 _CONVERGED_FUN_ATOL = 1e-14
 _CONVERGED_JAC_ATOL = 1e-12
-_ROUND_OFF_WALKS = frozenset(
-    {
-        # 180 to 200 iterations: early-iterate gaps grow from 1e-16 to 1e-1 by k = 110.
-        ("L-BFGS-B", "quadratic"),
-        # Its count changes with how XLA compiles the same loop (107 or 147; SciPy 109).
-        ("L-BFGS-B", "ill-conditioned"),
-    }
-)
+_LBFGSB_PGTOL = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
+_LBFGSB_FTOL = "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+# Converged walks that round-off decides, each with the messages besides SciPy's
+# that round-off also gives SciPy itself; their counts are not compared.
+_ROUND_OFF_WALKS = {
+    # 180 to 200 iterations: early-iterate gaps grow from 1e-16 to 1e-1 by k = 110.
+    # Round-off also picks the convergence test that stops it. From x0 moved by an
+    # ulp in one entry (40 draws), SciPy 1.17.1, 1.18.0 and 1.18.1 stop twice on
+    # FTOL, else on PGTOL (nit 179 to 191), on a NumPy objective, and 3 times on
+    # FTOL on this JAX objective under JAX 0.10; with f and each entry of g moved
+    # by up to an ulp at every evaluation, 8 times in 200. The port, which rounds
+    # differently at every iteration, stops on FTOL from x0 itself on JAX 0.11's
+    # CPU lane with SciPy 1.18 (jaxlib's CPU LAPACK calls are SciPy's).
+    ("L-BFGS-B", "quadratic"): frozenset({_LBFGSB_PGTOL, _LBFGSB_FTOL}),
+    # Its count changes with how XLA compiles the same loop (107 or 147; SciPy 109).
+    ("L-BFGS-B", "ill-conditioned"): frozenset(),
+}
 _GTOL = 1e-6
 _LANES = ("cpu", "gpu")
 
@@ -320,7 +331,8 @@ class TestQuasiNewtonJax(JaxTestCase):
         message, counts, x, fun, jac (to round-off of their scale at x0) and
         hess_inv, except the counts of the round-off walks listed in
         ``_ROUND_OFF_WALKS``, which end at SciPy's solution to what ``gtol``
-        allows."""
+        allows, with SciPy's status and its message or one that round-off
+        gives SciPy from x0 moved by an ulp."""
         for lane in _LANES:
             for method in ("BFGS", "L-BFGS-B"):
                 for name in _problems():
@@ -334,10 +346,11 @@ class TestQuasiNewtonJax(JaxTestCase):
         self.assertEqual(expected.status, 0, f"{name}: SciPy did not converge")
         result, message = _device(name, x0, params, method, options, lane)
         if (method, name) in _ROUND_OFF_WALKS:  # Round-off decides these counts; see _ROUND_OFF_WALKS.
-            self.assertEqual(
-                (int(result.status), message),
-                (expected.status, expected.message),
-                f"{method} {name}: status and message differ from SciPy's",
+            self.assertEqual(int(result.status), expected.status, f"{method} {name}: status differs from SciPy's")
+            self.assertIn(
+                message,
+                {expected.message} | _ROUND_OFF_WALKS[(method, name)],
+                f"{method} {name}: neither SciPy's message nor one its round-off gives",
             )
             assert_matches_native(result.x, expected.x, f"{method} {name} solution", _FINAL_RTOL)
             return
