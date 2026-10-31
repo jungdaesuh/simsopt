@@ -688,8 +688,10 @@ class JaxBoozerSurface(Optimizable):
 
         Returns:
             dict: Cached or newly stored native-style exact solve result, including
-                residual, Jacobian, mask, LU factors, coil VJP and success; updates the
-                surface after completed steps.
+                residual, Jacobian, mask, LU factors, coil VJP and success (of the final
+                iterate, as natively); updates the surface after completed steps. As
+                natively, a walk that ends with a larger or non-finite norm than at its
+                start keeps its start and the residual and Jacobian there, and fails.
         """
         if not self.need_to_run_code:
             return self.res

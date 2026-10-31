@@ -5,7 +5,8 @@ program (a ``lax.while_loop`` on the problem's device):
 
 - :func:`boozer_exact_newton` is ``solve_residual_equation_exactly_newton``
   (BoozerExact): undamped Newton on the masked residual system of
-  :func:`boozer_exact_residual`, one LU solve plus one refinement step;
+  :func:`boozer_exact_residual`, one LU solve plus one refinement step, with
+  success judged on the final iterate;
 - :func:`boozer_penalty_newton` is ``minimize_boozer_penalty_constraints_newton``:
   Newton on :func:`boozer_penalty_constraints` with its analytic Hessian
   shifted by ``stab``, refined once the gradient norm is below ``1e-9``;
@@ -24,9 +25,9 @@ so new values reuse the program. ``x`` is cast to float64, as the
 formulations cast it, so the iterates and ``dJ/dx`` are float64 too. Where native's ``np.linalg.solve`` raises
 ``LinAlgError`` (an exactly zero LU pivot of a finite matrix), the loop stops
 with ``singular`` set and ``x`` at the iterate that met it; the caller
-raises. NaN steps continue, as natively. As natively, the penalty Newton and
-the damped Gauss-Newton restore their starting point, with its derivatives,
-when they end (without a singular step) at a larger or non-finite ``norm``
+raises. NaN steps continue, as natively. As natively, every Newton-type loop
+restores its starting point, with its derivatives or system,
+when it ends (without a singular step) at a larger or non-finite ``norm``
 than they started from (:func:`keep_iterate`); ``norm`` stays the final one,
 so ``success`` is False. There is no damping.
 
@@ -100,11 +101,11 @@ class BoozerExactNewtonResult:
             x.
         jacobian (jax.Array): Masked exact-system Jacobian, shape (nb, nx), at x.
         iterations (jax.Array): Scalar shape () int32 completed step count.
-        norm (jax.Array): Scalar shape () Euclidean norm of the unweighted, unscaled
-            Boozer residual rows selected by residual_rows, followed by label minus
-            targetlabel and, without stellarator symmetry, z(0, 0). These terms
-            have mixed physical units. See :func:`boozer_exact_newton` for the
-            stopping norm at an iteration cap or initial convergence.
+        norm (jax.Array): Scalar shape () Euclidean norm, at the final iterate, of the
+            unweighted, unscaled Boozer residual rows selected by residual_rows,
+            followed by label minus targetlabel and, without stellarator symmetry,
+            z(0, 0). These terms have mixed physical units. See
+            :func:`boozer_exact_newton` for the norm when no step is allowed.
         singular (jax.Array): Scalar shape () bool indicating an exactly singular finite
             step matrix; x retains the iterate that encountered it.
     """
@@ -237,11 +238,12 @@ def boozer_exact_newton(
     starts from native's ``G`` of the coil currents), on the BoozerExact rows
     of :func:`simsopt_jax_adapters.geo.boozer_problem.boozer_exact_residual_rows`.
 
-    As natively, ``norm`` at a reached step cap is the one checked before
-    the last step. A nonpositive ``maxiter`` returns the initial ``1e6``
-    sentinel; initial convergence with a positive cap returns the computed
-    initial system norm. The adapter defines success by comparing this
-    returned norm with ``tol``.
+    As natively, ``norm`` is the system norm at the final iterate, also at a
+    reached step cap; a nonpositive (or NaN) ``maxiter`` takes no step and
+    returns native's ``1e6`` sentinel. The adapter defines success by
+    comparing this returned norm with ``tol``. A walk that ends (without a
+    singular step) with a larger or non-finite norm than at its start returns
+    its start with the residual and Jacobian there, and its final ``norm``.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
@@ -257,8 +259,9 @@ def boozer_exact_newton(
             optimize it.
 
     Returns:
-        BoozerExactNewtonResult: Result object with the final iterate, residual/Jacobian, stopping norm and
-            singular-step flag; input problem is unchanged.
+        BoozerExactNewtonResult: Result object with the final (or restored starting)
+            iterate, its residual and Jacobian, the final norm and the singular-step
+            flag; input problem is unchanged.
     """
     x = as_jax_float64(x)
     if G_from_currents:
@@ -269,32 +272,36 @@ def boozer_exact_newton(
         return b, jacobian, jnp.linalg.norm(b)
 
     def proceed(state):
-        _, _, _, norm, iterations, _, singular = state
+        _, _, _, norm, iterations, singular = state
         return (iterations < maxiter) & ~(norm <= tol) & ~singular
 
     def step(state):
-        x, b, jacobian, norm, iterations, _, _ = state
+        x, b, jacobian, _, iterations, _ = state
         factors, singular = _lu(jacobian)
         dx = lu_solve(factors, b)
         dx = dx + lu_solve(factors, b - jacobian @ dx)
         x, iterations = _advance(x, dx, iterations, singular)
-        return (x, *system(x), iterations, norm, singular)
+        return (x, *system(x), iterations, singular)
 
-    initial = (
-        x,
-        *system(x),
-        jnp.asarray(0, jnp.int32),
-        jnp.asarray(_EXACT_INITIAL_NORM, x.dtype),
-        jnp.asarray(False),
+    start = system(x)
+    _, initial_jacobian, initial_norm = start
+    final_x, _, final_jacobian, norm, iterations, singular = lax.while_loop(
+        proceed, step, (x, *start, jnp.asarray(0, jnp.int32), jnp.asarray(False))
     )
-    x, _, jacobian, norm, iterations, checked_norm, singular = lax.while_loop(proceed, step, initial)
+    # Native's loop evaluates the system only once it runs (0 < maxiter).
+    sentinel = jnp.asarray(_EXACT_INITIAL_NORM, x.dtype)
+    ran = 0 < maxiter
+    initial_norm, norm = (jnp.where(ran, value, sentinel) for value in (initial_norm, norm))
+    x, jacobian = _restore_on_failure(
+        (final_x, final_jacobian), (x, initial_jacobian), norm, initial_norm, singular
+    )
     (residual,) = boozer_surface_residual(problem, x, optimize_G=True)
     return BoozerExactNewtonResult(
         x=x,
         residual=residual,
         jacobian=jacobian,
         iterations=iterations,
-        norm=jnp.where(iterations < maxiter, norm, checked_norm),
+        norm=norm,
         singular=singular,
     )
 

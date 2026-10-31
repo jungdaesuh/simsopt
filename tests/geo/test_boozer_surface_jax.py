@@ -404,23 +404,30 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
         self.assertFalse(jax_problem.boozer.need_to_run_code)
 
-    def test_exact_newton_at_maxiter_fails_as_natively(self):
-        """At ``maxiter`` native reports the norm checked before the last step, so
-        the solve fails, also when that step converged (``maxiter=6`` here; PR
-        #669 would report success); the surface holds the last iterate, the
-        residual and Jacobian are evaluated there. With ``maxiter=0`` nothing
-        moves."""
+    def test_exact_newton_at_maxiter_judges_its_final_iterate_as_natively(self):
+        """At ``maxiter`` native judges success on the final iterate, so a walk
+        whose last permitted step converges succeeds (``maxiter=6`` here); the
+        surface holds the last iterate, the residual and Jacobian are evaluated
+        there. A fractional cap allows steps while the count is below it; with a
+        nonpositive cap nothing moves."""
         for case_id_0, stellsym in zip(
             ["stellsym", "nonsym"], [True, False], strict=True
         ):
             with self.subTest(
                 case_id_0=case_id_0, stellsym=stellsym
             ), self.case():
-                self._case_exact_newton_at_maxiter_fails_as_natively(stellsym)
+                self._case_exact_newton_at_maxiter_judges_its_final_iterate_as_natively(stellsym)
 
-    def _case_exact_newton_at_maxiter_fails_as_natively(self, stellsym):
+    def _case_exact_newton_at_maxiter_judges_its_final_iterate_as_natively(self, stellsym):
         """Run one row with case-local objects released before runtime cleanup."""
-        for maxiter in (2, 6, 0):
+        # The cap, native's step count and success at it.
+        for maxiter, steps, success in (
+            (2, 2, False),
+            (6, 6, True),
+            (0.5, 1, False),
+            (0, 0, False),
+            (-1, 0, False),
+        ):
             native, jax_problem = _pair("exact", stellsym=stellsym)
             start = native.boozer.surface.get_dofs()
             native_res = native.boozer.solve_residual_equation_exactly_newton(
@@ -429,8 +436,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
             jax_res = jax_problem.boozer.solve_residual_equation_exactly_newton(
                 tol=1e-10, maxiter=maxiter, iota=_IOTA, G=jax_problem.G0
             )
-            self.assertFalse(native_res["success"])
-            self.assertEqual(native_res["iter"], maxiter)
+            self.assertEqual((native_res["iter"], native_res["success"]), (steps, success))
             rtol = _RTOL if stellsym else _RTOL_NONSYM
             _assert_same_solve(
                 jax_problem,
@@ -449,7 +455,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 rtol,
                 scale=22.0,
             )
-            if maxiter == 0:
+            if steps == 0:
                 np.testing.assert_array_equal(
                     jax_problem.boozer.surface.get_dofs(), start
                 )
@@ -473,20 +479,18 @@ class TestBoozerSurfaceJax(JaxTestCase):
 
     def test_non_finite_solves_fail_as_natively(self):
         """A NaN ``G`` makes every BoozerExact step NaN: as natively the walk runs
-        to ``maxiter`` (a NaN norm never meets the tolerance), the surface takes
-        the NaN iterate and SciPy's ``lu`` refuses the final Jacobian. A weighted
+        to ``maxiter`` (a NaN norm never meets the tolerance), restores its start,
+        where ``G`` is still NaN, and SciPy's ``lu`` refuses the Jacobian there. A weighted
         BoozerLS penalty without current is 0/0: the Newton loop does not start
         and ``lu`` refuses the Hessian before the surface moves."""
         native, jax_problem = _pair("exact")
         for problem in (native, jax_problem):
+            start = problem.boozer.surface.get_dofs()
             with self.assertRaisesRegex(ValueError, "infs or NaNs"):
                 problem.boozer.solve_residual_equation_exactly_newton(
                     tol=1e-10, maxiter=3, iota=_IOTA, G=np.nan
                 )
-            self.assertTrue(
-                np.all(np.isnan(problem.boozer.surface.get_dofs())),
-                "np.all(np.isnan(problem.boozer.surface.get_dofs()))",
-            )
+            np.testing.assert_array_equal(problem.boozer.surface.get_dofs(), start)
 
         native, jax_problem = _pair("ls", weight_inv_modB=True)
         for problem in (native, jax_problem):

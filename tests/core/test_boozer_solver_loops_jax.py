@@ -100,6 +100,11 @@ _CASES = {
 _GROWTH = 0.05
 
 
+def _growing_exact_system(problem, x, residual_rows, *, derivatives=0):
+    # Refined Newton steps x - x / 0.05 = -19 x.
+    return x, _GROWTH * jnp.eye(2, dtype=x.dtype)
+
+
 def _growing_penalty_derivatives(
     problem, x, *, derivatives=0, optimize_G=False, weight_inv_modB=True
 ):
@@ -114,10 +119,18 @@ def _growing_penalty_residuals(
     return x, _GROWTH * jnp.eye(2, dtype=x.dtype)
 
 
-# Per loop: the formulation substituted, the norm after two steps (penalty
-# Newton: x = 361 x0; Gauss-Newton: steps 10 x and 15 x give x = 126 x0, where
+# Per loop: the formulation substituted, the norm after two steps (BoozerExact
+# and penalty Newton: x = 361 x0; Gauss-Newton: steps 10 x and 15 x give x = 126 x0, where
 # |J^T r| = 0.05 * 126) and the values at the start that the restored result carries.
 _GROWING_CASES = {
+    "exact": (
+        {
+            "boozer_exact_residual": _growing_exact_system,
+            "boozer_surface_residual": _exact_final_residual,
+        },
+        361.0,
+        {"residual": _START, "jacobian": _GROWTH * np.eye(2)},
+    ),
     "penalty-newton": (
         {"boozer_penalty_constraints": _growing_penalty_derivatives},
         361.0,
