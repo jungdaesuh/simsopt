@@ -1,7 +1,7 @@
-# This module ports SciPy 1.17's DCSRCH line search (scipy/optimize/_dcsrch.py
-# and scipy/optimize/__lbfgsb.c) to JAX. They are distributed under the
-# following licenses, whose notices, conditions and disclaimers are retained
-# here.
+# This module ports the DCSRCH line search of SciPy 1.17 and 1.18
+# (scipy/optimize/_dcsrch.py and scipy/optimize/__lbfgsb.c) to JAX. They are
+# distributed under the following licenses, whose notices, conditions and
+# disclaimers are retained here.
 #
 # SciPy (scipy/LICENSE.txt):
 #
@@ -72,7 +72,7 @@
 # G. Carter and Jorge J. More', Argonne National Laboratory and University of
 # Minnesota, 1993).
 
-"""MINPACK-2's DCSRCH line search (More and Thuente), as SciPy 1.17 runs it, in JAX.
+"""MINPACK-2's DCSRCH line search (More and Thuente), as SciPy 1.17 and 1.18 run it, in JAX.
 
 SciPy carries two translations of DCSRCH and its DCSTEP: the Python one of
 ``scipy/optimize/_dcsrch.py``, behind ``line_search_wolfe1`` (BFGS's first
