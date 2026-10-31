@@ -5,8 +5,8 @@
    configuration context it changes no setting the context hides.
 2. In a process whose JAX backends are initialized, GPU allocator settings
    and XLA flags cannot apply: selecting the GPU warns instead of raising and
-   leaves the caller's allocator variables alone, and the CPU compile preset
-   stays out of ``XLA_FLAGS``.
+   leaves the caller's allocator variables and ``XLA_FLAGS`` alone, and the CPU
+   compile preset stays out of ``XLA_FLAGS``.
 3. ``SIMSOPT_JAX_DEBUG_NANS`` is parsed like every other boolean setting.
 """
 
@@ -160,6 +160,25 @@ class TestSetBackendLifecycle(JaxTestCase):
         self.assertEqual({warning.filename for warning in caught}, {__file__}, messages)
         if {"cuda", "gpu"} & set(jax.extend.backend.backends()):
             self.assertEqual(jax.numpy.zeros(3).devices(), {jax.devices("gpu")[0]})
+
+    def test_gpu_selection_after_initialization_keeps_xla_flags(self):
+        """The CUDA autotuner pins, which XLA reads only at backend initialization,
+        are not exported to an initialized process, so child processes do not
+        inherit them; one warning says this process compiles without them."""
+        flags = "--xla_gpu_exclude_nondeterministic_ops=true"
+        os.environ["XLA_FLAGS"] = flags
+        self.assertTrue(runtime_module._jax_backends_initialized())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            set_backend("jax", device="gpu")
+
+        self.assertEqual(get_backend_mode(), "jax_gpu_fast")
+        self.assertEqual(os.environ["XLA_FLAGS"], flags)
+        messages = [str(warning.message) for warning in caught]
+        self.assertEqual(
+            sum("CUDA autotuner pins" in text for text in messages), 1, messages
+        )
 
     def test_cpu_selection_after_initialization_keeps_xla_flags(self):
         """The fast CPU mode's compile preset, which XLA reads only at backend

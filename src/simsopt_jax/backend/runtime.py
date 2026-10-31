@@ -717,20 +717,31 @@ def _export_startup_jax_platforms(config: BackendConfig) -> None:
         _exported_jax_platforms = exported
 
 
+def _xla_flags_with_cuda_autotuner_pins(xla_flags: str | None) -> str:
+    """Return ``xla_flags`` with both CUDA autotuner pins appended.
+
+    Same composition contract as :func:`_xla_flags_with_cpu_compile_preset`:
+    caller-provided autotuner settings are respected, and re-applying is a no-op.
+    """
+    return _xla_flags_with_gpu_autotune_level_pinned(
+        _xla_flags_with_gpu_fusion_autotuner_disabled(xla_flags)
+    )
+
+
 def apply_cuda_xla_flag_pins() -> str:
     """Put both CUDA autotuner pins into ``XLA_FLAGS`` and return its value.
 
     Inert on the CPU backend, so a host that probes devices before it installs
-    a backend config (a test session, a notebook) can call this at import time;
-    the config-install sites call it through :func:`_apply_cuda_autotuner_env`.
+    a backend config (a test session, a notebook) can call this at import time.
+    Unlike the config-install sites (:func:`_apply_cuda_autotuner_env`), it
+    exports the pins also after JAX initialized its backends, because the
+    caller asked for them.
 
     Returns:
         str: Updated XLA_FLAGS, preserving explicitly supplied autotuner
             settings.
     """
-    pinned = _xla_flags_with_gpu_autotune_level_pinned(
-        _xla_flags_with_gpu_fusion_autotuner_disabled(os.environ.get(_XLA_FLAGS_ENV))
-    )
+    pinned = _xla_flags_with_cuda_autotuner_pins(os.environ.get(_XLA_FLAGS_ENV))
     _set_runtime_env(_XLA_FLAGS_ENV, pinned)
     return pinned
 
@@ -742,20 +753,32 @@ def _apply_cuda_autotuner_env(config: BackendConfig) -> None:
     kernels during compilation. Autotune level zero fixes library algorithm
     selection across fresh compiles, which keeps chunked Biot-Savart reductions
     reproducible. Explicit caller flags take precedence; both defaults are
-    inert on CPU.
+    inert on CPU. XLA reads ``XLA_FLAGS`` only when it initializes its
+    backends, so once JAX did, the pins cannot change this process and are not
+    exported, which would hand child processes flags the parent never ran
+    with; a missing pin then warns, since this process's fresh compiles are not
+    bitwise-reproducible.
+
+    Args:
+        config (BackendConfig): Configuration being installed.
     """
     if config.jax_platform != "cuda":
         return
-    previous = os.environ.get(_XLA_FLAGS_ENV)
-    if apply_cuda_xla_flag_pins() != previous and _jax_backends_initialized():
-        _warn_at_caller(
-            "XLA already initialized its backends before the CUDA autotuner pins "
-            f"reached {_XLA_FLAGS_ENV}; this process compiles with XLA's default "
-            "GPU autotuning, so fresh compiles are not bitwise-reproducible. "
-            "Resolve the simsopt backend config (or call "
-            "simsopt_jax.backend.runtime.apply_cuda_xla_flag_pins()) before "
-            "touching JAX devices."
-        )
+    xla_flags = os.environ.get(_XLA_FLAGS_ENV)
+    pinned = _xla_flags_with_cuda_autotuner_pins(xla_flags)
+    if pinned == xla_flags:
+        return
+    if not _jax_backends_initialized():
+        _set_runtime_env(_XLA_FLAGS_ENV, pinned)
+        return
+    _warn_at_caller(
+        "XLA already initialized its backends without the CUDA autotuner pins in "
+        f"{_XLA_FLAGS_ENV}; this process compiles with XLA's default GPU "
+        "autotuning, so fresh compiles are not bitwise-reproducible, and "
+        f"{_XLA_FLAGS_ENV} is left unchanged. Resolve the simsopt backend config "
+        "(or call simsopt_jax.backend.runtime.apply_cuda_xla_flag_pins()) before "
+        "touching JAX devices."
+    )
 
 
 _compilation_cache_applied_dir: str | None = None
@@ -812,7 +835,8 @@ def apply_jax_runtime_config() -> None:
     _validate_cuda_parity_determinism_env(config)
     _apply_jax_gpu_memory_env(config)
     _apply_cpu_compile_preset_env(config, policy)
-    _apply_cuda_autotuner_env(config)
+    # The CUDA autotuner pins are applied where the configuration is installed
+    # (``get_backend_config`` and ``set_backend``), once per installation.
 
     if not _jax_backends_initialized():
         jax.config.update("jax_platforms", _startup_jax_platforms(config))
@@ -899,11 +923,13 @@ def set_backend(
     helpers continue to work unchanged. GPU memory keywords resolve the
     pre-backend-initialization JAX/XLA allocator env vars explicitly; env overrides still sit
     between mode defaults and these arguments. Once JAX initialized its backends they
-    cannot change the process, so a differing setting warns instead. Also updates the
-    config cache so subsequent ``get_backend_config()`` calls are free. A call that
-    raises leaves the previous configuration, environment and JAX settings in place;
-    JAX backends it initialized (checking the requested platform does) stay
-    initialized, so later GPU allocator settings no longer apply.
+    cannot change the process, so a differing setting warns instead. The CUDA
+    autotuner pins it adds to ``XLA_FLAGS`` follow the same rule: once JAX
+    initialized its backends they are not exported, and their absence warns. Also
+    updates the config cache so subsequent ``get_backend_config()`` calls are free.
+    A call that raises leaves the previous configuration, environment and JAX
+    settings in place; JAX backends it initialized (checking the requested platform
+    does) stay initialized, so later GPU allocator settings no longer apply.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.
