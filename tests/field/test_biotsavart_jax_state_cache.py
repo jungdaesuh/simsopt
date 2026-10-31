@@ -398,7 +398,7 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
         curves = _base_curves()
         field, native = _fields([Coil(curve, Current(1e5)) for curve in curves])
         buffer = aligned_host_copy(_POINTS)
-        points = jnp.asarray(buffer)
+        points = jax.device_put(buffer)  # noqa: TID251 test needs a JAX array aliasing a host buffer
         if next(iter(points.devices())).platform == "cpu":
             self.assertTrue(
                 np.shares_memory(np.asarray(points), buffer),
