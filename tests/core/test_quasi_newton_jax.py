@@ -1,4 +1,4 @@
-"""``simsopt_jax.core.quasi_newton`` against SciPy 1.17's BFGS and L-BFGS-B.
+"""``simsopt_jax.core.quasi_newton`` against SciPy's BFGS and L-BFGS-B (1.17 and 1.18).
 
 Each solver runs beside ``scipy.optimize.minimize(jac=True)`` on a quadratic
 (eigenvalues 1 to 1e3), the Rosenbrock function and an ill-conditioned
@@ -256,14 +256,17 @@ def _options(method, maxiter, **extra):
     return {"gtol": _GTOL, "ftol": 1e-14, "maxiter": maxiter, "maxcor": 3, **extra}
 
 
-# The port's claims, and so these comparisons (records, messages and the
-# private _linesearch helpers), are SciPy 1.17's; another SciPy is not their reference.
-_SCIPY_REFERENCE = (1, 17)
+# The SciPy versions these comparisons (records, messages and the private
+# _linesearch helpers) hold for: 1.18 keeps 1.17's _minimize_bfgs, _linesearch.py
+# and _dcsrch.py, and lbfgsb.c's logic without bounds. Another SciPy is not their
+# reference. Where JAX is unavailable, JaxTestCase's reason stands.
+_SCIPY_REFERENCES = ((1, 17), (1, 18))
+_SCIPY_VERSION = tuple(int(part) for part in scipy.__version__.split(".")[:2])
 
 
 @unittest.skipUnless(
-    tuple(int(part) for part in scipy.__version__.split(".")[:2]) == _SCIPY_REFERENCE,
-    f"compares with SciPy {'.'.join(map(str, _SCIPY_REFERENCE))}, not {scipy.__version__}",
+    JAX_IMPORT_ERROR is not None or _SCIPY_VERSION in _SCIPY_REFERENCES,
+    f"compares with SciPy {' and '.join('.'.join(map(str, v)) for v in _SCIPY_REFERENCES)}, not {scipy.__version__}",
 )
 class TestQuasiNewtonJax(JaxTestCase):
     def _assert_scipy_record(self, expected: OptimizeResult, result, message: str, name: str):
