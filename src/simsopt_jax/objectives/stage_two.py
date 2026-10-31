@@ -22,7 +22,10 @@ import numpy as np
 from simsopt_jax.backend.dtypes import runtime_device_put_tree
 from simsopt_jax.core._device_scalars import placement_zero
 from simsopt_jax.core.biotsavart import biot_savart_B
-from simsopt_jax.core.curve_geometry import curve_geometry_from_dofs
+from simsopt_jax.core.curve_geometry import (
+    curve_gamma_and_gammadash_from_dofs,
+    curve_geometry_from_dofs,
+)
 from simsopt_jax.core.curve_kernels import (
     curvature_p_norm_from_kappa_pure,
     curve_curve_distance_penalty_pure,
@@ -285,6 +288,11 @@ def _curve_curve_penalty(
     return total
 
 
+def _has_curvature_terms(config: StageTwoObjectiveConfig) -> bool:
+    """Whether a curvature term, the only reader of base-curve second derivatives, is on."""
+    return config.curvature_weight is not None or config.mean_squared_curvature_weight is not None
+
+
 def stage_two_geometric_penalty(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -317,7 +325,7 @@ def stage_two_geometric_penalty(
         lengths = jax.vmap(curve_length_from_incremental_arclength_pure)(base_speed)
         result = result + _length_penalty(jnp.sum(lengths), config.length_weight, config)
 
-    if config.curvature_weight is not None or config.mean_squared_curvature_weight is not None:
+    if _has_curvature_terms(config):
         base_kappa = jax.vmap(kappa_pure)(base_gammadash, base_gammadashdash)
         if config.curvature_weight is not None:
             curvature = jax.vmap(
@@ -374,12 +382,17 @@ def stage_two_geometric_penalty(
 
 def _ordinary_curve_geometry(
     curves: Sequence[CurveSpec],
+    second_derivative_curves: Sequence[CurveSpec],
 ) -> dict[int, tuple[jax.Array, ...]]:
     """Evaluate unique curves by identity, batching compatible XYZ Fourier specs.
 
+    Every curve gets ``(gamma, gammadash)``; batched XYZ Fourier curves and the
+    curves in ``second_derivative_curves`` also get ``gammadashdash``, so a
+    perturbation sample needs second derivatives only where they are used.
     Only static layouts are grouped; each curve retains its own quadrature
     values. Other curve kinds use their existing geometry evaluator unchanged.
     """
+    second_derivative_ids = {id(curve) for curve in second_derivative_curves}
     geometry_by_curve: dict[int, tuple[jax.Array, ...]] = {}
     fourier_groups: dict[
         tuple[int, tuple[int, ...], str, tuple[int, ...], str],
@@ -396,8 +409,10 @@ def _ordinary_curve_geometry(
                 str(curve.quadpoints.dtype),
             )
             fourier_groups.setdefault(key, []).append((curve_id, curve))
-        else:
+        elif curve_id in second_derivative_ids:
             geometry_by_curve[curve_id] = curve_geometry_from_dofs(curve, curve.dofs)
+        else:
+            geometry_by_curve[curve_id] = curve_gamma_and_gammadash_from_dofs(curve, curve.dofs)
     for group in fourier_groups.values():
         batched_curve = CurveXYZFourierSpec(
             dofs=jnp.stack(tuple(curve.dofs for _, curve in group)),
@@ -437,34 +452,51 @@ def stage_two_coil_geometry(
     Returns:
         tuple: (gamma, gammadash, gammadashdash, currents), three arrays of shape (ncoils, nquadpoints, 3) in m and one array of shape (ncoils,) in A.
     """
+    return _stage_two_geometry(extraction, parameters, len(extraction.coils))
+
+
+def _stage_two_geometry(
+    extraction: CoilSetDofExtractionSpec,
+    parameters: jax.Array,
+    second_derivative_coils: int,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """:func:`stage_two_coil_geometry` with ``gammadashdash`` of the leading coils only.
+
+    ``gammadashdash`` has shape (min(second_derivative_coils, ncoils), nquadpoints, 3),
+    so the other coils' curves are differentiated once, as native evaluates
+    only what an objective reads.
+    """
     coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
     # Places every current's tangent on the parameters' device (a fixed
     # current's would otherwise be a symbolic zero) without coupling any
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
-    geometry: list[tuple[jax.Array, jax.Array, jax.Array, jax.Array]] = []
+    geometry: list[tuple[jax.Array, jax.Array, jax.Array]] = []
+    gammadashdashs: list[jax.Array] = []
     geometry_by_curve = _ordinary_curve_geometry(
-        tuple(coil.curve for coil in coil_specs)
+        tuple(coil.curve for coil in coil_specs),
+        tuple(coil.curve for coil in coil_specs[:second_derivative_coils]),
     )
-    for coil_spec in coil_specs:
-        gamma, gammadash, gammadashdash = geometry_by_curve[id(coil_spec.curve)]
+    for index, coil_spec in enumerate(coil_specs):
+        curve_terms = geometry_by_curve[id(coil_spec.curve)]
         gamma, gammadash, current = apply_coil_symmetry(
-            gamma,
-            gammadash,
+            curve_terms[0],
+            curve_terms[1],
             coil_spec.current.value[0],
             coil_spec.symmetry,
         )
-        if coil_spec.symmetry.has_rotation:
-            gammadashdash = gammadashdash @ coil_spec.symmetry.rotmat
-        geometry.append((gamma, gammadash, gammadashdash, current + parameter_zero))
-    gammas, gammadashs, gammadashdashs, currents = zip(
-        *geometry,
-        strict=True,
-    )
+        if index < second_derivative_coils:
+            gammadashdash = curve_terms[2]
+            if coil_spec.symmetry.has_rotation:
+                gammadashdash = gammadashdash @ coil_spec.symmetry.rotmat
+            gammadashdashs.append(gammadashdash)
+        geometry.append((gamma, gammadash, current + parameter_zero))
+    gammas, gammadashs, currents = zip(*geometry, strict=True)
+    gammadash_stack = jnp.stack(gammadashs)
     return (
         jnp.stack(gammas),
-        jnp.stack(gammadashs),
-        jnp.stack(gammadashdashs),
+        gammadash_stack,
+        jnp.stack(gammadashdashs) if gammadashdashs else gammadash_stack[:0],
         jnp.stack(currents),
     )
 
@@ -544,9 +576,11 @@ def fused_stage_two_values(
     Returns:
         tuple of scalar arrays: (objective, squared_flux, geometric_penalty, maximum absolute normal field in T, total base length in m). Flux units follow integral_BdotN; weighted sum units follow config.
     """
-    gamma, gammadash, gammadashdash, currents = stage_two_coil_geometry(
+    config = problem.config
+    gamma, gammadash, gammadashdash, currents = _stage_two_geometry(
         problem.extraction,
         parameters,
+        config.num_basecurves if _has_curvature_terms(config) else 0,
     )
     flux_spec = problem.flux_spec
     magnetic_field = biot_savart_B(
@@ -562,10 +596,10 @@ def fused_stage_two_values(
         gammadashdash,
         problem.surface_gamma,
         problem.surface_normal,
-        problem.config,
+        config,
     )
     base_speed = jnp.linalg.norm(
-        gammadash[: problem.config.num_basecurves],
+        gammadash[: config.num_basecurves],
         axis=2,
     )
     total_curve_length = jnp.sum(jnp.mean(base_speed, axis=1))

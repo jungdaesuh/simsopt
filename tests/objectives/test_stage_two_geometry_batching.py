@@ -368,7 +368,7 @@ class StageTwoGeometryBatchingTests(JaxTestCase):
                 CurveXYZFourierSpec(dofs=dofs, quadpoints=template.quadpoints, order=1)
                 for dofs, template in zip(values, templates, strict=True)
             )
-            cache = _ordinary_curve_geometry(specs)
+            cache = _ordinary_curve_geometry(specs, specs)
             return tuple(cache[id(spec)] for spec in specs)
 
         native_values = tuple(
