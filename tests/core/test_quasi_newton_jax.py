@@ -437,7 +437,9 @@ class TestQuasiNewtonJax(JaxTestCase):
         4 and 11 times the largest entry). Iterates reach such steps only along
         round-off-driven walks (BFGS on (a x)^2 / 2 after about a dozen iterations,
         a walk the port does not follow bit for bit), so the update is compared
-        directly with SciPy 1.17's expression in ``_minimize_bfgs``."""
+        directly with SciPy's expression in ``_minimize_bfgs``, run eagerly and
+        compiled (as the solver's loop runs it, where XLA may fuse its products)."""
+        updates = {"eager": _bfgs_inverse_hessian_update, "compiled": jit(_bfgs_inverse_hessian_update)}
         curvature = np.array([1.0e27, 2.5e27])
         for case, scale in (("underflowing step", 1e-165), ("unit step", 1.0)):
             sk = scale * np.array([2.0, -1.3])
@@ -451,11 +453,10 @@ class TestQuasiNewtonJax(JaxTestCase):
             A2 = identity - yk[:, np.newaxis] * sk[np.newaxis, :] * rhok
             expected = np.dot(A1, np.dot(hess_inv, A2)) + (rhok * sk[:, np.newaxis] * sk[np.newaxis, :])
             for lane in _LANES:
-                with self.subTest(case=case, lane=lane), self.case(), parity_default_device(lane):
-                    updated = host_array(_bfgs_inverse_hessian_update(
-                        jnp.asarray(hess_inv), jnp.asarray(sk), jnp.asarray(yk)
-                    ))
-                    assert_matches_native(updated, expected, f"{case} H", _FAILURE_RTOL)
+                for path, update in updates.items():
+                    with self.subTest(case=case, lane=lane, path=path), self.case(), parity_default_device(lane):
+                        updated = host_array(update(jnp.asarray(hess_inv), jnp.asarray(sk), jnp.asarray(yk)))
+                        assert_matches_native(updated, expected, f"{case} H, {path}", _FAILURE_RTOL)
 
     def test_zoom_interpolants_match_scipy(self):
         """The cubic and quadratic minimizers are SciPy's, ``None`` where SciPy's
