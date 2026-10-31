@@ -491,14 +491,58 @@ def _device_platform(device) -> str:
     return device if isinstance(device, str) else device.platform
 
 
-def _select_initialized_jax_default_device(jax_module, config: BackendConfig) -> None:
+def _initialized_runtime_platform(jax_module, config: BackendConfig) -> str | None:
+    """Return the initialized JAX platform that serves ``config``, changing no setting.
+
+    This is the platform check of :func:`apply_jax_runtime_config`, run before
+    it changes any JAX setting. Listing the platforms initializes JAX's
+    backends if nothing did yet. A platform JAX never initialized cannot be
+    selected: that warns, or raises in strict and GPU parity modes.
+
+    Args:
+        jax_module (module): The ``jax`` module.
+        config (BackendConfig): Configuration being applied, with a JAX platform.
+
+    Returns:
+        str or None: Name of the first initialized backend that runs
+            ``config.jax_platform`` (``"cpu"``, or ``"cuda"`` or ``"gpu"`` for
+            CUDA), or None after the warning.
+
+    Raises:
+        RuntimeError: The platform was never initialized, in strict or GPU
+            parity mode.
+    """
+    expected_backends = _expected_runtime_backend_names(config.jax_platform)
+    initialized_platforms = tuple(jax_module.extend.backend.backends())
+    platform = next(
+        (name for name in initialized_platforms if name in expected_backends), None
+    )
+    if platform is None:
+        message = (
+            f"Requested JAX platform {config.jax_platform!r} for backend mode "
+            f"{config.mode!r}, but JAX initialized only "
+            f"{sorted(initialized_platforms)}. Set backend environment variables "
+            "before importing or touching JAX devices."
+        )
+        _raise_or_warn_runtime_issue(config, message)
+    return platform
+
+
+def _select_initialized_jax_default_device(
+    jax_module, config: BackendConfig, platform: str
+) -> None:
     """Make the requested platform JAX's default device in an initialized process.
 
     ``jax_platforms`` only decides which platforms JAX initializes, so once a
     process has several, the requested one becomes the default through
     ``jax_default_device``; a stale selection is cleared when JAX's own default
-    backend already matches. A platform JAX never initialized cannot be
-    selected: that warns, or raises in strict and GPU parity modes.
+    backend already matches.
+
+    Args:
+        jax_module (module): The ``jax`` module.
+        config (BackendConfig): Configuration being applied, with a JAX platform.
+        platform (str): Initialized backend that runs ``config.jax_platform``,
+            as :func:`_initialized_runtime_platform` returns it.
     """
     expected_backends = _expected_runtime_backend_names(config.jax_platform)
     selected_device = jax_module.config.jax_default_device
@@ -513,26 +557,7 @@ def _select_initialized_jax_default_device(jax_module, config: BackendConfig) ->
     if default_backend in expected_backends:
         jax_module.config.update("jax_default_device", None)
         return
-    initialized_platform = next(
-        (
-            platform
-            for platform in jax_module.extend.backend.backends()
-            if platform in expected_backends
-        ),
-        None,
-    )
-    if initialized_platform is not None:
-        jax_module.config.update(
-            "jax_default_device", jax_module.devices(initialized_platform)[0]
-        )
-        return
-    message = (
-        f"Requested JAX platform {config.jax_platform!r} for backend mode "
-        f"{config.mode!r}, but the active JAX default backend is "
-        f"{effective_backend!r}. Set backend environment variables before "
-        "importing or touching JAX devices."
-    )
-    _raise_or_warn_runtime_issue(config, message)
+    jax_module.config.update("jax_default_device", jax_module.devices(platform)[0])
 
 
 def _validate_cuda_parity_determinism_env(config: BackendConfig) -> None:
@@ -765,7 +790,18 @@ def _apply_compilation_cache_config(jax, config: BackendConfig) -> None:
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process.
 
-    Does nothing when the resolved backend is native.
+    Every check that can reject the configuration (the CUDA determinism flags,
+    then the platform) runs before the first JAX setting changes. A rejected
+    call therefore changes no JAX setting, also when a JAX context such as
+    ``jax.transfer_guard(...)`` hides a setting's process-wide value. The
+    exception is ``jax_platforms`` before JAX initializes its backends: it
+    decides which platforms the platform check initializes, and
+    ``set_backend`` restores it when the call is rejected. Does nothing when
+    the resolved backend is native.
+
+    Raises:
+        RuntimeError: GPU parity without the determinism ``XLA_FLAGS``, or a
+            platform JAX never initialized in strict or GPU parity mode.
     """
     config = get_backend_config()
     if config.backend != "jax":
@@ -778,6 +814,7 @@ def apply_jax_runtime_config() -> None:
 
     if not _jax_backends_initialized():
         jax.config.update("jax_platforms", _startup_jax_platforms(config))
+    platform = _initialized_runtime_platform(jax, config)
     # JAX resolves the default backend from the deprecated ``jax_platform_name``
     # before ``jax_platforms``. ``simsopt.geo`` sets it to ``"cpu"`` when no JAX
     # platform environment variable is set, which would keep the selected
@@ -790,7 +827,8 @@ def apply_jax_runtime_config() -> None:
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     _apply_compilation_cache_config(jax, config)
-    _select_initialized_jax_default_device(jax, config)
+    if platform is not None:
+        _select_initialized_jax_default_device(jax, config, platform)
 
 
 # Process state a ``set_backend`` call changes, restored when the call is rejected.
@@ -811,8 +849,10 @@ def _restore_backend_state_on_error() -> Iterator[None]:
     """Hold the runtime lock and undo every change if the body raises.
 
     Restores the installed configuration, the environment variables
-    ``set_backend`` synchronizes or exports, and every JAX setting, so a
-    rejected call leaves the process in the mode it had before.
+    ``set_backend`` synchronizes or exports, and ``jax_platforms``, so a
+    rejected call leaves the process in the mode it had before. No other JAX
+    setting needs restoring: :func:`apply_jax_runtime_config` runs every check
+    that can reject before it changes one.
     """
     global _cached_backend_config
     global _requested_jax_platforms_value, _exported_jax_platforms
@@ -820,7 +860,7 @@ def _restore_backend_state_on_error() -> Iterator[None]:
         config = _cached_backend_config
         platforms_state = (_requested_jax_platforms_value, _exported_jax_platforms)
         env = tuple((name, os.environ.get(name)) for name in _SET_BACKEND_ENV_NAMES)
-        jax_config = dict(jax.config.values)
+        jax_platforms = jax.config.values["jax_platforms"]
         try:
             yield
         except BaseException:
@@ -829,11 +869,8 @@ def _restore_backend_state_on_error() -> Iterator[None]:
             _reset_backend_runtime_caches()
             for name, value in env:
                 _set_runtime_env(name, value)
-            # The aggregate transfer guard sets the three directional ones,
-            # so it goes back first.
-            for name in ("jax_transfer_guard", *jax_config):
-                if jax.config.values[name] != jax_config[name]:
-                    jax.config.update(name, jax_config[name])
+            if jax.config.values["jax_platforms"] != jax_platforms:
+                jax.config.update("jax_platforms", jax_platforms)
             raise
 
 
@@ -862,8 +899,8 @@ def set_backend(
     cannot change the process, so a differing setting warns instead. Also updates the
     config cache so subsequent ``get_backend_config()`` calls are free. A call that
     raises leaves the previous configuration, environment and JAX settings in place;
-    JAX backends it initialized (selecting the default device does) stay initialized,
-    so later GPU allocator settings no longer apply.
+    JAX backends it initialized (checking the requested platform does) stay
+    initialized, so later GPU allocator settings no longer apply.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.

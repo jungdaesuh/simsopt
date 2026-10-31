@@ -1,7 +1,8 @@
 """Regression tests for ``set_backend`` process-state changes.
 
 1. A rejected call leaves the previous mode, environment and every JAX
-   setting in place, and the field still evaluates as before.
+   setting in place, and the field still evaluates as before; inside a JAX
+   configuration context it changes no setting the context hides.
 2. In a process whose JAX backends are initialized, GPU allocator settings
    and XLA flags cannot apply: selecting the GPU warns instead of raising and
    leaves the caller's allocator variables alone, and the CPU compile preset
@@ -26,8 +27,11 @@ with optional_jax_imports():
     )
     from simsopt_jax_adapters.field import JaxBiotSavart
 import os
+import subprocess
+import sys
 import warnings
 from contextlib import nullcontext
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -45,6 +49,10 @@ def _field_B() -> np.ndarray:
     return np.asarray(field.B())
 
 
+_REJECTED_IN_CONTEXT_CHILD = (
+    Path(__file__).resolve().with_name("fresh_process")
+    / "rejected_set_backend_in_config_context.py"
+)
 _OBSERVED_ENV_PREFIXES = ("SIMSOPT_", "JAX_", "XLA_", "TF_GPU_")
 _DIRECTIONAL_TRANSFER_GUARD = "jax_transfer_guard_host_to_device"
 
@@ -71,11 +79,11 @@ class TestSetBackendLifecycle(JaxTestCase):
                 lambda: set_backend("jax", device="gpu", intent="parity"),
             ),
             (
-                "default device rejected",
+                "platform rejected",
                 "rejected",
                 mock.patch.object(
                     runtime_module,
-                    "_select_initialized_jax_default_device",
+                    "_initialized_runtime_platform",
                     side_effect=RuntimeError("rejected"),
                 ),
                 lambda: set_backend(
@@ -107,6 +115,26 @@ class TestSetBackendLifecycle(JaxTestCase):
                 self.assertIs(get_backend_config(), config)
                 self.assertEqual(_process_state(), state)
                 np.testing.assert_array_equal(_field_B(), reference_B)
+
+    def test_rejected_set_backend_inside_config_contexts_changes_no_setting(self):
+        """A GPU request JAX never initialized, rejected inside a context that
+        hides the transfer guard, NaN debugging or JIT, leaves
+        every JAX setting as it was once the context exits."""
+        environment = dict(
+            os.environ,
+            JAX_PLATFORMS="cpu",
+            CUDA_VISIBLE_DEVICES="",
+            XLA_FLAGS="--xla_gpu_exclude_nondeterministic_ops=true",
+        )
+        completed = subprocess.run(
+            (sys.executable, str(_REJECTED_IN_CONTEXT_CHILD)),
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_gpu_selection_after_initialization_keeps_the_allocator_env(self):
         """Selecting the GPU in an initialized process warns about allocator settings
