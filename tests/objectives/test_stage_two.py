@@ -15,10 +15,13 @@ with optional_jax_imports():
     from simsopt.geo import (
         CurveCurveDistance,
         CurveLength,
+        CurvePerturbed,
         CurveSurfaceDistance,
         CurveXYZFourier,
+        GaussianSampler,
         LpCurveCurvature,
         MeanSquaredCurvature,
+        PerturbationSample,
         SurfaceRZFourier,
         create_equally_spaced_curves,
     )
@@ -184,6 +187,53 @@ class TestStageTwo(JaxTestCase):
         value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
         np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(np.asarray(gradient), _native_gradient(native, field), rtol=1e-11, atol=1e-13)
+
+    def test_fused_objective_reads_sample_second_derivatives_only_for_curvature(self):
+        """As on native, perturbation samples with first derivatives only (GaussianSampler's
+        default) suffice unless a curvature term reads a perturbed curve: the flux and length
+        objective of perturbed coils and curvature of unperturbed base curves beside perturbed
+        coils match native; curvature of a perturbed base curve raises, as native does."""
+        surface = _surface()
+        base, coils = _coils(surface)
+        sampler = GaussianSampler(base[0].quadpoints, 1e-3, 0.2, n_derivs=1)
+        rng = np.random.default_rng(11)
+        perturbed = coils_via_symmetries(
+            [CurvePerturbed(curve, PerturbationSample(sampler, randomgen=rng)) for curve in base],
+            [coil.current for coil in coils[:_NCOILS]],
+            surface.nfp,
+            True,
+        )
+        flux_and_length = StageTwoObjectiveConfig(num_basecurves=_NCOILS, length_weight=1e-3)
+        curvature = replace(
+            flux_and_length,
+            curvature_threshold=1.0,
+            curvature_weight=1e-2,
+            mean_squared_curvature_threshold=1.0,
+            mean_squared_curvature_weight=1e-2,
+        )
+        for case_id, case_coils, config in (
+            ("perturbed_flux_and_length", perturbed, flux_and_length),
+            ("unperturbed_base_curvature", coils[:_NCOILS] + perturbed, curvature),
+        ):
+            with self.subTest(case=case_id), self.case():
+                field = JaxBiotSavart(case_coils)
+                flux = JaxSquaredFlux(surface, field)
+                case_base = [coil.curve for coil in case_coils[:_NCOILS]]
+                native = _native_composite(surface, case_base, case_coils, config)
+                problem = make_stage_two_problem(field, flux.fixed_surface_flux_spec(), config)
+                value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
+                np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=1e-14)
+                np.testing.assert_allclose(
+                    np.asarray(gradient), _native_gradient(native, field), rtol=1e-11, atol=1e-13
+                )
+        with self.case():
+            field = JaxBiotSavart(perturbed)
+            flux = JaxSquaredFlux(surface, field)
+            problem = make_stage_two_problem(field, flux.fixed_surface_flux_spec(), curvature)
+            with self.assertRaisesRegex(ValueError, "has 1 derivatives"):
+                _value_and_grad(problem, jnp.asarray(field.x))
+            with self.assertRaises(ValueError):
+                LpCurveCurvature(perturbed[0].curve, 2, 1.0).J()
 
     def test_fused_diagnostics_match_native_terms(self):
         """Flux, penalty, normal-field and length diagnostics match native quantities."""

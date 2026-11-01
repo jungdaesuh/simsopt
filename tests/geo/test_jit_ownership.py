@@ -114,21 +114,33 @@ class JitOwnershipTests(unittest.TestCase):
         self.assertEqual(wrapped.__name__, record.__name__)
 
     def test_compiled_dispatch_receives_owned_inputs_under_native_device_context(self):
-        device_sentinel = object()
-        static_sentinel = object()
-        x = np.ones(4)
-        fake_compile = mock.Mock(side_effect=lambda fun, **kwargs: fun)
-        context = mock.Mock(side_effect=lambda device: nullcontext())
-        with mock.patch.dict(parameters, {"jit": True}), mock.patch.object(jit_module, "jaxjit", fake_compile), \
-                mock.patch.object(jit_module, "native_jax_device", return_value=device_sentinel), \
-                mock.patch.object(jit_module.jax, "default_device", context):
-            wrapped = jit_module.jit(lambda a, marker: (a, marker), static_argnums=(1,))
-            held, marker = wrapped(x, static_sentinel)
-        x[:] = 5
-        np.testing.assert_array_equal(held, np.ones(4))
-        self.assertIs(marker, static_sentinel)
-        context.assert_called_once_with(device_sentinel)
-        self.assertEqual(fake_compile.call_args.kwargs, {"static_argnums": (1,)})
+        """Both resolved selectors reach jax.jit, so no JAX version infers either;
+        a negative index names its parameter and counts from the signature."""
+        cases = (
+            ((1,), lambda wrapped, x, static: wrapped(x, static)),
+            (-1, lambda wrapped, x, static: wrapped(x, marker=static)),
+        )
+        for argnums, call in cases:
+            with self.subTest(static_argnums=argnums):
+                device_sentinel = object()
+                static_sentinel = object()
+                x = np.ones(4)
+                fake_compile = mock.Mock(side_effect=lambda fun, **kwargs: fun)
+                context = mock.Mock(side_effect=lambda device: nullcontext())
+                with mock.patch.dict(parameters, {"jit": True}), \
+                        mock.patch.object(jit_module, "jaxjit", fake_compile), \
+                        mock.patch.object(jit_module, "native_jax_device", return_value=device_sentinel), \
+                        mock.patch.object(jit_module.jax, "default_device", context):
+                    wrapped = jit_module.jit(lambda a, marker: (a, marker), static_argnums=argnums)
+                    held, marker = call(wrapped, x, static_sentinel)
+                x[:] = 5
+                np.testing.assert_array_equal(held, np.ones(4))
+                self.assertIs(marker, static_sentinel)
+                context.assert_called_once_with(device_sentinel)
+                self.assertEqual(
+                    fake_compile.call_args.kwargs,
+                    {"static_argnums": (1,), "static_argnames": ("marker",)},
+                )
 
     def test_real_jax_outputs_keep_call_time_values_after_input_mutation(self):
         """Even ready identity outputs of bare, nested and keyword arrays own their values."""
@@ -269,15 +281,13 @@ class JitOwnershipTests(unittest.TestCase):
         do not infer the other selector or bind keyword calls."""
         inferred = ({"static_argnums": 1}, {"static_argnums": (1,)}, {"static_argnums": np.int64(1)},
                     {"static_argnums": np.array(1, dtype=np.int64)}, {"static_argnums": IndexSelector()},
-                    {"static_argnames": "constant"})
+                    {"static_argnums": -1}, {"static_argnames": "constant"})
         cases = [
             *((options, call, True) for options in inferred for call in (positional, keyword)),
             ({"static_argnums": 1, "static_argnames": ()}, positional, True),
             ({"static_argnums": 1, "static_argnames": ()}, keyword, False),
             ({"static_argnums": (), "static_argnames": "constant"}, positional, False),
             ({"static_argnums": (), "static_argnames": "constant"}, keyword, True),
-            ({"static_argnums": -1}, positional, True),
-            ({"static_argnums": -1}, keyword, False),
             ({"static_argnums": iter((1,))}, positional, True),
             ({"static_argnames": iter(("constant",))}, positional, True),
         ]
