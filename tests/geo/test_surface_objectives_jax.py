@@ -160,8 +160,10 @@ _NATIVE_CASES = {
 # differs from native's (a BoozerLS ToroidalFlux label) and where the solves differ beyond
 # round-off (BoozerLS without stellarator symmetry: the native and JAX solves end on
 # parametrizations of the surface 20 % apart in the DOFs along a near-null direction, with iota
-# equal to 6e-14, so J on them differs by 4e-8).
+# equal to 6e-14, so J on them differs by 4e-8). BoozerExact without stellarator symmetry is
+# also in _NATIVE_CASES; here native's objective reads the JAX surface's exact adjoint.
 _JAX_SURFACE_CASES = {
+    "exact-flux-nonsym": ("exact", "ToroidalFlux", False, {}),
     "ls-flux": ("ls", "ToroidalFlux", True, {}),
     "ls-volume-nonsym-quasi-poloidal": (
         "ls",
