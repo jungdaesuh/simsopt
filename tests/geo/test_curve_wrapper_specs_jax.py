@@ -9,9 +9,16 @@ checked against the spectral derivative of the first.
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, host_array, optional_jax_imports
+from unittest_jax_support import (
+    JaxTestCase,
+    host_array,
+    optional_jax_imports,
+    require_cuda,
+)
 
 with optional_jax_imports():
+    import jax
+    from simsopt_jax.backend import invalidate_backend_cache, set_backend
     from simsopt_jax.core import (
         curve_gamma_and_gammadash_from_dofs,
         curve_geometry_from_dofs,
@@ -223,3 +230,17 @@ class TestCurveWrapperSpecs(JaxTestCase):
                     input_start=0,
                     input_end=4,
                 )
+
+    def test_wrapper_dof_map_templates_follow_the_runtime_device(self):
+        """Under a jax-cpu policy in a CUDA process, wrapper DOF-map templates join the
+        other spec leaves on the runtime CPU device instead of JAX's default GPU."""
+        require_cuda("CUDA device required for a runtime device JAX would not choose")
+        invalidate_backend_cache()
+        set_backend("jax_cpu_parity", configure_runtime=False)
+        cpu = jax.devices("cpu")[0]
+        base = _xyz_curve(_BASE)
+        for wrapper in (CurvePerturbed(base, _gaussian_sample(base, 1)), _filament(base, FramedCurveCentroid)):
+            with self.subTest(wrapper=type(wrapper).__name__):
+                spec = curve_spec_from_adapter_curve(wrapper)
+                devices = {leaf.devices().pop() for leaf in jax.tree.leaves(spec)}
+                self.assertEqual(devices, {cpu})
