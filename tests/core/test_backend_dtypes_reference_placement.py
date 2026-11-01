@@ -33,16 +33,21 @@ _PLACEMENT_CHILD = (
 )
 
 
-def _run_placement_child(scenario, environment):
-    """Run one ``fresh_process/backend_dtypes_placement.py`` scenario."""
+def _run_fresh_process_child(name, environment, *arguments):
+    """Run the ``fresh_process`` script ``name`` with ``arguments`` in a new interpreter."""
     return subprocess.run(
-        (sys.executable, str(_PLACEMENT_CHILD), scenario),
+        (sys.executable, str(_PLACEMENT_CHILD.with_name(name)), *arguments),
         env=environment,
         check=False,
         capture_output=True,
         text=True,
         timeout=300,
     )
+
+
+def _run_placement_child(scenario, environment):
+    """Run one ``fresh_process/backend_dtypes_placement.py`` scenario."""
+    return _run_fresh_process_child(_PLACEMENT_CHILD.name, environment, scenario)
 
 
 class TestBackendDtypesReferencePlacement(JaxTestCase):
@@ -246,22 +251,25 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         """Without ``simsopt.geo`` or ``set_backend``, the raw B kernel matches the
         analytic on-axis loop field to float64 precision, also with x64 disabled
         in the environment."""
-        child = _PLACEMENT_CHILD.with_name("raw_kernel_float64.py")
         for x64_setting in (None, "false"):
             with self.subTest(JAX_ENABLE_X64=x64_setting):
                 environment = dict(os.environ, JAX_PLATFORMS="cpu")
                 environment.pop("JAX_ENABLE_X64", None)
                 if x64_setting is not None:
                     environment["JAX_ENABLE_X64"] = x64_setting
-                completed = subprocess.run(
-                    (sys.executable, str(child)),
-                    env=environment,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
+                completed = _run_fresh_process_child(
+                    "raw_kernel_float64.py", environment
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_set_backend_reenables_float64_disabled_after_import(self):
+        """With x64 disabled after ``simsopt_jax`` was imported, selecting either
+        CPU mode runs the raw B kernel in float64 again (analytic on-axis loop
+        field to 1e-13 relative)."""
+        completed = _run_fresh_process_child(
+            "set_backend_float64.py", dict(os.environ, JAX_PLATFORMS="cpu")
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_explicit_device_array_rejects_reduced_precision_floats(self):
         """An exact-dtype placement accepts float64 as its only floating dtype."""
