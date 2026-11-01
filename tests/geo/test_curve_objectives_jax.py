@@ -775,6 +775,23 @@ class TestCurveObjectivesJax(JaxTestCase):
             self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
             base[0].x = np.asarray(base[0].x) - 0.01
 
+    def test_a_notification_discards_assigned_distance_candidates(self):
+        """As on native, a recompute notification discards assigned candidates even when
+        the geometry is unchanged: reassigning a curve's own DOFs brings back the searched
+        pairs and their nonzero penalty."""
+        base, curves = _curves()
+        surface = _surface()
+        for native, adapter in _candidate_query_objectives(base, curves, surface, _CC_THRESHOLD):
+            name = type(native).__name__
+            with self.subTest(objective=name), self.case():
+                native.candidates = adapter.candidates = []
+                self.assertEqual(adapter.J(), 0.0)
+                base[0].x = np.array(base[0].x)
+                native.compute_candidates()
+                self.assertTrue(native.candidates, name)
+                self.assertEqual(sorted(adapter.candidates), _native_candidates(native))
+                _assert_matches_native_including_nans(name, native, adapter, active=True)
+
     def test_distance_terms_evaluate_every_point_of_a_native_candidate(self):
         """Within a candidate pair every point is evaluated, as native: a zero tangent
         far from the other curve still gives native's non-finite gradient."""

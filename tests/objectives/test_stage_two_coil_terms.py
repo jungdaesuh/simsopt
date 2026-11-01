@@ -30,10 +30,13 @@ with optional_jax_imports():
     from simsopt.geo import (
         CurveCurveDistance,
         CurveLength,
+        CurvePerturbed,
         CurveSurfaceDistance,
         CurveXYZFourier,
+        GaussianSampler,
         LpCurveCurvature,
         MeanSquaredCurvature,
+        PerturbationSample,
         create_equally_spaced_curves,
         create_multifilament_grid,
     )
@@ -336,6 +339,56 @@ class TestStageTwoCoilTerms(JaxTestCase):
         value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
         np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=0.0)
         _assert_close(gradient, _native_gradient(native, field))
+
+    def test_coil_terms_read_sample_second_derivatives_only_for_the_lp_terms(self):
+        """As on native, perturbation samples with first derivatives only (GaussianSampler's
+        default) suffice for the squared mean force and torque and the vacuum energy, which
+        match native; the Lp force and torque read the regularized self-field, so on perturbed
+        base coils they raise, as native LpCurveForce does."""
+        surface = _surface()
+        coils = _force_coils(surface)
+        base = [coil.curve for coil in coils[:_NCOILS]]
+        sampler = GaussianSampler(base[0].quadpoints, 1e-3, 0.2, n_derivs=1)
+        rng = np.random.default_rng(37)
+        perturbed = coils_via_symmetries(
+            [CurvePerturbed(curve, PerturbationSample(sampler, randomgen=rng)) for curve in base],
+            [coil.current for coil in coils[:_NCOILS]],
+            surface.nfp,
+            True,
+            [coil.regularization for coil in coils[:_NCOILS]],
+        )
+        regularizations = [coil.regularization for coil in perturbed]
+        first_derivative_terms = StageTwoObjectiveConfig(
+            num_basecurves=_NCOILS,
+            squared_mean_force_weight=1e2,
+            squared_mean_torque_weight=1e4,
+            vacuum_energy_weight=0.1,
+        )
+        with self.case():
+            field = JaxBiotSavart(perturbed)
+            flux = JaxSquaredFlux(surface, field)
+            problem = make_stage_two_problem(
+                field, flux.fixed_surface_flux_spec(), first_derivative_terms, regularizations=regularizations
+            )
+            native = _native_force_composite(surface, perturbed, first_derivative_terms)
+            value, gradient = _value_and_grad(problem, jnp.asarray(field.x))
+            np.testing.assert_allclose(float(value), native.J(), rtol=1e-12, atol=0.0)
+            _assert_close(gradient, _native_gradient(native, field))
+        for case_id, weight, native_class in (
+            ("force", "force_weight", LpCurveForce), ("torque", "torque_weight", LpCurveTorque),
+        ):
+            with self.subTest(case=case_id), self.case():
+                config = replace(first_derivative_terms, **{weight: 1e5})
+                field = JaxBiotSavart(perturbed)
+                flux = JaxSquaredFlux(surface, field)
+                problem = make_stage_two_problem(
+                    field, flux.fixed_surface_flux_spec(), config, regularizations=regularizations
+                )
+                with self.assertRaisesRegex(ValueError, "has 1 derivatives"):
+                    _value_and_grad(problem, jnp.asarray(field.x))
+                native = native_class(perturbed[:_NCOILS], perturbed)
+                with self.assertRaisesRegex(ValueError, "Adjust the `n_derivs` parameter of the sampler"):
+                    native.J()
 
     def test_coil_geometry_keeps_its_outputs_and_geometry_adds_centerlines(self):
         """``stage_two_coil_geometry`` returns ``(gamma, gammadash, gammadashdash, currents)``
