@@ -142,13 +142,15 @@ class TestCoilDofExtractionSegments(JaxTestCase):
         ]
         expected_currents = [float(current.get_value()) for current in currents]
 
+        # The guard refuses implicit transfers, so the DOFs are placed before it.
+        device_dofs = jnp.asarray(free_dofs)
         compiled = (
             jit(lambda dofs: coil_specs_from_dof_extraction_spec(spec, dofs))
-            .lower(jnp.asarray(free_dofs))
+            .lower(device_dofs)
             .compile()
         )
         with jax.transfer_guard("disallow"):
-            coil_specs = compiled(jnp.asarray(free_dofs))
+            coil_specs = compiled(device_dofs)
 
         for coil_spec, expected_dofs, expected_current in zip(
             coil_specs, expected_curve_dofs, expected_currents
