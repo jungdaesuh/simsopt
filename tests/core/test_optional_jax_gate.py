@@ -42,3 +42,16 @@ class TestOptionalJaxGate(TestCase):
         """With an unsupported JAX every test module still imports, so discovery can skip."""
         completed = _run_child("discover_with_unsupported_jax.py")
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_version_gate_accepts_every_0_12_release_and_rejects_0_11(self):
+        """The floor is the 0.12 series: four-part and local releases pass, 0.11 fails."""
+        from simsopt_jax._requirements import _require_jax_version
+
+        for version in ("0.12.0", "0.12.0.1", "0.12.1", "0.12.0.1+cuda12", "0.13.0", "1.0.0"):
+            with self.subTest(version=version):
+                _require_jax_version("jax", version)
+        for version in ("0.11.2", "0.11.9.1", "0.10.0", "0.9.0"):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                ImportError, "requires jax >= 0.12; found " + version.replace(".", r"\.")
+            ):
+                _require_jax_version("jax", version)
