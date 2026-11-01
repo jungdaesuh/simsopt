@@ -1,4 +1,4 @@
-# This module ports SciPy 1.17's BFGS (scipy/optimize/_optimize.py and
+# This module ports SciPy 1.18's BFGS (scipy/optimize/_optimize.py and
 # _linesearch.py) and L-BFGS-B (scipy/optimize/__lbfgsb.c) to JAX. They are
 # distributed under the following licenses, whose notices, conditions and
 # disclaimers are retained here.
@@ -101,7 +101,7 @@ Statuses, messages (``BFGS_MESSAGES[message]``, ``LBFGSB_MESSAGES[message]``),
 iteration counts, ``nfev``/``njev`` (``ScalarFunction`` counts a point again
 only when it differs from the last one), ``hess_inv`` and SciPy's checks of
 its inputs without bounds are SciPy's. These claims are checked against
-SciPy 1.17 and 1.18 only; other SciPy versions may differ in them.
+SciPy 1.18 only; other SciPy versions may differ in them.
 
 Iterates agree with SciPy to round-off, not bitwise: XLA sums dot and matrix
 products in its own order and may fuse a multiply and an add into one

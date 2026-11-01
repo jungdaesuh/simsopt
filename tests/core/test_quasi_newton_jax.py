@@ -1,4 +1,4 @@
-"""``simsopt_jax.core.quasi_newton`` against SciPy's BFGS and L-BFGS-B (1.17 and 1.18).
+"""``simsopt_jax.core.quasi_newton`` against SciPy 1.18's BFGS and L-BFGS-B.
 
 Each solver runs beside ``scipy.optimize.minimize(jac=True)`` on a quadratic
 (eigenvalues 1 to 1e3), the Rosenbrock function and an ill-conditioned
@@ -101,7 +101,7 @@ _LBFGSB_FTOL = "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
 _ROUND_OFF_WALKS = {
     # 180 to 200 iterations: early-iterate gaps grow from 1e-16 to 1e-1 by k = 110.
     # Round-off also picks the convergence test that stops it. From x0 moved by an
-    # ulp in one entry (40 draws), SciPy 1.17.1, 1.18.0 and 1.18.1 stop twice on
+    # ulp in one entry (40 draws), SciPy 1.18.0 and 1.18.1 stop twice on
     # FTOL, else on PGTOL (nit 179 to 191), on a NumPy objective, and 3 times on
     # FTOL on this JAX objective under JAX 0.10; with f and each entry of g moved
     # by up to an ulp at every evaluation, 8 times in 200. The port, which rounds
@@ -256,17 +256,16 @@ def _options(method, maxiter, **extra):
     return {"gtol": _GTOL, "ftol": 1e-14, "maxiter": maxiter, "maxcor": 3, **extra}
 
 
-# The SciPy versions these comparisons (records, messages and the private
-# _linesearch helpers) hold for: 1.18 keeps 1.17's _minimize_bfgs, _linesearch.py
-# and _dcsrch.py, and lbfgsb.c's logic without bounds. Another SciPy is not their
-# reference. Where JAX is unavailable, JaxTestCase's reason stands.
-_SCIPY_REFERENCES = ((1, 17), (1, 18))
+# The SciPy version these comparisons (records, messages and the private
+# _linesearch helpers) hold for, the one the port is tested against. Another SciPy
+# is not their reference. Where JAX is unavailable, JaxTestCase's reason stands.
+_SCIPY_REFERENCE = (1, 18)
 _SCIPY_VERSION = tuple(int(part) for part in scipy.__version__.split(".")[:2])
 
 
 @unittest.skipUnless(
-    JAX_IMPORT_ERROR is not None or _SCIPY_VERSION in _SCIPY_REFERENCES,
-    f"compares with SciPy {' and '.join('.'.join(map(str, v)) for v in _SCIPY_REFERENCES)}, not {scipy.__version__}",
+    JAX_IMPORT_ERROR is not None or _SCIPY_VERSION == _SCIPY_REFERENCE,
+    f"compares with SciPy {'.'.join(map(str, _SCIPY_REFERENCE))}, not {scipy.__version__}",
 )
 class TestQuasiNewtonJax(JaxTestCase):
     def _assert_scipy_record(self, expected: OptimizeResult, result, message: str, name: str):
