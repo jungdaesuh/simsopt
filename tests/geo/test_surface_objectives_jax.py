@@ -19,7 +19,10 @@ native surfaces where the JAX adjoint is native's, and against native
 objectives on the same JAX surface where the JAX adjoint deliberately differs (BoozerLS
 with a ToroidalFlux label, where native's adjoint is not the derivative) or where the
 native and JAX solves differ by more than round-off (BoozerLS without
-stellarator symmetry, along a near-null direction of its DOFs).
+stellarator symmetry, along a near-null direction of its DOFs). BoozerExact without
+stellarator symmetry is compared both ways: on native surfaces for its values, and on the
+JAX surface, where native's objective reads the JAX surface's exact adjoint
+(``res['PLU']``, ``res['vjp']``), for that interoperation.
 Values and gradients agree to 1e-12 of the largest native entry (measured
 worst 4e-14).
 """
@@ -161,7 +164,8 @@ _NATIVE_CASES = {
 # round-off (BoozerLS without stellarator symmetry: the native and JAX solves end on
 # parametrizations of the surface 20 % apart in the DOFs along a near-null direction, with iota
 # equal to 6e-14, so J on them differs by 4e-8). BoozerExact without stellarator symmetry is
-# also in _NATIVE_CASES; here native's objective reads the JAX surface's exact adjoint.
+# also in _NATIVE_CASES, which checks its values. Here native's objective reads the JAX surface's
+# exact adjoint, so this row checks that native can use it; both sides share that adjoint.
 _JAX_SURFACE_CASES = {
     "exact-flux-nonsym": ("exact", "ToroidalFlux", False, {}),
     "ls-flux": ("ls", "ToroidalFlux", True, {}),
