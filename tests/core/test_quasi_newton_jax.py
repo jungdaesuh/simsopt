@@ -108,7 +108,8 @@ _ROUND_OFF_WALKS = {
     # differently at every iteration, stops on FTOL in 5 of those 40 draws on
     # JAX 0.12.0.1's CPU lane (jaxlib's CPU LAPACK calls are SciPy's).
     ("L-BFGS-B", "quadratic"): frozenset({_LBFGSB_PGTOL, _LBFGSB_FTOL}),
-    # Its count changes with how XLA compiles the same loop (107 or 147; SciPy 109).
+    # Its count changes with how XLA compiles the same loop (JAX 0.12.0.1: 114 on
+    # the CPU lane, 96 on the GPU lane; SciPy 1.18.1 109).
     ("L-BFGS-B", "ill-conditioned"): frozenset(),
 }
 _GTOL = 1e-6
