@@ -30,8 +30,8 @@ Retained settings:
   Eager JAX indexing can stage scalar indices; explicitly use the boundary
   owner's ``allow_host_transfers`` context when evaluating in that debug mode.
 * Every supported mode runs JAX in float64 (``jax_enable_x64``, which
-  importing ``simsopt_jax`` enables) with matrix products at the highest
-  precision.
+  importing ``simsopt_jax`` enables and ``set_backend`` enables again) with
+  matrix products at the highest precision.
 * ``SIMSOPT_JAX_COIL_CHUNK_SIZE``, ``SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE`` and
   ``SIMSOPT_JAX_POINT_CHUNK_SIZE`` override the mode's field tiling. A disallow
   transfer guard selects dense audit kernels (zero chunk sizes).
@@ -63,6 +63,8 @@ from typing import Callable, Literal
 
 import jax
 import jax.extend.backend
+
+from simsopt_jax._requirements import enable_float64
 
 # Public + private re-exports: callers and tests keep importing from this facade.
 from simsopt_jax.backend._runtime_policy import (
@@ -491,14 +493,68 @@ def _device_platform(device) -> str:
     return device if isinstance(device, str) else device.platform
 
 
-def _select_initialized_jax_default_device(jax_module, config: BackendConfig) -> None:
-    """Make the requested platform JAX's default device in an initialized process.
+def _initialized_runtime_platform(jax_module, config: BackendConfig) -> str | None:
+    """Return the initialized JAX platform that serves ``config``, changing no setting.
+
+    This is the platform check of :func:`apply_jax_runtime_config`, run before
+    it changes any JAX setting. Listing the platforms initializes JAX's
+    backends if nothing did yet. A platform JAX never initialized cannot be
+    selected: that warns, or raises in strict and GPU parity modes.
+
+    Args:
+        jax_module (module): The ``jax`` module.
+        config (BackendConfig): Configuration being applied, with a JAX platform.
+
+    Returns:
+        str or None: Name of the first initialized backend that runs
+            ``config.jax_platform`` (``"cpu"``, or ``"cuda"`` or ``"gpu"`` for
+            CUDA), or None after the warning.
+
+    Raises:
+        RuntimeError: The platform was never initialized, in strict or GPU
+            parity mode.
+    """
+    expected_backends = _expected_runtime_backend_names(config.jax_platform)
+    initialized_platforms = tuple(jax_module.extend.backend.backends())
+    platform = next(
+        (name for name in initialized_platforms if name in expected_backends), None
+    )
+    if platform is None:
+        message = (
+            f"Requested JAX platform {config.jax_platform!r} for backend mode "
+            f"{config.mode!r}, but JAX initialized only "
+            f"{sorted(initialized_platforms)}. Set backend environment variables "
+            "before importing or touching JAX devices."
+        )
+        _raise_or_warn_runtime_issue(config, message)
+    return platform
+
+
+def _default_device_updates(
+    jax_module, config: BackendConfig, platform: str
+) -> tuple[tuple[str, object], ...]:
+    """The ``jax_default_device`` update that makes the requested platform JAX's default.
 
     ``jax_platforms`` only decides which platforms JAX initializes, so once a
     process has several, the requested one becomes the default through
     ``jax_default_device``; a stale selection is cleared when JAX's own default
-    backend already matches. A platform JAX never initialized cannot be
-    selected: that warns, or raises in strict and GPU parity modes.
+    backend already matches. This only decides, so it runs among the checks of
+    :func:`apply_jax_runtime_config`: looking up JAX's default backend raises
+    when a deprecated selector (``jax_xla_backend``) names a platform JAX never
+    initialized, and that must reject the call before a setting changes.
+
+    Args:
+        jax_module (module): The ``jax`` module.
+        config (BackendConfig): Configuration being applied, with a JAX platform.
+        platform (str): Initialized backend that runs ``config.jax_platform``,
+            as :func:`_initialized_runtime_platform` returns it.
+
+    Returns:
+        tuple of (str, object) pairs: The ``(name, value)`` JAX setting updates to
+            apply, none or one ``("jax_default_device", device or None)``.
+
+    Raises:
+        RuntimeError: JAX cannot resolve its default backend.
     """
     expected_backends = _expected_runtime_backend_names(config.jax_platform)
     selected_device = jax_module.config.jax_default_device
@@ -509,30 +565,10 @@ def _select_initialized_jax_default_device(jax_module, config: BackendConfig) ->
         else _device_platform(selected_device)
     )
     if effective_backend in expected_backends:
-        return
+        return ()
     if default_backend in expected_backends:
-        jax_module.config.update("jax_default_device", None)
-        return
-    initialized_platform = next(
-        (
-            platform
-            for platform in jax_module.extend.backend.backends()
-            if platform in expected_backends
-        ),
-        None,
-    )
-    if initialized_platform is not None:
-        jax_module.config.update(
-            "jax_default_device", jax_module.devices(initialized_platform)[0]
-        )
-        return
-    message = (
-        f"Requested JAX platform {config.jax_platform!r} for backend mode "
-        f"{config.mode!r}, but the active JAX default backend is "
-        f"{effective_backend!r}. Set backend environment variables before "
-        "importing or touching JAX devices."
-    )
-    _raise_or_warn_runtime_issue(config, message)
+        return (("jax_default_device", None),)
+    return (("jax_default_device", jax_module.devices(platform)[0]),)
 
 
 def _validate_cuda_parity_determinism_env(config: BackendConfig) -> None:
@@ -690,20 +726,31 @@ def _export_startup_jax_platforms(config: BackendConfig) -> None:
         _exported_jax_platforms = exported
 
 
+def _xla_flags_with_cuda_autotuner_pins(xla_flags: str | None) -> str:
+    """Return ``xla_flags`` with both CUDA autotuner pins appended.
+
+    Same composition contract as :func:`_xla_flags_with_cpu_compile_preset`:
+    caller-provided autotuner settings are respected, and re-applying is a no-op.
+    """
+    return _xla_flags_with_gpu_autotune_level_pinned(
+        _xla_flags_with_gpu_fusion_autotuner_disabled(xla_flags)
+    )
+
+
 def apply_cuda_xla_flag_pins() -> str:
     """Put both CUDA autotuner pins into ``XLA_FLAGS`` and return its value.
 
     Inert on the CPU backend, so a host that probes devices before it installs
-    a backend config (a test session, a notebook) can call this at import time;
-    the config-install sites call it through :func:`_apply_cuda_autotuner_env`.
+    a backend config (a test session, a notebook) can call this at import time.
+    Unlike the config-install sites (:func:`_apply_cuda_autotuner_env`), it
+    exports the pins also after JAX initialized its backends, because the
+    caller asked for them.
 
     Returns:
         str: Updated XLA_FLAGS, preserving explicitly supplied autotuner
             settings.
     """
-    pinned = _xla_flags_with_gpu_autotune_level_pinned(
-        _xla_flags_with_gpu_fusion_autotuner_disabled(os.environ.get(_XLA_FLAGS_ENV))
-    )
+    pinned = _xla_flags_with_cuda_autotuner_pins(os.environ.get(_XLA_FLAGS_ENV))
     _set_runtime_env(_XLA_FLAGS_ENV, pinned)
     return pinned
 
@@ -715,20 +762,32 @@ def _apply_cuda_autotuner_env(config: BackendConfig) -> None:
     kernels during compilation. Autotune level zero fixes library algorithm
     selection across fresh compiles, which keeps chunked Biot-Savart reductions
     reproducible. Explicit caller flags take precedence; both defaults are
-    inert on CPU.
+    inert on CPU. XLA reads ``XLA_FLAGS`` only when it initializes its
+    backends, so once JAX did, the pins cannot change this process and are not
+    exported, which would hand child processes flags the parent never ran
+    with; a missing pin then warns, since this process's fresh compiles are not
+    bitwise-reproducible.
+
+    Args:
+        config (BackendConfig): Configuration being installed.
     """
     if config.jax_platform != "cuda":
         return
-    previous = os.environ.get(_XLA_FLAGS_ENV)
-    if apply_cuda_xla_flag_pins() != previous and _jax_backends_initialized():
-        _warn_at_caller(
-            "XLA already initialized its backends before the CUDA autotuner pins "
-            f"reached {_XLA_FLAGS_ENV}; this process compiles with XLA's default "
-            "GPU autotuning, so fresh compiles are not bitwise-reproducible. "
-            "Resolve the simsopt backend config (or call "
-            "simsopt_jax.backend.runtime.apply_cuda_xla_flag_pins()) before "
-            "touching JAX devices."
-        )
+    xla_flags = os.environ.get(_XLA_FLAGS_ENV)
+    pinned = _xla_flags_with_cuda_autotuner_pins(xla_flags)
+    if pinned == xla_flags:
+        return
+    if not _jax_backends_initialized():
+        _set_runtime_env(_XLA_FLAGS_ENV, pinned)
+        return
+    _warn_at_caller(
+        "XLA already initialized its backends without the CUDA autotuner pins in "
+        f"{_XLA_FLAGS_ENV}; this process compiles with XLA's default GPU "
+        "autotuning, so fresh compiles are not bitwise-reproducible, and "
+        f"{_XLA_FLAGS_ENV} is left unchanged. Resolve the simsopt backend config "
+        "(or call simsopt_jax.backend.runtime.apply_cuda_xla_flag_pins()) before "
+        "touching JAX devices."
+    )
 
 
 _compilation_cache_applied_dir: str | None = None
@@ -765,7 +824,18 @@ def _apply_compilation_cache_config(jax, config: BackendConfig) -> None:
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process.
 
-    Does nothing when the resolved backend is native.
+    Every check that can reject the configuration (the CUDA determinism flags,
+    the platform, then the default-backend lookup) runs before a JAX setting
+    that a JAX context can hide changes. A rejected call therefore changes no
+    such setting, also inside a context such as ``jax.transfer_guard(...)``.
+    The exceptions are :data:`_PRE_CHECK_JAX_SETTINGS`, which the checks need
+    first, and which ``set_backend`` restores when the call is rejected. Does
+    nothing when the resolved backend is native.
+
+    Raises:
+        RuntimeError: GPU parity without the determinism ``XLA_FLAGS``, a
+            platform JAX never initialized in strict or GPU parity mode, or a
+            default backend JAX cannot resolve.
     """
     config = get_backend_config()
     if config.backend != "jax":
@@ -774,23 +844,37 @@ def apply_jax_runtime_config() -> None:
     _validate_cuda_parity_determinism_env(config)
     _apply_jax_gpu_memory_env(config)
     _apply_cpu_compile_preset_env(config, policy)
-    _apply_cuda_autotuner_env(config)
+    # The CUDA autotuner pins are applied where the configuration is installed
+    # (``get_backend_config`` and ``set_backend``), once per installation.
 
     if not _jax_backends_initialized():
         jax.config.update("jax_platforms", _startup_jax_platforms(config))
+    platform = _initialized_runtime_platform(jax, config)
     # JAX resolves the default backend from the deprecated ``jax_platform_name``
     # before ``jax_platforms``. ``simsopt.geo`` sets it to ``"cpu"`` when no JAX
     # platform environment variable is set, which would keep the selected
     # platform from becoming the default (or fail when CPU is not listed).
     # Clearing it makes the selected platform, listed first, the default.
     jax.config.update("jax_platform_name", "")
+    default_device_updates = (
+        () if platform is None else _default_device_updates(jax, config, platform)
+    )
+    enable_float64()
     jax.config.update("jax_default_matmul_precision", "highest")
     jax.config.update("jax_debug_nans", config.debug_nans)
     jax.config.update("jax_disable_jit", config.disable_jit)
     if config.transfer_guard is not None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     _apply_compilation_cache_config(jax, config)
-    _select_initialized_jax_default_device(jax, config)
+    for name, value in default_device_updates:
+        jax.config.update(name, value)
+
+
+# JAX settings ``apply_jax_runtime_config`` changes before its last check:
+# ``jax_platforms`` (before backends initialize) decides which platforms the
+# platform check initializes, and ``jax_platform_name`` must be cleared before
+# the default-backend lookup. A rejected ``set_backend`` restores them.
+_PRE_CHECK_JAX_SETTINGS = ("jax_platforms", "jax_platform_name")
 
 
 # Process state a ``set_backend`` call changes, restored when the call is rejected.
@@ -811,8 +895,10 @@ def _restore_backend_state_on_error() -> Iterator[None]:
     """Hold the runtime lock and undo every change if the body raises.
 
     Restores the installed configuration, the environment variables
-    ``set_backend`` synchronizes or exports, and every JAX setting, so a
-    rejected call leaves the process in the mode it had before.
+    ``set_backend`` synchronizes or exports, and :data:`_PRE_CHECK_JAX_SETTINGS`,
+    so a rejected call leaves the process in the mode it had before. No other
+    JAX setting needs restoring: :func:`apply_jax_runtime_config` runs every
+    check that can reject before it changes one.
     """
     global _cached_backend_config
     global _requested_jax_platforms_value, _exported_jax_platforms
@@ -820,7 +906,9 @@ def _restore_backend_state_on_error() -> Iterator[None]:
         config = _cached_backend_config
         platforms_state = (_requested_jax_platforms_value, _exported_jax_platforms)
         env = tuple((name, os.environ.get(name)) for name in _SET_BACKEND_ENV_NAMES)
-        jax_config = dict(jax.config.values)
+        jax_settings = tuple(
+            (name, jax.config.values[name]) for name in _PRE_CHECK_JAX_SETTINGS
+        )
         try:
             yield
         except BaseException:
@@ -829,11 +917,9 @@ def _restore_backend_state_on_error() -> Iterator[None]:
             _reset_backend_runtime_caches()
             for name, value in env:
                 _set_runtime_env(name, value)
-            # The aggregate transfer guard sets the three directional ones,
-            # so it goes back first.
-            for name in ("jax_transfer_guard", *jax_config):
-                if jax.config.values[name] != jax_config[name]:
-                    jax.config.update(name, jax_config[name])
+            for name, value in jax_settings:
+                if jax.config.values[name] != value:
+                    jax.config.update(name, value)
             raise
 
 
@@ -859,11 +945,13 @@ def set_backend(
     helpers continue to work unchanged. GPU memory keywords resolve the
     pre-backend-initialization JAX/XLA allocator env vars explicitly; env overrides still sit
     between mode defaults and these arguments. Once JAX initialized its backends they
-    cannot change the process, so a differing setting warns instead. Also updates the
-    config cache so subsequent ``get_backend_config()`` calls are free. A call that
-    raises leaves the previous configuration, environment and JAX settings in place;
-    JAX backends it initialized (selecting the default device does) stay initialized,
-    so later GPU allocator settings no longer apply.
+    cannot change the process, so a differing setting warns instead. The CUDA
+    autotuner pins it adds to ``XLA_FLAGS`` follow the same rule: once JAX
+    initialized its backends they are not exported, and their absence warns. Also
+    updates the config cache so subsequent ``get_backend_config()`` calls are free.
+    A call that raises leaves the previous configuration, environment and JAX
+    settings in place; JAX backends it initialized (checking the requested platform
+    does) stay initialized, so later GPU allocator settings no longer apply.
 
     Args:
         mode (str): A canonical backend mode, or jax with an explicit device selector.

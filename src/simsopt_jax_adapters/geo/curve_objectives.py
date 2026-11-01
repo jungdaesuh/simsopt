@@ -326,17 +326,26 @@ class JaxMeanSquaredCurvature(Optimizable):
 class _DistanceCandidates:
     """Host-only native candidate data, independent of JAX operand placement.
 
-    ``candidates`` is the native search's result for the state ``key``, or the
-    pairs a caller assigned at that state.
+    ``candidates`` is the native search's result for the state ``key``, or, when
+    ``assigned``, the pairs a caller assigned at that state; as on native, the
+    next recompute notification discards an assignment.
     """
 
     key: tuple[object, ...]
     candidates: tuple[tuple[int, int], ...]
+    assigned: bool = False
 
 
 def _assigned_candidates(key: tuple[object, ...], pairs) -> _DistanceCandidates | None:
     """Native's ``candidates`` assignment at the state ``key``: None reruns the search."""
-    return None if pairs is None else _DistanceCandidates(key, tuple(tuple(pair) for pair in pairs))
+    return None if pairs is None else _DistanceCandidates(
+        key, tuple(tuple(pair) for pair in pairs), assigned=True
+    )
+
+
+def _searched_candidates(cached: _DistanceCandidates | None) -> _DistanceCandidates | None:
+    """``cached`` without an assignment: what a recompute notification leaves, as on native."""
+    return None if cached is not None and cached.assigned else cached
 
 
 @dataclass(frozen=True)
@@ -563,8 +572,8 @@ class JaxCurveCurveDistance(Optimizable):
         """The candidate pairs at the current state, searched when not yet known.
 
         Assigning a list of pairs makes ``J``, ``dJ`` and the distance queries use it, as
-        in native, until the curve geometry or the settings change; assigning None
-        reruns the search.
+        in native, until the next recompute notification (any curve DOF assignment) or a
+        change of the geometry or settings; assigning None reruns the search.
 
         Returns:
             list[tuple[int, int]]: a copy of the curve index pairs ``(i, j)`` with some
@@ -575,6 +584,16 @@ class JaxCurveCurveDistance(Optimizable):
     @candidates.setter
     def candidates(self, pairs):
         self._candidate_cache = _assigned_candidates(self._candidate_key(), pairs)
+
+    def recompute_bell(self, parent=None):
+        """Discard assigned candidates on a recompute notification, as native does.
+
+        The search result stays cached per exact geometry.
+
+        Args:
+            parent (Optimizable or None): Dependency that sent the notification.
+        """
+        self._candidate_cache = _searched_candidates(self._candidate_cache)
 
     def compute_candidates(self):
         """Run the native candidate search unless its result for the current state is cached."""
@@ -773,8 +792,9 @@ class JaxCurveSurfaceDistance(Optimizable):
         """The candidate curves at the current state, searched when not yet known.
 
         Assigning a list of pairs ``(i, 0)`` makes ``J``, ``dJ`` and the distance queries
-        use it, as in native, until the curve or surface geometry or the threshold
-        change; assigning None reruns the search.
+        use it, as in native, until the next recompute notification (any curve DOF
+        assignment) or a change of the curve or surface geometry or the threshold;
+        assigning None reruns the search.
 
         Returns:
             list[tuple[int, int]]: a copy of the pairs ``(i, 0)`` of curve ``i`` with some
@@ -786,6 +806,16 @@ class JaxCurveSurfaceDistance(Optimizable):
     @candidates.setter
     def candidates(self, pairs):
         self._candidate_cache = _assigned_candidates(self._candidate_key(), pairs)
+
+    def recompute_bell(self, parent=None):
+        """Discard assigned candidates on a recompute notification, as native does.
+
+        The search result stays cached per exact geometry.
+
+        Args:
+            parent (Optimizable or None): Dependency that sent the notification.
+        """
+        self._candidate_cache = _searched_candidates(self._candidate_cache)
 
     def compute_candidates(self):
         """Run the native candidate search unless its result for the current state is cached."""
