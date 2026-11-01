@@ -10,7 +10,7 @@ import numpy as np
 from simsopt_jax.core.biotsavart import biot_savart_B
 
 
-def main() -> None:
+def check_on_axis_loop_field() -> None:
     """Compare B on the axis of a circular loop with mu0 I R^2 / (2 (R^2 + z^2)^(3/2))."""
     radius, current, quadpoints = 1.0, 1.0e5, 64
     phi = 2.0 * np.pi * np.arange(quadpoints) / quadpoints
@@ -31,4 +31,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    check_on_axis_loop_field()
