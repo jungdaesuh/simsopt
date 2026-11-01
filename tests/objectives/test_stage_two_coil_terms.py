@@ -386,8 +386,9 @@ class TestStageTwoCoilTerms(JaxTestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "has 1 derivatives"):
                     _value_and_grad(problem, jnp.asarray(field.x))
-                with self.assertRaises(ValueError):
-                    native_class(perturbed[:_NCOILS], perturbed).J()
+                native = native_class(perturbed[:_NCOILS], perturbed)
+                with self.assertRaisesRegex(ValueError, "Adjust the `n_derivs` parameter of the sampler"):
+                    native.J()
 
     def test_coil_geometry_keeps_its_outputs_and_geometry_adds_centerlines(self):
         """``stage_two_coil_geometry`` returns ``(gamma, gammadash, gammadashdash, currents)``
