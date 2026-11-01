@@ -707,51 +707,33 @@ def stage_two_coil_geometry(
     Returns:
         tuple: (gamma, gammadash, gammadashdash, currents), three arrays of shape (ncoils, nquadpoints, 3) in m and one array of shape (ncoils,) in A.
     """
-    return _stage_two_geometry(extraction, parameters, len(extraction.coils))
-
-
-def _stage_two_geometry(
-    extraction: CoilSetDofExtractionSpec,
-    parameters: jax.Array,
-    second_derivative_coils: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """:func:`stage_two_coil_geometry` with ``gammadashdash`` of the leading coils only.
-
-    ``gammadashdash`` has shape (min(second_derivative_coils, ncoils), nquadpoints, 3),
-    so the other coils' curves are differentiated once, as native evaluates
-    only what an objective reads.
-    """
     coil_specs = coil_specs_from_dof_extraction_spec(extraction, parameters)
     # Places every current's tangent on the parameters' device (a fixed
     # current's would otherwise be a symbolic zero) without coupling any
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
-    geometry: list[tuple[jax.Array, jax.Array, jax.Array]] = []
-    gammadashdashs: list[jax.Array] = []
-    geometry_by_curve = _ordinary_curve_geometry(
-        tuple(coil.curve for coil in coil_specs),
-        tuple(coil.curve for coil in coil_specs[:second_derivative_coils]),
-    )
-    for index, coil_spec in enumerate(coil_specs):
-        curve_terms = geometry_by_curve[id(coil_spec.curve)]
+    geometry: list[tuple[jax.Array, jax.Array, jax.Array, jax.Array]] = []
+    curves = tuple(coil.curve for coil in coil_specs)
+    geometry_by_curve = _ordinary_curve_geometry(curves, curves)
+    for coil_spec in coil_specs:
+        gamma, gammadash, gammadashdash = geometry_by_curve[id(coil_spec.curve)]
         gamma, gammadash, current = apply_coil_symmetry(
-            curve_terms[0],
-            curve_terms[1],
+            gamma,
+            gammadash,
             coil_spec.current.value[0],
             coil_spec.symmetry,
         )
-        if index < second_derivative_coils:
-            gammadashdash = curve_terms[2]
-            if coil_spec.symmetry.has_rotation:
-                gammadashdash = gammadashdash @ coil_spec.symmetry.rotmat
-            gammadashdashs.append(gammadashdash)
-        geometry.append((gamma, gammadash, current + parameter_zero))
-    gammas, gammadashs, currents = zip(*geometry, strict=True)
-    gammadash_stack = jnp.stack(gammadashs)
+        if coil_spec.symmetry.has_rotation:
+            gammadashdash = gammadashdash @ coil_spec.symmetry.rotmat
+        geometry.append((gamma, gammadash, gammadashdash, current + parameter_zero))
+    gammas, gammadashs, gammadashdashs, currents = zip(
+        *geometry,
+        strict=True,
+    )
     return (
         jnp.stack(gammas),
-        gammadash_stack,
-        jnp.stack(gammadashdashs) if gammadashdashs else gammadash_stack[:0],
+        jnp.stack(gammadashs),
+        jnp.stack(gammadashdashs),
         jnp.stack(currents),
     )
 
