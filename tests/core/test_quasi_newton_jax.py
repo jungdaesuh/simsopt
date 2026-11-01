@@ -85,10 +85,10 @@ _TINY_RTOL = 1e-14
 # differently (XLA's sums and fused multiply-adds); measured worst 1.1e-9 of the
 # largest entry, BFGS on the Rosenbrock function.
 _CONVERGED_HESS_INV_RTOL = 1e-7
-# Measured worst early gaps (JAX 0.10.0 CPU and GPU, 0.10.2 CPU): iterates
-# 3.9e-13, BFGS on the quartic on the GPU; fun and jac, which magnify an
-# iterate's difference, 1.5e-12 of their size, L-BFGS-B on the quadratic at
-# k = 9 on JAX 0.10.2.
+# Measured worst early gaps (JAX 0.12.0.1 CPU and GPU, SciPy 1.18.1): iterates
+# 4.3e-13, BFGS on the quartic on the GPU; fun and jac, which magnify an
+# iterate's difference, 1.2e-12 of their size, L-BFGS-B on the quadratic at
+# k = 9 on the GPU.
 _EARLY_FUN_JAC_RTOL = 10 * _EARLY_RTOL
 # At a converged solution fun and jac are near zero, so they are compared
 # absolutely (measured worst 3.3e-24 and 4.5e-14 where the walks match).
@@ -102,11 +102,11 @@ _ROUND_OFF_WALKS = {
     # 180 to 200 iterations: early-iterate gaps grow from 1e-16 to 1e-1 by k = 110.
     # Round-off also picks the convergence test that stops it. From x0 moved by an
     # ulp in one entry (40 draws), SciPy 1.18.0 and 1.18.1 stop twice on
-    # FTOL, else on PGTOL (nit 179 to 191), on a NumPy objective, and 3 times on
-    # FTOL on this JAX objective under JAX 0.10; with f and each entry of g moved
-    # by up to an ulp at every evaluation, 8 times in 200. The port, which rounds
-    # differently at every iteration, stops on FTOL from x0 itself on JAX 0.11's
-    # CPU lane with SciPy 1.18 (jaxlib's CPU LAPACK calls are SciPy's).
+    # FTOL, else on PGTOL (nit 179 to 191), on a NumPy objective, and never on
+    # this JAX objective under JAX 0.12.0.1; with f and each entry of g moved by
+    # up to an ulp at every evaluation, 8 times in 200. The port, which rounds
+    # differently at every iteration, stops on FTOL in 5 of those 40 draws on
+    # JAX 0.12.0.1's CPU lane (jaxlib's CPU LAPACK calls are SciPy's).
     ("L-BFGS-B", "quadratic"): frozenset({_LBFGSB_PGTOL, _LBFGSB_FTOL}),
     # Its count changes with how XLA compiles the same loop (107 or 147; SciPy 109).
     ("L-BFGS-B", "ill-conditioned"): frozenset(),
@@ -301,7 +301,8 @@ class TestQuasiNewtonJax(JaxTestCase):
         beyond the bounds: ten iterations there magnify round-off about
         1e4-fold, so a run that rounds differently from SciPy, as compiled XLA
         does, can miss the bounds with no error in its algorithm (on JAX
-        0.10.2's CPU lane ``yk`` differs by 1.2e-12). The numerical comparison
+        0.12.0.1 ``yk`` differs by 9.2e-13 on the GPU lane and ``jac`` by
+        5.2e-12, against SciPy's own 2.0e-12 and 1.1e-11). The numerical comparison
         stops at nine there (``_EARLY_NUMERIC_ITERATIONS``); the record is still
         compared at ten, and the converged comparison follows that walk to its
         end."""
