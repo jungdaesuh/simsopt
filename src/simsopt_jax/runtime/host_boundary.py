@@ -29,7 +29,7 @@ def disallow_host_transfers() -> Iterator[None]:
     array to the CPU as an implicit device-to-host copy and refuses it; the
     placement helpers in ``simsopt_jax.backend.dtypes`` gather such arrays with
     ``device_get`` first, so their explicit placements pass.  On CPU --
-    verified on jax 0.10.0, where no copy actually happens -- implicit
+    verified on jax 0.12.0.1, where no copy actually happens -- implicit
     device-to-host (``np.sum(x)``, ``x.tolist()``) passes too.
 
     Returns:

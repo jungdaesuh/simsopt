@@ -28,8 +28,9 @@ with optional_jax_imports():
         BackendPolicy,
         FieldKernelTuning,
         _config_from_mode,
+        _default_device_updates,
+        _initialized_runtime_platform,
         _policy_from_config,
-        _select_initialized_jax_default_device,
         get_field_kernel_tuning,
         get_runtime_jax_device,
         set_backend,
@@ -404,12 +405,17 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                     selected=selected,
                     devices_by_platform=both,
                 )
+                config = _config_from_mode(mode, strict=True)
+                platform = "cpu" if mode.startswith("jax_cpu") else "cuda"
                 with warnings.catch_warnings():
                     warnings.simplefilter("error", RuntimeWarning)
-                    _select_initialized_jax_default_device(
-                        fake_jax, _config_from_mode(mode, strict=True)
+                    self.assertEqual(
+                        _initialized_runtime_platform(fake_jax, config), platform
                     )
-                self.assertEqual(fake_jax.config.updates, expected)
+                    updates = _default_device_updates(fake_jax, config, platform)
+                self.assertEqual(list(updates), expected)
+                # Deciding changes no setting.
+                self.assertEqual(fake_jax.config.updates, [])
 
     def test_default_device_for_a_never_initialized_platform_warns_or_raises(self):
         """A platform JAX never initialized warns, and raises in strict and GPU parity modes."""
@@ -426,13 +432,13 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                     devices_by_platform={"cpu": [_FakeDevice("cpu")]},
                 )
                 config = _config_from_mode(mode, strict=strict)
-                expected = "Requested JAX platform 'cuda'.*default backend is 'cpu'"
+                expected = r"Requested JAX platform 'cuda'.*initialized only \['cpu'\]"
                 if raises:
                     with self.assertRaisesRegex(RuntimeError, expected):
-                        _select_initialized_jax_default_device(fake_jax, config)
+                        _initialized_runtime_platform(fake_jax, config)
                 else:
                     with self.assertWarnsRegex(RuntimeWarning, expected):
-                        _select_initialized_jax_default_device(fake_jax, config)
+                        self.assertIsNone(_initialized_runtime_platform(fake_jax, config))
                 self.assertEqual(fake_jax.config.updates, [])
 
     def test_set_backend_moves_new_arrays_and_fields_between_initialized_platforms(
