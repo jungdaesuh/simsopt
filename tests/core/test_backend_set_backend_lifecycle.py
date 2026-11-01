@@ -1,11 +1,12 @@
 """Regression tests for ``set_backend`` process-state changes.
 
 1. A rejected call leaves the previous mode, environment and every JAX
-   setting in place, and the field still evaluates as before.
+   setting in place, and the field still evaluates as before; inside a JAX
+   configuration context it changes no setting the context hides.
 2. In a process whose JAX backends are initialized, GPU allocator settings
    and XLA flags cannot apply: selecting the GPU warns instead of raising and
-   leaves the caller's allocator variables alone, and the CPU compile preset
-   stays out of ``XLA_FLAGS``.
+   leaves the caller's allocator variables and ``XLA_FLAGS`` alone, and the CPU
+   compile preset stays out of ``XLA_FLAGS``.
 3. ``SIMSOPT_JAX_DEBUG_NANS`` is parsed like every other boolean setting.
 """
 
@@ -26,8 +27,11 @@ with optional_jax_imports():
     )
     from simsopt_jax_adapters.field import JaxBiotSavart
 import os
+import subprocess
+import sys
 import warnings
 from contextlib import nullcontext
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -45,6 +49,7 @@ def _field_B() -> np.ndarray:
     return np.asarray(field.B())
 
 
+_FRESH_PROCESS = Path(__file__).resolve().with_name("fresh_process")
 _OBSERVED_ENV_PREFIXES = ("SIMSOPT_", "JAX_", "XLA_", "TF_GPU_")
 _DIRECTIONAL_TRANSFER_GUARD = "jax_transfer_guard_host_to_device"
 
@@ -59,6 +64,28 @@ def _process_state() -> tuple[dict[str, str], dict[str, object]]:
     return env, dict(jax.config.values)
 
 
+def _run_cpu_child(name: str, **environment: str) -> subprocess.CompletedProcess[str]:
+    """Run the ``fresh_process`` script ``name`` in a CPU-only interpreter.
+
+    Args:
+        name (str): File name of the script in ``fresh_process``.
+        **environment (str): Further environment variables for the child.
+
+    Returns:
+        subprocess.CompletedProcess: The finished child, with captured text output.
+    """
+    return subprocess.run(
+        (sys.executable, str(_FRESH_PROCESS / name)),
+        env=dict(
+            os.environ, JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", **environment
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
 class TestSetBackendLifecycle(JaxTestCase):
     def test_rejected_set_backend_keeps_the_previous_mode(self):
         """An early or a late rejection restores the CPU parity mode, every JAX
@@ -71,11 +98,11 @@ class TestSetBackendLifecycle(JaxTestCase):
                 lambda: set_backend("jax", device="gpu", intent="parity"),
             ),
             (
-                "default device rejected",
+                "platform rejected",
                 "rejected",
                 mock.patch.object(
                     runtime_module,
-                    "_select_initialized_jax_default_device",
+                    "_initialized_runtime_platform",
                     side_effect=RuntimeError("rejected"),
                 ),
                 lambda: set_backend(
@@ -108,6 +135,25 @@ class TestSetBackendLifecycle(JaxTestCase):
                 self.assertEqual(_process_state(), state)
                 np.testing.assert_array_equal(_field_B(), reference_B)
 
+    def test_rejected_set_backend_inside_config_contexts_changes_no_setting(self):
+        """A GPU request JAX never initialized, rejected inside a context that
+        hides the transfer guard, NaN debugging or JIT, leaves
+        every JAX setting as it was once the context exits."""
+        completed = _run_cpu_child(
+            "rejected_set_backend_in_config_context.py",
+            XLA_FLAGS="--xla_gpu_exclude_nondeterministic_ops=true",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_set_backend_rejected_by_the_default_backend_lookup_changes_no_setting(
+        self,
+    ):
+        """A CPU request that JAX's default-backend lookup rejects (the deprecated
+        jax_xla_backend names an uninitialized platform) leaves x64, NaN
+        debugging, the transfer guard and every other JAX setting unchanged."""
+        completed = _run_cpu_child("rejected_set_backend_default_backend_lookup.py")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_gpu_selection_after_initialization_keeps_the_allocator_env(self):
         """Selecting the GPU in an initialized process warns about allocator settings
         it cannot apply and leaves the caller's XLA variables unchanged."""
@@ -132,6 +178,25 @@ class TestSetBackendLifecycle(JaxTestCase):
         self.assertEqual({warning.filename for warning in caught}, {__file__}, messages)
         if {"cuda", "gpu"} & set(jax.extend.backend.backends()):
             self.assertEqual(jax.numpy.zeros(3).devices(), {jax.devices("gpu")[0]})
+
+    def test_gpu_selection_after_initialization_keeps_xla_flags(self):
+        """The CUDA autotuner pins, which XLA reads only at backend initialization,
+        are not exported to an initialized process, so child processes do not
+        inherit them; one warning says this process compiles without them."""
+        flags = "--xla_gpu_exclude_nondeterministic_ops=true"
+        os.environ["XLA_FLAGS"] = flags
+        self.assertTrue(runtime_module._jax_backends_initialized())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            set_backend("jax", device="gpu")
+
+        self.assertEqual(get_backend_mode(), "jax_gpu_fast")
+        self.assertEqual(os.environ["XLA_FLAGS"], flags)
+        messages = [str(warning.message) for warning in caught]
+        self.assertEqual(
+            sum("CUDA autotuner pins" in text for text in messages), 1, messages
+        )
 
     def test_cpu_selection_after_initialization_keeps_xla_flags(self):
         """The fast CPU mode's compile preset, which XLA reads only at backend
