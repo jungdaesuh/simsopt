@@ -16,9 +16,8 @@ and ``examples/2_Intermediate/boozerQA.py``): NCSX coils, BoozerExact
 weight 100, iota -0.406. Exact solves use ``newton_tol = 1e-10``, above the
 residual's round-off floor. Comparisons are against native objects on
 native surfaces where the JAX adjoint is native's, and against native
-objectives on the same JAX surface where the JAX adjoint deliberately differs (BoozerExact
-without stellarator symmetry, where native raises; BoozerLS with a
-ToroidalFlux label, where native's adjoint is not the derivative) or where the
+objectives on the same JAX surface where the JAX adjoint deliberately differs (BoozerLS
+with a ToroidalFlux label, where native's adjoint is not the derivative) or where the
 native and JAX solves differ by more than round-off (BoozerLS without
 stellarator symmetry, along a near-null direction of its DOFs).
 Values and gradients agree to 1e-12 of the largest native entry (measured
@@ -152,17 +151,17 @@ _NATIVE_CASES = {
     "exact-volume-quasi-poloidal": ("exact", "Volume", True, {"quasi_poloidal": True}),
     "exact-area-own-grid": ("exact", "Area", True, {}),
     "exact-flux-own-grid": ("exact", "ToroidalFlux", True, {"sDIM": 12}),
+    "exact-flux-nonsym": ("exact", "ToroidalFlux", False, {}),
     "ls-volume": ("ls", "Volume", True, {}),
 }
 
 
 # Native's objective on the same JAX surface is the reference where the JAX adjoint deliberately
-# differs from native's (BoozerExact without stellarator symmetry, a BoozerLS ToroidalFlux label)
-# and where the solves differ beyond round-off (BoozerLS without stellarator symmetry: the native
-# and JAX solves end on parametrizations of the surface 20 % apart in the DOFs along a near-null
-# direction, with iota equal to 6e-14, so J on them differs by 4e-8).
+# differs from native's (a BoozerLS ToroidalFlux label) and where the solves differ beyond
+# round-off (BoozerLS without stellarator symmetry: the native and JAX solves end on
+# parametrizations of the surface 20 % apart in the DOFs along a near-null direction, with iota
+# equal to 6e-14, so J on them differs by 4e-8).
 _JAX_SURFACE_CASES = {
-    "exact-flux-nonsym": ("exact", "ToroidalFlux", False, {}),
     "ls-flux": ("ls", "ToroidalFlux", True, {}),
     "ls-volume-nonsym-quasi-poloidal": (
         "ls",
@@ -242,8 +241,8 @@ class TestSurfaceObjectivesJax(JaxTestCase):
     def test_ratio_and_partials_match_native(self):
         """The kernel at a native solved surface: native's ``J``,
         ``dJ_by_dsurfacecoefficients`` and direct coil derivative
-        ``B_vjp(dJ_by_dB)``. (Native's BoozerExact adjoint raises without
-        stellarator symmetry, so that surface is a BoozerLS one.)"""
+        ``B_vjp(dJ_by_dB)``, on a stellarator-symmetric BoozerExact surface
+        and a BoozerLS surface without stellarator symmetry."""
         for case_id_0, quasi_poloidal in zip(["QA", "QP"], [False, True], strict=True):
             for case_id_1, (boozer_type, stellsym) in zip(
                 ["exact-stellsym", "ls-nonsym"],
