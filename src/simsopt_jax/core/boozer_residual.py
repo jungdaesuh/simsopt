@@ -114,8 +114,12 @@ def taylor_field(
     if len(coefficients) > 1:
         field = field + jnp.einsum("pj,pjl->pl", displacement, coefficients[1])
     if len(coefficients) > 2:
-        field = field + 0.5 * jnp.einsum(
-            "pj,pk,pjkl->pl", displacement, displacement, coefficients[2]
+        # Multiply and sum rather than einsum: as a dot, the GPU compiler of JAX 0.12
+        # can read d2B with a field and a derivative axis swapped (openxla/xla issue 51186),
+        # which is wrong wherever d2B is not symmetric in those axes.
+        field = field + 0.5 * jnp.sum(
+            displacement[:, :, None, None] * displacement[:, None, :, None] * coefficients[2],
+            axis=(1, 2),
         )
     return field
 
