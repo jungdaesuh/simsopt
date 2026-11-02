@@ -61,38 +61,59 @@ def _snapshot_plain(value):
 
 
 def _static_arguments(fun, options):
-    """Resolve JAX's static selectors without changing the actual call layout."""
+    """Resolve both static selectors once and hand both to :func:`jax.jit`.
+
+    Given one selector, JAX infers the other from the signature, and JAX 0.12
+    changed that inference (a negative index now names its parameter and is
+    resolved against the signature rather than the call). The selectors are
+    resolved here as JAX 0.12 does and both are passed explicitly, so every
+    supported JAX compiles exactly the arguments this wrapper leaves uncopied.
+    """
     argnums = options.get("static_argnums")
     argnames = options.get("static_argnames")
-    compile_options = dict(options)
     if argnums is not None:
         # Match JAX's scalar __index__ protocol before considering an iterable.
         try:
             argnums = (operator.index(argnums),)
         except TypeError:
             argnums = tuple(map(operator.index, argnums))
-        compile_options["static_argnums"] = argnums
     if argnames is not None:
         argnames = (argnames,) if isinstance(argnames, str) else tuple(argnames)
-        compile_options["static_argnames"] = argnames
 
-    if (argnums is None) != (argnames is None):
-        # As in JAX, one selector implies the other through the signature.
-        try:
-            signature = inspect.signature(fun)
-        except (TypeError, ValueError):
-            signature = None
-        if signature is not None:
-            positional = {
-                i: name
-                for i, (name, param) in enumerate(signature.parameters.items())
-                if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
-            }
-            if argnames is not None:
-                argnums = tuple(i for i, name in positional.items() if name in argnames)
-            elif argnums is not None:
-                argnames = tuple(name for i, name in positional.items() if i in argnums)
-    return frozenset(argnums or ()), frozenset(argnames or ()), compile_options
+    try:
+        signature = inspect.signature(fun)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        parameters = tuple(signature.parameters.values())
+        named = {
+            i: param.name
+            for i, param in enumerate(parameters)
+            if param.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+        }
+        if argnums is None and argnames is not None:
+            argnums = tuple(i for i, name in named.items() if name in argnames)
+        elif argnames is None and argnums is not None:
+            argnames = tuple(
+                name
+                for i, name in named.items()
+                if i in argnums or i - len(parameters) in argnums
+            )
+        positional = sum(
+            param.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            for param in parameters
+        )
+        if argnums and not any(
+            param.kind == inspect.Parameter.VAR_POSITIONAL for param in parameters
+        ):
+            # Out-of-range indices stay as given so that JAX rejects them.
+            argnums = tuple(
+                i + positional if -positional <= i < 0 else i for i in argnums
+            )
+    argnums, argnames = argnums or (), argnames or ()
+    compile_options = {**options, "static_argnums": argnums, "static_argnames": argnames}
+    return frozenset(argnums), frozenset(argnames), compile_options
 
 
 def jit(fun, **args):

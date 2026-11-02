@@ -837,17 +837,16 @@ class TestBoozerResidualJax(JaxTestCase):
 
     def test_fixed_surface_dofs_leave_the_derivatives_unchanged(self):
         """Derivatives are with respect to all surface DOFs, fixed ones included,
-        as native ``dgamma_by_dcoeff``. Native ``BoozerSurface`` at 9e027eac3 cannot
-        evaluate a surface with fixed DOFs (its label gradient has the free DOFs
-        only and does not fit), so the reference is native with every DOF free."""
+        as native ``dgamma_by_dcoeff`` and native's label gradient
+        ``dlabel_dsurface``: native with the same DOFs fixed is the reference."""
         setup = _setup("tensor", True, "volume")
+        names = list(setup.surface.local_full_dof_names)
+        setup.surface.fix(names[0])
+        setup.surface.fix(names[4])
         x = _decision(setup.surface, False)
         expected = _native_boozer(setup, 2.0).boozer_penalty_constraints_vectorized(
             x.copy(), derivatives=2, constraint_weight=2.0
         )
-        names = list(setup.surface.local_full_dof_names)
-        setup.surface.fix(names[0])
-        setup.surface.fix(names[4])
         problem = boozer_problem(
             setup.field, setup.surface, setup.label, setup.target, 2.0
         )

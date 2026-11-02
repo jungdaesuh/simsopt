@@ -1,22 +1,24 @@
-"""``simsopt_jax.core.quasi_newton`` against SciPy 1.17's BFGS and L-BFGS-B.
+"""``simsopt_jax.core.quasi_newton`` against SciPy 1.18's BFGS and L-BFGS-B.
 
 Each solver runs beside ``scipy.optimize.minimize(jac=True)`` on a quadratic
 (eigenvalues 1 to 1e3), the Rosenbrock function and an ill-conditioned
 quartic (scales 1 to 1e6), SciPy evaluating the same JAX objective on the CPU.
-Capped after k = 1, ..., 10 iterations (9 for L-BFGS-B on the quadratic,
-see ``_EARLY_ITERATIONS``), each solve stops at ``maxiter`` (status 1) with
-SciPy's message, iteration and evaluation counts, and its iterate and
-``hess_inv`` (BFGS's matrix; L-BFGS-B's correction pairs in the order of
-SciPy's ring buffer) agree with SciPy's, relative to the largest entry, to
-1e-12, ``fun`` and ``jac`` to 1e-11. Capped, L-BFGS-B holds three
-corrections, so its memory wraps. Run to convergence (ten corrections),
+Capped after k = 1, ..., 10 iterations, each solve stops at ``maxiter``
+(status 1) with SciPy's message, iteration and evaluation counts, and its
+iterate and ``hess_inv`` (BFGS's matrix; L-BFGS-B's correction pairs in the
+order of SciPy's ring buffer) agree with SciPy's, relative to the largest
+entry, to 1e-12, ``fun`` and ``jac`` to 1e-11 (up to k = 9 for L-BFGS-B on
+the quadratic, see ``_EARLY_NUMERIC_ITERATIONS``). Capped, L-BFGS-B holds
+three corrections, so its memory wraps. Run to convergence (ten corrections),
 status, message, counts and ``x`` (to 1e-12) are SciPy's, ``fun`` and ``jac``
 agree absolutely to 1e-14 and 1e-12, and ``hess_inv`` agrees
 to 1e-7 after forty or more updates; L-BFGS-B's 100 to 200 iterations on the
 quadratic and the quartic follow round-off instead (their counts change with
 how XLA compiles the loop), and there the solutions agree to 1e-5, what
 ``gtol = 1e-6`` leaves two points with unit smallest curvature (measured worst
-3.1e-7).
+3.1e-7); on the quadratic round-off also picks the convergence test that stops
+the walk, for SciPy as for the port, so either convergence message passes
+there (``_ROUND_OFF_WALKS``).
 
 A gradient that contradicts the value fails every line search: BFGS ends with
 SciPy's status 2 ("precision loss", after DCSRCH and then
@@ -28,11 +30,12 @@ doublings end its loop; a first step below ``amin`` (gradients of 1e110)
 stops DCSRCH at its start. A NaN wall ends BFGS with status 3, and
 ``maxiter=0`` ends BFGS at once and L-BFGS-B after one iteration, as in SciPy.
 Corrections near 1e-100 underflow formt's products and reset L-BFGS-B's memory
-as in SciPy (compared op by op, see that test). Invalid inputs end or raise as
-in SciPy. Each case runs on the CPU and, when present, the GPU lane. The
-zoom's interpolants and trial steps, which these objectives reach only partly,
-are checked against SciPy's ``_cubicmin``, ``_quadmin`` and ``_zoom``
-directly.
+as in SciPy (compared op by op, see that test), and a BFGS update by a step
+whose s s^T underflows is SciPy's (compared with SciPy's expression).
+Invalid inputs end or raise as in SciPy. Each case runs on the CPU and, when
+present, the GPU lane. The zoom's interpolants and trial steps, which these
+objectives reach only partly, are checked against SciPy's ``_cubicmin``,
+``_quadmin`` and ``_zoom`` directly.
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ with optional_jax_imports():
     from simsopt_jax.core.quasi_newton import (
         BFGS_MESSAGES,
         LBFGSB_MESSAGES,
+        _bfgs_inverse_hessian_update,
         _cubicmin,
         _quadmin,
         _zoom_trial,
@@ -68,9 +72,11 @@ import scipy
 from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, minimize
 from scipy.optimize import _linesearch as scipy_linesearch
 
-# Early iterations compared per (method, problem), 10 unless listed; see
-# test_early_iterates_match_scipy for why L-BFGS-B on the quadratic stops at 9.
-_EARLY_ITERATIONS = {("L-BFGS-B", "quadratic"): 9}
+# Early iterations: status, message and counts are compared up to k = 10;
+# iterates, fun, jac and hess_inv up to k = 10 unless listed here (see
+# test_early_iterates_match_scipy for why L-BFGS-B on the quadratic stops at 9).
+_EARLY_ITERATIONS = 10
+_EARLY_NUMERIC_ITERATIONS = {("L-BFGS-B", "quadratic"): 9}
 _EARLY_RTOL = 1e-12
 _FINAL_RTOL = 1e-5
 _FAILURE_RTOL = 1e-12
@@ -79,23 +85,33 @@ _TINY_RTOL = 1e-14
 # differently (XLA's sums and fused multiply-adds); measured worst 1.1e-9 of the
 # largest entry, BFGS on the Rosenbrock function.
 _CONVERGED_HESS_INV_RTOL = 1e-7
-# Measured worst early gaps (JAX 0.10.0 CPU and GPU, 0.10.2 CPU): iterates
-# 3.9e-13, BFGS on the quartic on the GPU; fun and jac, which magnify an
-# iterate's difference, 1.5e-12 of their size, L-BFGS-B on the quadratic at
-# k = 9 on JAX 0.10.2.
+# Measured worst early gaps (JAX 0.12.0.1 CPU and GPU, SciPy 1.18.1): iterates
+# 4.3e-13, BFGS on the quartic on the GPU; fun and jac, which magnify an
+# iterate's difference, 1.2e-12 of their size, L-BFGS-B on the quadratic at
+# k = 9 on the GPU.
 _EARLY_FUN_JAC_RTOL = 10 * _EARLY_RTOL
 # At a converged solution fun and jac are near zero, so they are compared
 # absolutely (measured worst 3.3e-24 and 4.5e-14 where the walks match).
 _CONVERGED_FUN_ATOL = 1e-14
 _CONVERGED_JAC_ATOL = 1e-12
-_ROUND_OFF_WALKS = frozenset(
-    {
-        # 180 to 200 iterations: early-iterate gaps grow from 1e-16 to 1e-1 by k = 110.
-        ("L-BFGS-B", "quadratic"),
-        # Its count changes with how XLA compiles the same loop (107 or 147; SciPy 109).
-        ("L-BFGS-B", "ill-conditioned"),
-    }
-)
+_LBFGSB_PGTOL = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
+_LBFGSB_FTOL = "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+# Converged walks that round-off decides, each with the messages besides SciPy's
+# that round-off also gives SciPy itself; their counts are not compared.
+_ROUND_OFF_WALKS = {
+    # 180 to 200 iterations: early-iterate gaps grow from 1e-16 to 1e-1 by k = 110.
+    # Round-off also picks the convergence test that stops it. From x0 moved by an
+    # ulp in one entry (40 draws), SciPy 1.18.0 and 1.18.1 stop twice on
+    # FTOL, else on PGTOL (nit 179 to 191), on a NumPy objective, and never on
+    # this JAX objective under JAX 0.12.0.1; with f and each entry of g moved by
+    # up to an ulp at every evaluation, 8 times in 200. The port, which rounds
+    # differently at every iteration, stops on FTOL in 5 of those 40 draws on
+    # JAX 0.12.0.1's CPU lane (jaxlib's CPU LAPACK calls are SciPy's).
+    ("L-BFGS-B", "quadratic"): frozenset({_LBFGSB_PGTOL, _LBFGSB_FTOL}),
+    # Its count changes with how XLA compiles the same loop (JAX 0.12.0.1: 114 on
+    # the CPU lane, 96 on the GPU lane; SciPy 1.18.1 109).
+    ("L-BFGS-B", "ill-conditioned"): frozenset(),
+}
 _GTOL = 1e-6
 _LANES = ("cpu", "gpu")
 
@@ -241,13 +257,15 @@ def _options(method, maxiter, **extra):
     return {"gtol": _GTOL, "ftol": 1e-14, "maxiter": maxiter, "maxcor": 3, **extra}
 
 
-# The port's claims, and so these comparisons (records, messages and the
-# private _linesearch helpers), are SciPy 1.17's; another SciPy is not their reference.
-_SCIPY_REFERENCE = (1, 17)
+# The SciPy version these comparisons (records, messages and the private
+# _linesearch helpers) hold for, the one the port is tested against. Another SciPy
+# is not their reference. Where JAX is unavailable, JaxTestCase's reason stands.
+_SCIPY_REFERENCE = (1, 18)
+_SCIPY_VERSION = tuple(int(part) for part in scipy.__version__.split(".")[:2])
 
 
 @unittest.skipUnless(
-    tuple(int(part) for part in scipy.__version__.split(".")[:2]) == _SCIPY_REFERENCE,
+    JAX_IMPORT_ERROR is not None or _SCIPY_VERSION == _SCIPY_REFERENCE,
     f"compares with SciPy {'.'.join(map(str, _SCIPY_REFERENCE))}, not {scipy.__version__}",
 )
 class TestQuasiNewtonJax(JaxTestCase):
@@ -274,7 +292,8 @@ class TestQuasiNewtonJax(JaxTestCase):
     def test_early_iterates_match_scipy(self):
         """Capped at k iterations, both solvers stop as SciPy does with its
         iterate to round-off, at every k where round-off determines SciPy's
-        own iterate to these bounds.
+        own iterate to these bounds, and with SciPy's status, message and
+        counts at every k.
 
         SciPy's runs from ``x0`` moved by one ulp per entry (nine sign
         patterns) differ from its run from ``x0`` by at most 8.6e-14 (``yk``)
@@ -283,9 +302,11 @@ class TestQuasiNewtonJax(JaxTestCase):
         beyond the bounds: ten iterations there magnify round-off about
         1e4-fold, so a run that rounds differently from SciPy, as compiled XLA
         does, can miss the bounds with no error in its algorithm (on JAX
-        0.10.2's CPU lane ``yk`` differs by 1.2e-12). The comparison stops at
-        nine there (``_EARLY_ITERATIONS``); the converged comparison still
-        follows that walk to its end."""
+        0.12.0.1 ``yk`` differs by 9.2e-13 on the GPU lane and ``jac`` by
+        5.2e-12, against SciPy's own 2.0e-12 and 1.1e-11). The numerical comparison
+        stops at nine there (``_EARLY_NUMERIC_ITERATIONS``); the record is still
+        compared at ten, and the converged comparison follows that walk to its
+        end."""
         for lane in _LANES:
             for method in ("BFGS", "L-BFGS-B"):
                 for name in _problems():
@@ -294,12 +315,15 @@ class TestQuasiNewtonJax(JaxTestCase):
 
     def _case_early_iterates_match_scipy(self, lane, method, name):
         x0, params = _problems()[name]
-        for k in range(1, _EARLY_ITERATIONS.get((method, name), 10) + 1):
+        numeric_iterations = _EARLY_NUMERIC_ITERATIONS.get((method, name), _EARLY_ITERATIONS)
+        for k in range(1, _EARLY_ITERATIONS + 1):
             options = _options(method, k)
             expected = _scipy(name, x0, params, method, options)
             self.assertEqual(expected.status, 1, f"{name}: SciPy converged before k={k}")
             result, message = _device(name, x0, params, method, options, lane)
             self._assert_scipy_record(expected, result, message, f"{method} {name} k={k}")
+            if k > numeric_iterations:
+                continue
             assert_matches_native(result.x, expected.x, f"{method} {name} x at k={k}", _EARLY_RTOL)
             rtol = _EARLY_FUN_JAC_RTOL
             assert_matches_native(result.fun, expected.fun, f"{method} {name} fun at k={k}", rtol, abs(expected.fun))
@@ -311,7 +335,8 @@ class TestQuasiNewtonJax(JaxTestCase):
         message, counts, x, fun, jac (to round-off of their scale at x0) and
         hess_inv, except the counts of the round-off walks listed in
         ``_ROUND_OFF_WALKS``, which end at SciPy's solution to what ``gtol``
-        allows."""
+        allows, with SciPy's status and its message or one that round-off
+        gives SciPy from x0 moved by an ulp."""
         for lane in _LANES:
             for method in ("BFGS", "L-BFGS-B"):
                 for name in _problems():
@@ -325,10 +350,11 @@ class TestQuasiNewtonJax(JaxTestCase):
         self.assertEqual(expected.status, 0, f"{name}: SciPy did not converge")
         result, message = _device(name, x0, params, method, options, lane)
         if (method, name) in _ROUND_OFF_WALKS:  # Round-off decides these counts; see _ROUND_OFF_WALKS.
-            self.assertEqual(
-                (int(result.status), message),
-                (expected.status, expected.message),
-                f"{method} {name}: status and message differ from SciPy's",
+            self.assertEqual(int(result.status), expected.status, f"{method} {name}: status differs from SciPy's")
+            self.assertIn(
+                message,
+                {expected.message} | _ROUND_OFF_WALKS[(method, name)],
+                f"{method} {name}: neither SciPy's message nor one its round-off gives",
             )
             assert_matches_native(result.x, expected.x, f"{method} {name} solution", _FINAL_RTOL)
             return
@@ -403,6 +429,35 @@ class TestQuasiNewtonJax(JaxTestCase):
                     else:
                         self.assertEqual((int(result.status), message), (expected.status, expected.message))
                     self._assert_scipy_hess_inv(expected, result, f"badly scaled, maxiter={maxiter}", _FAILURE_RTOL)
+
+    def test_bfgs_update_is_scipys_where_s_s_underflows(self):
+        """A step s ~ 1e-165 with y ~ 1e27 s: s s^T and (H y) s^T underflow to zero,
+        while y^T s ~ 1e-303, SciPy's s y^T and the updated H ~ 1e-27 are normal.
+        The update is SciPy's to round-off there, as for a step of unit size; forming
+        s s^T or (H y) s^T before scaling by rho loses rank-one terms (here errors of
+        4 and 11 times the largest entry). Iterates reach such steps only along
+        round-off-driven walks (BFGS on (a x)^2 / 2 after about a dozen iterations,
+        a walk the port does not follow bit for bit), so the update is compared
+        directly with SciPy's expression in ``_minimize_bfgs``, run eagerly and
+        compiled (as the solver's loop runs it, where XLA may fuse its products)."""
+        updates = {"eager": _bfgs_inverse_hessian_update, "compiled": jit(_bfgs_inverse_hessian_update)}
+        curvature = np.array([1.0e27, 2.5e27])
+        for case, scale in (("underflowing step", 1e-165), ("unit step", 1.0)):
+            sk = scale * np.array([2.0, -1.3])
+            yk = curvature * sk + scale * np.array([0.3e26, -0.1e26])
+            hess_inv = np.array([[0.8e-27, 0.1e-27], [0.1e-27, 0.4e-27]])
+            if scale < 1.0:
+                self.assertTrue(np.all(np.outer(sk, sk) == 0.0) and np.dot(yk, sk) > 1e-307, case)
+            rhok = 1.0 / np.dot(yk, sk)
+            identity = np.eye(2)
+            A1 = identity - sk[:, np.newaxis] * yk[np.newaxis, :] * rhok
+            A2 = identity - yk[:, np.newaxis] * sk[np.newaxis, :] * rhok
+            expected = np.dot(A1, np.dot(hess_inv, A2)) + (rhok * sk[:, np.newaxis] * sk[np.newaxis, :])
+            for lane in _LANES:
+                for path, update in updates.items():
+                    with self.subTest(case=case, lane=lane, path=path), self.case(), parity_default_device(lane):
+                        updated = host_array(update(jnp.asarray(hess_inv), jnp.asarray(sk), jnp.asarray(yk)))
+                        assert_matches_native(updated, expected, f"{case} H, {path}", _FAILURE_RTOL)
 
     def test_zoom_interpolants_match_scipy(self):
         """The cubic and quadratic minimizers are SciPy's, ``None`` where SciPy's
