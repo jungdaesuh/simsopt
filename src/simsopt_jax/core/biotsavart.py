@@ -105,21 +105,24 @@ def _radius_squared(diff):
     return jnp.sum(diff * diff, axis=-1)
 
 
-def _cross_product(left, right):
-    left_x = left[..., 0]
-    left_y = left[..., 1]
-    left_z = left[..., 2]
-    right_x = right[..., 0]
-    right_y = right[..., 1]
-    right_z = right[..., 2]
-    return jnp.stack(
-        (
-            left_y * right_z - left_z * right_y,
-            left_z * right_x - left_x * right_z,
-            left_x * right_y - left_y * right_x,
-        ),
-        axis=-1,
+def _components(vectors):
+    """Return the x, y and z components of ``vectors``, shape (..., 3)."""
+    return vectors[..., 0], vectors[..., 1], vectors[..., 2]
+
+
+def _cross_components(left, right):
+    """Return the components of ``left x right`` from component tuples."""
+    left_x, left_y, left_z = left
+    right_x, right_y, right_z = right
+    return (
+        left_y * right_z - left_z * right_y,
+        left_z * right_x - left_x * right_z,
+        left_x * right_y - left_y * right_x,
     )
+
+
+def _cross_product(left, right):
+    return jnp.stack(_cross_components(_components(left), _components(right)), axis=-1)
 
 
 # ── Tree utilities ────────────────────────────────────────────────────
@@ -235,7 +238,9 @@ def _quadrature_sum(components):
     ``components`` holds the x, y and z arrays, each shape (C, Qb); returns
     their ``pairwise_sum_axis`` sums, three arrays of shape (C,).
     """
-    return tuple(_pairwise_sum_axis(component, axis=1) for component in components)
+    return jax.tree.map(
+        lambda component: _pairwise_sum_axis(component, axis=1), components
+    )
 
 
 def _quadrature_block_integral(
@@ -385,11 +390,6 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 # minor and reduces the point axis at stride 3, several times slower on GPU.
 
 
-def _components(vectors):
-    """Return the x, y and z components of ``vectors``, shape (..., 3)."""
-    return vectors[..., 0], vectors[..., 1], vectors[..., 2]
-
-
 def _separation(x, gammas):
     """Return the components of ``gammas - x`` and its exact squared length.
 
@@ -404,13 +404,11 @@ def _separation(x, gammas):
 
 def _biot_savart_B_integrand(x, gammas, gammadashs):
     (dx, dy, dz), r2 = _separation(x, gammas)
-    tx, ty, tz = _components(gammadashs)
     r_inv = lax.rsqrt(r2)
     r_inv3 = r_inv * jnp.reciprocal(r2)
-    return (
-        (dy * tz - dz * ty) * r_inv3,
-        (dz * tx - dx * tz) * r_inv3,
-        (dx * ty - dy * tx) * r_inv3,
+    return tuple(
+        component * r_inv3
+        for component in _cross_components((dx, dy, dz), _components(gammadashs))
     )
 
 
