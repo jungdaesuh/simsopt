@@ -230,16 +230,12 @@ def _coil_chunk_reduce(
 
 
 def _quadrature_sum(components):
-    """Sum a component-major integrand over its quadrature axis.
+    """Sum each component of a component-major integrand over its quadrature axis.
 
-    ``components`` holds the x, y and z arrays, each shape (C, Qb); each is
-    reduced with ``pairwise_sum_axis`` before the stack, so the result, shape
-    (C, 3), is the stacked integrand's pairwise sum element for element.
+    ``components`` holds the x, y and z arrays, each shape (C, Qb); returns
+    their ``pairwise_sum_axis`` sums, three arrays of shape (C,).
     """
-    return jnp.stack(
-        [_pairwise_sum_axis(component, axis=1) for component in components],
-        axis=-1,
-    )
+    return tuple(_pairwise_sum_axis(component, axis=1) for component in components)
 
 
 def _quadrature_block_integral(
@@ -250,40 +246,44 @@ def _quadrature_block_integral(
     block_size: int,
     integrand,
 ):
-    """Average a component-major integrand over the quadrature nodes, shape (C, 3)."""
+    """Average a component-major integrand over the quadrature nodes.
+
+    Returns the x, y and z averages, three arrays of shape (C,).
+    """
     quadrature_count = gammas.shape[1]
     # The single-block, exact two-block, and full-block-plus-tail >=3 paths use
     # different quadrature reduction-tree shapes. Keep parity tests pinned
     # across block boundaries when changing this routine.
     if block_size <= 0 or quadrature_count <= block_size:
         integral_sum = _quadrature_sum(integrand(x, gammas, gammadashs))
-        return integral_sum * _scalar_like(integral_sum, 1.0 / quadrature_count)
+        return tuple(
+            component * _scalar_like(component, 1.0 / quadrature_count)
+            for component in integral_sum
+        )
 
     block_count = (quadrature_count + block_size - 1) // block_size
     if block_count == 2:
         # Exact two-block shapes avoid padded loop overhead in B/B+dB hot paths.
         second_block_size = quadrature_count - block_size
-        return (
-            _two_chunk_sum(
-                (
-                    _slice_quadrature_block(gammas, 0, block_size),
-                    _slice_quadrature_block(gammadashs, 0, block_size),
+        integral_sum = _two_chunk_sum(
+            (
+                _slice_quadrature_block(gammas, 0, block_size),
+                _slice_quadrature_block(gammadashs, 0, block_size),
+            ),
+            (
+                _slice_quadrature_block(gammas, block_size, second_block_size),
+                _slice_quadrature_block(
+                    gammadashs,
+                    block_size,
+                    second_block_size,
                 ),
-                (
-                    _slice_quadrature_block(gammas, block_size, second_block_size),
-                    _slice_quadrature_block(
-                        gammadashs,
-                        block_size,
-                        second_block_size,
-                    ),
-                ),
-                lambda gg, ggd: _quadrature_sum(integrand(x, gg, ggd)),
-            )
-            / quadrature_count
+            ),
+            lambda gg, ggd: _quadrature_sum(integrand(x, gg, ggd)),
         )
+        return tuple(component / quadrature_count for component in integral_sum)
 
     full_block_count, tail_size = divmod(quadrature_count, block_size)
-    zero = _zeros((gammas.shape[0], 3), dtype=jnp.float64)
+    zero = (_zeros((gammas.shape[0],), dtype=jnp.float64),) * 3
 
     def body(block_index: int, acc):
         start = block_index * block_size
@@ -294,7 +294,7 @@ def _quadrature_block_integral(
             block_size,
         )
         block_integrand = integrand(x, block_gammas, block_gammadashs)
-        return acc + _quadrature_sum(block_integrand)
+        return _tree_add(acc, _quadrature_sum(block_integrand))
 
     integral_sum = lax.fori_loop(0, full_block_count, body, zero)
     if tail_size:
@@ -304,8 +304,8 @@ def _quadrature_block_integral(
             gammas[:, tail_start:],
             gammadashs[:, tail_start:],
         )
-        integral_sum = integral_sum + _quadrature_sum(tail_integrand)
-    return integral_sum / quadrature_count
+        integral_sum = _tree_add(integral_sum, _quadrature_sum(tail_integrand))
+    return tuple(component / quadrature_count for component in integral_sum)
 
 
 # The Hessian integrand carries 27 doubles per (point, quadrature node) where
@@ -469,6 +469,10 @@ _INTEGRANDS = {
 def _one_point_dense(
     x, gammas, gammadashs, currents, *, integrand, quadrature_block_size=0
 ):
+    # Each component is contracted with the currents before the three are
+    # stacked. Stacking the per-coil quadrature sums instead let XLA (A100,
+    # jacfwd) fuse two of those sums into the stack, where every output element
+    # sums its quadrature block in a serial loop.
     integral = _quadrature_block_integral(
         x,
         gammas,
@@ -476,8 +480,11 @@ def _one_point_dense(
         block_size=quadrature_block_size,
         integrand=integrand,
     )
-    return _float64_scalar(currents, _MU0_OVER_4PI) * jnp.einsum(
-        "c,cj->j", currents, integral, precision=lax.Precision.HIGHEST
+    return _float64_scalar(currents, _MU0_OVER_4PI) * jnp.stack(
+        [
+            jnp.einsum("c,c->", currents, component, precision=lax.Precision.HIGHEST)
+            for component in integral
+        ]
     )
 
 
