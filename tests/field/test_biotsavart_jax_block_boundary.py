@@ -1,6 +1,6 @@
 """Quadrature-block and coil-chunk tiling keep the Biot-Savart kernels' results.
 
-``_quadrature_block_integral`` sums the quadrature axis along one of three
+``_quadrature_block_sum`` sums the quadrature axis along one of three
 paths: a single block, an exact two-block split, or a loop over full blocks
 plus a tail. ``_coil_chunk_reduce`` has the same three paths over coils. Each
 tiled kernel here is compared with the untiled one (quadrature_block_size=0,

@@ -1,7 +1,7 @@
-"""The compiled B-VJP and dB/dX kernels keep fast per-coil reduction layouts.
+"""The compiled B, B-VJP and dB/dX kernels keep fast per-coil reductions.
 
 Two XLA layout hazards made these kernels several times slower (openxla/xla
-issue 52437):
+issue 52437), and a fusion hazard made them about twice as slow on CPU:
 
 * A per-coil reduce (over quadrature nodes, or over the point chunk in the
   VJP) whose operand keeps a length-3 Cartesian axis minor reduces the other
@@ -11,9 +11,14 @@ issue 52437):
   each output element's sum in a serial loop. Contracting each component with
   the currents before stacking the three keeps the stack out of the reduction
   fusions.
+* On CPU, elementwise arithmetic on a per-coil quadrature sum inside the
+  reduce's own fusion (the 1/Q scale, or the sum of two quadrature blocks)
+  becomes, at production sizes, the epilogue of an XLA:CPU YNN reduction
+  fusion, which runs at about half the speed. Contracting each block's
+  per-coil sums with the currents first keeps that arithmetic out.
 
-These tests compile both kernels for a small case and inspect the optimized
-HLO text for either form.
+These tests compile the kernels for a small case and inspect the optimized
+HLO text for each form.
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from unittest_jax_support import JaxTestCase, optional_jax_imports, require_cuda
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
-    import jax  # noqa: F401
+    import jax
     import jax.numpy as jnp
     from simsopt_jax.core import biotsavart as biotsavart_core
 
@@ -112,33 +117,44 @@ def _array_dims_and_minor(shape):
     return dims, minor
 
 
-def _per_coil_reduces(computations, coil_count):
-    """Return every per-coil reduce of the module.
+def _instruction_shapes(computations):
+    """Map every instruction name of the module to its shape text."""
+    return {
+        instruction.name: instruction.shape
+        for instructions in computations.values()
+        for instruction in instructions
+    }
+
+
+def _per_coil_reduce(instruction, shapes, coil_count):
+    """Return ``instruction`` as a ``_Reduce`` if it is a per-coil reduce, else None.
 
     A per-coil reduce keeps the coil axis: it sums a per-coil-node array over
     quadrature nodes, or over the point chunk in the VJP. Reductions over the
     coil axis (the current contraction) are not per-coil.
     """
-    shapes = {
-        instruction.name: instruction.shape
+    if instruction.opcode != "reduce":
+        return None
+    operand_shape = shapes[instruction.operands[0]]
+    dims, minor = _array_dims_and_minor(operand_shape)
+    (axes,) = _REDUCED_DIMENSIONS.findall(instruction.attributes)
+    reduced = frozenset(int(axis) for axis in axes.split(",") if axis)
+    if any(
+        size == coil_count and axis not in reduced for axis, size in enumerate(dims)
+    ):
+        return _Reduce(operand_shape, dims, minor, reduced)
+    return None
+
+
+def _per_coil_reduces(computations, coil_count):
+    """Return every per-coil reduce of the module."""
+    shapes = _instruction_shapes(computations)
+    reduces = (
+        _per_coil_reduce(instruction, shapes, coil_count)
         for instructions in computations.values()
         for instruction in instructions
-    }
-    reduces = []
-    for instructions in computations.values():
-        for instruction in instructions:
-            if instruction.opcode != "reduce":
-                continue
-            operand_shape = shapes[instruction.operands[0]]
-            dims, minor = _array_dims_and_minor(operand_shape)
-            (axes,) = _REDUCED_DIMENSIONS.findall(instruction.attributes)
-            reduced = frozenset(int(axis) for axis in axes.split(",") if axis)
-            if any(
-                size == coil_count and axis not in reduced
-                for axis, size in enumerate(dims)
-            ):
-                reduces.append(_Reduce(operand_shape, dims, minor, reduced))
-    return reduces
+    )
+    return [reduce for reduce in reduces if reduce is not None]
 
 
 def _computation_has_reduce(computations, name, seen=frozenset()):
@@ -154,18 +170,22 @@ def _computation_has_reduce(computations, name, seen=frozenset()):
     return False
 
 
-def _concatenate_fusions_with_reduces(computations):
-    """Return the fused computations rooted at a concatenate that reduce."""
-    fused = {
+def _fused_computations(computations):
+    """Return the names of the computations that fusion instructions call."""
+    return {
         called
         for instructions in computations.values()
         for instruction in instructions
         if instruction.opcode == "fusion"
         for called in _CALLED.findall(instruction.attributes)
     }
+
+
+def _concatenate_fusions_with_reduces(computations):
+    """Return the fused computations rooted at a concatenate that reduce."""
     return sorted(
         name
-        for name in fused
+        for name in _fused_computations(computations)
         if any(
             instruction.is_root and instruction.opcode == "concatenate"
             for instruction in computations[name]
@@ -174,7 +194,32 @@ def _concatenate_fusions_with_reduces(computations):
     )
 
 
-def _inputs():
+_ELEMENTWISE_ARITHMETIC = frozenset({"add", "subtract", "multiply", "divide"})
+
+
+def _per_coil_reduces_with_arithmetic_epilogue(computations, coil_count):
+    """Return ``fusion: reduce -> opcode`` for each per-coil reduce that
+    elementwise arithmetic consumes inside the reduce's own fused computation."""
+    shapes = _instruction_shapes(computations)
+    found = []
+    for name in sorted(_fused_computations(computations)):
+        instructions = computations[name]
+        per_coil = {
+            instruction.name
+            for instruction in instructions
+            if _per_coil_reduce(instruction, shapes, coil_count) is not None
+        }
+        found.extend(
+            f"{name}: {operand} -> {instruction.opcode}"
+            for instruction in instructions
+            if instruction.opcode in _ELEMENTWISE_ARITHMETIC
+            for operand in instruction.operands
+            if operand in per_coil
+        )
+    return found
+
+
+def _inputs(device):
     rng = np.random.default_rng(52437)
     gammas = rng.standard_normal((_COIL_COUNT, _QUADRATURE_COUNT, 3))
     gammadashs = rng.standard_normal((_COIL_COUNT, _QUADRATURE_COUNT, 3))
@@ -182,27 +227,32 @@ def _inputs():
     points = rng.standard_normal((_POINT_COUNT, 3)) + 5.0
     cotangent = rng.standard_normal((_POINT_COUNT, 3))
     return tuple(
-        jnp.asarray(values)
+        jnp.asarray(values, device=device)
         for values in (points, cotangent, gammas, gammadashs, currents)
     )
 
 
-def _optimized_hlo(kernel_name, tuning):
-    """Compile one kernel for the default device and return its optimized HLO."""
-    points, cotangent, gammas, gammadashs, currents = _inputs()
+def _optimized_hlo(kernel_name, tuning, device=None):
+    """Compile one kernel and return its optimized HLO.
+
+    The inputs are placed on ``device``; None means JAX's default device.
+    """
+    points, cotangent, gammas, gammadashs, currents = _inputs(device)
     if kernel_name == "B_vjp":
         kernel = biotsavart_core._make_B_vjp_kernel(*tuning)
         arguments = (points, cotangent, gammas, gammadashs, currents)
     else:
         kernel = biotsavart_core._make_kernel(
             biotsavart_core._Integrand.B,
-            biotsavart_core._DiffMode.JACOBIAN,
+            biotsavart_core._DiffMode[_FORWARD_DIFF_MODES[kernel_name]],
             *tuning,
         )
         arguments = (points, gammas, gammadashs, currents)
     return _parse_hlo(kernel.lower(*arguments).compile().as_text())
 
 
+# Forward kernel name -> ``_DiffMode`` member name.
+_FORWARD_DIFF_MODES = {"B": "VALUE", "dB_by_dX": "JACOBIAN"}
 _KERNELS = ("B_vjp", "dB_by_dX")
 
 
@@ -249,3 +299,29 @@ class TestBiotSavartReduceLayout(JaxTestCase):
             "no per-coil reduce found in the optimized HLO",
         )
         self.assertEqual(_concatenate_fusions_with_reduces(computations), [])
+
+    def test_cpu_quadrature_reduces_have_no_arithmetic_epilogue(self):
+        """Compiled for CPU, no per-coil reduce of the B or dB/dX kernel feeds
+        elementwise arithmetic inside its own fusion."""
+        cpu = jax.devices("cpu")[0]
+        for kernel_name in _FORWARD_DIFF_MODES:
+            for tuning in _TUNINGS:
+                with self.subTest(kernel=kernel_name, tuning=tuning), self.case():
+                    self._case_cpu_quadrature_reduces_have_no_arithmetic_epilogue(
+                        kernel_name, tuning, cpu
+                    )
+
+    def _case_cpu_quadrature_reduces_have_no_arithmetic_epilogue(
+        self, kernel_name, tuning, cpu
+    ):
+        """Run one row with case-local objects released before runtime cleanup."""
+        computations = _optimized_hlo(kernel_name, tuning, cpu)
+        self.assertTrue(
+            _per_coil_reduces(computations, _COIL_COUNT),
+            "no per-coil reduce found in the optimized HLO",
+        )
+        self.assertEqual(
+            _per_coil_reduces_with_arithmetic_epilogue(computations, _COIL_COUNT),
+            [],
+            "per-coil quadrature sums combined or scaled inside their reduce fusion",
+        )
