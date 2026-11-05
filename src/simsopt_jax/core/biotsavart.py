@@ -229,6 +229,19 @@ def _coil_chunk_reduce(
     return reduced
 
 
+def _quadrature_sum(components):
+    """Sum a component-major integrand over its quadrature axis.
+
+    ``components`` holds the x, y and z arrays, each shape (C, Qb); each is
+    reduced with ``pairwise_sum_axis`` before the stack, so the result, shape
+    (C, 3), is the stacked integrand's pairwise sum element for element.
+    """
+    return jnp.stack(
+        [_pairwise_sum_axis(component, axis=1) for component in components],
+        axis=-1,
+    )
+
+
 def _quadrature_block_integral(
     x,
     gammas,
@@ -237,16 +250,14 @@ def _quadrature_block_integral(
     block_size: int,
     integrand,
 ):
+    """Average a component-major integrand over the quadrature nodes, shape (C, 3)."""
     quadrature_count = gammas.shape[1]
     # The single-block, exact two-block, and full-block-plus-tail >=3 paths use
     # different quadrature reduction-tree shapes. Keep parity tests pinned
     # across block boundaries when changing this routine.
     if block_size <= 0 or quadrature_count <= block_size:
-        values = integrand(x, gammas, gammadashs)
-        return _pairwise_sum_axis(values, axis=1) * _scalar_like(
-            values,
-            1.0 / values.shape[1],
-        )
+        integral_sum = _quadrature_sum(integrand(x, gammas, gammadashs))
+        return integral_sum * _scalar_like(integral_sum, 1.0 / quadrature_count)
 
     block_count = (quadrature_count + block_size - 1) // block_size
     if block_count == 2:
@@ -266,7 +277,7 @@ def _quadrature_block_integral(
                         second_block_size,
                     ),
                 ),
-                lambda gg, ggd: _pairwise_sum_axis(integrand(x, gg, ggd), axis=1),
+                lambda gg, ggd: _quadrature_sum(integrand(x, gg, ggd)),
             )
             / quadrature_count
         )
@@ -283,7 +294,7 @@ def _quadrature_block_integral(
             block_size,
         )
         block_integrand = integrand(x, block_gammas, block_gammadashs)
-        return acc + _pairwise_sum_axis(block_integrand, axis=1)
+        return acc + _quadrature_sum(block_integrand)
 
     integral_sum = lax.fori_loop(0, full_block_count, body, zero)
     if tail_size:
@@ -293,7 +304,7 @@ def _quadrature_block_integral(
             gammas[:, tail_start:],
             gammadashs[:, tail_start:],
         )
-        integral_sum = integral_sum + _pairwise_sum_axis(tail_integrand, axis=1)
+        integral_sum = integral_sum + _quadrature_sum(tail_integrand)
     return integral_sum / quadrature_count
 
 
@@ -365,21 +376,48 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 
 # ── Physics integrands ────────────────────────────────────────────────
 
+# The B and A integrands are component-major: they split the coil data into
+# Cartesian components before forming ``gammas - x`` and return the x, y and z
+# components of the integrand as three arrays shaped like ``gammas[..., 0]``.
+# No per-node array carries a length-3 axis, so the coil-data VJP sums each
+# component over the vmapped point chunk as its own array. With the axis kept,
+# XLA from JAX 0.10.1 on lays those per-chunk sums out with the length-3 axis
+# minor and reduces the point axis at stride 3, several times slower on GPU.
+
+
+def _components(vectors):
+    """Return the x, y and z components of ``vectors``, shape (..., 3)."""
+    return vectors[..., 0], vectors[..., 1], vectors[..., 2]
+
+
+def _separation(x, gammas):
+    """Return the components of ``gammas - x`` and its exact squared length.
+
+    ``r2`` is exact, so point-on-coil singularities stay loud. ``x`` has shape
+    (3,) and ``gammas`` (C, Qb, 3); every returned array has shape (C, Qb).
+    """
+    dx, dy, dz = (
+        gamma - point for gamma, point in zip(_components(gammas), _components(x))
+    )
+    return (dx, dy, dz), dx * dx + dy * dy + dz * dz
+
 
 def _biot_savart_B_integrand(x, gammas, gammadashs):
-    diff = gammas - x
-    r2 = _radius_squared(diff)
+    (dx, dy, dz), r2 = _separation(x, gammas)
+    tx, ty, tz = _components(gammadashs)
     r_inv = lax.rsqrt(r2)
     r_inv3 = r_inv * jnp.reciprocal(r2)
-    cross = _cross_product(diff, gammadashs)
-    return cross * r_inv3[..., None]
+    return (
+        (dy * tz - dz * ty) * r_inv3,
+        (dz * tx - dx * tz) * r_inv3,
+        (dx * ty - dy * tx) * r_inv3,
+    )
 
 
 def _biot_savart_A_integrand(x, gammas, gammadashs):
-    diff = gammas - x
-    r2 = _radius_squared(diff)
+    _, r2 = _separation(x, gammas)
     r_inv = lax.rsqrt(r2)
-    return gammadashs * r_inv[..., None]
+    return tuple(tangent * r_inv for tangent in _components(gammadashs))
 
 
 def _biot_savart_B_and_dB_integrand(x, gammas, gammadashs):
