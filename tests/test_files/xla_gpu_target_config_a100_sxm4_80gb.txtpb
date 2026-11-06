@@ -1,0 +1,154 @@
+gpu_device_info {
+  threads_per_block_limit: 1024
+  threads_per_warp: 32
+  shared_memory_per_block: 49152
+  shared_memory_per_core: 167936
+  threads_per_core_limit: 2048
+  core_count: 108
+  fpus_per_core: 64
+  block_dim_limit_x: 2147483647
+  block_dim_limit_y: 65535
+  block_dim_limit_z: 65535
+  memory_bandwidth: 2039040000000
+  l2_cache_size: 41943040
+  clock_rate_ghz: 1.41
+  device_memory_size: 85093777408
+  shared_memory_per_block_optin: 166912
+  cuda_compute_capability {
+    major: 8
+    feature_extension: NONE
+  }
+  registers_per_core_limit: 65536
+  registers_per_block_limit: 65536
+  scalar_unit_description {
+    rate_infos {
+      key: 4
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 64
+        ops_per_clock: 1
+      }
+    }
+    rate_infos {
+      key: 8
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 64
+        ops_per_clock: 1
+      }
+    }
+    rate_infos {
+      key: 10
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 64
+        ops_per_clock: 2
+      }
+    }
+    rate_infos {
+      key: 11
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 64
+        ops_per_clock: 1
+      }
+    }
+    rate_infos {
+      key: 12
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 32
+        ops_per_clock: 1
+      }
+    }
+    rate_infos {
+      key: 16
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 64
+        ops_per_clock: 2
+      }
+    }
+  }
+  matrix_unit_description {
+    rate_infos {
+      key: 2
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 4
+        ops_per_clock: 512
+      }
+    }
+    rate_infos {
+      key: 6
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 4
+        ops_per_clock: 512
+      }
+    }
+    rate_infos {
+      key: 10
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 4
+        ops_per_clock: 256
+      }
+    }
+    rate_infos {
+      key: 11
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 4
+        ops_per_clock: 128
+      }
+    }
+    rate_infos {
+      key: 12
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 4
+        ops_per_clock: 16
+      }
+    }
+    rate_infos {
+      key: 16
+      value {
+        clock_rate_ghz: 1.41
+        units_per_core: 4
+        ops_per_clock: 256
+      }
+    }
+  }
+  driver_version: "13.0.0"
+  kernel_mode_driver_version: "580.178.4"
+  runtime_version: "12.9.0"
+  compile_time_toolkit_version: "12.9.0"
+  dnn_version: "9.27.0"
+  cub_version: "3.2.0"
+  device_interconnect_info {
+    active_links: 12
+  }
+  device_vendor: "NVIDIA Corporation"
+  platform_version: "Compute Capability 8.0"
+  pci_bus_id: "<undefined>"
+  name: "NVIDIA A100-SXM4-80GB"
+  model_str: "sm_8.0 with 85093777408B RAM, 108 cores, 1410000KHz clock, 1593000KHz mem clock, 41943040B L2$"
+  numa_node: -1
+  thread_dim_limit_x: 1024
+  thread_dim_limit_y: 1024
+  thread_dim_limit_z: 64
+  device_address_bits: 64
+  pcie_bandwidth: 34359738368
+  ecc_enabled: true
+  mem_clock_ghz: 1.593
+  reserved_shared_memory_per_block: 1024
+  max_blocks_per_multiprocessor: 32
+  collective_memory_granularity: 2097152
+}
+platform_name: "CUDA"
+device_description_str: "NVIDIA A100-SXM4-80GB"
+runtime_version {
+  major: 12
+  minor: 9
+}
