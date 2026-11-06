@@ -7,33 +7,38 @@ issue 52437), and a fusion hazard made them about twice as slow on CPU:
   VJP) whose operand keeps a length-3 Cartesian axis minor reduces the other
   axis at stride 3. The B and A integrands are component-major so that no
   per-node array carries that axis.
-* On GPU, a reduce fused into a fusion whose root is a concatenate computes
-  each output element's sum in a serial loop. Contracting each component with
-  the currents before stacking the three keeps the stack out of the reduction
-  fusions.
+* On an A100, a reduce fused into a fusion whose root is a concatenate
+  computes each output element's sum in a serial loop. Contracting each
+  component with the currents before stacking the three keeps the stack out of
+  the reduction fusions. XLA makes that fusion for the A100 target at the
+  fast-lane tiling but not for an RTX 5090, nor at this module's small sizes,
+  so the test compiles a fast-lane-sized case for a recorded A100 target.
 * On CPU, elementwise arithmetic on a per-coil quadrature sum inside the
   reduce's own fusion (the 1/Q scale, or the sum of two quadrature blocks)
   becomes, at production sizes, the epilogue of an XLA:CPU YNN reduction
   fusion, which runs at about half the speed. Contracting each block's
   per-coil sums with the currents first keeps that arithmetic out.
 
-These tests compile the kernels for a small case and inspect the optimized
-HLO text for each form.
+These tests compile the kernels and inspect the optimized HLO text for each
+form.
 """
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports, require_cuda
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
+    from jax.experimental import topologies
     from simsopt_jax.core import biotsavart as biotsavart_core
 
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from unittest import SkipTest
 
 import numpy as np
 
@@ -47,6 +52,20 @@ _POINT_CHUNK_SIZE = 7
 # (coil_chunk_size, quadrature_block_size, point_chunk_size): unblocked, and
 # two quadrature blocks as in the fast-lane tuning (128 nodes in 64-node blocks).
 _TUNINGS = ((0, 0, _POINT_CHUNK_SIZE), (0, 12, _POINT_CHUNK_SIZE))
+
+# The A100 case: one 1024-point chunk and 128 nodes in two 64-node blocks, the
+# fast-lane tiling, at which XLA fuses the per-coil reduces of the code before
+# the current contraction into concatenate-rooted fusions for the A100 target.
+# 31 coils is the only length-31 axis.
+_A100_TARGET_CONFIG = (
+    Path(__file__).resolve().parent.parent
+    / "test_files"
+    / "xla_gpu_target_config_a100_sxm4_80gb.txtpb"
+)
+_A100_COIL_COUNT = 31
+_A100_QUADRATURE_COUNT = 128
+_A100_POINT_COUNT = 1024
+_A100_TUNING = (0, 64, 1024)
 
 _COMPUTATION = re.compile(r"^(?:ENTRY\s+)?%([\w.\-]+)\s.*\{\s*$")
 _INSTRUCTION = re.compile(
@@ -232,12 +251,61 @@ def _inputs(device):
     )
 
 
+def _a100_compile_only_device():
+    """Return a compile-only device for the recorded A100 target.
+
+    Compiling for it needs the CUDA PJRT plugin but no GPU; without the plugin
+    the calling test is skipped.
+    """
+    try:
+        topology = topologies.get_topology_desc(
+            platform="cuda",
+            target_config=_A100_TARGET_CONFIG.read_text(),
+            topology="1x1x1",
+        )
+    except NotImplementedError as error:
+        raise SkipTest(
+            f"compiling for the A100 target needs the CUDA PJRT plugin: {error}"
+        ) from error
+    return topology.devices[0]
+
+
+def _a100_optimized_hlo(kernel_name, device):
+    """Compile one kernel for the A100 case on ``device`` and return its HLO."""
+    sharding = jax.sharding.SingleDeviceSharding(device)
+
+    def spec(*shape):
+        return jax.ShapeDtypeStruct(shape, jnp.float64, sharding=sharding)
+
+    coil_shape = (_A100_COIL_COUNT, _A100_QUADRATURE_COUNT, 3)
+    return _compiled_hlo(
+        kernel_name,
+        _A100_TUNING,
+        (
+            spec(_A100_POINT_COUNT, 3),
+            spec(_A100_POINT_COUNT, 3),
+            spec(*coil_shape),
+            spec(*coil_shape),
+            spec(_A100_COIL_COUNT),
+        ),
+    )
+
+
 def _optimized_hlo(kernel_name, tuning, device=None):
     """Compile one kernel and return its optimized HLO.
 
     The inputs are placed on ``device``; None means JAX's default device.
     """
-    points, cotangent, gammas, gammadashs, currents = _inputs(device)
+    return _compiled_hlo(kernel_name, tuning, _inputs(device))
+
+
+def _compiled_hlo(kernel_name, tuning, inputs):
+    """Compile one kernel for ``inputs`` and return its optimized HLO.
+
+    ``inputs`` holds the points, cotangent, gammas, gammadashs and currents, as
+    arrays or as shape structs.
+    """
+    points, cotangent, gammas, gammadashs, currents = inputs
     if kernel_name == "B_vjp":
         kernel = biotsavart_core._make_B_vjp_kernel(*tuning)
         arguments = (points, cotangent, gammas, gammadashs, currents)
@@ -277,25 +345,21 @@ class TestBiotSavartReduceLayout(JaxTestCase):
         ]
         self.assertEqual(offending, [], "per-coil reduces with a minor 3-axis")
 
-    def test_gpu_reduces_are_not_fused_into_concatenates(self):
-        """On GPU no reduce of the compiled B-VJP or dB/dX kernel sits in a
-        fusion rooted at a concatenate."""
-        require_cuda(
-            "a reduce inside a concatenate-rooted fusion is a GPU emitter hazard "
-            "(the A100 input_concatenate_fusion); it needs a CUDA device"
-        )
+    def test_a100_reduces_are_not_fused_into_concatenates(self):
+        """Compiled for the A100 target, no reduce of the B-VJP or dB/dX kernel
+        sits in a fusion rooted at a concatenate."""
+        device = _a100_compile_only_device()
         for kernel_name in _KERNELS:
-            for tuning in _TUNINGS:
-                with self.subTest(kernel=kernel_name, tuning=tuning), self.case():
-                    self._case_gpu_reduces_are_not_fused_into_concatenates(
-                        kernel_name, tuning
-                    )
+            with self.subTest(kernel=kernel_name), self.case():
+                self._case_a100_reduces_are_not_fused_into_concatenates(
+                    kernel_name, device
+                )
 
-    def _case_gpu_reduces_are_not_fused_into_concatenates(self, kernel_name, tuning):
+    def _case_a100_reduces_are_not_fused_into_concatenates(self, kernel_name, device):
         """Run one row with case-local objects released before runtime cleanup."""
-        computations = _optimized_hlo(kernel_name, tuning)
+        computations = _a100_optimized_hlo(kernel_name, device)
         self.assertTrue(
-            _per_coil_reduces(computations, _COIL_COUNT),
+            _per_coil_reduces(computations, _A100_COIL_COUNT),
             "no per-coil reduce found in the optimized HLO",
         )
         self.assertEqual(_concatenate_fusions_with_reduces(computations), [])

@@ -107,3 +107,12 @@ This FOCUS input file gives the NCSX plasma boundary, as well as the
 component of B normal to this boundary due to a 0.5 Tesla purely
 toroidal field.
 
+
+---
+
+    xla_gpu_target_config_a100_sxm4_80gb.txtpb
+
+The XLA GPU target description (``gpu_target_config.pbtxt``) that
+JAX 0.12.0.1 dumped on an NVIDIA A100-SXM4-80GB. The BiotSavartJAX
+reduce-layout test compiles kernels for this target ahead of time, so the
+A100 fusion decisions are checked on hosts without an A100.
