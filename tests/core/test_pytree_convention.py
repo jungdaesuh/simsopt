@@ -1,5 +1,7 @@
 """Keep JAX registration and immutable record conventions centralized."""
 
+from __future__ import annotations
+
 from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
@@ -7,6 +9,7 @@ with optional_jax_imports():
     import jax  # noqa: F401
     import jax.numpy as jnp
     from simsopt_jax import pytree
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.pytree import (
         pytree_dataclass,
         pytree_node,
@@ -19,7 +22,7 @@ from collections.abc import Callable
 from collections import Counter
 from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Tuple, cast
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,10 +44,9 @@ NAMEDTUPLE_NAMES = frozenset(("NamedTuple", "namedtuple"))
 ALIAS_NAMES = (
     REGISTRATION_NAMES | NAMEDTUPLE_NAMES | {"pytree_dataclass", "pytree_node"}
 )
-Violation = tuple[str, str, str, str]
-
-# Any exemption must match the exact occurrence multiset below.
-PENDING: tuple[Violation, ...] = ()
+# typing.Tuple: a module-level alias is evaluated at import, and builtin
+# tuple[...] subscripting needs Python 3.9; unsupported runtimes must still skip.
+Violation = Tuple[str, str, str, str]
 
 
 class ConventionVisitor(ast.NodeVisitor):
@@ -197,42 +199,14 @@ class TestPytreeConvention(JaxTestCase):
         cls.repository_inspections = repository_inspections()
 
     def test_registration_and_record_convention(self):
-        """Repository pytree and record violations match the explicitly pending
-        occurrence inventory."""
+        """The repository has no pytree registration or record violations."""
         repository_inspections = self.repository_inspections
         actual = Counter(
             violation
             for visitor in repository_inspections
             for violation in visitor.violations
         )
-        expected = Counter(PENDING)
-        self.assertTrue(
-            actual == expected,
-            f"Unexpected occurrences: {dict(actual - expected)}; "
-            f"stale occurrences: {dict(expected - actual)}",
-        )
-
-    def test_pending_has_no_stale_entries(self):
-        """Pending convention exceptions still occur and cannot authorize
-        register_dataclass."""
-        repository_inspections = self.repository_inspections
-        actual = Counter(
-            violation
-            for visitor in repository_inspections
-            for violation in visitor.violations
-        )
-        self.assertTrue(not Counter(PENDING) - actual, "not Counter(PENDING) - actual")
-        self.assertTrue(
-            all(
-                kind in {"import", "registration", "namedtuple", "star-import"}
-                for _, _, kind, _ in PENDING
-            ),
-            'all( kind in {"import", "registration", "namedtuple", "star-import"} for _, _, kind, _ in PENDING )',
-        )
-        self.assertTrue(
-            all(name != "register_dataclass" for _, _, _, name in PENDING),
-            'all(name != "register_dataclass" for _, _, _, name in PENDING)',
-        )
+        self.assertTrue(not actual, f"Unexpected occurrences: {dict(actual)}")
 
     def test_guard_rejects_every_prohibited_reference(self):
         """The guard detects prohibited record and registration references in every
@@ -874,8 +848,8 @@ class TestPytreeConvention(JaxTestCase):
             return value.first + 2 * value.second
 
         self.assertTrue(
-            float(jax.jit(weighted_sum)(restored)) == 5.0,
-            "float(jax.jit(weighted_sum)(restored)) == 5.0",
+            float(jit(weighted_sum)(restored)) == 5.0,
+            "float(jit(weighted_sum)(restored)) == 5.0",
         )
         gradient = jax.grad(weighted_sum)(restored)
         self.assertTrue(gradient.mode == "sum", 'gradient.mode == "sum"')

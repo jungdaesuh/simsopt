@@ -13,9 +13,11 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from simsopt_jax.backend import dtypes
 from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
 from simsopt_jax.core._device_scalars import staged_like
+from simsopt_jax.runtime.host_boundary import disallow_host_transfers
 
 
 def _placed_leaf(value) -> jax.Array:
@@ -29,9 +31,9 @@ def staged_device_array() -> None:
     """``staged_like`` moves a device array held elsewhere onto the reference's device."""
     jax.config.update("jax_enable_x64", True)
     first, second = jax.devices("cpu")[:2]
-    reference = jax.device_put(np.zeros(2), first)
-    tolerance = jax.device_put(np.asarray(1.0e-12), second)
-    budget = jax.device_put(np.asarray(40, dtype=np.int32), second)
+    reference = jax.device_put(np.zeros(2), first)  # noqa: TID251 test places on a chosen device
+    tolerance = jax.device_put(np.asarray(1.0e-12), second)  # noqa: TID251 test places on a chosen device
+    budget = jax.device_put(np.asarray(40, dtype=np.int32), second)  # noqa: TID251 test places on a chosen device
     with jax.transfer_guard("disallow"):
         staged_tolerance = staged_like(reference, tolerance)
         staged_budget = staged_like(reference, budget, dtype=np.int32)
@@ -48,7 +50,7 @@ def unplaced_joins_committed() -> None:
     jax.config.update("jax_enable_x64", True)
     first, second = jax.devices("cpu")[:2]
     assert dtypes.get_runtime_jax_device() == first
-    elsewhere = jax.device_put(np.arange(3.0), second)
+    elsewhere = jax.device_put(np.arange(3.0), second)  # noqa: TID251 test places on a chosen device
     unplaced = dtypes.runtime_device_put(np.ones(3))
     as_float64 = dtypes.as_jax_float64(np.ones(3))
     assert (unplaced + elsewhere).devices() == {second}
@@ -108,10 +110,28 @@ def cuda_two_backend() -> None:
         assert placed.committed and placed.devices() == {cpu}, placed.devices()
 
 
+def cuda_sharded_cross_backend() -> None:
+    """Explicit moves between a GPU device and a two-CPU sharding pass a disallow guard."""
+    jax.config.update("jax_enable_x64", True)
+    gpu = jax.devices("gpu")[0]
+    cpus = jax.devices("cpu")[:2]
+    cpu_sharding = NamedSharding(Mesh(np.array(cpus), ("i",)), PartitionSpec("i"))
+    values = np.arange(6.0)
+    on_gpu = jax.device_put(values, gpu)  # noqa: TID251 test places on a chosen device
+    with disallow_host_transfers():
+        sharded = dtypes.runtime_device_put_tree({"x": on_gpu}, target=cpu_sharding)
+        returned = dtypes.runtime_device_put_tree(sharded, device=gpu)
+    assert sharded["x"].sharding == cpu_sharding, sharded["x"].sharding
+    assert returned["x"].devices() == {gpu}, returned["x"].devices()
+    np.testing.assert_array_equal(np.asarray(sharded["x"]), values)
+    np.testing.assert_array_equal(np.asarray(returned["x"]), values)
+
+
 _SCENARIOS = {
     "staged_device_array": staged_device_array,
     "unplaced_joins_committed": unplaced_joins_committed,
     "cuda_two_backend": cuda_two_backend,
+    "cuda_sharded_cross_backend": cuda_sharded_cross_backend,
 }
 
 
