@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports, require_cuda
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
     from simsopt_jax.backend import dtypes
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.backend.runtime import invalidate_backend_cache, set_backend
     from simsopt_jax.core import _device_scalars
     from simsopt_jax.core._device_scalars import staged_like
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
 
 
 import os
@@ -31,10 +33,10 @@ _PLACEMENT_CHILD = (
 )
 
 
-def _run_placement_child(scenario, environment):
-    """Run one ``fresh_process/backend_dtypes_placement.py`` scenario."""
+def _run_fresh_process_child(name, environment, *arguments):
+    """Run the ``fresh_process`` script ``name`` with ``arguments`` in a new interpreter."""
     return subprocess.run(
-        (sys.executable, str(_PLACEMENT_CHILD), scenario),
+        (sys.executable, str(_PLACEMENT_CHILD.with_name(name)), *arguments),
         env=environment,
         check=False,
         capture_output=True,
@@ -43,12 +45,17 @@ def _run_placement_child(scenario, environment):
     )
 
 
+def _run_placement_child(scenario, environment):
+    """Run one ``fresh_process/backend_dtypes_placement.py`` scenario."""
+    return _run_fresh_process_child(_PLACEMENT_CHILD.name, environment, scenario)
+
+
 class TestBackendDtypesReferencePlacement(JaxTestCase):
     def test_reference_placement_short_circuits_on_tracer(self):
         """A tracer reference is never probed for its placement (the O(jaxpr) walk)."""
         captured: dict[str, object] = {}
 
-        @jax.jit
+        @jit
         def f(x):
             with mock.patch.object(dtypes, "_committed_placement") as committed:
                 captured["result"] = dtypes._reference_placement(x)
@@ -63,7 +70,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
     def test_reference_placement_is_the_bare_device_of_a_committed_array(self):
         """A committed concrete reference is probed and reduced to its device."""
         device = jax.local_devices()[0]
-        arr = jax.device_put(np.zeros(3), device)
+        arr = jax.device_put(np.zeros(3), device)  # noqa: TID251 test places on a chosen device
         with mock.patch.object(
             dtypes,
             "_committed_placement",
@@ -81,7 +88,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
     def test_runtime_device_put_tree_can_preserve_arrays_and_place_host_leaves(self):
         """Preserving placement retains JAX leaf identity and places host leaves without
         changing structure or dtype."""
-        array = jax.device_put(np.ones(3, dtype=np.float64), jax.local_devices()[0])
+        array = jax.device_put(np.ones(3, dtype=np.float64), jax.local_devices()[0])  # noqa: TID251 test places on a chosen device
         value = {"device": array, "host": (np.asarray(2, dtype=np.int32), None)}
 
         placed = dtypes.runtime_device_put_tree(value, preserve_placement=True)
@@ -115,7 +122,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
             )
         )
 
-        @jax.jit
+        @jit
         def add_staged_scalar(reference):
             return reference + staged_like(reference, 1.0)
 
@@ -126,7 +133,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
     def test_staged_like_tracer_preserves_explicit_integer_dtype(self):
         """Scalar staging under JIT preserves a requested int32 dtype."""
 
-        @jax.jit
+        @jit
         def staged_integer(reference):
             return staged_like(reference, 1, dtype=jnp.int32)
 
@@ -157,7 +164,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         """The list/tuple branch skips a tracer leaf and returns None."""
         captured: dict[str, object] = {}
 
-        @jax.jit
+        @jit
         def f(x):
             with mock.patch.object(dtypes, "_committed_placement") as committed:
                 captured["result"] = dtypes._reference_placement([x])
@@ -240,6 +247,30 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         self.assertTrue(placement is None, "placement is None")
         self.assertTrue(placements == [None], "placements == [None]")
 
+    def test_importing_simsopt_jax_alone_computes_the_raw_kernels_in_float64(self):
+        """Without ``simsopt.geo`` or ``set_backend``, the raw B kernel matches the
+        analytic on-axis loop field to float64 precision, also with x64 disabled
+        in the environment."""
+        for x64_setting in (None, "false"):
+            with self.subTest(JAX_ENABLE_X64=x64_setting):
+                environment = dict(os.environ, JAX_PLATFORMS="cpu")
+                environment.pop("JAX_ENABLE_X64", None)
+                if x64_setting is not None:
+                    environment["JAX_ENABLE_X64"] = x64_setting
+                completed = _run_fresh_process_child(
+                    "raw_kernel_float64.py", environment
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_set_backend_reenables_float64_disabled_after_import(self):
+        """With x64 disabled after ``simsopt_jax`` was imported, selecting either
+        CPU mode runs the raw B kernel in float64 again (analytic on-axis loop
+        field to 1e-13 relative)."""
+        completed = _run_fresh_process_child(
+            "set_backend_float64.py", dict(os.environ, JAX_PLATFORMS="cpu")
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_explicit_device_array_rejects_reduced_precision_floats(self):
         """An exact-dtype placement accepts float64 as its only floating dtype."""
         patches = self.patches
@@ -269,7 +300,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         ``dtypes._array_device``).
         """
         patches = self.patches
-        reference = jax.device_put(np.zeros(3), jax.local_devices()[0])
+        reference = jax.device_put(np.zeros(3), jax.local_devices()[0])  # noqa: TID251 test places on a chosen device
         (reference_device,) = reference.devices()
         placements: list[object | None] = []
 
@@ -322,7 +353,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         with_committed_reference = dtypes.explicit_device_array(
             np.ones(3),
             dtype=jnp.float64,
-            reference=jax.device_put(np.zeros(3), default_device),
+            reference=jax.device_put(np.zeros(3), default_device),  # noqa: TID251 test places on a chosen device
         )
 
         for array in (
@@ -377,11 +408,76 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         which JAX would not choose in a CUDA process, host values are committed
         to the CPU.
         """
-        if not any(device.platform == "gpu" for device in jax.devices()):
-            self.skipTest("CUDA device required for the two-backend placement check")
+        require_cuda("CUDA device required for the two-backend placement check")
         environment = dict(os.environ)
         environment.update({"JAX_PLATFORMS": "cuda,cpu", "JAX_ENABLE_X64": "1"})
         completed = _run_placement_child("cuda_two_backend", environment)
+        self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
+
+    def test_explicit_cross_backend_moves_pass_a_disallow_guard(self):
+        """Under ``disallow_host_transfers``, explicit moves of a GPU array and a pytree to the CPU and back keep their values."""
+        require_cuda("CUDA device required for cross-backend placement")
+        gpu = jax.devices("gpu")[0]
+        cpu = jax.devices("cpu")[0]
+        array = np.arange(5.0)
+        pair = np.ones((2, 3))
+        on_gpu = jax.device_put(array, gpu)  # noqa: TID251 test places on a chosen device
+        tree = {"array": on_gpu, "pair": (jax.device_put(pair, gpu), np.arange(3))}  # noqa: TID251 test places on a chosen device
+        with disallow_host_transfers():
+            array_on_cpu = dtypes.runtime_device_put_tree(on_gpu, device=cpu)
+            tree_on_cpu = dtypes.runtime_device_put_tree(tree, device=cpu)
+            array_back = dtypes.runtime_device_put_tree(array_on_cpu, device=gpu)
+            tree_back = dtypes.runtime_device_put_tree(tree_on_cpu, device=gpu)
+        for placed, device in [
+            (array_on_cpu, cpu),
+            (tree_on_cpu, cpu),
+            (array_back, gpu),
+            (tree_back, gpu),
+        ]:
+            for leaf in jax.tree.leaves(placed):
+                self.assertEqual(leaf.devices(), {device})
+                self.assertTrue(leaf.committed)
+        for placed in (array_on_cpu, array_back):
+            np.testing.assert_array_equal(np.asarray(placed), array)
+        for placed in (tree_on_cpu, tree_back):
+            np.testing.assert_array_equal(np.asarray(placed["array"]), array)
+            np.testing.assert_array_equal(np.asarray(placed["pair"][0]), pair)
+            np.testing.assert_array_equal(np.asarray(placed["pair"][1]), np.arange(3))
+
+    def test_runtime_placement_moves_a_gpu_array_to_a_cpu_policy_under_a_disallow_guard(
+        self,
+    ):
+        """A jax-cpu policy in a CUDA process moves a committed GPU array to the CPU under a disallow guard."""
+        require_cuda("CUDA device required for cross-backend placement")
+        gpu = jax.devices("gpu")[0]
+        cpu = jax.devices("cpu")[0]
+        values = np.arange(4.0)
+        on_gpu = jax.device_put(values, gpu)  # noqa: TID251 test places on a chosen device
+        set_backend("jax_cpu_parity", configure_runtime=False)
+        with disallow_host_transfers():
+            placed = dtypes.runtime_device_put_tree({"x": on_gpu})["x"]
+        self.assertEqual(placed.devices(), {cpu})
+        np.testing.assert_array_equal(np.asarray(placed), values)
+
+    def test_sharded_cross_backend_moves_pass_a_disallow_guard(self):
+        """A GPU array moves to a two-CPU sharding and back under a disallow guard, values unchanged."""
+        require_cuda("CUDA device required for cross-backend placement")
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "JAX_PLATFORMS": "cuda,cpu",
+                "JAX_ENABLE_X64": "1",
+                "XLA_FLAGS": " ".join(
+                    flag
+                    for flag in (
+                        environment.get("XLA_FLAGS"),
+                        "--xla_force_host_platform_device_count=2",
+                    )
+                    if flag
+                ),
+            }
+        )
+        completed = _run_placement_child("cuda_sharded_cross_backend", environment)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_commit_in_place_commits_where_the_array_lives(self):

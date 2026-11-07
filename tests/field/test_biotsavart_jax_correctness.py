@@ -1,11 +1,12 @@
 """Native regression oracles for the JaxBiotSavart correctness review."""
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, aligned_host_copy, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
+    from simsopt_jax.core import biotsavart as core_biotsavart
     from simsopt_jax.core import curve_gamma_and_gammadash_from_spec
     from simsopt_jax.core.field import (
         group_biot_savart_B_vjp,
@@ -153,7 +154,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             plus, _ = _jax_filament_geometry(frame, quadpoints + step)
             minus, _ = _jax_filament_geometry(frame, quadpoints - step)
             next_error = np.linalg.norm((plus - minus) / (2 * step) - gammadash)
-            print(f"R10 {frame.__name__} step={step:.3e}: error={next_error:.3e}")
             self.assertLess(next_error, 0.3 * error)
             error = next_error
         native = _filament(frame, quadpoints)
@@ -213,9 +213,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         flat = adapter.coil_cotangents_to_dofs_gradient(
             pullback.d_coil_arrays, pullback.coil_indices
         )
-        print(
-            f"R9 {quantity} scale={scale}: adapter={actual[0]:.16g} flat={float(flat[0]):.16g} native={expected[0]:.16g} fd={finite_difference:.16g}"
-        )
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(flat, expected, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(actual, finite_difference, rtol=1e-9, atol=1e-14)
@@ -265,9 +262,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         )
         derivative = _vjp(adapter, quantity, _cotangent(quantity))
         actual = cast(Derivative, derivative(adapter, as_derivative=True))
-        print(
-            f"R5 {quantity} {fixed}: current={cast(np.ndarray, actual.data[current])[0]:.16g}/{cast(np.ndarray, expected.data[current])[0]:.16g} curve[0]={cast(np.ndarray, actual.data[curve])[0]:.16g}/{cast(np.ndarray, expected.data[curve])[0]:.16g}"
-        )
         for owner in expected.data:
             np.testing.assert_allclose(
                 actual.data[owner],
@@ -309,9 +303,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         adapter.set_points(_POINTS)
         expected = native.B()
         actual = np.asarray(adapter.B())
-        print(
-            f"R6 replicas={replicas}: native_delta={np.max(np.abs(expected - before)):.16g} adapter_delta={np.max(np.abs(actual - before)):.16g} error={np.max(np.abs(actual - expected)):.16g}"
-        )
         self.assertTrue(
             np.max(np.abs(expected - before)) > 1e-6,
             "np.max(np.abs(expected - before)) > 1e-6",
@@ -327,21 +318,32 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
     def test_cartesian_points_are_owned_snapshots(self):
         """Mutating caller-owned Cartesian points leaves the adapter points and cached
         field equal to native snapshots."""
-        storage = np.empty(_POINTS.size + 8, dtype=np.float64)
-        offset = (-storage.ctypes.data % 64) // storage.itemsize
-        points = storage[offset : offset + _POINTS.size].reshape(_POINTS.shape)
-        points[:] = _POINTS
+        points = aligned_host_copy(_POINTS)
         coils = [Coil(_curves()[0], Current(1e5))]
         native = BiotSavart(coils).set_points(points)
         adapter = JaxBiotSavart(coils).set_points(points)
         adapter.B()
         points[:] += 0.3
         actual = adapter.get_points_cart()
-        print(
-            f"R8 point_error={np.max(np.abs(actual - native.get_points_cart())):.16g} field_error={np.max(np.abs(np.asarray(adapter.B()) - native.B())):.16g}"
-        )
         np.testing.assert_array_equal(actual, native.get_points_cart())
         np.testing.assert_allclose(adapter.B(), native.B(), rtol=1e-12, atol=1e-14)
+
+    def test_cleared_points_must_be_set_before_evaluation(self):
+        """After clear_points, evaluation raises until points are set again."""
+        coils = [Coil(_curves()[0], Current(1e5))]
+        adapter = JaxBiotSavart(coils)
+        adapter.clear_points()
+        for quantity in ("B", "GradAbsB", "B_cyl", "get_points_cart"):
+            with self.subTest(quantity=quantity), self.assertRaisesRegex(
+                RuntimeError, "call set_points"
+            ):
+                getattr(adapter, quantity)()
+        with self.assertRaisesRegex(RuntimeError, "call set_points"):
+            adapter.B_vjp(np.zeros((1, 3)))
+        native = BiotSavart(coils).set_points(_POINTS)
+        np.testing.assert_allclose(
+            adapter.set_points(_POINTS).B(), native.B(), rtol=1e-12, atol=1e-14
+        )
 
     def test_serialization_preserves_points_and_field(self):
         """GSON reconstruction and JSON loading preserve evaluation points and field
@@ -366,14 +368,28 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             filename = tmp_path / (name + ".json")
             field.save(filename, fmt="json")
             loaded = load(filename)
-            print(
-                f"R4 {coordinates} {name}: restored_points={restored.get_points_cart().tolist()}"
-            )
             for result in (restored, loaded):
                 np.testing.assert_array_equal(result.get_points_cart(), expected_points)
                 np.testing.assert_allclose(
                     result.B(), native.B(), rtol=1e-12, atol=1e-14
                 )
+
+    def test_payload_without_points_is_rejected_like_native(self):
+        """A payload without a points key raises KeyError in both fields; None
+        restores cleared points."""
+        coils = [Coil(_curves()[0], Current(1e5))]
+        for field in (BiotSavart(coils), JaxBiotSavart(coils)):
+            with self.subTest(field=type(field).__name__):
+                serialized = {}
+                payload = field.as_dict(serialized)
+                del payload["points"]
+                with self.assertRaises(KeyError):
+                    type(field).from_dict(payload, serialized, {})
+        adapter = JaxBiotSavart(coils)
+        adapter.clear_points()
+        serialized = {}
+        restored = JaxBiotSavart.from_dict(adapter.as_dict(serialized), serialized, {})
+        self.assertIsNone(restored.get_points_cart_ref())
 
     def test_native_symmetry_curve_converts_for_fields_and_vjps(self):
         """Native symmetry Fourier curves yield matching JAX fields and VJPs with or
@@ -395,9 +411,6 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             actual, expected = (
                 np.asarray(getattr(adapter, quantity)()),
                 getattr(native, quantity)(),
-            )
-            print(
-                f"R7 stellsym={stellsym} {quantity}: error={np.max(np.abs(actual - expected)):.16g}"
             )
             np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-13)
             np.testing.assert_allclose(
@@ -468,30 +481,38 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
             pullback.coil_indices,
         )
         np.testing.assert_allclose(flat, expected_gradient, rtol=1e-11, atol=1e-13)
-        if quantity == "A":
-            # The value half of the combined VJP must ignore the gradient cotangent.
-            vgrad = _cotangent("dA_by_dX")
-            combined_native = cast(
-                Derivative,
-                native.A_and_dA_vjp(cotangent, vgrad)[0](native, as_derivative=True),
-            )
-            combined_adapter = cast(
-                Derivative,
-                adapter.A_and_dA_vjp(cotangent, vgrad)[0](adapter, as_derivative=True),
-            )
-            for owner in expected_partials.data:
-                np.testing.assert_allclose(
-                    combined_adapter.data[owner],
-                    combined_native.data[owner],
-                    rtol=1e-11,
-                    atol=1e-13,
+        if quantity in ("A", "B"):
+            # Both halves of the combined VJP, with both cotangents nonzero, match
+            # native; the value half ignores the gradient cotangent.
+            combined_vjp = f"{quantity}_and_d{quantity}_vjp"
+            vgrad = _cotangent(f"d{quantity}_by_dX")
+            getattr(native, f"d{quantity}_by_dX")()
+            native_halves = getattr(native, combined_vjp)(cotangent, vgrad)
+            adapter_halves = getattr(adapter, combined_vjp)(cotangent, vgrad)
+            for half, (native_half, adapter_half) in enumerate(
+                zip(native_halves, adapter_halves, strict=True)
+            ):
+                combined_native = cast(
+                    Derivative, native_half(native, as_derivative=True)
                 )
-                np.testing.assert_allclose(
-                    combined_adapter.data[owner],
-                    actual_partials.data[owner],
-                    rtol=1e-11,
-                    atol=1e-13,
+                combined_adapter = cast(
+                    Derivative, adapter_half(adapter, as_derivative=True)
                 )
+                for owner in combined_native.data:
+                    np.testing.assert_allclose(
+                        combined_adapter.data[owner],
+                        combined_native.data[owner],
+                        rtol=1e-11,
+                        atol=1e-13,
+                        err_msg=f"{combined_vjp} half {half}",
+                    )
+                    if half == 0:
+                        np.testing.assert_allclose(
+                            combined_adapter.data[owner],
+                            actual_partials.data[owner],
+                            rtol=1e-11,
+                            atol=1e-13,
+                        )
 
         dofs = native.x.copy()
         direction = np.linspace(-0.3, 0.4, dofs.size)
@@ -575,7 +596,7 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         ]
         adapter = JaxBiotSavart(coils).set_points(_POINTS)
         cotangent = _cotangent(quantity)
-        dofs = adapter.x.copy()
+        dofs = np.array(adapter.x, dtype=np.float64)
         patches.callback(setattr, adapter, "x", dofs)
         analytic = _gradient(_vjp(adapter, quantity, cotangent), adapter)
         for exponent in range(5):
@@ -590,6 +611,45 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
                 rtol=1e-9,
                 atol=1e-14,
             )
+
+    def test_raw_kernels_evaluate_single_precision_inputs_in_float64(self):
+        """Raw kernels and the B pullback upcast float32 inputs and compute in float64.
+
+        The float32 inputs are exact in float64, so each result must equal, bit
+        for bit, the evaluation of their float64 upcast.
+        """
+        coils = [Coil(curve, Current(1e5)) for curve in _curves()]
+        single = (
+            _POINTS.astype(np.float32),
+            _cotangent("B").astype(np.float32),
+            np.stack([coil.curve.gamma() for coil in coils]).astype(np.float32),
+            np.stack([coil.curve.gammadash() for coil in coils]).astype(np.float32),
+            np.array([coil.current.get_value() for coil in coils], dtype=np.float32),
+        )
+        double = tuple(value.astype(np.float64) for value in single)
+
+        def evaluate(name, points, cotangent, *coil_data):
+            if name == "biot_savart_B_vjp":
+                return core_biotsavart.biot_savart_B_vjp(points, cotangent, *coil_data)
+            return getattr(core_biotsavart, name)(points, *coil_data)
+
+        for name in (
+            "biot_savart_B",
+            "biot_savart_A",
+            "biot_savart_dB_by_dX",
+            "biot_savart_B_and_dB",
+            "biot_savart_B_vjp",
+        ):
+            with self.subTest(kernel=name):
+                for actual, expected in zip(
+                    jax.tree.leaves(evaluate(name, *single)),
+                    jax.tree.leaves(evaluate(name, *double)),
+                    strict=True,
+                ):
+                    self.assertEqual(actual.dtype, np.float64)
+                    np.testing.assert_array_equal(
+                        np.asarray(actual), np.asarray(expected)
+                    )
 
     def test_grouped_field_evaluates_single_precision_points_in_float64(self):
         """Grouped B and its pullback evaluate float32 points and cotangents in float64."""

@@ -15,14 +15,13 @@ from math import gcd
 from typing import Literal, TypeVar, Union
 
 import jax
-import numpy as np
 
 from simsopt_jax.pytree import pytree_dataclass
 from simsopt_jax.runtime.host_boundary import host_value
 
 from ._math_utils import (
     as_jax_float64 as _as_float64_array,
-    runtime_device_put,
+    eye,
 )
 
 __all__ = [
@@ -440,15 +439,6 @@ class CoilGroupSpec:
         """
         return self.gammas, self.gammadashs, self.currents
 
-    def as_grouped_data(self) -> tuple[jax.Array, jax.Array, jax.Array, list[int]]:
-        """Return kernel inputs together with original coil indices.
-
-        Returns:
-            tuple: Stored arrays of shapes (C, Q, 3), (C, Q, 3), (C,), followed by
-                a new list[int] of original coil indices.
-        """
-        return self.gammas, self.gammadashs, self.currents, list(self.coil_indices)
-
 
 @pytree_dataclass(data=("groups",), meta=())
 class GroupedCoilSetSpec:
@@ -479,17 +469,6 @@ class GroupedCoilSetSpec:
         """
         return tuple(group.coil_indices for group in self.groups)
 
-    def as_grouped_data(
-        self,
-    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, list[int]], ...]:
-        """Return grouped kernel inputs and original coil indices.
-
-        Returns:
-            tuple[tuple]: Array triples of shapes (C, Q, 3), (C, Q, 3), (C,) and
-                new index lists, one tuple per group.
-        """
-        return tuple(group.as_grouped_data() for group in self.groups)
-
 
 RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
 
@@ -505,7 +484,7 @@ RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
         "sample_gammadashdash",
         "sample_gammadashdashdash",
     ),
-    meta=(),
+    meta=("sample_derivatives",),
 )
 class CurvePerturbedSpec:
     """Immutable wrapper payload for a perturbed base curve.
@@ -527,6 +506,9 @@ class CurvePerturbedSpec:
             perturbation, shape (Q, 3), in meters.
         sample_gammadashdashdash (jax.Array): Additive third parameter-derivative
             perturbation, shape (Q, 3), in meters.
+        sample_derivatives (int): Number of parameter derivatives the sample provides,
+            1 to 3; higher sample terms are zero placeholders, which filament frames
+            refuse to differentiate through.
     """
 
     dofs: jax.Array
@@ -537,6 +519,7 @@ class CurvePerturbedSpec:
     sample_gammadash: jax.Array
     sample_gammadashdash: jax.Array
     sample_gammadashdashdash: jax.Array
+    sample_derivatives: int
 
 
 @pytree_dataclass(
@@ -633,6 +616,70 @@ def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
     raise TypeError(f"Unsupported curve spec type: {type(spec).__name__}")
 
 
+# Base-curve derivatives a filament frame consumes beyond the filament's own:
+# the centroid frame is built from gammadash, the Frenet frame from gammadashdash.
+_FILAMENT_FRAME_EXTRA_DERIVATIVES = {"centroid": 1, "frenet": 2}
+
+
+def _filament_base_derivative_order(frame_kind: str, order: int) -> int:
+    """Return the base-curve derivative order a filament frame needs.
+
+    Args:
+        frame_kind (str): "centroid" or "frenet".
+        order (int): Number of parameter derivatives of the filament position.
+
+    Returns:
+        int: Number of parameter derivatives of the base curve the frame needs.
+    """
+    return order + _FILAMENT_FRAME_EXTRA_DERIVATIVES[frame_kind]
+
+
+def _require_sample_derivatives(spec: CurvePerturbedSpec, order: int) -> None:
+    """Reject a perturbed curve whose sample lacks a needed derivative.
+
+    Native ``PerturbationSample`` raises when a derivative above its sampler's
+    ``n_derivs`` is requested; the zero placeholders above
+    ``spec.sample_derivatives`` are not derivatives and must not be used.
+
+    Args:
+        spec (CurvePerturbedSpec): Immutable perturbed-curve payload.
+        order (int): Number of parameter derivatives of the curve position needed.
+
+    Raises:
+        ValueError: The sample provides fewer than ``order`` derivatives.
+    """
+    if order > spec.sample_derivatives:
+        raise ValueError(
+            f"The perturbation sample has {spec.sample_derivatives} derivatives, "
+            f"but derivative {order} is needed. Adjust the `n_derivs` parameter "
+            "of the sampler to access higher derivatives (the JAX spec carries "
+            "at most 3)."
+        )
+
+
+def _require_curve_derivatives(spec: CurveSpec, order: int) -> None:
+    """Reject a curve whose perturbation samples lack derivatives a filament needs.
+
+    Applies ``_require_sample_derivatives`` to every perturbed layer below a
+    filament frame, including the extra base derivatives the frame consumes,
+    so a filament spec is rejected when it is built rather than evaluated.
+
+    Args:
+        spec (CurveSpec): Immutable curve geometry.
+        order (int): Number of parameter derivatives of the curve position needed.
+
+    Raises:
+        ValueError: A perturbed layer provides fewer than the needed derivatives.
+    """
+    if isinstance(spec, CurvePerturbedSpec):
+        _require_sample_derivatives(spec, order)
+        _require_curve_derivatives(spec.base_curve, order)
+    elif isinstance(spec, CurveFilamentSpec):
+        _require_curve_derivatives(
+            spec.base_curve, _filament_base_derivative_order(spec.frame_kind, order)
+        )
+
+
 def make_coil_group_spec(
     gammas: object,
     gammadashs: object,
@@ -707,8 +754,8 @@ def make_oriented_curve_xyzfourier_spec(
 
     Returns:
         OrientedCurveXYZFourierSpec object: Frozen pytree payload; newly
-            converted array leaves retain their argument shape, use runtime
-            floating precision and snapshot host NumPy inputs.
+            converted array leaves retain their argument shape, use float64
+            and snapshot host NumPy inputs.
     """
     return OrientedCurveXYZFourierSpec(
         dofs=_as_float64_array(dofs),
@@ -775,8 +822,8 @@ def make_curve_xyzfouriersymmetries_spec(
 
     Returns:
         CurveXYZFourierSymmetriesSpec object: Frozen pytree payload; newly
-            converted array leaves retain their argument shape, use runtime
-            floating precision and snapshot host NumPy inputs.
+            converted array leaves retain their argument shape, use float64
+            and snapshot host NumPy inputs.
     """
     nfp_int = int(nfp)
     ntor_int = int(ntor)
@@ -877,7 +924,7 @@ def make_optimizable_dof_map_spec(
             including fixed entries.
         owner_segments (Iterable[tuple[int, int, int, int]]): Half-open (owner_start,
             owner_end, target_start, target_end) copy ranges from owner DOFs into the
-            full template.
+            full template; each owner range and its target range have equal length.
         input_mode (str): full selects all reconstructed DOFs; any other value selects
             the local slice input_start:input_end.
         input_start (int): Inclusive start index of the requested local slice.
@@ -887,18 +934,30 @@ def make_optimizable_dof_map_spec(
         OptimizableDofMapSpec object: Frozen pytree payload; newly converted
             array leaves retain their argument shape, use float64
             and snapshot host NumPy inputs.
+
+    Raises:
+        ValueError: A segment has unequal owner/target lengths or a target range
+            outside the template.
     """
-    return OptimizableDofMapSpec(
-        template_full_dofs=_as_float64_array(template_full_dofs),
-        owner_segments=tuple(
-            (
-                int(owner_start),
-                int(owner_end),
-                int(target_start),
-                int(target_end),
+    template = _as_float64_array(template_full_dofs)
+    segments = tuple(
+        (int(owner_start), int(owner_end), int(target_start), int(target_end))
+        for owner_start, owner_end, target_start, target_end in owner_segments
+    )
+    for owner_start, owner_end, target_start, target_end in segments:
+        if not (
+            0 <= owner_start <= owner_end
+            and 0 <= target_start <= target_end <= template.shape[0]
+            and owner_end - owner_start == target_end - target_start
+        ):
+            raise ValueError(
+                f"Owner segment {(owner_start, owner_end, target_start, target_end)} "
+                "must copy an owner range into an equal-length target range within "
+                f"the {template.shape[0]} template DOFs."
             )
-            for owner_start, owner_end, target_start, target_end in owner_segments
-        ),
+    return OptimizableDofMapSpec(
+        template_full_dofs=template,
+        owner_segments=segments,
         input_mode=str(input_mode),
         input_start=int(input_start),
         input_end=int(input_end),
@@ -960,14 +1019,17 @@ def make_curve_perturbed_spec(
     sample_gammadash: object,
     sample_gammadashdash: object,
     sample_gammadashdashdash: object,
+    sample_derivatives: int,
 ) -> CurvePerturbedSpec:
     """Build an immutable CurvePerturbedSpec payload for JAX kernels.
 
     Args:
         dofs (array-like): Wrapper DOFs, shape (D,), including dependencies in the
             layout described by base_curve_map.
-        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,),
-            conventionally in [0, 1).
+        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,):
+            the base curve's grid, on which the sample is drawn, as for native
+            ``CurvePerturbed``. Geometry is evaluated on that grid; this field does
+            not resample it.
         base_curve (CurveSpec): Immutable geometry of the unperturbed or centerline
             curve.
         base_curve_map (OptimizableDofMapSpec): Map from wrapper DOFs to base-curve
@@ -980,12 +1042,22 @@ def make_curve_perturbed_spec(
             perturbation, shape (Q, 3), in meters.
         sample_gammadashdashdash (array-like): Additive third parameter-derivative
             perturbation, shape (Q, 3), in meters.
+        sample_derivatives (int): Number of parameter derivatives the sample provides,
+            1 to 3; pass zeros for the sample terms above it. Required, so zero
+            placeholders are never mistaken for derivatives.
 
     Returns:
         CurvePerturbedSpec object: Frozen pytree payload; newly converted
             array leaves retain their argument shape, use float64
             and snapshot host NumPy inputs.
+
+    Raises:
+        ValueError: sample_derivatives is outside 1 to 3.
     """
+    if not 1 <= sample_derivatives <= 3:
+        raise ValueError(
+            f"sample_derivatives must be 1, 2 or 3, got {sample_derivatives}."
+        )
     return CurvePerturbedSpec(
         dofs=_as_float64_array(dofs),
         quadpoints=_as_float64_array(quadpoints),
@@ -995,6 +1067,7 @@ def make_curve_perturbed_spec(
         sample_gammadash=_as_float64_array(sample_gammadash),
         sample_gammadashdash=_as_float64_array(sample_gammadashdash),
         sample_gammadashdashdash=_as_float64_array(sample_gammadashdashdash),
+        sample_derivatives=int(sample_derivatives),
     )
 
 
@@ -1015,8 +1088,9 @@ def make_curve_filament_spec(
     Args:
         dofs (array-like): Wrapper DOFs, shape (D,), including curve and rotation
             dependencies in their mapped layouts.
-        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,),
-            conventionally in [0, 1).
+        quadpoints (array-like): Normalized, dimensionless curve parameters, shape (Q,):
+            the base curve's and rotation's grid, as for native ``CurveFilament``.
+            Geometry is evaluated on those grids; this field does not resample them.
         base_curve (CurveSpec): Immutable geometry of the unperturbed or centerline
             curve.
         base_curve_map (OptimizableDofMapSpec): Map from wrapper DOFs to base-curve
@@ -1032,8 +1106,17 @@ def make_curve_filament_spec(
         CurveFilamentSpec object: Frozen pytree payload; newly converted array
             leaves retain their argument shape, use float64 and
             snapshot host NumPy inputs.
+
+    Raises:
+        ValueError: frame_kind is not centroid or frenet, or a perturbed base
+            curve's sample lacks a derivative the frame needs for the filament
+            tangent (2 for centroid, 3 for frenet), as native raises.
     """
-    return CurveFilamentSpec(
+    if frame_kind not in _FILAMENT_FRAME_EXTRA_DERIVATIVES:
+        raise ValueError(
+            f"frame_kind must be 'centroid' or 'frenet', got {frame_kind!r}."
+        )
+    spec = CurveFilamentSpec(
         dofs=_as_float64_array(dofs),
         quadpoints=_as_float64_array(quadpoints),
         base_curve=base_curve,
@@ -1044,12 +1127,8 @@ def make_curve_filament_spec(
         dn=float(dn),
         db=float(db),
     )
-
-
-def _normalize_rotmat(rotmat: object | None) -> tuple[jax.Array, bool]:
-    if rotmat is None:
-        return runtime_device_put(np.eye(3, dtype=np.float64), dtype=np.float64), False
-    return _as_float64_array(rotmat), True
+    _require_curve_derivatives(spec, 1)
+    return spec
 
 
 def make_coil_symmetry_spec(
@@ -1070,11 +1149,10 @@ def make_coil_symmetry_spec(
             leaves retain their argument shape, use float64 and
             snapshot host NumPy inputs.
     """
-    rotmat_jax, has_rotation = _normalize_rotmat(rotmat)
     return CoilSymmetrySpec(
-        rotmat=rotmat_jax,
+        rotmat=eye(3) if rotmat is None else _as_float64_array(rotmat),
         scale=float(scale),
-        has_rotation=has_rotation,
+        has_rotation=rotmat is not None,
     )
 
 
@@ -1139,8 +1217,8 @@ def make_coil_set_dof_extraction_spec(
 
     Returns:
         CoilSetDofExtractionSpec object: Frozen pytree payload; newly
-            converted array leaves retain their argument shape, use runtime
-            floating precision and snapshot host NumPy inputs.
+            converted array leaves retain their argument shape, use float64
+            and snapshot host NumPy inputs.
     """
     return CoilSetDofExtractionSpec(coils=tuple(coils))
 
@@ -1190,31 +1268,28 @@ def make_field_eval_spec(points: object) -> FieldEvalSpec:
     return FieldEvalSpec(points=_as_float64_array(points))
 
 
-def make_grouped_coil_set_spec(groups: Iterable[CoilGroupSpec | tuple[jax.Array, jax.Array, jax.Array, tuple[int, ...]]]) -> GroupedCoilSetSpec:
+def make_grouped_coil_set_spec(
+    groups: Iterable[CoilGroupSpec | tuple[object, object, object, tuple[int, ...]]],
+) -> GroupedCoilSetSpec:
     """Build an immutable GroupedCoilSetSpec payload for JAX kernels.
 
     Args:
-        groups (Iterable[CoilGroupSpec or tuple]): Groups of geometry/current arrays
+        groups (Iterable[CoilGroupSpec or tuple]): Existing specs or geometry/current arrays
             with shapes (C, Q, 3), (C, Q, 3), (C,) and original coil-index tuples;
             quadrature count may vary between groups.
 
     Returns:
-        GroupedCoilSetSpec object: Frozen pytree payload; newly converted
-            array leaves retain their argument shape, use float64
+        GroupedCoilSetSpec object: Frozen pytree payload retaining supplied specs;
+            newly converted array leaves retain their argument shape, use float64
             and snapshot host NumPy inputs.
     """
-    group_specs = []
+    group_specs: list[CoilGroupSpec] = []
     for group in groups:
         if isinstance(group, CoilGroupSpec):
             group_specs.append(group)
             continue
         gammas, gammadashs, currents, coil_indices = group
         group_specs.append(
-            make_coil_group_spec(
-                gammas,
-                gammadashs,
-                currents,
-                coil_indices,
-            )
+            make_coil_group_spec(gammas, gammadashs, currents, coil_indices)
         )
     return GroupedCoilSetSpec(groups=tuple(group_specs))

@@ -36,6 +36,17 @@ def _config(jax_platform):
 
 
 class TestBackendXlaGpuFusionAutotuner(JaxTestCase):
+    def setUp(self) -> None:
+        """Run each test as if JAX had not initialized its backends, the only
+        state in which the configuration exports the pins."""
+        super().setUp()
+        self.patches.enter_context(
+            mock.patch(
+                "simsopt_jax.backend.runtime._jax_backends_initialized",
+                return_value=False,
+            )
+        )
+
     def test_compose_yields_lone_flag_for_empty_input(self):
         """Empty XLA flags become the single disabled-fusion-autotuner flag."""
         for empty in [None, "", "   "]:

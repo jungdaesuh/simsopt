@@ -6,7 +6,7 @@ guards. Computing zero from reference values could overflow for finite inputs.
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -17,9 +17,6 @@ with optional_jax_imports():
 
 import numpy as np
 
-
-if JAX_IMPORT_ERROR is None:
-    jax.config.update("jax_enable_x64", True)
 
 REFERENCES = (
     (1.0e308, 1.0e308),
@@ -32,7 +29,7 @@ SEEDS = (np.nan, np.inf, -np.inf, 1.0)
 
 
 def _placed(values) -> jax.Array:
-    return jax.device_put(np.asarray(values, dtype=np.float64))
+    return jnp.array(np.asarray(values, dtype=np.float64))
 
 
 class TestPlacementZero(JaxTestCase):
