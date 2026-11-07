@@ -7,6 +7,7 @@ from unittest_jax_support import JaxTestCase, optional_jax_imports
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core import (
         OrientedCurveXYZFourierSpec,
         curve_gamma_and_gammadash_from_spec,
@@ -17,15 +18,8 @@ with optional_jax_imports():
 import numpy as np
 
 
-_DIRECT_KERNEL = {
-    "rtol": 1e-10,
-    "atol": 1e-12,
-    "requires_same_state": True,
-    "requires_direct_cpp_oracle": True,
-    "vector_parity_required": True,
-}
-_RTOL = _DIRECT_KERNEL["rtol"]
-_ATOL = _DIRECT_KERNEL["atol"]
+_RTOL = 1e-10
+_ATOL = 1e-12
 
 
 def _oriented_curve_numpy(dofs: np.ndarray, quadpoints: np.ndarray, order: int):
@@ -117,7 +111,7 @@ class TestOrientedcurveJaxSpec(JaxTestCase):
             isinstance(spec, OrientedCurveXYZFourierSpec),
             "isinstance(spec, OrientedCurveXYZFourierSpec)",
         )
-        gamma, gammadash = jax.jit(curve_gamma_and_gammadash_from_spec)(spec)
+        gamma, gammadash = jit(curve_gamma_and_gammadash_from_spec)(spec)
         expected_gamma, expected_gammadash = _oriented_curve_numpy(dofs, quadpoints, 2)
 
         np.testing.assert_allclose(
