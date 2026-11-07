@@ -1,14 +1,14 @@
 from math import sin, cos
 
 import numpy as np
-from jax import device_get, device_put, jacfwd, jvp, vjp
+from jax import vjp, jacfwd, jvp
 import jax.numpy as jnp
 
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
 
-from .jit import jit, native_jax_device
+from .jit import jit
 from .plotting import fix_matplotlib_3d
 
 __all__ = ['Curve', 'JaxCurve', 'RotatedCurve', 'curves_to_vtk', 'create_equally_spaced_curves',
@@ -241,17 +241,8 @@ class Curve(Optimizable):
         to the curve and :math:`\mathbf{c}` are the curve dofs.
         """
 
-        # Upstream's jitted VJP, on the device ``native_jax_device`` names and
-        # through explicit transfers, so the native gradient stays host-owned.
-        device = native_jax_device()
-        incremental_arclength_cotangent = np.asarray(
-            device_get(
-                incremental_arclength_vjp(
-                    device_put(self.gammadash(), device), device_put(v, device)
-                )
-            )
-        )
-        return self.dgammadash_by_dcoeff_vjp(incremental_arclength_cotangent)
+        return self.dgammadash_by_dcoeff_vjp(
+            incremental_arclength_vjp(self.gammadash(), v))
 
     def kappa_impl(self, kappa):
         r"""

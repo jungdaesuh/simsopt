@@ -11,6 +11,9 @@ from unittest_jax_support import JaxTestCase, optional_jax_imports
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
+    import jax.numpy as jnp
+    from simsopt_jax.backend.dtypes import as_jax_float64
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.core.field import coil_set_spec_from_dof_extraction_spec
     from simsopt_jax.core.specs import (
         CoilDofExtractionSpec,
@@ -62,7 +65,7 @@ def _extraction_spec() -> CoilDofExtractionSpec:
 def _coil_field_inputs(spec: CoilDofExtractionSpec):
     return coil_set_spec_from_dof_extraction_spec(
         make_coil_set_dof_extraction_spec([spec]),
-        jax.device_put(OWNER_DOFS),
+        jnp.array(OWNER_DOFS),
     ).field_inputs()
 
 
@@ -141,8 +144,9 @@ class TestCoilDofExtractionSpecPlacement(JaxTestCase):
             ).field_inputs()[0]
             return gammas.sum()
 
+        owner_dofs = as_jax_float64(OWNER_DOFS)
         with jax.transfer_guard("disallow"):
-            total = jax.jit(total_gamma)(jax.device_put(OWNER_DOFS))
+            total = jit(total_gamma)(owner_dofs)
 
         self.assertTrue(
             np.isfinite(np.asarray(jax.device_get(total))),

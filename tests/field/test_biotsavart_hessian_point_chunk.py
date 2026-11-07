@@ -9,7 +9,7 @@ kernel: point tiling never changes any single point's reduction.
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -19,10 +19,6 @@ with optional_jax_imports():
 
 
 import numpy as np
-
-
-if JAX_IMPORT_ERROR is None:
-    jax.config.update("jax_enable_x64", True)
 
 
 def _coil_set(rng):
@@ -83,7 +79,6 @@ class TestBiotsavartHessianPointChunk(JaxTestCase):
         rng = np.random.default_rng(7)
         gammas, gammadashs, currents = _coil_set(rng)
         points = jnp.asarray(rng.uniform(-0.4, 0.4, size=(37, 3)))
-        biotsavart_core.invalidate_kernel_cache()
         untiled = biotsavart_core._make_kernel(
             biotsavart_core._Integrand.B,
             biotsavart_core._DiffMode.HESSIAN,
