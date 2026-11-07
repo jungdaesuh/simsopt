@@ -535,7 +535,10 @@ class TestFusedBAndDBAutodiffReference(JaxTestCase):
         }
 
         def B_integrand(x):
-            return core_biotsavart._biot_savart_B_integrand(x, gammas, gammadashs)
+            return jnp.stack(
+                core_biotsavart._biot_savart_B_integrand(x, gammas, gammadashs),
+                axis=-1,
+            )
 
         def autodiff_integrand(x):
             # jacfwd yields [..., component, direction]; the fused integrand
