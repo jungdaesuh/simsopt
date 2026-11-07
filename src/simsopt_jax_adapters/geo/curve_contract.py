@@ -1,6 +1,5 @@
 """Shared JAX curve-method contract helpers."""
 
-import jax.numpy as jnp
 import numpy as np
 from typing import cast
 
@@ -55,7 +54,8 @@ def _optimizable_dof_map_components(owner, opt, *, separate_owners: bool = False
         source_indices = {
             dep_opt: slices_by_dofs[dep_opt.dofs] for dep_opt in opt_indices
         }
-    template_full_dofs = jnp.asarray(full_dofs, dtype=jnp.float64)
+    # A host template: make_optimizable_dof_map_spec places it with the runtime policy.
+    template_full_dofs = np.asarray(full_dofs, dtype=np.float64)
     owner_segments = tuple(
         (
             int(source_indices[dep_opt][0]),

@@ -7,7 +7,8 @@ NCSX problems (``tests/geo/surface_test_helpers.get_boozer_surface``), with
 and without stellarator symmetry, ``optimize_G``, ``weight_inv_modB`` and
 labels on their own grids: iteration counts, success flags, the surface,
 ``iota``, ``G``, the result arrays and the ``PLU`` solves agree. Failures at
-``maxiter``, diverging Newton walks, singular systems and the
+``maxiter``, diverging Newton walks and other failed solves (which restore
+their start when they end worse), singular systems and the
 ``need_to_run_code`` cache behave as natively. Native ``Iotas``,
 ``MajorRadius``, ``NonQuasiSymmetricRatio`` and ``BoozerResidual`` on a
 ``JaxBoozerSurface`` give native values and coil gradients for coil-independent
@@ -15,8 +16,12 @@ labels with optimized ``G``. ``JaxBoozerResidual`` also differentiates the
 explicit ToroidalFlux and current-derived ``G`` terms that native misses,
 checked through re-solves. Then: settings
 read at every solve, no recompilation for new values, no implicit transfers,
-the documented differences (fixed DOFs, the BoozerExact adjoint without
-stellarator symmetry) and unsupported inputs.
+fixed surface DOFs solved for as natively, the BoozerExact adjoint without
+stellarator symmetry, ``BoozerResidual`` on BoozerExact solves, and
+unsupported inputs. BFGS and L-BFGS-B run SciPy's
+algorithms on the device by default; the ``host_bfgs`` option runs SciPy
+itself on the jitted penalty, as before, and the device programs' scratch
+memory is the penalty's plus their quasi-Newton state.
 
 Tolerances sit above round-off: iterates and arrays agree to 1e-12 of the
 largest native entry (measured worst 2e-13, coil gradients of the objectives)
@@ -36,6 +41,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
+    from simsopt._core.derivative import Derivative
     from simsopt.configs import get_data
     from simsopt.field.biotsavart import BiotSavart
     from simsopt.geo.boozersurface import BoozerSurface
@@ -48,14 +54,17 @@ with optional_jax_imports():
         ToroidalFlux,
         Volume,
         boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
-        boozer_surface_residual_dB,
     )
     from simsopt.geo.surfacerzfourier import SurfaceRZFourier
     from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
     from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
     from simsopt.objectives.utilities import forward_backward
-    from simsopt_jax.core.boozer_problem import boozer_penalty_residual
-    from simsopt_jax.runtime.host_boundary import disallow_host_transfers
+    from simsopt_jax.core.boozer_problem import (
+        boozer_penalty_constraints,
+        boozer_penalty_residual,
+    )
+    from simsopt_jax.core.boozer_solvers import boozer_penalty_bfgs, boozer_penalty_lbfgsb
+    from simsopt_jax.runtime.host_boundary import disallow_host_transfers, host_tree
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_problem import boozer_problem
     from simsopt_jax_adapters.geo import boozer_surface as jax_boozer_surface
@@ -66,27 +75,33 @@ with optional_jax_imports():
     from .surface_test_helpers import get_boozer_surface
 
 from unittest_jax_support import (
+    assert_errors_shrink,
     assert_matches_native,
+    host_array,
     jax_compilations,
     parity_default_device,
     parity_rng,
     place_float64,
+    scaled_direction,
 )
 
 from dataclasses import dataclass, replace
 import copy
 import inspect
-from contextlib import ExitStack
 from unittest import mock
 from typing import cast
 
 import numpy as np
+from scipy.optimize import OptimizeResult, least_squares, minimize
 
 
 _IOTA = -0.406
 _RTOL = 1e-12
 _RTOL_NONSYM = 1e-9
 _WEIGHT = 100.0
+# Scratch bytes the device quasi-Newton loops may add to the penalty's for their
+# vectors and scalars, beyond their matrices.
+_QUASI_NEWTON_SLACK = 2**20
 
 
 @dataclass
@@ -314,6 +329,18 @@ def _least_squares_problem(jax_field: bool) -> _Problem:
 # --- native objectives and adjoints ---------------------------------------------
 
 
+_NATIVE_OBJECTIVES = {
+    "Iotas": lambda problem: Iotas(problem.boozer),
+    "MajorRadius": lambda problem: MajorRadius(problem.boozer),
+    "NonQuasiSymmetricRatio": lambda problem: NonQuasiSymmetricRatio(
+        problem.boozer, BiotSavart(problem.coils)
+    ),
+    "BoozerResidual": lambda problem: BoozerResidual(
+        problem.boozer, BiotSavart(problem.coils)
+    ),
+}
+
+
 _OBJECTIVE_CASES = {
     "exact-volume": ("exact", "Volume", True, False),
     "exact-flux-own-grid": ("exact", "ToroidalFlux", True, False),
@@ -328,25 +355,17 @@ _OBJECTIVE_CASES = {
 def _toroidal_flux_adjoint_problem():
     """Solve the shared ToroidalFlux problem and build its adjoint objectives."""
     native, jax_problem = _pair("ls", "ToroidalFlux", label_grid=(31, 31))
-    objectives = {
-        "Iotas": lambda problem: Iotas(problem.boozer),
-        "MajorRadius": lambda problem: MajorRadius(problem.boozer),
-        "NonQuasiSymmetricRatio": lambda problem: NonQuasiSymmetricRatio(
-            problem.boozer, BiotSavart(problem.coils)
-        ),
-        "BoozerResidual": lambda problem: BoozerResidual(
-            problem.boozer, BiotSavart(problem.coils)
-        ),
-    }
     jax_objectives = {
-        **objectives,
+        **_NATIVE_OBJECTIVES,
         "BoozerResidual": lambda problem: JaxBoozerResidual(
             problem.boozer, problem.boozer.biotsavart
         ),
     }
     for problem in (native, jax_problem):
         problem.boozer.run_code(_IOTA, G=problem.G0)
-    native_objectives = {name: make(native) for name, make in objectives.items()}
+    native_objectives = {
+        name: make(native) for name, make in _NATIVE_OBJECTIVES.items()
+    }
     return native, jax_problem, native_objectives, jax_objectives
 
 
@@ -354,10 +373,10 @@ class TestBoozerSurfaceJax(JaxTestCase):
     def test_exact_run_code_matches_native(self):
         """Exact run_code solves match native surface state, residuals and result metadata."""
         for name in _EXACT_CASES:
-            with self.subTest(name=name), self.case() as patches:
-                self._case_exact_run_code_matches_native(name, patches)
+            with self.subTest(name=name), self.case():
+                self._case_exact_run_code_matches_native(name)
 
-    def _case_exact_run_code_matches_native(self, name, patches):
+    def _case_exact_run_code_matches_native(self, name):
         """Run one row with case-local objects released before runtime cleanup."""
         stellsym, label, grid = _EXACT_CASES[name]
         native, jax_problem = _pair(
@@ -365,10 +384,8 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
         native_res = native.boozer.run_code(_IOTA, G=native.G0)
         jax_res = jax_problem.boozer.run_code(_IOTA, G=jax_problem.G0)
-        self.assertTrue(
-            native_res["success"] and native_res["iter"] > 3,
-            'native_res["success"] and native_res["iter"] > 3',
-        )
+        self.assertTrue(native_res["success"])
+        self.assertGreater(native_res["iter"], 3)
         _assert_same_solve(
             jax_problem,
             native,
@@ -379,36 +396,38 @@ class TestBoozerSurfaceJax(JaxTestCase):
             _RTOL if stellsym else _RTOL_NONSYM,
         )
         np.testing.assert_array_equal(jax_res["mask"], native_res["mask"])
-        self.assertTrue(
-            jax_res["type"] == "exact" and jax_res["s"] is jax_problem.boozer.surface,
-            'jax_res["type"] == "exact" and jax_res["s"] is jax_problem.boozer.surface',
-        )
+        self.assertEqual(jax_res["type"], "exact")
+        self.assertIs(jax_res["s"], jax_problem.boozer.surface)
         self.assertTrue(
             np.max(np.abs(jax_res["residual"])) < 1e-11,
             "the converged residual is not at round-off",
         )
-        self.assertTrue(
-            not jax_problem.boozer.need_to_run_code,
-            "not jax_problem.boozer.need_to_run_code",
-        )
+        self.assertFalse(jax_problem.boozer.need_to_run_code)
 
-    def test_exact_newton_at_maxiter_fails_as_natively(self):
-        """At ``maxiter`` native reports the norm checked before the last step, so
-        the solve fails, also when that step converged (``maxiter=6`` here; PR
-        #669 would report success); the surface holds the last iterate, the
-        residual and Jacobian are evaluated there. With ``maxiter=0`` nothing
-        moves."""
+    def test_exact_newton_at_maxiter_judges_its_final_iterate_as_natively(self):
+        """At ``maxiter`` native judges success on the final iterate, so a walk
+        whose last permitted step converges succeeds (``maxiter=6`` here); the
+        surface holds the last iterate, the residual and Jacobian are evaluated
+        there. A fractional cap allows steps while the count is below it; with a
+        nonpositive cap nothing moves."""
         for case_id_0, stellsym in zip(
             ["stellsym", "nonsym"], [True, False], strict=True
         ):
             with self.subTest(
                 case_id_0=case_id_0, stellsym=stellsym
-            ), self.case() as patches:
-                self._case_exact_newton_at_maxiter_fails_as_natively(stellsym, patches)
+            ), self.case():
+                self._case_exact_newton_at_maxiter_judges_its_final_iterate_as_natively(stellsym)
 
-    def _case_exact_newton_at_maxiter_fails_as_natively(self, stellsym, patches):
+    def _case_exact_newton_at_maxiter_judges_its_final_iterate_as_natively(self, stellsym):
         """Run one row with case-local objects released before runtime cleanup."""
-        for maxiter in (2, 6, 0):
+        # The cap, native's step count and success at it.
+        for maxiter, steps, success in (
+            (2, 2, False),
+            (6, 6, True),
+            (0.5, 1, False),
+            (0, 0, False),
+            (-1, 0, False),
+        ):
             native, jax_problem = _pair("exact", stellsym=stellsym)
             start = native.boozer.surface.get_dofs()
             native_res = native.boozer.solve_residual_equation_exactly_newton(
@@ -417,10 +436,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
             jax_res = jax_problem.boozer.solve_residual_equation_exactly_newton(
                 tol=1e-10, maxiter=maxiter, iota=_IOTA, G=jax_problem.G0
             )
-            self.assertTrue(
-                not native_res["success"] and native_res["iter"] == maxiter,
-                'not native_res["success"] and native_res["iter"] == maxiter',
-            )
+            self.assertEqual((native_res["iter"], native_res["success"]), (steps, success))
             rtol = _RTOL if stellsym else _RTOL_NONSYM
             _assert_same_solve(
                 jax_problem,
@@ -439,7 +455,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 rtol,
                 scale=22.0,
             )
-            if maxiter == 0:
+            if steps == 0:
                 np.testing.assert_array_equal(
                     jax_problem.boozer.surface.get_dofs(), start
                 )
@@ -459,26 +475,22 @@ class TestBoozerSurfaceJax(JaxTestCase):
                     tol=1e-10, maxiter=5, iota=_IOTA, G=native.G0
                 )
             np.testing.assert_array_equal(problem.boozer.surface.get_dofs(), start)
-            self.assertTrue(
-                problem.boozer.need_to_run_code, "problem.boozer.need_to_run_code"
-            )
+            self.assertTrue(problem.boozer.need_to_run_code)
 
     def test_non_finite_solves_fail_as_natively(self):
         """A NaN ``G`` makes every BoozerExact step NaN: as natively the walk runs
-        to ``maxiter`` (a NaN norm never meets the tolerance), the surface takes
-        the NaN iterate and SciPy's ``lu`` refuses the final Jacobian. A weighted
+        to ``maxiter`` (a NaN norm never meets the tolerance), restores its start,
+        where ``G`` is still NaN, and SciPy's ``lu`` refuses the Jacobian there. A weighted
         BoozerLS penalty without current is 0/0: the Newton loop does not start
         and ``lu`` refuses the Hessian before the surface moves."""
         native, jax_problem = _pair("exact")
         for problem in (native, jax_problem):
+            start = problem.boozer.surface.get_dofs()
             with self.assertRaisesRegex(ValueError, "infs or NaNs"):
                 problem.boozer.solve_residual_equation_exactly_newton(
                     tol=1e-10, maxiter=3, iota=_IOTA, G=np.nan
                 )
-            self.assertTrue(
-                np.all(np.isnan(problem.boozer.surface.get_dofs())),
-                "np.all(np.isnan(problem.boozer.surface.get_dofs()))",
-            )
+            np.testing.assert_array_equal(problem.boozer.surface.get_dofs(), start)
 
         native, jax_problem = _pair("ls", weight_inv_modB=True)
         for problem in (native, jax_problem):
@@ -506,44 +518,49 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
 
     def test_ls_run_code_matches_native(self):
-        """BFGS, then the penalty Newton. Near convergence BFGS's last line
-        searches follow round-off (its iteration count can differ by one or two),
-        so the polished solution, the Newton step count and flags are compared."""
-        for case_id_0, optimize_G in zip(
-            ["G", "G-from-currents"], [True, False], strict=True
-        ):
-            for case_id_1, weight_inv_modB in zip(
-                ["weighted", "unweighted"], [True, False], strict=True
+        """BFGS (or L-BFGS-B), then the penalty Newton. Near convergence the
+        quasi-Newton walk's last line searches follow round-off (its iteration
+        count can differ by one or two), so the polished solution, the Newton
+        step count and flags are compared."""
+        for limited_memory in (False, True):
+            for case_id_0, optimize_G in zip(
+                ["G", "G-from-currents"], [True, False], strict=True
             ):
-                with self.subTest(
-                    case_id_0=case_id_0,
-                    optimize_G=optimize_G,
-                    case_id_1=case_id_1,
-                    weight_inv_modB=weight_inv_modB,
-                ), self.case() as patches:
-                    self._case_ls_run_code_matches_native(
-                        optimize_G, weight_inv_modB, patches
-                    )
+                for case_id_1, weight_inv_modB in zip(
+                    ["weighted", "unweighted"], [True, False], strict=True
+                ):
+                    with self.subTest(
+                        limited_memory=limited_memory,
+                        case_id_0=case_id_0,
+                        optimize_G=optimize_G,
+                        case_id_1=case_id_1,
+                        weight_inv_modB=weight_inv_modB,
+                    ), self.case():
+                        self._case_ls_run_code_matches_native(
+                            optimize_G, weight_inv_modB, limited_memory
+                        )
 
-    def _case_ls_run_code_matches_native(self, optimize_G, weight_inv_modB, patches):
+    def _case_ls_run_code_matches_native(self, optimize_G, weight_inv_modB, limited_memory):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = _pair(
-            "ls", optimize_G=optimize_G, weight_inv_modB=weight_inv_modB
+            "ls",
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            options={
+                "verbose": False,
+                "weight_inv_modB": weight_inv_modB,
+                "limited_memory": limited_memory,
+            },
         )
         native_res = native.boozer.run_code(_IOTA, G=native.G0)
         jax_res = jax_problem.boozer.run_code(_IOTA, G=jax_problem.G0)
-        self.assertTrue(native_res["success"], 'native_res["success"]')
+        self.assertTrue(native_res["success"])
         _assert_same_solve(
             jax_problem, native, jax_res, native_res, ("hessian",), "run_code"
         )
-        self.assertTrue(
-            jax_res["type"] == "ls" and jax_res["weight_inv_modB"] == weight_inv_modB,
-            'jax_res["type"] == "ls" and jax_res["weight_inv_modB"] == weight_inv_modB',
-        )
-        self.assertTrue(
-            np.linalg.norm(jax_res["jacobian"]) <= 1e-11,
-            'np.linalg.norm(jax_res["jacobian"]) <= 1e-11',
-        )
+        self.assertEqual(jax_res["type"], "ls")
+        self.assertEqual(jax_res["weight_inv_modB"], weight_inv_modB)
+        self.assertLessEqual(np.linalg.norm(jax_res["jacobian"]), 1e-11)
 
     def test_bfgs_matches_native_up_to_maxiter(self):
         """Capped before convergence (a failed solve, kept as natively). The two
@@ -560,13 +577,13 @@ class TestBoozerSurfaceJax(JaxTestCase):
                     stellsym=stellsym,
                     case_id_1=case_id_1,
                     limited_memory=limited_memory,
-                ), self.case() as patches:
+                ), self.case():
                     self._case_bfgs_matches_native_up_to_maxiter(
-                        stellsym, limited_memory, patches
+                        stellsym, limited_memory
                     )
 
     def _case_bfgs_matches_native_up_to_maxiter(
-        self, stellsym, limited_memory, patches
+        self, stellsym, limited_memory
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         maxiter = 15
@@ -583,14 +600,23 @@ class TestBoozerSurfaceJax(JaxTestCase):
             )
             for problem in (native, jax_problem)
         )
-        self.assertTrue(
-            not native_res["success"] and native_res["iter"] == maxiter,
-            'not native_res["success"] and native_res["iter"] == maxiter',
+        self.assertFalse(native_res["success"])
+        self.assertEqual(native_res["iter"], maxiter)
+        self.assertEqual(
+            tuple(jax_res["info"][key] for key in ("nfev", "njev", "status", "message")),
+            tuple(native_res["info"][key] for key in ("nfev", "njev", "status", "message")),
         )
-        self.assertTrue(
-            jax_res["info"].nfev == native_res["info"].nfev,
-            'jax_res["info"].nfev == native_res["info"].nfev',
-        )
+        # info is SciPy's OptimizeResult: its fields in its order, hess_inv
+        # included. The steps carry the iterates' difference, and H magnifies
+        # it (measured 2.1e-11 for sk, 6.3e-11 for H, of the largest entry).
+        self.assertEqual(list(jax_res["info"]), list(native_res["info"]))
+        jax_hess, native_hess = jax_res["info"].hess_inv, native_res["info"].hess_inv
+        self.assertIs(type(jax_hess), type(native_hess))
+        if limited_memory:
+            assert_matches_native(jax_hess.sk, native_hess.sk, "L-BFGS-B hess_inv sk", 1e-10)
+            assert_matches_native(jax_hess.yk, native_hess.yk, "L-BFGS-B hess_inv yk", 1e-10)
+        else:
+            assert_matches_native(jax_hess, native_hess, "BFGS hess_inv", 5e-10)
         _assert_same_solve(
             jax_problem, native, jax_res, native_res, ("fun",), "BFGS", rtol=1e-11
         )
@@ -598,20 +624,136 @@ class TestBoozerSurfaceJax(JaxTestCase):
         assert_matches_native(
             jax_res["gradient"], native_res["gradient"], "BFGS gradient", 1e-9
         )
-        self.assertTrue(
-            jax_res["s"] is jax_problem.boozer.surface
-            and not jax_problem.boozer.need_to_run_code,
-            'jax_res["s"] is jax_problem.boozer.surface and not jax_problem.boozer.need_to_run_code',
+        self.assertIs(jax_res["s"], jax_problem.boozer.surface)
+        self.assertFalse(jax_problem.boozer.need_to_run_code)
+
+    def test_host_bfgs_runs_scipy_on_the_jitted_penalty(self):
+        """With ``host_bfgs``, BFGS and L-BFGS-B are SciPy's on the jitted
+        penalty, the path before the device port, bit for bit; ``run_code``
+        takes the option from ``options``."""
+        for limited_memory in (False, True):
+            with self.subTest(limited_memory=limited_memory), self.case():
+                self._case_host_bfgs_runs_scipy_on_the_jitted_penalty(limited_memory)
+
+    def _case_host_bfgs_runs_scipy_on_the_jitted_penalty(self, limited_memory):
+        """Run one row with case-local objects released before runtime cleanup."""
+        maxiter, tol = 20, 1e-10
+        jax_problem = _problem(
+            True,
+            "ls",
+            options={
+                "verbose": False,
+                "weight_inv_modB": False,
+                "limited_memory": limited_memory,
+                "host_bfgs": True,
+                "bfgs_maxiter": maxiter,
+                "bfgs_tol": tol,
+                "newton_maxiter": 0,
+            },
+        )
+        boozer = jax_problem.boozer
+        start = boozer.surface.get_dofs()
+        problem = boozer_problem(
+            boozer.biotsavart, boozer.surface, boozer.label, boozer.targetlabel, _WEIGHT
+        )
+
+        def penalty(x):
+            return host_tree(
+                boozer_penalty_constraints(
+                    problem,
+                    place_float64(x, problem.targetlabel),
+                    derivatives=1,
+                    optimize_G=True,
+                    weight_inv_modB=False,
+                )
+            )
+
+        options = {"maxiter": maxiter, "gtol": tol}
+        if limited_memory:
+            options.update(maxcor=200, ftol=tol)
+        expected = minimize(
+            penalty,
+            np.concatenate((start, [_IOTA, jax_problem.G0])),
+            jac=True,
+            method="L-BFGS-B" if limited_memory else "BFGS",
+            options=options,
+        )
+        res = boozer.minimize_boozer_penalty_constraints_LBFGS(
+            tol=tol,
+            maxiter=maxiter,
+            constraint_weight=_WEIGHT,
+            iota=_IOTA,
+            G=jax_problem.G0,
+            limited_memory=limited_memory,
+            weight_inv_modB=False,
+            host_bfgs=True,
+        )
+        for key in ("x", "fun", "jac", "nit", "nfev", "njev", "status", "message"):
+            np.testing.assert_array_equal(
+                res["info"][key], expected[key], err_msg=f"host_bfgs {key} differs from SciPy's"
+            )
+        # run_code reads the option; without Newton steps it ends at SciPy's endpoint.
+        boozer.surface.set_dofs(start)
+        boozer.recompute_bell()
+        boozer.run_code(_IOTA, G=jax_problem.G0)
+        np.testing.assert_array_equal(
+            boozer.surface.get_dofs(), expected.x[:-2], err_msg="run_code did not run SciPy"
+        )
+
+    def test_device_quasi_newton_scratch_is_the_penalty_plus_its_state(self):
+        """The compiled BFGS and L-BFGS-B loops need the scratch memory of the
+        penalty's value and gradient plus their state: BFGS's inverse Hessian
+        and its update (measured 2 n^2 doubles on the CPU, 1.2 n^2 on the GPU,
+        n = 75), L-BFGS-B's corrections and their small matrices (measured 3.8
+        MB on the CPU at maxcor 200), never a multiple of the penalty's."""
+        for parity_lane in ("cpu", "gpu"):
+            with self.subTest(parity_lane=parity_lane), self.case():
+                self._case_device_quasi_newton_scratch_is_the_penalty_plus_its_state(parity_lane)
+
+    def _case_device_quasi_newton_scratch_is_the_penalty_plus_its_state(self, parity_lane):
+        """Run one row with case-local objects released before runtime cleanup."""
+        with parity_default_device(parity_lane):
+            jax_problem = _problem(True, "ls")
+            boozer = jax_problem.boozer
+            problem = boozer_problem(
+                boozer.biotsavart, boozer.surface, boozer.label, boozer.targetlabel, _WEIGHT
+            )
+            x = place_float64(
+                np.concatenate((boozer.surface.get_dofs(), [_IOTA, jax_problem.G0])),
+                problem.targetlabel,
+            )
+            scalar = place_float64(1.0, problem.targetlabel)
+            options = {"optimize_G": True, "weight_inv_modB": False}
+
+            def scratch(lowered):
+                return lowered.compile().memory_analysis().temp_size_in_bytes
+
+            penalty = scratch(boozer_penalty_constraints.lower(problem, x, derivatives=1, **options))
+            bfgs = scratch(boozer_penalty_bfgs.lower(problem, x, scalar, scalar, **options))
+            maxcor = 200
+            lbfgsb = scratch(
+                boozer_penalty_lbfgsb.lower(problem, x, scalar, scalar, scalar, maxcor=maxcor, **options)
+            )
+        n, double = x.shape[0], 8
+        self.assertLessEqual(
+            bfgs,
+            penalty + 3 * n * n * double + _QUASI_NEWTON_SLACK,
+            f"BFGS scratch {bfgs} B exceeds the penalty's {penalty} B plus 3 n^2 doubles",
+        )
+        self.assertLessEqual(
+            lbfgsb,
+            penalty + 2 * (2 * maxcor * n + 8 * maxcor**2) * double + _QUASI_NEWTON_SLACK,
+            f"L-BFGS-B scratch {lbfgsb} B exceeds the penalty's {penalty} B plus its memory",
         )
 
     def test_penalty_newton_matches_native(self):
         """From a BFGS iterate; ``stab`` shifts the Hessian of each step but not
         the returned one."""
         for stab in [0.0, 1e-4]:
-            with self.subTest(stab=stab), self.case() as patches:
-                self._case_penalty_newton_matches_native(stab, patches)
+            with self.subTest(stab=stab), self.case():
+                self._case_penalty_newton_matches_native(stab)
 
-    def _case_penalty_newton_matches_native(self, stab, patches):
+    def _case_penalty_newton_matches_native(self, stab):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = _pair("ls")
         iota, G = _same_start(native, jax_problem, 200)
@@ -627,26 +769,22 @@ class TestBoozerSurfaceJax(JaxTestCase):
             )
             for problem in (native, jax_problem)
         )
-        self.assertTrue(
-            native_res["success"] and native_res["iter"] > 1,
-            'native_res["success"] and native_res["iter"] > 1',
-        )
+        self.assertTrue(native_res["success"])
+        self.assertGreater(native_res["iter"], 1)
         _assert_same_solve(
             jax_problem, native, jax_res, native_res, ("hessian",), f"stab={stab}"
         )
-        self.assertTrue(
-            jax_res["residual"] is jax_res["jacobian"],
-            'jax_res["residual"] is jax_res["jacobian"]',
-        )
+        self.assertIs(jax_res["residual"], jax_res["jacobian"])
 
-    def test_penalty_newton_diverges_and_keeps_its_iterate_as_natively(self):
+    def test_penalty_newton_diverges_and_restores_its_start_as_natively(self):
         """From an early BFGS iterate the undamped Newton walk diverges: as natively
-        (no divergence guard, no restore) it runs to ``maxiter``, fails and leaves
-        the diverged iterate in the surface. The walk is chaotic, so only its
-        outcome is compared; a two-step walk is compared iterate by iterate."""
+        it runs to ``maxiter``, fails and, ending with a larger gradient norm than
+        it started with, restores its start and the derivatives there. A two-step
+        walk is compared with native's whatever it ends at."""
         for maxiter in (2, 40):
             native, jax_problem = _pair("ls")
             iota, G = _same_start(native, jax_problem, 40)
+            start = native.boozer.surface.get_dofs()
             native_res, jax_res = (
                 problem.boozer.minimize_boozer_penalty_constraints_newton(
                     tol=1e-11,
@@ -658,69 +796,189 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 )
                 for problem in (native, jax_problem)
             )
-            self.assertTrue(
-                not native_res["success"] and not jax_res["success"],
-                'not native_res["success"] and not jax_res["success"]',
+            self.assertFalse(native_res["success"])
+            self.assertFalse(jax_res["success"])
+            self.assertEqual(native_res["iter"], maxiter)
+            self.assertEqual(jax_res["iter"], maxiter)
+            if maxiter == 40:
+                for problem, res in ((native, native_res), (jax_problem, jax_res)):
+                    np.testing.assert_array_equal(problem.boozer.surface.get_dofs(), start)
+                    self.assertEqual((res["iota"], res["G"]), (iota, G))
+            # Diverging steps magnify round-off (measured 1e-11 of the largest entry).
+            _assert_same_solve(
+                jax_problem,
+                native,
+                jax_res,
+                native_res,
+                ("jacobian", "hessian"),
+                f"maxiter={maxiter}",
+                1e-9 if maxiter == 2 else _RTOL,
             )
-            self.assertTrue(
-                native_res["iter"] == jax_res["iter"] == maxiter,
-                'native_res["iter"] == jax_res["iter"] == maxiter',
-            )
-            if maxiter == 2:
-                # Diverging steps magnify round-off (measured 1e-11 of the largest entry).
-                _assert_same_solve(
-                    jax_problem,
-                    native,
-                    jax_res,
-                    native_res,
-                    ("jacobian", "hessian"),
-                    "two steps",
-                    1e-9,
-                )
-            else:
-                self.assertTrue(
-                    np.linalg.norm(native_res["jacobian"]) > 1e3
-                    and np.linalg.norm(jax_res["jacobian"]) > 1e3,
-                    'np.linalg.norm(native_res["jacobian"]) > 1e3 and np.linalg.norm(jax_res["jacobian"]) > 1e3',
-                )
 
-    def test_penalty_newton_with_a_non_finite_shift_fails_as_natively(self):
+    def test_penalty_newton_divergence_factor_as_natively(self):
+        """``divergence_factor`` has native's meaning: from an early BFGS iterate
+        (where the walk diverges) a factor of 10 stops the walk at native's step,
+        before ``maxiter``, and the start is restored. On a converging walk (from a later iterate) None and a
+        factor that never fires give the default call's iterates bit for bit,
+        and native's."""
+        for bfgs_maxiter, factor in ((40, 10.0), (200, None), (200, 1e3)):
+            with self.subTest(bfgs_maxiter=bfgs_maxiter, factor=factor), self.case():
+                self._case_penalty_newton_divergence_factor_as_natively(bfgs_maxiter, factor)
+
+    def _case_penalty_newton_divergence_factor_as_natively(self, bfgs_maxiter, factor):
+        """Run one row with case-local objects released before runtime cleanup."""
+        native, jax_problem = _pair("ls")
+        iota, G = _same_start(native, jax_problem, bfgs_maxiter)
+        start = native.boozer.surface.get_dofs()
+        options = {
+            "tol": 1e-11,
+            "maxiter": 40,
+            "constraint_weight": _WEIGHT,
+            "iota": iota,
+            "G": G,
+            "weight_inv_modB": False,
+        }
+        native_res, jax_res = (
+            problem.boozer.minimize_boozer_penalty_constraints_newton(
+                **options, divergence_factor=factor
+            )
+            for problem in (native, jax_problem)
+        )
+        if bfgs_maxiter == 40:
+            self.assertFalse(native_res["success"])
+            self.assertLess(native_res["iter"], 40)
+            np.testing.assert_array_equal(jax_problem.boozer.surface.get_dofs(), start)
+        else:
+            self.assertTrue(native_res["success"])
+        # A converged gradient is round-off, so only the Hessian is compared there.
+        arrays = ("jacobian", "hessian") if bfgs_maxiter == 40 else ("hessian",)
+        _assert_same_solve(
+            jax_problem, native, jax_res, native_res, arrays, f"factor={factor}"
+        )
+        if bfgs_maxiter == 200:
+            solved = jax_problem.boozer.surface.get_dofs()
+            jax_problem.boozer.surface.set_dofs(start)
+            jax_problem.boozer.recompute_bell()
+            default = jax_problem.boozer.minimize_boozer_penalty_constraints_newton(**options)
+            np.testing.assert_array_equal(jax_problem.boozer.surface.get_dofs(), solved)
+            self.assertEqual(default["iter"], jax_res["iter"])
+            np.testing.assert_array_equal(default["hessian"], jax_res["hessian"])
+
+    def test_penalty_newton_with_a_non_finite_shift_restores_its_start_as_natively(self):
         """Native's ``H + stab * I`` is NaN off the diagonal too (IEEE ``inf * 0``),
-        so the first step is NaN, the loop stops on the NaN gradient norm and SciPy's
-        ``lu`` refuses the Hessian: the surface keeps the NaN iterate."""
+        so the first step is NaN and the loop stops on the NaN gradient norm: as
+        natively the solve fails after one step and restores its start, with
+        native's penalty derivatives there (evaluated on a fresh native problem:
+        native's own solve then raises in ``lu``, because its
+        ``SurfaceXYZTensorFourier.d2volume_by_dcoeffdcoeff`` keeps the NaN of the
+        stepped iterate after the surface is set back)."""
         for case_id_0, stab in zip(["nan", "inf"], [np.nan, np.inf], strict=True):
-            with self.subTest(case_id_0=case_id_0, stab=stab), self.case() as patches:
-                self._case_penalty_newton_with_a_non_finite_shift_fails_as_natively(
-                    stab, patches
+            with self.subTest(case_id_0=case_id_0, stab=stab), self.case():
+                self._case_penalty_newton_with_a_non_finite_shift_restores_its_start_as_natively(
+                    stab
                 )
 
-    def _case_penalty_newton_with_a_non_finite_shift_fails_as_natively(
-        self, stab, patches
+    def _case_penalty_newton_with_a_non_finite_shift_restores_its_start_as_natively(
+        self, stab
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = _pair("ls")
+        start = native.boozer.surface.get_dofs()
+        x0 = np.concatenate((start, [_IOTA, native.G0]))
+        _, gradient, hessian = native.boozer.boozer_penalty_constraints_vectorized(
+            x0, derivatives=2, constraint_weight=_WEIGHT, optimize_G=True, weight_inv_modB=False
+        )
+        res = jax_problem.boozer.minimize_boozer_penalty_constraints_newton(
+            tol=1e-11,
+            maxiter=2,
+            constraint_weight=_WEIGHT,
+            iota=_IOTA,
+            G=jax_problem.G0,
+            stab=stab,
+            weight_inv_modB=False,
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["iter"], 1)
+        np.testing.assert_array_equal(jax_problem.boozer.surface.get_dofs(), start)
+        self.assertEqual((res["iota"], res["G"]), (_IOTA, jax_problem.G0))
+        assert_matches_native(res["jacobian"], gradient, f"stab={stab} gradient")
+        assert_matches_native(res["hessian"], hessian, f"stab={stab} hessian")
+
+    def test_failed_scipy_solves_restore_their_start_as_natively(self):
+        """A failed BFGS (``host_bfgs``) or ``least_squares`` solve that ends at a
+        larger or non-finite penalty value or residual norm than at its start
+        restores the start, as natively; one that ends lower keeps its iterate.
+        SciPy's solver is replaced, natively and in JAX, by a failed solve that
+        ends at ``x0 + delta`` or, for ``delta=None``, by SciPy's own capped at
+        two iterations or evaluations."""
+        for solver in ("LBFGS", "ls"):
+            for delta in (None, 1e-2, np.nan):
+                with self.subTest(solver=solver, delta=delta), self.case() as patches:
+                    self._case_failed_scipy_solves_restore_their_start_as_natively(
+                        solver, delta, patches
+                    )
+
+    def _case_failed_scipy_solves_restore_their_start_as_natively(
+        self, solver, delta, patches
+    ):
+        """Run one row with case-local objects released before runtime cleanup."""
+
+        def failed_minimize(fun, x, **kwargs):
+            if delta is None:
+                options = {**kwargs.pop("options"), "maxiter": 2}
+                return minimize(fun, x, options=options, **kwargs)
+            end = x + delta
+            value, gradient = fun(end)
+            return OptimizeResult(x=end, fun=value, jac=gradient, nit=1, success=False)
+
+        def failed_least_squares(fun, x, jac, **kwargs):
+            if delta is None:
+                return least_squares(fun, x, jac=jac, **{**kwargs, "max_nfev": 2})
+            end = x + delta
+            residual, jacobian = fun(end), jac(end)
+            return OptimizeResult(
+                x=end, fun=residual, grad=jacobian.T @ residual, jac=jacobian, status=0
+            )
+
+        native_name, jax_name, replacement = {
+            "LBFGS": ("minimize", "minimize", failed_minimize),
+            "ls": ("least_squares", "_least_squares", failed_least_squares),
+        }[solver]
+        patches.enter_context(
+            mock.patch(f"simsopt.geo.boozersurface.{native_name}", replacement)
+        )
+        patches.enter_context(mock.patch.object(jax_boozer_surface, jax_name, replacement))
+        native, jax_problem = _pair("ls")
+        start = native.boozer.surface.get_dofs()
+        results = []
         for problem in (native, jax_problem):
-            start = problem.boozer.surface.get_dofs()
-            with self.assertRaisesRegex(ValueError, "infs or NaNs"):
-                problem.boozer.minimize_boozer_penalty_constraints_newton(
-                    tol=1e-11,
-                    maxiter=2,
-                    constraint_weight=_WEIGHT,
-                    iota=_IOTA,
-                    G=problem.G0,
-                    stab=stab,
-                    weight_inv_modB=False,
+            options = {
+                "constraint_weight": _WEIGHT,
+                "iota": _IOTA,
+                "G": problem.G0,
+                "weight_inv_modB": False,
+            }
+            if solver == "LBFGS":
+                if problem is jax_problem:
+                    options["host_bfgs"] = True
+                res = problem.boozer.minimize_boozer_penalty_constraints_LBFGS(
+                    tol=1e-10, maxiter=10, limited_memory=False, **options
                 )
-            self.assertTrue(
-                problem.boozer.need_to_run_code, "problem.boozer.need_to_run_code"
-            )
-            self.assertTrue(
-                np.all(np.isnan(problem.boozer.surface.get_dofs()))
-                and not np.any(np.isnan(start)),
-                "np.all(np.isnan(problem.boozer.surface.get_dofs())) and not np.any(np.isnan(start))",
-            )
-        np.testing.assert_array_equal(
-            jax_problem.boozer.surface.get_dofs(), native.boozer.surface.get_dofs()
+            else:
+                res = problem.boozer.minimize_boozer_penalty_constraints_ls(
+                    tol=1e-12, maxiter=10, method="lm", **options
+                )
+            self.assertFalse(res["success"])
+            moved = np.max(np.abs(problem.boozer.surface.get_dofs() - start))
+            if delta is None:
+                self.assertGreater(moved, 0.0, "a lower failed iterate was not kept")
+            else:
+                self.assertEqual(moved, 0.0, "a worse failed iterate was kept")
+                self.assertEqual((res["iota"], res["G"]), (_IOTA, problem.G0))
+            results.append(res)
+        arrays = ("fun", "gradient") if solver == "LBFGS" else ("residual", "gradient", "jacobian")
+        _assert_same_solve(
+            jax_problem, native, results[1], results[0], arrays, f"{solver} delta={delta}", 1e-10
         )
 
     def test_singular_step_after_a_step_leaves_the_last_iterate_as_natively(self):
@@ -731,7 +989,9 @@ class TestBoozerSurfaceJax(JaxTestCase):
         Newton and the damped Gauss-Newton). The JAX loop takes one real step and
         its result is then marked singular, so this checks what the adapter does
         with a reached iterate, not the loop's detection of the singular step
-        (``tests/jax/core/test_boozer_solver_loops_jax.py`` checks that). The
+        (``tests/core/test_boozer_solver_loops_jax.py`` checks that); the starts
+        are ones where the first step lowers the norm, so that one-step loop keeps
+        its iterate rather than restoring its start. The
         BoozerExact step and the penalty Newton step at this gradient norm solve
         twice and once."""
         for method in ["exact", "newton", "manual"]:
@@ -745,33 +1005,37 @@ class TestBoozerSurfaceJax(JaxTestCase):
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = _pair("exact" if method == "exact" else "ls")
+        # From the raw start and early BFGS iterates the first penalty Newton step
+        # raises the gradient norm; from this iterate it lowers it (2e-3 to 1e-6).
+        iota, G = (
+            _same_start(native, jax_problem, 200)
+            if method == "newton"
+            else (_IOTA, native.G0)
+        )
         start = native.boozer.surface.get_dofs()
         solver_name, solves_per_step = {
             "exact": ("boozer_exact_newton", 2),
             "newton": ("boozer_penalty_newton", 1),
             "manual": ("boozer_penalty_gauss_newton", 1),
         }[method]
-        with ExitStack() as patch:
-            _singular_at_second_factorisation(patch, solver_name, solves_per_step)
-            for problem in (native, jax_problem):
-                options = dict(tol=1e-11, maxiter=5, iota=_IOTA, G=problem.G0)
-                with self.assertRaisesRegex(np.linalg.LinAlgError, "Singular matrix"):
-                    if method == "exact":
-                        problem.boozer.solve_residual_equation_exactly_newton(**options)
-                    elif method == "newton":
-                        problem.boozer.minimize_boozer_penalty_constraints_newton(
-                            **options, constraint_weight=_WEIGHT, weight_inv_modB=False
-                        )
-                    else:
-                        problem.boozer.minimize_boozer_penalty_constraints_ls(
-                            **options,
-                            constraint_weight=_WEIGHT,
-                            weight_inv_modB=False,
-                            method="manual",
-                        )
-                self.assertTrue(
-                    problem.boozer.need_to_run_code, "problem.boozer.need_to_run_code"
-                )
+        _singular_at_second_factorisation(patches, solver_name, solves_per_step)
+        for problem in (native, jax_problem):
+            options = dict(tol=1e-11, maxiter=5, iota=iota, G=G)
+            with self.assertRaisesRegex(np.linalg.LinAlgError, "Singular matrix"):
+                if method == "exact":
+                    problem.boozer.solve_residual_equation_exactly_newton(**options)
+                elif method == "newton":
+                    problem.boozer.minimize_boozer_penalty_constraints_newton(
+                        **options, constraint_weight=_WEIGHT, weight_inv_modB=False
+                    )
+                else:
+                    problem.boozer.minimize_boozer_penalty_constraints_ls(
+                        **options,
+                        constraint_weight=_WEIGHT,
+                        weight_inv_modB=False,
+                        method="manual",
+                    )
+            self.assertTrue(problem.boozer.need_to_run_code)
         self.assertTrue(
             np.max(np.abs(native.boozer.surface.get_dofs() - start)) > 1e-6,
             "the first step did not move the surface",
@@ -787,10 +1051,10 @@ class TestBoozerSurfaceJax(JaxTestCase):
         result is returned but, as natively, not stored. ``lm`` is capped at 8
         evaluations, where its walk still agrees to round-off."""
         for method in ["manual", "lm"]:
-            with self.subTest(method=method), self.case() as patches:
-                self._case_least_squares_methods_match_native(method, patches)
+            with self.subTest(method=method), self.case():
+                self._case_least_squares_methods_match_native(method)
 
-    def _case_least_squares_methods_match_native(self, method, patches):
+    def _case_least_squares_methods_match_native(self, method):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = (
             _least_squares_problem(False),
@@ -836,22 +1100,14 @@ class TestBoozerSurfaceJax(JaxTestCase):
             1e-11,
             scale=1.0,
         )
-        self.assertTrue(
-            jax_res["success"] == native_res["success"]
-            and jax_res["s"] is jax_problem.boozer.surface,
-            'jax_res["success"] == native_res["success"] and jax_res["s"] is jax_problem.boozer.surface',
-        )
+        self.assertEqual(jax_res["success"], native_res["success"])
+        self.assertIs(jax_res["s"], jax_problem.boozer.surface)
         if method == "manual":
-            self.assertTrue(
-                native_res["success"] and jax_problem.boozer.need_to_run_code,
-                'native_res["success"] and jax_problem.boozer.need_to_run_code',
-            )
+            self.assertTrue(native_res["success"])
+            self.assertTrue(jax_problem.boozer.need_to_run_code)
         else:
-            self.assertTrue(
-                jax_res["info"].nfev == native_res["info"].nfev
-                and jax_problem.boozer.res is jax_res,
-                'jax_res["info"].nfev == native_res["info"].nfev and jax_problem.boozer.res is jax_res',
-            )
+            self.assertEqual(jax_res["info"].nfev, native_res["info"].nfev)
+            self.assertIs(jax_problem.boozer.res, jax_res)
 
     def test_penalty_residual_matches_native(self):
         """The least-squares methods' formulation: native
@@ -867,13 +1123,13 @@ class TestBoozerSurfaceJax(JaxTestCase):
                     optimize_G=optimize_G,
                     case_id_1=case_id_1,
                     weight_inv_modB=weight_inv_modB,
-                ), self.case() as patches:
+                ), self.case():
                     self._case_penalty_residual_matches_native(
-                        optimize_G, weight_inv_modB, patches
+                        optimize_G, weight_inv_modB
                     )
 
     def _case_penalty_residual_matches_native(
-        self, optimize_G, weight_inv_modB, patches
+        self, optimize_G, weight_inv_modB
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = _pair("ls", "ToroidalFlux", label_grid=(31, 31))
@@ -882,7 +1138,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
             boozer.biotsavart, boozer.surface, boozer.label, boozer.targetlabel, 7.0
         )
         G0 = native.G0
-        self.assertTrue(G0 is not None, "G0 is not None")
+        self.assertIsNotNone(G0)
         x = np.concatenate((boozer.surface.get_dofs(), [_IOTA, G0][: 1 + optimize_G]))
         expected = native.boozer._get_residual_vector_and_jacobian(
             x.copy(), 7.0, optimize_G, weight_inv_modB
@@ -908,17 +1164,14 @@ class TestBoozerSurfaceJax(JaxTestCase):
         jax_problem = _problem(True, "exact")
         boozer = jax_problem.boozer
         res = boozer.run_code(_IOTA, G=jax_problem.G0)
-        self.assertTrue(
-            boozer.run_code(_IOTA, G=jax_problem.G0) is None,
-            "boozer.run_code(_IOTA, G=jax_problem.G0) is None",
-        )
+        self.assertIsNone(boozer.run_code(_IOTA, G=jax_problem.G0))
         for solve in (
             boozer.solve_residual_equation_exactly_newton,
             boozer.minimize_boozer_penalty_constraints_LBFGS,
             boozer.minimize_boozer_penalty_constraints_newton,
             boozer.minimize_boozer_penalty_constraints_ls,
         ):
-            self.assertTrue(solve(iota=0.3) is res, "solve(iota=0.3) is res")
+            self.assertIs(solve(iota=0.3), res)
         jax_problem.currents[0].local_full_x = (
             1.01 * jax_problem.currents[0].local_full_x
         )
@@ -932,13 +1185,15 @@ class TestBoozerSurfaceJax(JaxTestCase):
         ``res['PLU']`` and ``res['vjp']``) as with native ``BoozerSurface``. With
         a Volume label and ``G`` optimized or the currents fixed,
         ``JaxBoozerResidual`` is native ``BoozerResidual`` too, also after a coil
-        change that makes both re-solve; on BoozerExact both raise ``KeyError``
-        (exact results have no ``weight_inv_modB``)."""
+        change that makes both re-solve. On a converged BoozerExact surface the
+        Boozer residual is round-off (``J`` about 1e-29), so ``BoozerResidual`` is
+        compared on capped BoozerExact solves instead
+        (``test_boozer_residual_on_capped_boozer_exact_solves_matches_native``)."""
         for name in _OBJECTIVE_CASES:
-            with self.subTest(name=name), self.case() as patches:
-                self._case_native_objectives_use_the_jax_surface(name, patches)
+            with self.subTest(name=name), self.case():
+                self._case_native_objectives_use_the_jax_surface(name)
 
-    def _case_native_objectives_use_the_jax_surface(self, name, patches):
+    def _case_native_objectives_use_the_jax_surface(self, name):
         """Run one row with case-local objects released before runtime cleanup."""
         boozer_type, label, optimize_G, weight_inv_modB = _OBJECTIVE_CASES[name]
         native, jax_problem = _pair(
@@ -951,16 +1206,10 @@ class TestBoozerSurfaceJax(JaxTestCase):
         for problem in (native, jax_problem):
             problem.boozer.run_code(_IOTA, G=problem.G0)
         objectives = {
-            "Iotas": lambda problem: Iotas(problem.boozer),
-            "MajorRadius": lambda problem: MajorRadius(problem.boozer),
-            "NonQuasiSymmetricRatio": lambda problem: NonQuasiSymmetricRatio(
-                problem.boozer, BiotSavart(problem.coils)
-            ),
+            objective_name: make
+            for objective_name, make in _NATIVE_OBJECTIVES.items()
+            if boozer_type == "ls" or objective_name != "BoozerResidual"
         }
-        if boozer_type == "ls":
-            objectives["BoozerResidual"] = lambda problem: BoozerResidual(
-                problem.boozer, BiotSavart(problem.coils)
-            )
         for objective_name, make in objectives.items():
             native_objective, jax_objective = make(native), make(jax_problem)
             assert_matches_native(
@@ -971,15 +1220,12 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 native_objective.dJ(),
                 f"{name} {objective_name} coil gradient",
             )
+        if boozer_type == "exact":
+            return
         native_residual = BoozerResidual(native.boozer, BiotSavart(native.coils))
         jax_residual = JaxBoozerResidual(
             jax_problem.boozer, jax_problem.boozer.biotsavart
         )
-        if boozer_type == "exact":
-            for objective in (native_residual, jax_residual):
-                with self.assertRaisesRegex(KeyError, "weight_inv_modB"):
-                    objective.J()
-            return
         for change in ("solved", "after a coil change"):
             value = jax_residual.J()
             self.assertTrue(
@@ -1016,13 +1262,13 @@ class TestBoozerSurfaceJax(JaxTestCase):
         the same solved surface isolates the objective's derivative from the
         ill-conditioned Hessian's amplification of different solver round-off."""
         for label in ["Area", "AspectRatio"]:
-            with self.subTest(label=label), self.case() as patches:
+            with self.subTest(label=label), self.case():
                 self._case_boozer_residual_jax_matches_native_for_labels_without_coil_dependence(
-                    label, patches
+                    label
                 )
 
     def _case_boozer_residual_jax_matches_native_for_labels_without_coil_dependence(
-        self, label, patches
+        self, label
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native, jax_problem = _pair("ls", label)
@@ -1071,18 +1317,9 @@ class TestBoozerSurfaceJax(JaxTestCase):
         field = copy.copy(boozer.biotsavart)
         residual = JaxBoozerResidual(boozer, field)
         native = BoozerResidual(boozer, BiotSavart(problem.coils))
-        self.assertTrue(
-            residual.surface.dofs is not boozer.surface.dofs,
-            "residual.surface.dofs is not boozer.surface.dofs",
-        )
-        self.assertTrue(
-            boozer.label.surface.dofs is boozer.surface.dofs,
-            "boozer.label.surface.dofs is boozer.surface.dofs",
-        )
-        self.assertTrue(
-            boozer.label.surface.quadpoints_phi.size == 31,
-            "boozer.label.surface.quadpoints_phi.size == 31",
-        )
+        self.assertIsNot(residual.surface.dofs, boozer.surface.dofs)
+        self.assertIs(boozer.label.surface.dofs, boozer.surface.dofs)
+        self.assertEqual(boozer.label.surface.quadpoints_phi.size, 31)
         np.testing.assert_array_equal(
             residual.surface.quadpoints_phi, boozer.surface.quadpoints_phi
         )
@@ -1094,18 +1331,10 @@ class TestBoozerSurfaceJax(JaxTestCase):
         assert_matches_native(first, native.J(), "private surface and label grids")
         assert_matches_native(residual.dJ(), native.dJ(), "copied field gradient")
         copied = copy.copy(residual)
-        self.assertTrue(
-            copied.surface.dofs is not residual.surface.dofs,
-            "copied.surface.dofs is not residual.surface.dofs",
-        )
-        self.assertTrue(
-            copied._J is None and copied._dJ is None,
-            "copied._J is None and copied._dJ is None",
-        )
-        self.assertTrue(
-            copied.constraint_weight == residual.constraint_weight,
-            "copied.constraint_weight == residual.constraint_weight",
-        )
+        self.assertIsNot(copied.surface.dofs, residual.surface.dofs)
+        self.assertIsNone(copied._J)
+        self.assertIsNone(copied._dJ)
+        self.assertEqual(copied.constraint_weight, residual.constraint_weight)
         assert_matches_native(copied.J(), native.J(), "copied objective")
         assert_matches_native(copied.dJ(), native.dJ(), "copied objective gradient")
         residual.surface.set_dofs(1.1 * solved_dofs)
@@ -1118,20 +1347,19 @@ class TestBoozerSurfaceJax(JaxTestCase):
         with jax_compilations() as compilations:
             changed = residual.J()
             gradient = residual.dJ()
-        self.assertTrue(
-            compilations == [], "new residual target or weight recompiled the objective"
+        self.assertEqual(
+            compilations, [], "new residual target or weight recompiled the objective"
         )
-        self.assertTrue(changed != first, "changed != first")
+        self.assertNotEqual(changed, first)
         np.testing.assert_array_equal(residual.surface.get_dofs(), solved_dofs)
         assert_matches_native(changed, native.J(), "changed target and weight")
         assert_matches_native(
             gradient, native.dJ(), "changed target and weight gradient"
         )
         problem.currents[0].local_full_x *= 1.001
-        self.assertTrue(
-            boozer.need_to_run_code and residual._J is None and residual._dJ is None,
-            "boozer.need_to_run_code and residual._J is None and residual._dJ is None",
-        )
+        self.assertTrue(boozer.need_to_run_code)
+        self.assertIsNone(residual._J)
+        self.assertIsNone(residual._dJ)
         self.assertTrue(
             copied._J is None and copied._dJ is None,
             "a copied objective kept stale coil caches",
@@ -1165,16 +1393,15 @@ class TestBoozerSurfaceJax(JaxTestCase):
         (``boozer_surface_dlsqgrad_dcoils_vjp``) drops the label term and is not.
         ``BoozerResidual``'s value also depends on the coils through the label:
         ``JaxBoozerResidual`` differentiates it; native ``BoozerResidual`` takes
-        its explicit derivative through ``B`` only and is not the derivative."""
+        its explicit derivative through ``B`` only and is not the derivative.
+        The centered differences then converge to the adjoints at halving steps."""
         native, jax_problem, native_objectives, jax_objectives = (
             _toroidal_flux_adjoint_problem()
         )
         jax_handle, native_handle = Iotas(jax_problem.boozer), Iotas(native.boozer)
         # Every free coil DOF moves, by a fraction of its own size.
         x0 = np.asarray(native_handle.x, dtype=np.float64)
-        direction = parity_rng(11).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
+        direction = scaled_direction(x0, 11)
         step = 1e-6
 
         def values(sign: float) -> dict[str, float]:
@@ -1183,13 +1410,24 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 name: objective.J() for name, objective in native_objectives.items()
             }
 
-        plus, minus = values(1.0), values(-1.0)
+        solution = native.boozer.surface.get_dofs().copy()
+        solved_iota, solved_G = native.boozer.res["iota"], native.boozer.res["G"]
+
+        def restarted_values(sign):
+            native.boozer.surface.set_dofs(solution)
+            native.boozer.res["iota"], native.boozer.res["G"] = solved_iota, solved_G
+            evaluated = values(sign)
+            self.assertTrue(native.boozer.res["success"])
+            return evaluated
+
+        plus, minus = restarted_values(1.0), restarted_values(-1.0)
         native_handle.x = x0
+        adjoints = {}
         for name, make in jax_objectives.items():
             central = (plus[name] - minus[name]) / (2 * step)
             with disallow_host_transfers():
                 partials = make(jax_problem).dJ(partials=True)
-            adjoint = partials(jax_handle) @ direction
+            adjoint = adjoints[name] = partials(jax_handle) @ direction
             native_adjoint = (
                 native_objectives[name].dJ(partials=True)(native_handle) @ direction
             )
@@ -1203,6 +1441,16 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 abs(native_adjoint - central) > 1e-4 * abs(central),
                 f"{name}: native's adjoint matches the difference",
             )
+
+        errors = {name: [] for name in adjoints}
+        for step in np.power(2.0, -np.arange(13, 18)):
+            plus, minus = restarted_values(1.0), restarted_values(-1.0)
+            for name, adjoint in adjoints.items():
+                errors[name].append(abs((plus[name] - minus[name]) / (2 * step) - adjoint))
+        for name, series in errors.items():
+            assert_errors_shrink(self, series, 0.35, floor=1e-9, msg=name, initial=1e9)
+        native_handle.x = x0
+        native.boozer.surface.set_dofs(solution)
 
     def _free_current_adjoint_problem(self):
         """Solve the shared penalty problem with G derived from free currents."""
@@ -1241,7 +1489,8 @@ class TestBoozerSurfaceJax(JaxTestCase):
         of ``Iotas`` and ``JaxBoozerResidual`` on a ``JaxBoozerSurface`` are the
         central differences of the native objectives' values through native
         re-solves (penalty Newton from the solution); native's own drop
-        ``dG/dI``."""
+        ``dG/dI``. The centered differences then converge to the adjoints at
+        halving steps."""
         native, jax_problem, solve = self._free_current_adjoint_problem()
         solution, iota = native.boozer.surface.get_dofs(), native.boozer.res["iota"]
         native_objectives = {
@@ -1256,13 +1505,10 @@ class TestBoozerSurfaceJax(JaxTestCase):
         }
         native_handle, jax_handle = native_objectives["Iotas"], jax_objectives["Iotas"]
         x0 = np.asarray(native_handle.x, dtype=np.float64)
-        direction = parity_rng(13).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
+        direction = scaled_direction(x0, 13)
+        self.assertGreater(x0.size, 0)
         self.assertTrue(
-            x0.size > 0
-            and any(not current.dofs.all_fixed() for current in native.currents),
-            "x0.size > 0 and any(not current.dofs.all_fixed() for current in native.currents)",
+            any(not current.dofs.all_fixed() for current in native.currents)
         )
         # Central-difference truncation is 9e-6 relative at 1e-5 and 9e-8 at 1e-6 (Iotas), so the step is 1e-7.
         step = 1e-7
@@ -1275,15 +1521,21 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 name: objective.J() for name, objective in native_objectives.items()
             }
 
-        plus, minus = values(1.0), values(-1.0)
+        def restarted_values(sign):
+            evaluated = values(sign)
+            self.assertTrue(native.boozer.res["success"])
+            return evaluated
+
+        plus, minus = restarted_values(1.0), restarted_values(-1.0)
         native_handle.x = x0
         native.boozer.surface.set_dofs(solution)
         native.boozer.minimize_boozer_penalty_constraints_newton(iota=iota, **solve)
+        adjoints = {}
         for name, objective in jax_objectives.items():
             central = (plus[name] - minus[name]) / (2 * step)
             with disallow_host_transfers():
                 partials = objective.dJ(partials=True)
-            adjoint = partials(jax_handle) @ direction
+            adjoint = adjoints[name] = partials(jax_handle) @ direction
             native_adjoint = (
                 native_objectives[name].dJ(partials=True)(native_handle) @ direction
             )
@@ -1298,40 +1550,30 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 f"{name}: native's gradient matches the difference",
             )
 
-    def test_exact_adjoint_without_stellsym_where_native_raises(self):
-        """Native's BoozerExact ``vjp`` takes the label multiplier from the last
-        entry and fails without stellarator symmetry, where the system has a
-        ``z(0, 0)`` row too. The JAX ``vjp`` is checked against native's own pieces
-        with the label multiplier second to last (simsopt PR #669's correction)."""
+        errors = {name: [] for name in adjoints}
+        for step in np.power(2.0, -np.arange(13, 18)):
+            plus, minus = restarted_values(1.0), restarted_values(-1.0)
+            for name, adjoint in adjoints.items():
+                errors[name].append(abs((plus[name] - minus[name]) / (2 * step) - adjoint))
+        for name, series in errors.items():
+            assert_errors_shrink(self, series, 0.35, floor=1e-9, msg=name, initial=1e9)
+        native_handle.x = x0
+        native.boozer.surface.set_dofs(solution)
+
+    def test_exact_adjoint_without_stellsym_matches_native(self):
+        """Without stellarator symmetry the BoozerExact system has a ``z(0, 0)``
+        row after the label row: the JAX ``vjp`` matches native's, which takes the
+        label multiplier second to last."""
         native, jax_problem = _pair(
             "exact", "ToroidalFlux", stellsym=False, newton_tol=1e-10
         )
         for problem in (native, jax_problem):
             problem.boozer.run_code(_IOTA, G=problem.G0)
-        res = native.boozer.res
+        res, jax_res = native.boozer.res, jax_problem.boozer.res
         lm = parity_rng(3).standard_normal(res["jacobian"].shape[0])
-        with self.assertRaises(ValueError):
-            boozer_surface_dexactresidual_dcoils_dcurrents_vjp(
-                lm, native.boozer, res["iota"], res["G"]
-            )
-
-        residual_dB = boozer_surface_residual_dB(
-            native.boozer.surface, res["iota"], res["G"], native.boozer.biotsavart
+        expected = boozer_surface_dexactresidual_dcoils_dcurrents_vjp(
+            lm, native.boozer, res["iota"], res["G"]
         )
-        self.assertTrue(residual_dB is not None, "residual_dB is not None")
-        dres_dB = cast(tuple, residual_dB)[1]
-        multipliers = np.zeros(res["mask"].shape)
-        multipliers[res["mask"]] = lm[:-2]
-        field_cotangent = np.sum(
-            multipliers.reshape((-1, 3))[:, :, None] * dres_dB.reshape((-1, 3, 3)),
-            axis=1,
-        )
-        expected = native.boozer.biotsavart.B_vjp(field_cotangent) + lm[
-            -2
-        ] * native.boozer.label.dJ(partials=True)(
-            native.boozer.biotsavart, as_derivative=True
-        )
-        jax_res = jax_problem.boozer.res
         actual = jax_res["vjp"](lm, jax_problem.boozer, jax_res["iota"], jax_res["G"])
         assert_matches_native(
             actual(BiotSavart(jax_problem.coils)),
@@ -1339,6 +1581,42 @@ class TestBoozerSurfaceJax(JaxTestCase):
             "non-stellsym exact vjp",
             _RTOL_NONSYM,
         )
+
+    def test_boozer_residual_on_capped_boozer_exact_solves_matches_native(self):
+        """``BoozerResidual`` on a BoozerExact surface (no label penalty) after two
+        Newton steps, where the residual is not yet round-off, with and without
+        stellarator symmetry and a ToroidalFlux label: native ``BoozerResidual``
+        and ``JaxBoozerResidual`` on the JAX surface give native's value and coil
+        gradient (through the exact ``PLU`` and ``vjp``). The residual depends on
+        the coils and the surface only through the Newton system's rows, which the
+        adjoint holds fixed, so the coil gradient is zero: its explicit and adjoint
+        terms cancel (to 1e-15 of the explicit term here), and it is compared on
+        the scale of those terms."""
+        for stellsym in (True, False):
+            with self.subTest(stellsym=stellsym), self.case():
+                self._case_boozer_residual_on_capped_boozer_exact_solves_matches_native(stellsym)
+
+    def _case_boozer_residual_on_capped_boozer_exact_solves_matches_native(self, stellsym):
+        """Run one row with case-local objects released before runtime cleanup."""
+        native, jax_problem = _pair("exact", "ToroidalFlux", stellsym=stellsym)
+        for problem in (native, jax_problem):
+            problem.boozer.solve_residual_equation_exactly_newton(
+                tol=1e-10, maxiter=2, iota=_IOTA, G=problem.G0
+            )
+        rtol = _RTOL if stellsym else _RTOL_NONSYM
+        native_residual = BoozerResidual(native.boozer, BiotSavart(native.coils))
+        native_gradient = native_residual.dJ()
+        field = native_residual.biotsavart
+        # Native's B_vjp sums Derivatives, which type checkers read as an int.
+        explicit_term = cast(Derivative, field.B_vjp(native_residual.dJ_by_dB()))
+        explicit = np.max(np.abs(host_array(explicit_term(field), dtype=np.float64)))
+        assert_matches_native(native_gradient, np.zeros_like(native_gradient), "native gradient", rtol, explicit)
+        for name, residual in (
+            ("BoozerResidual", BoozerResidual(jax_problem.boozer, BiotSavart(jax_problem.coils))),
+            ("JaxBoozerResidual", JaxBoozerResidual(jax_problem.boozer, jax_problem.boozer.biotsavart)),
+        ):
+            assert_matches_native(residual.J(), native_residual.J(), name, rtol)
+            assert_matches_native(residual.dJ(), native_gradient, f"{name} gradient", rtol, explicit)
 
     def test_exact_adjoint_is_the_derivative_of_the_solve_taylor(self):
         """BoozerExact coil gradients are second-order limits of central differences through re-solves."""
@@ -1352,9 +1630,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
         handle = objectives["Iotas"]
         # Every free coil DOF moves, by a fraction of its own size.
         x0 = np.asarray(handle.x, dtype=np.float64)
-        direction = parity_rng(17).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
+        direction = scaled_direction(x0, 17)
         gradients = {
             name: objective.dJ(partials=True)(handle) @ direction
             for name, objective in objectives.items()
@@ -1371,33 +1647,46 @@ class TestBoozerSurfaceJax(JaxTestCase):
             self.assertTrue(boozer.res["success"], "the re-solve did not converge")
             return evaluated
 
-        previous_errors = {name: np.inf for name in objectives}
+        errors = {name: [] for name in objectives}
         for eps in 1e-2 * 0.5 ** np.arange(8):
             plus, minus = values(x0 + eps * direction), values(x0 - eps * direction)
             for name, gradient in gradients.items():
-                error = abs((plus[name] - minus[name]) / (2 * eps) - gradient)
-                # Central differences: the error falls by 4 per halving (measured 0.248 to 0.250).
-                self.assertLess(error, 0.3 * previous_errors[name], f"{name} at {eps}")
-                previous_errors[name] = error
+                errors[name].append(abs((plus[name] - minus[name]) / (2 * eps) - gradient))
         for name, gradient in gradients.items():
+            # Central differences: the error falls by 4 per halving (measured 0.248 to 0.250).
+            assert_errors_shrink(self, errors[name], 0.3, msg=name, initial=np.inf)
             # Measured 2.6e-5 (Iotas) and 2.9e-6 (MajorRadius) relative at the last step.
-            self.assertLess(previous_errors[name], 1e-4 * abs(gradient), name)
+            self.assertLess(errors[name][-1], 1e-4 * abs(gradient), name)
 
-    def test_fixed_surface_dofs_are_solved_for_as_with_every_dof_free(self):
-        """Native ``BoozerSurface`` at 9e027eac3 cannot solve with fixed surface
-        DOFs (its label gradient has the free DOFs only and does not fit; PR #669's
-        ``dlabel_dsurface`` fixes that). The JAX solve treats every DOF as an
-        unknown, as native does with every DOF free."""
-        native, jax_problem = _pair("exact", newton_tol=1e-10)
-        native.boozer.surface.fix("x(0,0)")
-        with self.assertRaises(ValueError):
-            native.boozer.run_code(_IOTA, G=native.G0)
-        native.boozer.surface.unfix_all()
-        native_res = native.boozer.run_code(_IOTA, G=native.G0)
-        jax_problem.boozer.surface.fix("x(0,0)")
-        jax_res = jax_problem.boozer.run_code(_IOTA, G=jax_problem.G0)
+    def test_fixed_surface_dofs_are_solved_for_as_natively(self):
+        """Native ``BoozerSurface`` solves for every surface DOF, fixed or free,
+        with the label differentiated in all of them (``dlabel_dsurface``), and so
+        does the JAX solve: the penalty Newton from a BFGS iterate with a fixed
+        DOF matches native's; native ``BoozerResidual`` then reads the JAX
+        surface's ``dlabel_dsurface``, which is native's."""
+        native, jax_problem = _pair("ls")
+        for problem in (native, jax_problem):
+            problem.boozer.surface.fix("x(0,0)")
+        iota, G = _same_start(native, jax_problem, 200)
+        native_res, jax_res = (
+            problem.boozer.minimize_boozer_penalty_constraints_newton(
+                tol=1e-11,
+                maxiter=20,
+                constraint_weight=_WEIGHT,
+                iota=iota,
+                G=G,
+                weight_inv_modB=False,
+            )
+            for problem in (native, jax_problem)
+        )
+        self.assertTrue(native_res["success"])
         _assert_same_solve(
-            jax_problem, native, jax_res, native_res, ("jacobian",), "fixed DOFs"
+            jax_problem, native, jax_res, native_res, ("hessian",), "fixed DOFs"
+        )
+        assert_matches_native(
+            jax_problem.boozer.dlabel_dsurface(),
+            native.boozer.dlabel_dsurface(),
+            "label gradient with fixed DOFs",
         )
 
     def test_settings_are_read_at_every_solve(self):
@@ -1428,10 +1717,9 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 )
                 for problem in problems
             )
-            self.assertTrue(
-                not native_res["success"]
-                and native_res["iter"] == (2 if native_res["type"] == "exact" else 0),
-                'not native_res["success"] and native_res["iter"] == (2 if native_res["type"] == "exact" else 0)',
+            self.assertFalse(native_res["success"])
+            self.assertEqual(
+                native_res["iter"], 2 if native_res["type"] == "exact" else 0
             )
             _assert_same_solve(
                 problems[1],
@@ -1442,10 +1730,8 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 "new settings",
                 1e-10,
             )
-        self.assertTrue(
-            options
-            == {"verbose": False, "weight_inv_modB": False, "newton_tol": 1e-10},
-            'options == {"verbose": False, "weight_inv_modB": False, "newton_tol": 1e-10}',
+        self.assertEqual(
+            options, {"verbose": False, "weight_inv_modB": False, "newton_tol": 1e-10}
         )
 
     def test_solves_preserve_the_field_point_buffer(self):
@@ -1488,15 +1774,17 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 G=exact_problem.G0,
             )
             Iotas(exact).dJ()
-            start = ls.minimize_boozer_penalty_constraints_LBFGS(
-                tol=1e-10,
-                maxiter=settings["maxiter"],
-                constraint_weight=settings["weight"],
-                iota=settings["iota"],
-                G=ls_problem.G0,
-                limited_memory=False,
-                weight_inv_modB=False,
-            )
+            for limited_memory in (True, False):
+                ls.recompute_bell()
+                start = ls.minimize_boozer_penalty_constraints_LBFGS(
+                    tol=1e-10,
+                    maxiter=settings["maxiter"],
+                    constraint_weight=settings["weight"],
+                    iota=settings["iota"],
+                    G=ls_problem.G0,
+                    limited_memory=limited_memory,
+                    weight_inv_modB=False,
+                )
             for method in ("manual", "lm"):
                 ls.recompute_bell()
                 ls.minimize_boozer_penalty_constraints_ls(
@@ -1552,12 +1840,8 @@ class TestBoozerSurfaceJax(JaxTestCase):
                     "stab": 1e-4,
                 },
             )
-        self.assertTrue(
-            compilations == [], "new values retraced or recompiled a solver"
-        )
-        self.assertTrue(
-            second["iota"] != first["iota"], 'second["iota"] != first["iota"]'
-        )
+        self.assertEqual(compilations, [], "new values retraced or recompiled a solver")
+        self.assertNotEqual(second["iota"], first["iota"])
 
     def test_solves_make_no_implicit_transfers(self):
         """Exact and penalty solves use explicit transfers under the runtime transfer guard."""
@@ -1569,13 +1853,13 @@ class TestBoozerSurfaceJax(JaxTestCase):
                     case_id_0=case_id_0,
                     parity_lane=parity_lane,
                     boozer_type=boozer_type,
-                ), self.case() as patches:
+                ), self.case():
                     self._case_solves_make_no_implicit_transfers(
-                        parity_lane, boozer_type, patches
+                        parity_lane, boozer_type
                     )
 
     def _case_solves_make_no_implicit_transfers(
-        self, parity_lane, boozer_type, patches
+        self, parity_lane, boozer_type
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         native = _problem(False, boozer_type)
@@ -1599,14 +1883,13 @@ class TestBoozerSurfaceJax(JaxTestCase):
                         weight_inv_modB=False,
                     )
         coils = jax_problem.boozer.biotsavart.coil_set_spec()
-        self.assertTrue(
+        self.assertEqual(
             {
                 device.platform
                 for leaf in jax.tree.leaves(coils)
                 for device in leaf.devices()
-            }
-            == {parity_lane},
-            "{device.platform for leaf in jax.tree.leaves(coils) for device in leaf.devices()} == {parity_lane}",
+            },
+            {parity_lane},
         )
         native_res = native.boozer.run_code(_IOTA, G=native.G0)
         assert_matches_native(
@@ -1665,142 +1948,3 @@ class TestBoozerSurfaceJax(JaxTestCase):
         # As natively, G from the currents needs fixed currents for coil gradients.
         with self.assertRaises(AssertionError):
             JaxBoozerSurface(field, xyz, Volume(xyz), 1.0, 1.0).run_code(_IOTA)
-
-    def test_ls_adjoint_with_a_toroidal_flux_label_is_the_derivative_of_the_solve_taylor(
-        self,
-    ):
-        """Solved coil adjoints converge with the native centered Taylor stencil."""
-        native, jax_problem, native_objectives, jax_objectives = (
-            _toroidal_flux_adjoint_problem()
-        )
-        jax_handle, native_handle = Iotas(jax_problem.boozer), Iotas(native.boozer)
-        # Every free coil DOF moves, by a fraction of its own size.
-        x0 = np.asarray(native_handle.x, dtype=np.float64)
-        direction = parity_rng(11).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
-        step = 1e-6
-
-        def values(sign: float) -> dict[str, float]:
-            native_handle.x = x0 + sign * step * direction
-            return {
-                name: objective.J() for name, objective in native_objectives.items()
-            }
-
-        solution = native.boozer.surface.get_dofs().copy()
-        solved_iota, solved_G = native.boozer.res["iota"], native.boozer.res["G"]
-
-        def restarted_values(sign):
-            native.boozer.surface.set_dofs(solution)
-            native.boozer.res["iota"], native.boozer.res["G"] = solved_iota, solved_G
-            evaluated = values(sign)
-            self.assertTrue(native.boozer.res["success"])
-            return evaluated
-
-        plus, minus = restarted_values(1.0), restarted_values(-1.0)
-        native_handle.x = x0
-        for name, make in jax_objectives.items():
-            central = (plus[name] - minus[name]) / (2 * step)
-            with disallow_host_transfers():
-                partials = make(jax_problem).dJ(partials=True)
-            adjoint = partials(jax_handle) @ direction
-            native_adjoint = (
-                native_objectives[name].dJ(partials=True)(native_handle) @ direction
-            )
-            # Truncation and the re-solves' tolerances bound the agreement (measured 2e-9 to 2e-8 relative);
-            # native's gradients are off by 1.8e-3 to 3e-2.
-            self.assertTrue(
-                abs(adjoint - central) <= 1e-7 * abs(central),
-                f"{name}: adjoint {adjoint} != difference {central}",
-            )
-            self.assertTrue(
-                abs(native_adjoint - central) > 1e-4 * abs(central),
-                f"{name}: native's adjoint matches the difference",
-            )
-
-        previous_errors = {name: 1e9 for name in jax_objectives}
-        for step in np.power(2.0, -np.arange(13, 18)):
-            plus, minus = restarted_values(1.0), restarted_values(-1.0)
-            for name, make in jax_objectives.items():
-                adjoint = make(jax_problem).dJ(partials=True)(jax_handle) @ direction
-                error = abs((plus[name] - minus[name]) / (2 * step) - adjoint)
-                self.assertLess(error, max(1e-9, 0.35 * previous_errors[name]), name)
-                previous_errors[name] = error
-        native_handle.x = x0
-        native.boozer.surface.set_dofs(solution)
-
-    def test_gradients_with_G_from_free_currents_are_the_derivatives_of_the_solve_taylor(
-        self,
-    ):
-        """Solved coil adjoints converge with the native centered Taylor stencil."""
-        native, jax_problem, solve = self._free_current_adjoint_problem()
-        solution, iota = native.boozer.surface.get_dofs(), native.boozer.res["iota"]
-        native_objectives = {
-            "Iotas": Iotas(native.boozer),
-            "BoozerResidual": BoozerResidual(native.boozer, BiotSavart(native.coils)),
-        }
-        jax_objectives = {
-            "Iotas": Iotas(jax_problem.boozer),
-            "BoozerResidual": JaxBoozerResidual(
-                jax_problem.boozer, jax_problem.boozer.biotsavart
-            ),
-        }
-        native_handle, jax_handle = native_objectives["Iotas"], jax_objectives["Iotas"]
-        x0 = np.asarray(native_handle.x, dtype=np.float64)
-        direction = parity_rng(13).standard_normal(x0.size) * np.maximum(
-            np.abs(x0), 1.0
-        )
-        self.assertTrue(
-            x0.size > 0
-            and any(not current.dofs.all_fixed() for current in native.currents),
-            "x0.size > 0 and any(not current.dofs.all_fixed() for current in native.currents)",
-        )
-        # Central-difference truncation is 9e-6 relative at 1e-5 and 9e-8 at 1e-6 (Iotas), so the step is 1e-7.
-        step = 1e-7
-
-        def values(sign: float) -> dict[str, float]:
-            native_handle.x = x0 + sign * step * direction
-            native.boozer.surface.set_dofs(solution)
-            native.boozer.minimize_boozer_penalty_constraints_newton(iota=iota, **solve)
-            return {
-                name: objective.J() for name, objective in native_objectives.items()
-            }
-
-        def restarted_values(sign):
-            evaluated = values(sign)
-            self.assertTrue(native.boozer.res["success"])
-            return evaluated
-
-        plus, minus = restarted_values(1.0), restarted_values(-1.0)
-        native_handle.x = x0
-        native.boozer.surface.set_dofs(solution)
-        native.boozer.minimize_boozer_penalty_constraints_newton(iota=iota, **solve)
-        for name, objective in jax_objectives.items():
-            central = (plus[name] - minus[name]) / (2 * step)
-            with disallow_host_transfers():
-                partials = objective.dJ(partials=True)
-            adjoint = partials(jax_handle) @ direction
-            native_adjoint = (
-                native_objectives[name].dJ(partials=True)(native_handle) @ direction
-            )
-            # Truncation and the re-solves' tolerances bound the agreement (measured 6e-9 and 9e-11 relative);
-            # native's gradients are off by 2.3e-4 and 7.1e-4.
-            self.assertTrue(
-                abs(adjoint - central) <= 1e-7 * abs(central),
-                f"{name}: adjoint {adjoint} != difference {central}",
-            )
-            self.assertTrue(
-                abs(native_adjoint - central) > 1e-4 * abs(central),
-                f"{name}: native's gradient matches the difference",
-            )
-
-        previous_errors = {name: 1e9 for name in jax_objectives}
-        for step in np.power(2.0, -np.arange(13, 18)):
-            plus, minus = restarted_values(1.0), restarted_values(-1.0)
-            for name, make in jax_objectives.items():
-                adjoint = make.dJ(partials=True)(jax_handle) @ direction
-                error = abs((plus[name] - minus[name]) / (2 * step) - adjoint)
-                self.assertLess(error, max(1e-9, 0.35 * previous_errors[name]), name)
-                previous_errors[name] = error
-        native_handle.x = x0
-        native.boozer.surface.set_dofs(solution)

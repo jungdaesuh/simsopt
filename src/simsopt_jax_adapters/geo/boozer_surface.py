@@ -29,17 +29,19 @@ such as ``Iotas``, ``MajorRadius``, ``NonQuasiSymmetricRatio`` and
 
 Each solve evaluates the formulations of :mod:`simsopt_jax.core.boozer_problem`
 for the current surface, coils, label, target and weight: the Newton-type
-loops of :mod:`simsopt_jax.core.boozer_solvers` run on the device in one
-program, BFGS/L-BFGS-B and ``least_squares`` are SciPy's (as natively) over
-the jitted value and gradient. Results are native's: NumPy arrays, the
+loops of :mod:`simsopt_jax.core.boozer_solvers`, and SciPy's BFGS and
+L-BFGS-B as :mod:`simsopt_jax.core.quasi_newton` ports them, run on the
+device, each in one program (the ``host_bfgs`` option runs SciPy's own on
+the host over the jitted value and gradient instead, as natively);
+``least_squares`` is SciPy's (as natively) over the jitted residuals and
+Jacobian. Results are native's: NumPy arrays, the
 solution in ``surface``, host ``PLU`` factors and a ``vjp`` that returns the
 coil ``Derivative``. Like native ``BoozerSurface``, an instance mutates its
 surface and ``res`` and belongs to one thread.
 
 Differences from native: the label must be ``Volume``, ``Area``,
 ``AspectRatio`` or ``ToroidalFlux`` on the surface or a surface sharing its
-DOFs; fixed surface DOFs are solved for (native raises); the exact ``vjp``
-also handles surfaces without stellarator symmetry (native raises); the
+DOFs; the
 BoozerLS ``vjp`` is the derivative of the whole penalty, including a
 ``ToroidalFlux`` label's coil dependence and ``G``'s dependence on the
 currents, which native's ``boozer_surface_dlsqgrad_dcoils_vjp`` drops (a
@@ -76,10 +78,11 @@ from typing import cast
 import jax
 import numpy as np
 from scipy.linalg import lu
-from scipy.optimize import OptimizeResult, least_squares, minimize
+from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, least_squares, minimize
 
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
+from simsopt.geo.boozersurface import BoozerSurface, _keep_iterate
 from simsopt.geo.surfaceobjectives import Area, AspectRatio, ToroidalFlux, Volume
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -93,10 +96,18 @@ from simsopt_jax.core.boozer_problem import (
 from simsopt_jax.core.boozer_solvers import (
     boozer_exact_newton,
     boozer_exact_residual_coil_vjp,
+    boozer_penalty_bfgs,
     boozer_penalty_coil_vjp,
     boozer_penalty_gauss_newton,
+    boozer_penalty_lbfgsb,
     boozer_penalty_newton,
     boozer_residual_objective,
+)
+from simsopt_jax.core.quasi_newton import (
+    BFGS_MESSAGES,
+    LBFGSB_MESSAGES,
+    LbfgsbCorrections,
+    QuasiNewtonResult,
 )
 from simsopt_jax.runtime.host_boundary import host_tree
 from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
@@ -118,6 +129,7 @@ _DEFAULT_OPTIONS = MappingProxyType(
                 "bfgs_maxiter": 1500,
                 "limited_memory": False,
                 "weight_inv_modB": True,
+                "host_bfgs": False,
             }
         ),
     }
@@ -131,6 +143,33 @@ _least_squares = cast(Callable[..., OptimizeResult], least_squares)
 def _place(values, problem: BoozerProblem) -> jax.Array:
     """``values`` as float64 on the problem's device."""
     return explicit_device_array(np.asarray(values, dtype=np.float64), dtype=np.float64, reference=problem.targetlabel)
+
+
+def _optimize_result(result: QuasiNewtonResult, messages: tuple[str, ...]) -> OptimizeResult:
+    """SciPy's ``OptimizeResult`` of a device solve, on the host, with SciPy's
+    fields in SciPy's order: BFGS's or L-BFGS-B's (whose ``hess_inv`` is an
+    ``LbfgsInvHessProduct``)."""
+    result = host_tree(result)
+    status = int(result.status)
+    fields = {
+        "fun": float(result.fun),
+        "jac": result.jac,
+        "nfev": int(result.nfev),
+        "njev": int(result.njev),
+        "status": status,
+        "success": status == 0,
+        "message": messages[int(result.message)],
+        "x": result.x,
+        "nit": int(result.iterations),
+    }
+    if isinstance(result.hess_inv, LbfgsbCorrections):
+        count = int(result.hess_inv.count)
+        fields["hess_inv"] = LbfgsInvHessProduct(result.hess_inv.s[:count], result.hess_inv.y[:count])
+        order = ("fun", "jac", "nfev", "njev", "nit", "status", "message", "x", "success", "hess_inv")
+    else:
+        fields["hess_inv"] = result.hess_inv
+        order = ("fun", "jac", "hess_inv", "nfev", "njev", "status", "success", "message", "x", "nit")
+    return OptimizeResult({key: fields[key] for key in order})
 
 
 def _solution(x: np.ndarray, optimize_G: bool):
@@ -201,7 +240,10 @@ class JaxBoozerSurface(Optimizable):
         options (dict | None): Native solver options overriding the defaults for the
             selected formulation (``verbose`` True, ``newton_tol`` 1e-13 for BoozerExact
             or 1e-11 for BoozerLS, ``newton_maxiter`` 40, ``bfgs_tol`` 1e-10, ``bfgs_maxiter`` 1500,
-            ``limited_memory`` False, ``weight_inv_modB`` True); default None uses the defaults.
+            ``limited_memory`` False, ``weight_inv_modB`` True, and the JAX option
+            ``host_bfgs`` False: True runs BoozerLS's BFGS or L-BFGS-B with SciPy on the
+            host, as natively, instead of its port on the device); default None uses the
+            defaults.
 
     The label must be one of the four classes above; with ``G=None`` in :meth:`run_code` the coil
     currents must be fixed, as natively. ``minimize_boozer_exact_constraints_newton`` is not provided.
@@ -238,6 +280,10 @@ class JaxBoozerSurface(Optimizable):
                 unused.
         """
         self.need_to_run_code = True
+
+    # Native's, so native objectives get the label row their adjoints expect: shape
+    # (surface.local_full_dof_size,), in the label's units per meter.
+    dlabel_dsurface = BoozerSurface.dlabel_dsurface
 
     def run_code(self, iota, G=None):
         """Native ``run_code``: BoozerExact Newton, or BFGS then the penalty
@@ -279,6 +325,7 @@ class JaxBoozerSurface(Optimizable):
             verbose=self.options["verbose"],
             limited_memory=self.options["limited_memory"],
             weight_inv_modB=self.options["weight_inv_modB"],
+            host_bfgs=self.options["host_bfgs"],
         )
         self.need_to_run_code = True
         return self.minimize_boozer_penalty_constraints_newton(
@@ -329,13 +376,16 @@ class JaxBoozerSurface(Optimizable):
         limited_memory=True,
         weight_inv_modB=True,
         verbose=False,
+        host_bfgs=False,
     ):
-        """Native's: SciPy BFGS (or L-BFGS-B) on the penalty.
+        """Native's: SciPy's BFGS (or L-BFGS-B) on the penalty, by default as
+        :mod:`simsopt_jax.core.quasi_newton` runs it on the device; ``info`` is
+        SciPy's ``OptimizeResult`` with SciPy's fields.
 
         Args:
-            tol (float): SciPy gradient stopping tolerance (gtol), also relative objective
+            tol (float): Gradient stopping tolerance (SciPy's gtol), also relative objective
                 stopping tolerance (ftol) for L-BFGS-B; default 1e-3.
-            maxiter (int | float): Maximum SciPy iterations; default 1000.
+            maxiter (int | float): Maximum iterations; default 1000.
             constraint_weight (float): Native penalty coefficient for the squared label and
                 z constraints; default 1.0.
             iota (float): Initial dimensionless rotational transform; default 0.0.
@@ -345,15 +395,27 @@ class JaxBoozerSurface(Optimizable):
             weight_inv_modB (bool): Divide each point's Boozer residual by the field
                 magnitude in teslas; default True.
             verbose (bool): Print the native-style solver summary; default False.
+            host_bfgs (bool): Run SciPy's solver on the host over the jitted value and
+                gradient, as natively; default False.
 
         Returns:
             dict: Cached or newly stored native-style result, including value, gradient,
-                iteration count, success, iota and G; updates the surface DOFs.
+                iteration count, success, iota and G; updates the surface DOFs. As
+                natively, a failed solve whose final penalty value is larger than its
+                starting one, or not finite, keeps the starting point (``info`` is the
+                solver's own result).
         """
         if not self.need_to_run_code:
             return self.res
         optimize_G = G is not None
         problem = self._problem(constraint_weight)
+        x = self._decision_vector(iota, G)
+
+        method = "L-BFGS-B" if limited_memory else "BFGS"
+        options = {"maxiter": maxiter, "gtol": tol}
+        if limited_memory:
+            options["maxcor"] = 200
+            options["ftol"] = tol
 
         def penalty(x):
             return host_tree(
@@ -366,16 +428,44 @@ class JaxBoozerSurface(Optimizable):
                 )
             )
 
-        method = "L-BFGS-B" if limited_memory else "BFGS"
-        options = {"maxiter": maxiter, "gtol": tol}
-        if limited_memory:
-            options["maxcor"] = 200
-            options["ftol"] = tol
-        res = minimize(penalty, self._decision_vector(iota, G), jac=True, method=method, options=options)
+        if host_bfgs:
+            res = minimize(penalty, x, jac=True, method=method, options=options)
+        elif limited_memory:
+            res = _optimize_result(
+                boozer_penalty_lbfgsb(
+                    problem,
+                    _place(x, problem),
+                    _place(options["ftol"], problem),
+                    _place(options["gtol"], problem),
+                    _place(options["maxiter"], problem),
+                    maxcor=options["maxcor"],
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                LBFGSB_MESSAGES,
+            )
+        else:
+            res = _optimize_result(
+                boozer_penalty_bfgs(
+                    problem,
+                    _place(x, problem),
+                    _place(options["gtol"], problem),
+                    _place(options["maxiter"], problem),
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                BFGS_MESSAGES,
+            )
+        # As natively, a failed solve that ended at a larger or non-finite value restores its start.
+        xsol, fsol, gsol = res.x, res.fun, res.jac
+        if not res.success:
+            f0, g0 = penalty(x)
+            if not _keep_iterate(fsol, f0):
+                xsol, fsol, gsol = x, f0, g0
 
         resdict = {
-            "fun": res.fun,
-            "gradient": res.jac,
+            "fun": fsol,
+            "gradient": gsol,
             "iter": res.nit,
             "info": res,
             "success": res.success,
@@ -383,7 +473,7 @@ class JaxBoozerSurface(Optimizable):
             "weight_inv_modB": weight_inv_modB,
             "type": "ls",
         }
-        iota, G = self._commit(res.x, optimize_G)
+        iota, G = self._commit(xsol, optimize_G)
         resdict = self._store(resdict, iota, G, with_surface=True)
         if verbose:
             print(
@@ -404,6 +494,7 @@ class JaxBoozerSurface(Optimizable):
         stab=0.0,
         weight_inv_modB=True,
         verbose=False,
+        divergence_factor=None,
     ):
         """Native's: Newton on the penalty with its analytic Hessian.
 
@@ -422,11 +513,16 @@ class JaxBoozerSurface(Optimizable):
             weight_inv_modB (bool): Divide each point's Boozer residual by the field
                 magnitude in teslas; default True.
             verbose (bool): Print the native-style solver summary; default False.
+            divergence_factor (float | None): Stop, unsuccessfully, once the Euclidean
+                penalty-gradient norm exceeds this dimensionless multiple of its value at
+                the starting point, as natively; default None disables the check.
 
         Returns:
             dict: Cached or newly stored native-style result with final derivatives,
                 success, LU factors and coil VJP; updates the surface, including the last
-                iterate before a singular-step error.
+                iterate before a singular-step error. As natively, a walk that ends with a
+                larger or non-finite gradient norm than it started with keeps its starting
+                point and the derivatives there, and fails.
         """
         if not self.need_to_run_code:
             return self.res
@@ -439,6 +535,7 @@ class JaxBoozerSurface(Optimizable):
                 _place(tol, problem),
                 _place(maxiter, problem),
                 _place(stab, problem),
+                None if divergence_factor is None else _place(divergence_factor, problem),
                 optimize_G=optimize_G,
                 weight_inv_modB=weight_inv_modB,
             )
@@ -502,7 +599,10 @@ class JaxBoozerSurface(Optimizable):
         Returns:
             dict: Native-style least-squares result after updating the surface. SciPy
                 results are cached in res; the manual result is returned without storing it,
-                as natively.
+                as natively. As natively, a failed SciPy solve (``status <= 0``) whose final
+                residual norm is larger than its starting one, or not finite, keeps the
+                starting point and its residuals, as does a manual walk ending with a larger
+                or non-finite ``|J^T r|``.
         """
         if not self.need_to_run_code:
             return self.res
@@ -543,12 +643,12 @@ class JaxBoozerSurface(Optimizable):
                 derivatives=derivatives,
                 optimize_G=optimize_G,
                 weight_inv_modB=weight_inv_modB,
-            )[derivatives]
+            )
 
         res = _least_squares(
-            lambda x: host_tree(residuals(x, 0)),
+            lambda x: host_tree(residuals(x, 0)[0]),
             x,
-            jac=lambda x: host_tree(residuals(x, 1)),
+            jac=lambda x: host_tree(residuals(x, 1)[1]),
             method=method,
             ftol=tol,
             xtol=tol,
@@ -556,15 +656,21 @@ class JaxBoozerSurface(Optimizable):
             x_scale=1.0,
             max_nfev=maxiter,
         )
+        # As natively, a failed solve that ended at a larger or non-finite residual restores its start.
+        xsol, rsol, gsol, Jsol = res.x, res.fun, res.grad, res.jac
+        if res.status <= 0:
+            r0, J0 = host_tree(residuals(x, 1))
+            if not _keep_iterate(np.linalg.norm(rsol), np.linalg.norm(r0)):
+                xsol, rsol, gsol, Jsol = x, r0, J0.T @ r0, J0
         resdict = {
             "info": res,
-            "residual": res.fun,
-            "gradient": res.grad,
-            "jacobian": res.jac,
+            "residual": rsol,
+            "gradient": gsol,
+            "jacobian": Jsol,
             "success": res.status > 0,
             "G": None,
         }
-        iota, G = self._commit(res.x, optimize_G)
+        iota, G = self._commit(xsol, optimize_G)
         return self._store(resdict, iota, G, with_surface=True)
 
     def solve_residual_equation_exactly_newton(self, tol=1e-10, maxiter=10, iota=0.0, G=None, verbose=False):
@@ -587,8 +693,10 @@ class JaxBoozerSurface(Optimizable):
 
         Returns:
             dict: Cached or newly stored native-style exact solve result, including
-                residual, Jacobian, mask, LU factors, coil VJP and success; updates the
-                surface after completed steps.
+                residual, Jacobian, mask, LU factors, coil VJP and success (of the final
+                iterate, as natively); updates the surface after completed steps. As
+                natively, a walk that ends with a larger or non-finite norm than at its
+                start keeps its start and the residual and Jacobian there, and fails.
         """
         if not self.need_to_run_code:
             return self.res
@@ -622,6 +730,7 @@ class JaxBoozerSurface(Optimizable):
             "PLU": lu(result.jacobian),
             "mask": mask,
             "type": "exact",
+            "weight_inv_modB": False,
             "vjp": _exact_coil_vjp,
         }
         if verbose:
@@ -630,20 +739,16 @@ class JaxBoozerSurface(Optimizable):
                 f"||residual||_inf = {np.linalg.norm(res['residual'], ord=np.inf):.3e}",
                 flush=True,
             )
-        self.res = res
-        self.need_to_run_code = False
-        return res
+        return self._store(res, iota, G, with_surface=True)
 
 
-def _coil_derivative(booz_surf: JaxBoozerSurface, cotangents) -> Derivative:
-    return booz_surf.biotsavart.coil_cotangents_to_derivative(
-        cotangents.field_inputs(), cotangents.coil_index_lists()
-    )
+def _coil_derivative(field: JaxBiotSavart, cotangents) -> Derivative:
+    return field.coil_cotangents_to_derivative(cotangents.field_inputs(), cotangents.coil_index_lists())
 
 
 class JaxBoozerResidual(Optimizable):
     r"""JAX version of :class:`simsopt.geo.BoozerResidual`: the Boozer residual penalty of a solved
-    BoozerLS :class:`JaxBoozerSurface`,
+    BoozerLS or BoozerExact :class:`JaxBoozerSurface`,
 
     .. math::
 
@@ -653,7 +758,8 @@ class JaxBoozerResidual(Optimizable):
     ``weight_inv_modB``) at the solved :math:`\iota` and :math:`G` on a
     ``SurfaceXYZTensorFourier`` copy of the solved surface with the same quadrature points,
     :math:`n_r = 3 n_\varphi n_\theta`, :math:`l` the solver's label with target :math:`l_0`, and
-    :math:`w_c` the solver's ``constraint_weight`` at construction. Unlike the solver's penalty, it
+    :math:`w_c` the solver's ``constraint_weight`` at construction (0 for BoozerExact, whose
+    ``constraint_weight`` is None, as natively). Unlike the solver's penalty, it
     has no :math:`z(\varphi=0, \theta=0)` term. The surface is re-solved first when it needs to be.
 
     ``dJ`` is the total coil derivative through the solve, the explicit coil derivative of
@@ -668,14 +774,14 @@ class JaxBoozerResidual(Optimizable):
         J. Plasma Phys. 88(4), 905880401 (2022), doi:10.1017/S0022377822000563.
 
     Args:
-        boozer_surface (JaxBoozerSurface): Mutable BoozerLS solver; the objective owns a
-            separate copy of its solved geometry.
+        boozer_surface (JaxBoozerSurface): Mutable BoozerLS or BoozerExact solver; the
+            objective owns a separate copy of its solved geometry.
         bs (JaxBiotSavart): Field with the solver's coils; evaluating this objective
             leaves its evaluation points unchanged except for shared label callbacks
             during re-solves.
 
-    The solver must be BoozerLS (a truthy ``constraint_weight``); with a ``ToroidalFlux`` label use
-    this class rather than native ``BoozerResidual``.
+    With a ``ToroidalFlux`` label on a BoozerLS solver use this class rather than native
+    ``BoozerResidual``.
     """
 
     def __init__(self, boozer_surface: JaxBoozerSurface, bs: JaxBiotSavart):
@@ -691,7 +797,8 @@ class JaxBoozerResidual(Optimizable):
             quadpoints_theta=in_surface.quadpoints_theta,
         )
         surface.set_dofs(in_surface.get_dofs())
-        self.constraint_weight = boozer_surface.constraint_weight
+        # BoozerExact surfaces have no label penalty (constraint_weight is None), as natively.
+        self.constraint_weight = 0.0 if boozer_surface.constraint_weight is None else boozer_surface.constraint_weight
         self.in_surface = in_surface
         self.surface = surface
         self.biotsavart = bs
@@ -754,7 +861,7 @@ class JaxBoozerResidual(Optimizable):
             boozer_problem(self.biotsavart, self.in_surface, booz_surf.label, booz_surf.targetlabel, self.constraint_weight),
             surface=surface_spec_from_surface(self.surface),
         )
-        x = np.concatenate((self.surface.get_dofs(), [iota] if G is None else [iota, G]))
+        x = booz_surf._decision_vector(iota, G)
         value, dJ_dx, dJ_dcoils = boozer_residual_objective(
             problem, _place(x, problem), optimize_G=G is not None, weight_inv_modB=weight_inv_modB
         )
@@ -762,9 +869,7 @@ class JaxBoozerResidual(Optimizable):
 
         P, L, U = res["PLU"]
         adj = forward_backward(P, L, U, host_tree(dJ_dx))
-        explicit = self.biotsavart.coil_cotangents_to_derivative(
-            dJ_dcoils.field_inputs(), dJ_dcoils.coil_index_lists()
-        )
+        explicit = _coil_derivative(self.biotsavart, dJ_dcoils)
         self._dJ = explicit - res["vjp"](adj, booz_surf, iota, G)
 
 
@@ -776,7 +881,7 @@ def _exact_coil_vjp(lm, booz_surf: JaxBoozerSurface, iota, G) -> Derivative:
     x = booz_surf._decision_vector(iota, G)
     rows = boozer_exact_residual_rows(booz_surf.surface, problem.targetlabel)
     return _coil_derivative(
-        booz_surf, boozer_exact_residual_coil_vjp(problem, _place(x, problem), rows, _place(lm, problem))
+        booz_surf.biotsavart, boozer_exact_residual_coil_vjp(problem, _place(x, problem), rows, _place(lm, problem))
     )
 
 
@@ -789,7 +894,7 @@ def _penalty_coil_vjp(
     ``G``'s coil dependence that native drops (see the module docstring)."""
     problem = booz_surf._problem(constraint_weight)
     return _coil_derivative(
-        booz_surf,
+        booz_surf.biotsavart,
         boozer_penalty_coil_vjp(
             problem,
             _place(booz_surf._decision_vector(iota, G), problem),
