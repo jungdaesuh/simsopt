@@ -15,17 +15,12 @@ from simsopt_jax.backend.dtypes import _has_jax_array_value, explicit_device_arr
 from .curve_helical import curve_helical_pure
 from .curve_planar_fourier import curveplanarfourier_pure
 from .curve_rz_fourier import curverzfourier_pure
-from .curve_xyz_fourier import (
-    jaxfouriercurve_geometry_pure,
-    jaxfouriercurve_pure,
-)
+from .curve_xyz_fourier import jaxfouriercurve_pure
 from .curve_xyz_fourier_symmetries import jaxXYZFourierSymmetriescurve_pure
 from ._math_utils import as_jax_float64 as _as_jax_float64
 from .framedcurve import (
     rotated_centroid_frame,
-    rotated_centroid_frame_dash,
     rotated_frenet_frame,
-    rotated_frenet_frame_dash,
     rotation_alpha as jaxrotation_pure,
     rotation_alphadash as jaxrotationdash_pure,
 )
@@ -43,14 +38,15 @@ from .specs import (
     OptimizableDofMapSpec,
     RotationSpec,
     ZeroRotationSpec,
-    curve_spec_kind,
+    _filament_base_derivative_order,
+    _require_sample_derivatives,
 )
 
 __all__ = [
-    "curve_filament_frame_from_dofs",
     "curve_gamma_and_gammadash_from_dofs",
     "curve_gamma_and_gammadash_from_spec",
     "curve_gamma_vjp_from_dofs",
+    "curve_filament_pack_from_dofs",
     "curve_geometry_from_dofs",
     "curve_gammadash_vjp_from_dofs",
     "curve_gammadashdash_vjp_from_dofs",
@@ -158,23 +154,19 @@ def _curve_gamma_kernel(
             reference=spec.dofs,
         )
     )
-    spec_kind = curve_spec_kind(spec)
-    if spec_kind == "xyz_fourier":
-        spec = cast(CurveXYZFourierSpec, spec)
+    if isinstance(spec, CurveXYZFourierSpec):
         return lambda quadpoints: jaxfouriercurve_pure(
             curve_dofs,
             quadpoints,
             spec.order,
         )
-    if spec_kind == "oriented_xyz_fourier":
-        spec = cast(OrientedCurveXYZFourierSpec, spec)
+    if isinstance(spec, OrientedCurveXYZFourierSpec):
         return lambda quadpoints: centercurve_pure(
             curve_dofs,
             quadpoints,
             spec.order,
         )
-    if spec_kind == "rz_fourier":
-        spec = cast(CurveRZFourierSpec, spec)
+    if isinstance(spec, CurveRZFourierSpec):
         return lambda quadpoints: curverzfourier_pure(
             curve_dofs,
             quadpoints,
@@ -182,15 +174,13 @@ def _curve_gamma_kernel(
             spec.nfp,
             spec.stellsym,
         )
-    if spec_kind == "planar_fourier":
-        spec = cast(CurvePlanarFourierSpec, spec)
+    if isinstance(spec, CurvePlanarFourierSpec):
         return lambda quadpoints: curveplanarfourier_pure(
             curve_dofs,
             quadpoints,
             spec.order,
         )
-    if spec_kind == "helical":
-        spec = cast(CurveHelicalSpec, spec)
+    if isinstance(spec, CurveHelicalSpec):
         return lambda quadpoints: curve_helical_pure(
             curve_dofs,
             quadpoints,
@@ -200,8 +190,7 @@ def _curve_gamma_kernel(
             spec.R0,
             spec.r,
         )
-    if spec_kind == "xyz_fourier_symmetries":
-        spec = cast(CurveXYZFourierSymmetriesSpec, spec)
+    if isinstance(spec, CurveXYZFourierSymmetriesSpec):
         return lambda quadpoints: jaxXYZFourierSymmetriescurve_pure(
             curve_dofs,
             quadpoints,
@@ -221,40 +210,20 @@ def _curve_quadpoints(spec: CurveSpec, *, reference):
     return quadpoints, _ones_like_runtime(quadpoints)
 
 
+def _parameter_derivative_kernel(kernel, tangents):
+    """Return ``qp -> d kernel(qp) / d qp`` along ``tangents``."""
+    return lambda qp: jax.jvp(kernel, (qp,), (tangents,))[1]
+
+
 def _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, tangents, *, order) -> tuple[jax.Array, ...]:
+    """Return ``gamma_kernel`` and its first ``order`` parameter derivatives by nested JVPs."""
     gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
-    if order == 1:
-        return gamma, gammadash
-
-    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
-    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
-    if order == 2:
-        return gamma, gammadash, gammadashdash
-
-    gammadashdash_kernel = lambda qp: jax.jvp(
-        gammadash_kernel,
-        (qp,),
-        (tangents,),
-    )[1]
-    _, gammadashdashdash = jax.jvp(
-        gammadashdash_kernel,
-        (quadpoints,),
-        (tangents,),
-    )
-    return gamma, gammadash, gammadashdash, gammadashdashdash
-
-
-def _direct_curve_geometry_terms(spec: CurveSpec, dofs, *, order):
-    if curve_spec_kind(spec) != "xyz_fourier":
-        return None
-    spec = cast(CurveXYZFourierSpec, spec)
-    curve_dofs = spec.dofs if dofs is None else dofs
-    geometry = jaxfouriercurve_geometry_pure(
-        curve_dofs,
-        spec.quadpoints,
-        spec.order,
-    )
-    return geometry[: order + 1]
+    terms = [gamma, gammadash]
+    derivative_kernel = gamma_kernel
+    for _ in range(order - 1):
+        derivative_kernel = _parameter_derivative_kernel(derivative_kernel, tangents)
+        terms.append(jax.jvp(derivative_kernel, (quadpoints,), (tangents,))[1])
+    return tuple(terms)
 
 
 def _mapped_full_dofs(
@@ -269,27 +238,14 @@ def _mapped_full_dofs(
         owner_dofs,
         reference=owner_dofs,
     )
-    for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
-        del target_end
+    # make_optimizable_dof_map_spec guarantees equal owner and target lengths.
+    for owner_start, owner_end, target_start, _target_end in map_spec.owner_segments:
         mapped = _update_1d_static(
             mapped,
             target_start,
             _slice_1d_static(owner_dofs, owner_start, owner_end),
         )
     return mapped
-
-
-def _mapped_input_dofs(
-    map_spec: OptimizableDofMapSpec,
-    owner_dofs,
-):
-    mapped_full = _mapped_full_dofs(
-        map_spec,
-        owner_dofs,
-    )
-    if map_spec.input_mode == "full":
-        return mapped_full
-    return _slice_1d_static(mapped_full, map_spec.input_start, map_spec.input_end)
 
 
 def optimizable_input_dofs_from_map_spec(
@@ -309,63 +265,72 @@ def optimizable_input_dofs_from_map_spec(
             otherwise the requested local slice of shape (input_end -
             input_start,).
     """
-    return _mapped_input_dofs(
+    mapped_full = _mapped_full_dofs(
         map_spec,
         owner_dofs,
     )
+    if map_spec.input_mode == "full":
+        return mapped_full
+    return _slice_1d_static(mapped_full, map_spec.input_start, map_spec.input_end)
 
 
-def _rotation_alpha_and_dash_from_dofs(
+def _rotation_alpha_terms_from_dofs(
     rotation_spec: RotationSpec,
     rotation_map: OptimizableDofMapSpec,
     owner_dofs,
-):
+    order: int,
+) -> tuple[jax.Array, ...]:
+    """Return the frame rotation angle and its first ``order`` parameter derivatives."""
     quadpoints = _as_explicit_array(
         rotation_spec.quadpoints, reference=owner_dofs
     )
     if isinstance(rotation_spec, ZeroRotationSpec):
-        zeros = _zeros_like_runtime(quadpoints)
-        return zeros, zeros
+        return (_zeros_like_runtime(quadpoints),) * (order + 1)
 
-    rotation_dofs = _mapped_input_dofs(rotation_map, owner_dofs)
+    rotation_dofs = optimizable_input_dofs_from_map_spec(rotation_map, owner_dofs)
     rotation_scale = _runtime_scalar(rotation_spec.scale, reference=owner_dofs)
-    return (
-        rotation_scale
-        * jaxrotation_pure(rotation_dofs, quadpoints, rotation_spec.order),
-        rotation_scale
-        * jaxrotationdash_pure(rotation_dofs, quadpoints, rotation_spec.order),
+
+    def alphadash(qp):
+        return jaxrotationdash_pure(rotation_dofs, qp, rotation_spec.order)
+
+    dash_terms = (
+        (alphadash(quadpoints),)
+        if order == 1
+        else _curve_geometry_terms_from_kernel(
+            alphadash, quadpoints, _ones_like_runtime(quadpoints), order=order - 1
+        )
     )
+    terms = (jaxrotation_pure(rotation_dofs, quadpoints, rotation_spec.order), *dash_terms)
+    return tuple(rotation_scale * term for term in terms)
 
 
-def _curve_geometry_with_third_derivative_from_dofs(
-    spec: CurveSpec,
-    dofs,
-) -> tuple[jax.Array, ...]:
-    """Return (gamma, gammadash, gammadashdash, gammadashdashdash) in one pass."""
+def _curve_geometry_terms_from_dofs(spec: CurveSpec, dofs, order: int) -> tuple[jax.Array, ...]:
+    """Return gamma and its first ``order`` parameter derivatives for any curve spec.
+
+    A perturbed layer whose sample lacks a needed derivative raises
+    ``ValueError``, as native ``PerturbationSample`` does.
+    """
     if isinstance(spec, CurvePerturbedSpec):
-        base_geometry = _curve_geometry_with_third_derivative_from_dofs(
+        _require_sample_derivatives(spec, order)
+        base_geometry = _curve_geometry_terms_from_dofs(
             spec.base_curve,
-            _curve_perturbed_base_dofs(spec, dofs),
+            optimizable_input_dofs_from_map_spec(spec.base_curve_map, dofs),
+            order,
         )
         return _add_curve_perturbation(spec, *base_geometry)
-    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=3)
-    if direct_geometry is not None:
-        return direct_geometry
+    if isinstance(spec, CurveFilamentSpec):
+        return _curve_filament_terms_from_dofs(spec, dofs, order)
     gamma_kernel = _curve_gamma_kernel(
         spec,
         dofs,
     )
+    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
     return _curve_geometry_terms_from_kernel(
         gamma_kernel,
         quadpoints,
         tangents,
-        order=3,
+        order=order,
     )
-
-
-def _curve_perturbed_base_dofs(spec: CurvePerturbedSpec, dofs):
-    return _mapped_input_dofs(spec.base_curve_map, dofs)
 
 
 def _add_curve_perturbation(spec: CurvePerturbedSpec, *geometry_terms) -> tuple[jax.Array, ...]:
@@ -381,138 +346,34 @@ def _add_curve_perturbation(spec: CurvePerturbedSpec, *geometry_terms) -> tuple[
     )
 
 
-def _curve_perturbed_gamma_and_dash_from_dofs(spec: CurvePerturbedSpec, dofs) -> tuple[jax.Array, ...]:
-    base_geometry = curve_gamma_and_gammadash_from_dofs(
-        spec.base_curve,
-        _curve_perturbed_base_dofs(spec, dofs),
-    )
-    return _add_curve_perturbation(spec, *base_geometry)
+def _curve_filament_input_jets(spec: CurveFilamentSpec, dofs, order: int):
+    """Return a filament's rotated-frame function and the frame inputs with their parameter derivatives.
 
-
-def _curve_perturbed_geometry_from_dofs(spec: CurvePerturbedSpec, dofs) -> tuple[jax.Array, ...]:
-    base_geometry = curve_geometry_from_dofs(
-        spec.base_curve,
-        _curve_perturbed_base_dofs(spec, dofs),
-    )
-    return _add_curve_perturbation(spec, *base_geometry)
-
-
-def _curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
-    quadpoints_jax = _as_explicit_array(quadpoints, reference=spec.dofs)
-    spec_kind = curve_spec_kind(spec)
-    if spec_kind == "perturbed":
-        spec = cast(CurvePerturbedSpec, spec)
-        return replace(
-            spec,
-            quadpoints=quadpoints_jax,
-            base_curve=_curve_spec_with_quadpoints(spec.base_curve, quadpoints_jax),
-        )
-    if spec_kind == "filament":
-        spec = cast(CurveFilamentSpec, spec)
-        return replace(
-            spec,
-            quadpoints=quadpoints_jax,
-            base_curve=_curve_spec_with_quadpoints(spec.base_curve, quadpoints_jax),
-            rotation=replace(spec.rotation, quadpoints=quadpoints_jax),
-        )
-    return replace(spec, quadpoints=quadpoints_jax)
-
-
-def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
-    def gamma_kernel(qp):
-        quad_spec = cast(CurveFilamentSpec, _curve_spec_with_quadpoints(spec, qp))
-        base_dofs = _mapped_input_dofs(quad_spec.base_curve_map, dofs)
-        alpha, _alphadash = _rotation_alpha_and_dash_from_dofs(
-            quad_spec.rotation,
-            quad_spec.rotation_map,
-            dofs,
-        )
-        gamma, gammadash = curve_gamma_and_gammadash_from_dofs(
-            quad_spec.base_curve, base_dofs
-        )
-        if quad_spec.frame_kind == "frenet":
-            _gamma, _gammadash, gammadashdash = curve_geometry_from_dofs(
-                quad_spec.base_curve,
-                base_dofs,
-            )
-            _tangent, normal, binormal = rotated_frenet_frame(
-                gamma,
-                gammadash,
-                gammadashdash,
-                alpha,
-            )
-        else:
-            _tangent, normal, binormal = rotated_centroid_frame(
-                gamma,
-                gammadash,
-                alpha,
-            )
-        return _filament_offset(gamma, normal, binormal, quad_spec.dn, quad_spec.db)
-
-    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
-    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
-    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
-    return gamma, gammadash, gammadashdash
-
-
-def curve_filament_frame_from_dofs(spec: CurveFilamentSpec, dofs) -> tuple[jax.Array, ...]:
-    """Return the underlying curve and rotated frame of a finite-build filament.
-
-    The result is ``(gamma, gammadash, gammadashdash, normal, binormal,
-    normal_dash, binormal_dash)`` of the filament's base curve; the filament
-    is ``gamma + dn * normal + db * binormal`` and its tangent
-    ``gammadash + dn * normal_dash + db * binormal_dash``.
-
-    Args:
-        spec: CurveFilamentSpec object, base curve, DOF maps, rotation and frame convention.
-        dofs: Array of shape (ndofs,), filament full DOFs in the spec mapping order.
-
-    Returns:
-        tuple of arrays of shape (nquadpoints, 3): base gamma, first and second parameter derivatives in m, unit normal and binormal, and their unit-period parameter derivatives.
+    The result is ``(frame, input_jets)``: ``frame(*input_jets[0])`` is the
+    base curve's rotated frame ``(t, n, b)`` and ``input_jets[j]`` is the
+    ``j``-th parameter derivative of those inputs, for ``j`` up to ``order``.
+    Every input derivative comes from the base geometry and rotation terms
+    themselves, so perturbation samples (constant arrays, not functions of the
+    curve parameter) contribute their own derivatives.
     """
-    base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
-    alpha, alphadash = _rotation_alpha_and_dash_from_dofs(
+    base_order = _filament_base_derivative_order(spec.frame_kind, order)
+    base_terms = _curve_geometry_terms_from_dofs(
+        spec.base_curve,
+        optimizable_input_dofs_from_map_spec(spec.base_curve_map, dofs),
+        base_order,
+    )
+    alpha_terms = _rotation_alpha_terms_from_dofs(
         spec.rotation,
         spec.rotation_map,
         dofs,
+        order,
     )
-
-    if spec.frame_kind == "frenet":
-        gamma, gammadash, gammadashdash, gammadashdashdash = (
-            _curve_geometry_with_third_derivative_from_dofs(spec.base_curve, base_dofs)
-        )
-        _tangent, normal, binormal = rotated_frenet_frame(
-            gamma,
-            gammadash,
-            gammadashdash,
-            alpha,
-        )
-        _tangent_dash, normal_dash, binormal_dash = rotated_frenet_frame_dash(
-            gamma,
-            gammadash,
-            gammadashdash,
-            gammadashdashdash,
-            alpha,
-            alphadash,
-        )
-    else:
-        gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
-            spec.base_curve, base_dofs
-        )
-        _tangent, normal, binormal = rotated_centroid_frame(
-            gamma,
-            gammadash,
-            alpha,
-        )
-        _tangent_dash, normal_dash, binormal_dash = rotated_centroid_frame_dash(
-            gamma,
-            gammadash,
-            gammadashdash,
-            alpha,
-            alphadash,
-        )
-    return gamma, gammadash, gammadashdash, normal, binormal, normal_dash, binormal_dash
+    frame = rotated_frenet_frame if spec.frame_kind == "frenet" else rotated_centroid_frame
+    geometry_inputs = base_order - order + 1
+    input_jets = tuple(
+        (*base_terms[j : j + geometry_inputs], alpha_terms[j]) for j in range(order + 1)
+    )
+    return frame, input_jets
 
 
 def _filament_offset(
@@ -522,20 +383,78 @@ def _filament_offset(
     dn: float | jax.Array,
     db: float | jax.Array,
 ) -> jax.Array:
-    """Apply the normal/binormal offset to a frame component, in native arithmetic order."""
+    """Apply the normal/binormal offset to the base curve, in native arithmetic order."""
     return gamma + dn * normal + db * binormal
 
 
-def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
-    gamma, gammadash, _gammadashdash, normal, binormal, normal_dash, binormal_dash = (
-        curve_filament_frame_from_dofs(spec, dofs)
+def _filament_terms(frame, input_jets, dn, db) -> tuple[jax.Array, ...]:
+    """Return the filament ``gamma + dn * normal + db * binormal`` and its first ``len(input_jets) - 1`` parameter derivatives.
+
+    The ``k``-th derivative map takes the input jets ``0..k``; the next one is
+    its JVP along jets ``1..k+1``, the chain rule for a curve parameter that
+    moves every input along its own derivative (``J x'' + H[x', x']`` at
+    order 2).
+    """
+
+    def filament(frame_inputs):
+        _tangent, normal, binormal = frame(*frame_inputs)
+        return (_filament_offset(frame_inputs[0], normal, binormal, dn, db),)
+
+    def differentiated(terms):
+        def extended(*jets):
+            primal_terms, tangent_terms = jax.jvp(terms, jets[:-1], jets[1:])
+            return (*primal_terms, tangent_terms[-1])
+
+        return extended
+
+    terms = filament
+    for _ in input_jets[1:]:
+        terms = differentiated(terms)
+    return terms(*input_jets)
+
+
+def curve_filament_pack_from_dofs(
+    spec: CurveFilamentSpec,
+    dofs,
+    offsets: tuple[tuple[float, float], ...],
+) -> tuple[jax.Array, ...]:
+    """Return the base curve and the filaments of a finite-build pack sharing ``spec``'s curve and frame.
+
+    Each filament is ``gamma + dn * normal + db * binormal`` for one
+    ``(dn, db)`` of ``offsets``; its tangent is the ``jax.jvp`` of that
+    expression along the base curve's parameter derivatives. The frame does
+    not depend on the offsets, so ``jax.vmap`` over them evaluates it once.
+
+    Args:
+        spec: CurveFilamentSpec object, base curve, DOF maps, rotation and frame convention of the pack.
+        dofs: Array of shape (ndofs,), filament full DOFs in the spec mapping order.
+        offsets: tuple of (dn, db) pairs in m, one per filament.
+
+    Returns:
+        tuple: (gamma, gammadash, gammadashdash) of the base curve, arrays of shape (nquadpoints, 3) in m, then the filaments' gamma and gammadash, arrays of shape (nfilaments, nquadpoints, 3) in m.
+    """
+    frame, input_jets = _curve_filament_input_jets(spec, dofs, 1)
+    # Both frames take (gamma, gammadash, ...) of the base curve, so the frame
+    # inputs start with gamma and their parameter derivatives with
+    # (gammadash, gammadashdash).
+    base_geometry = (input_jets[0][0], *input_jets[1][:2])
+    dn, db = (
+        _as_explicit_array(np.asarray(values, dtype=np.float64), reference=dofs)
+        for values in zip(*offsets, strict=True)
     )
-    dn = _runtime_scalar(spec.dn, reference=normal)
-    db = _runtime_scalar(spec.db, reference=binormal)
-    return (
-        _filament_offset(gamma, normal, binormal, dn, db),
-        _filament_offset(gammadash, normal_dash, binormal_dash, dn, db),
-    )
+    gammas, gammadashs = jax.vmap(
+        lambda filament_dn, filament_db: _filament_terms(
+            frame, input_jets, filament_dn, filament_db
+        )
+    )(dn, db)
+    return (*base_geometry, gammas, gammadashs)
+
+
+def _curve_filament_terms_from_dofs(spec: CurveFilamentSpec, dofs, order: int):
+    frame, input_jets = _curve_filament_input_jets(spec, dofs, order)
+    dn = _runtime_scalar(spec.dn, reference=input_jets[0][0])
+    db = _runtime_scalar(spec.db, reference=input_jets[0][0])
+    return _filament_terms(frame, input_jets, dn, db)
 
 
 def curve_spec_with_dofs(
@@ -587,27 +506,7 @@ def curve_gamma_and_gammadash_from_dofs(
         tuple[jax.Array, ...]: Position and its first 1 normalized-parameter
             derivative(s), each shape (Q, 3), in meters.
     """
-    spec_kind = curve_spec_kind(spec)
-    if spec_kind == "perturbed":
-        spec = cast(CurvePerturbedSpec, spec)
-        return _curve_perturbed_gamma_and_dash_from_dofs(spec, dofs)
-    if spec_kind == "filament":
-        spec = cast(CurveFilamentSpec, spec)
-        return _curve_filament_gamma_and_dash_from_dofs(spec, dofs)
-    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=1)
-    if direct_geometry is not None:
-        return direct_geometry
-    gamma_kernel = _curve_gamma_kernel(
-        spec,
-        dofs,
-    )
-    return _curve_geometry_terms_from_kernel(
-        gamma_kernel,
-        quadpoints,
-        tangents,
-        order=1,
-    )
+    return _curve_geometry_terms_from_dofs(spec, dofs, 1)
 
 
 def curve_geometry_from_dofs(
@@ -625,36 +524,16 @@ def curve_geometry_from_dofs(
     Returns:
         tuple[jax.Array, ...]: Position and its first 2 normalized-parameter
             derivative(s), each shape (Q, 3), in meters.
+
+    Raises:
+        ValueError: A perturbation sample in the spec provides fewer than two
+            parameter derivatives, as native ``PerturbationSample`` raises.
     """
-    spec_kind = curve_spec_kind(spec)
-    if spec_kind == "perturbed":
-        spec = cast(CurvePerturbedSpec, spec)
-        return _curve_perturbed_geometry_from_dofs(spec, dofs)
-    if spec_kind == "filament":
-        spec = cast(CurveFilamentSpec, spec)
-        return _curve_filament_geometry_from_dofs(spec, dofs)
-    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=2)
-    if direct_geometry is not None:
-        return direct_geometry
-    gamma_kernel = _curve_gamma_kernel(
-        spec,
-        dofs,
-    )
-    return _curve_geometry_terms_from_kernel(
-        gamma_kernel,
-        quadpoints,
-        tangents,
-        order=2,
-    )
+    return _curve_geometry_terms_from_dofs(spec, dofs, 2)
 
 
 def _curve_geometry_term_from_dofs(spec: CurveSpec, dofs, term_index: int):
-    if term_index < 2:
-        return curve_gamma_and_gammadash_from_dofs(spec, dofs)[term_index]
-    if term_index == 2:
-        return curve_geometry_from_dofs(spec, dofs)[2]
-    return _curve_geometry_with_third_derivative_from_dofs(spec, dofs)[3]
+    return _curve_geometry_terms_from_dofs(spec, dofs, max(term_index, 1))[term_index]
 
 
 def _curve_geometry_term_vjp_from_dofs(
@@ -735,6 +614,10 @@ def curve_gammadashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
     Returns:
         jax.Array: Coefficient cotangent, shape (D,), in the input DOF
             ordering; quadrature nodes are held fixed.
+
+    Raises:
+        ValueError: A perturbation sample in the spec provides fewer than two
+            parameter derivatives, as native ``PerturbationSample`` raises.
     """
     return _curve_geometry_term_vjp_from_dofs(
         spec,
@@ -758,6 +641,10 @@ def curve_gammadashdashdash_vjp_from_dofs(spec: CurveSpec, dofs, cotangent):
     Returns:
         jax.Array: Coefficient cotangent, shape (D,), in the input DOF
             ordering; quadrature nodes are held fixed.
+
+    Raises:
+        ValueError: A perturbation sample in the spec provides fewer than three
+            parameter derivatives, as native ``PerturbationSample`` raises.
     """
     return _curve_geometry_term_vjp_from_dofs(
         spec,

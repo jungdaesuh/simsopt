@@ -36,11 +36,12 @@ class TestUnittestJaxSupport(TestCase):
         environment["PYTHONPATH"] = os.pathsep.join(
             (str(_TESTS_ROOT), environment.get("PYTHONPATH", ""))
         )
+        # Runtime prerequisites can fail before simsopt_jax imports the blocked jax.
         cases = (
             (runner, reason, selector)
             for runner, reason in (
                 ("unittest_with_unsupported_jax.py", "simsopt_jax requires"),
-                ("unittest_without_jax.py", "import of jax halted"),
+                ("unittest_without_jax.py", JAX_IMPORT_ERROR or "import of jax halted"),
             )
             for selector in selectors
         )

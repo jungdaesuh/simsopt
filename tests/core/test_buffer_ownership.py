@@ -1,14 +1,20 @@
-"""Caller mutation cannot change PR 3's captured state or pending kernels."""
+"""Caller mutation cannot change captured JAX field state or pending kernels."""
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
+from unittest_jax_support import (
+    JAX_IMPORT_ERROR,
+    JaxTestCase,
+    aligned_host_copy,
+    optional_jax_imports,
+)
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax  # noqa: F401
     import jax.numpy as jnp
     from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.backend.dtypes import (
         as_jax_array,
         as_jax_float64,
@@ -35,13 +41,11 @@ from simsopt.geo.curvexyzfouriersymmetries import CurveXYZFourierSymmetries
 
 
 def _host_array(shape, *, misaligned=False):
-    """64-byte alignment forces CPU aliasing; offset one tests delayed copies."""
+    """Distinct values in aligned storage; misaligned storage tests delayed copies."""
     size = int(np.prod(shape))
-    storage = np.empty(size + 9, dtype=np.float64)
-    offset = (-storage.ctypes.data % 64) // storage.itemsize + int(misaligned)
-    array = storage[offset : offset + size].reshape(shape)
-    array[:] = np.arange(size).reshape(shape) / max(size, 1) + 1.0
-    return array
+    return aligned_host_copy(
+        np.arange(size).reshape(shape) / max(size, 1) + 1.0, misaligned=misaligned
+    )
 
 
 def _assert_tree_equal(actual, expected):
@@ -141,6 +145,7 @@ _SPEC_FACTORIES = [
             sample_gammadash=x.samples,
             sample_gammadashdash=x.samples,
             sample_gammadashdashdash=x.samples,
+            sample_derivatives=3,
         ),
     ),
     (
@@ -167,7 +172,7 @@ def make_execution_gate():
     """Queue enough CPU work for the warmed consumer to remain pending."""
     matrix = jnp.ones((_GATE_SIZE, _GATE_SIZE), dtype=jnp.float64)
 
-    @jax.jit
+    @jit
     def gate(value, matrix):
         product = jax.lax.fori_loop(
             0, 4, lambda _, x: (x @ matrix) / _GATE_SIZE, matrix
@@ -241,7 +246,7 @@ class TestBufferOwnership(JaxTestCase):
         )
         tree = snapshot_host_tree({"device": device, "host": np.arange(16)})
         self.assertTrue(tree["device"] is device, 'tree["device"] is device')
-        np.testing.assert_array_equal(jax.jit(snapshot_host_tree)(device), device)
+        np.testing.assert_array_equal(jit(snapshot_host_tree)(device), device)
         self.assertTrue(
             runtime_device_put_tree(device, preserve_placement=True) is device,
             "runtime_device_put_tree(device, preserve_placement=True) is device",
@@ -260,11 +265,10 @@ class TestBufferOwnership(JaxTestCase):
 
     def _case_mixed_device_host_sequence_snapshots_numpy(self, convert):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
+        gate = make_execution_gate()
         source = _host_array((65536,))
         expected = source.copy()
         zeros = jnp.zeros(source.shape)
-        gate = execution_gate
         gate(zeros).block_until_ready()
         convert([zeros, source]).block_until_ready()
         result = convert([gate(zeros), source])
@@ -275,11 +279,7 @@ class TestBufferOwnership(JaxTestCase):
     def test_spec_factories_own_numpy_leaves(self):
         """Spec factories retain owned NumPy snapshots after every caller input is
         mutated."""
-        for case_id_0, factory in zip(
-            [name for name, _ in _SPEC_FACTORIES],
-            [factory for _, factory in _SPEC_FACTORIES],
-            strict=True,
-        ):
+        for case_id_0, factory in _SPEC_FACTORIES:
             with self.subTest(case_id_0=case_id_0, factory=factory), self.case():
                 self._case_spec_factories_own_numpy_leaves(factory)
 
@@ -333,8 +333,7 @@ class TestBufferOwnership(JaxTestCase):
 
     def _case_cylindrical_points_own_numpy_before_conversion(self, misaligned, patches):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
-        gate = execution_gate
+        gate = make_execution_gate()
         source = _host_array((1_666_667, 3), misaligned=misaligned)
         saved = source.copy()
         canonical = adapter._canonical_set_points_cyl
@@ -363,13 +362,11 @@ class TestBufferOwnership(JaxTestCase):
         """Raw forward kernels snapshot NumPy inputs before deferred device execution and
         caller mutation."""
         for pending_input in ["points", "gamma"]:
-            for case_id_1, kernel in zip(
-                [kernel.__name__ for kernel in _FORWARD_KERNELS],
-                _FORWARD_KERNELS,
-                strict=True,
-            ):
+            for kernel in _FORWARD_KERNELS:
                 with self.subTest(
-                    pending_input=pending_input, case_id_1=case_id_1, kernel=kernel
+                    pending_input=pending_input,
+                    case_id_1=kernel.__name__,
+                    kernel=kernel,
                 ), self.case():
                     self._case_raw_forward_kernel_owns_numpy_inputs(
                         pending_input, kernel
@@ -377,8 +374,7 @@ class TestBufferOwnership(JaxTestCase):
 
     def _case_raw_forward_kernel_owns_numpy_inputs(self, pending_input, kernel):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
-        gate = execution_gate
+        gate = make_execution_gate()
         inputs = list(_kernel_inputs())
         expected = jax.tree.map(
             lambda x: np.array(x, copy=True),
@@ -407,8 +403,7 @@ class TestBufferOwnership(JaxTestCase):
 
     def _case_raw_pullback_owns_numpy_inputs(self, kernel):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
-        gate = execution_gate
+        gate = make_execution_gate()
         points, gamma, dash, current = _kernel_inputs()
         cotangent = _host_array(points.shape)
         expected = jax.tree.map(
@@ -437,16 +432,16 @@ class TestBufferOwnership(JaxTestCase):
 
     def _case_explicit_dofs_are_owned(self, entry, patches):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
+        gate = make_execution_gate()
         field = _field()
-        source = _host_array(field.x.shape)
-        source[:] = field.x
+        dofs = np.array(field.x, dtype=np.float64)
+        source = _host_array(dofs.shape)
+        source[:] = dofs
         call = getattr(field, entry)
         expected = jax.tree.map(
             lambda x: np.array(x, copy=True),
             jax.block_until_ready(call(source)),
         )
-        gate = execution_gate
         normalize = field._normalize_explicit_coil_dofs
         gate(normalize(source)).block_until_ready()
         patches.enter_context(
@@ -478,7 +473,7 @@ class TestBufferOwnership(JaxTestCase):
 
     def _case_adapter_pullback_owns_numpy_cotangent(self, entry, shape):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
+        gate = make_execution_gate()
         field = _field()
         call = getattr(field, entry)
         source = _host_array(shape)
@@ -486,7 +481,6 @@ class TestBufferOwnership(JaxTestCase):
             lambda x: np.array(x, copy=True),
             jax.block_until_ready(call(source)),
         )
-        gate = execution_gate
         gate(field._points_jax).block_until_ready()
         field._points_jax = gate(field._points_jax)
         result = call(source)
@@ -502,7 +496,7 @@ class TestBufferOwnership(JaxTestCase):
 
     def _case_group_coil_data_owns_numpy_inputs(self, stacked, patches):
         """Run one row with case-local objects released before runtime cleanup."""
-        execution_gate = make_execution_gate()
+        gate = make_execution_gate()
         _, gamma, dash, current = _kernel_inputs()
         inputs = (
             (gamma, dash, current)
@@ -515,7 +509,6 @@ class TestBufferOwnership(JaxTestCase):
                 kernels.group_coil_data(*inputs)
             ),
         )
-        gate = execution_gate
         convert = kernels._as_jax_float64
         if stacked:
             axis0 = kernels._axis0_entries

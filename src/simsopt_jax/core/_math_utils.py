@@ -14,14 +14,14 @@ from simsopt_jax.backend.dtypes import (
     runtime_device_put,
 )
 
+from ._device_scalars import placement_zero
+
 __all__ = [
     "_explicit_device_array",
     "as_jax_array",
     "as_jax_float64",
     "as_jax_int32",
     "axis0_entries",
-    "explicit_inv",
-    "explicit_rsqrt",
     "eye",
     "iter_axis0_entries",
     "pad_axis",
@@ -87,24 +87,22 @@ def zero_padding_like(array, *, axis: int, pad_width: int):
     """Construct trailing padding with the input dtype and execution placement.
 
     Args:
-        array (jax.Array): Finite input of any nonscalar shape supplying dtype and
-            placement.
+        array (jax.Array): Input of any nonscalar shape supplying dtype and
+            placement; its values are not read.
         axis (int): Axis to replace with a padding extent; negative axes count from the
             end.
         pad_width (int): Nonnegative number of padding entries.
 
     Returns:
-        jax.Array: Zeros with the input shape except for axis extent
-            pad_width; formed from the input reduction, so nonfinite/overflowing
-            inputs can yield NaNs.
+        jax.Array: Exact zeros with the input shape except for axis extent
+            pad_width, broadcast from :func:`placement_zero`, so nonfinite or
+            overflowing inputs still pad with zeros.
     """
     axis_index = int(axis) if axis >= 0 else array.ndim + int(axis)
-    zero_slice = jnp.sum(array, axis=axis_index, keepdims=True, dtype=array.dtype)
-    zero_slice = zero_slice - zero_slice
     target_shape = (
         array.shape[:axis_index] + (int(pad_width),) + array.shape[axis_index + 1 :]
     )
-    return jnp.broadcast_to(zero_slice, target_shape)
+    return jnp.broadcast_to(placement_zero(array), target_shape)
 
 
 def pad_axis(array, *, axis: int, padded_size: int):
@@ -167,55 +165,3 @@ def eye(size: int, dtype=jnp.float64) -> jax.Array:
         np.eye(int(size), dtype=np.dtype(dtype)),
         dtype=dtype,
     )
-
-
-def _explicit_inv_impl(x):
-    return jnp.divide(scalar_like(x, 1.0), x)
-
-
-@jax.custom_jvp
-def explicit_inv(x):
-    """Evaluate the elementwise reciprocal with an explicit custom JVP.
-
-    Args:
-        x (jax.Array): Floating input of arbitrary shape.
-
-    Returns:
-        jax.Array: Same shape as x containing 1/x; the JVP is -x_dot/x**2 and
-            singularities are not regularized.
-    """
-    return _explicit_inv_impl(x)
-
-
-@explicit_inv.defjvp
-def _explicit_inv_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_inv_impl(x)
-    tangent_out = jnp.negative(x_dot * primal_out * primal_out)
-    return primal_out, tangent_out
-
-
-def _explicit_rsqrt_impl(x):
-    return jnp.divide(scalar_like(x, 1.0), jnp.sqrt(x))
-
-
-@jax.custom_jvp
-def explicit_rsqrt(x):
-    """Evaluate the elementwise reciprocal square root with an explicit custom JVP.
-
-    Args:
-        x (jax.Array): Floating input of arbitrary shape.
-
-    Returns:
-        jax.Array: Same shape as x containing 1/sqrt(x); the JVP is
-            -0.5*x_dot/(x*sqrt(x)) and singularities are not regularized.
-    """
-    return _explicit_rsqrt_impl(x)
-
-
-@explicit_rsqrt.defjvp
-def _explicit_rsqrt_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_rsqrt_impl(x)
-    tangent_out = x_dot * scalar_like(x, -0.5) / (x * jnp.sqrt(x))
-    return primal_out, tangent_out

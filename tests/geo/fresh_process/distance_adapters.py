@@ -23,7 +23,11 @@ from simsopt_jax_adapters.geo import JaxCurveCurveDistance, JaxCurveSurfaceDista
 
 
 def _objectives(kind):
-    """Return the JAX adapter and the native objective of ``kind``."""
+    """Return the JAX adapter and the native objective of ``kind``.
+
+    The curves are 0.707 m apart and 0.541 m from the surface samples, so both
+    thresholds select candidates and the adapters place operands.
+    """
     curves = create_equally_spaced_curves(
         2, 1, stellsym=True, R0=1.0, R1=0.5, order=2, numquadpoints=12,
     )
@@ -32,8 +36,8 @@ def _objectives(kind):
     surface.set_rc(1, 0, 0.3)
     surface.set_zs(1, 0, 0.3)
     if kind == "curve_curve":
-        return JaxCurveCurveDistance(curves, 0.6), CurveCurveDistance(curves, 0.6)
-    return JaxCurveSurfaceDistance(curves, surface, 0.4), CurveSurfaceDistance(curves, surface, 0.4)
+        return JaxCurveCurveDistance(curves, 0.8), CurveCurveDistance(curves, 0.8)
+    return JaxCurveSurfaceDistance(curves, surface, 0.6), CurveSurfaceDistance(curves, surface, 0.6)
 
 
 def _require_uninitialized_backends(num_cpu_devices):
@@ -62,10 +66,10 @@ def device_scopes(kind):
     with mock.patch.object(adapter, "_candidates", wraps=adapter._candidates) as search:
         for device in (first, second, first):
             with jax.default_device(device):
-                _, operands = adapter._operands()
-                _, reused = adapter._operands()
-                assert reused is operands, "same-scope operands should be reused"
-                assert all(array.devices() == {device} for array in jax.tree.leaves(operands)), device
+                snapshot = adapter._snapshot()
+                assert snapshot is not None, "the test state must have candidates"
+                assert adapter._snapshot() is snapshot, "same-scope operands should be reused"
+                assert all(array.devices() == {device} for array in jax.tree.leaves(snapshot.operands)), device
                 with jax.transfer_guard("disallow"):
                     value, gradient = adapter.J(), adapter.dJ()
                     shortest = adapter.shortest_distance()

@@ -8,6 +8,7 @@ import jax
 import numpy as np
 from simsopt._core.derivative import derivative_dec
 from simsopt._core.optimizable import Optimizable
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.core.field import (
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_inputs,
@@ -17,9 +18,9 @@ from simsopt_jax.core.integral_bdotn import (
     fixed_surface_flux_integral_from_B,
 )
 from simsopt_jax.core.specs import FixedSurfaceFluxSpec, make_fixed_surface_flux_spec
-from simsopt_jax.runtime.host_boundary import host_array
 
 from simsopt_jax_adapters.field.biotsavart_backend import JaxBiotSavart
+from simsopt_jax_adapters.geo.curve_objectives import _host_float
 
 __all__ = ["JaxSquaredFlux"]
 
@@ -38,8 +39,8 @@ def _squared_flux_from_coil_arrays(flux_spec: FixedSurfaceFluxSpec, coil_arrays)
     return fixed_surface_flux_integral_from_B(B, flux_spec)
 
 
-_squared_flux_value = jax.jit(_squared_flux_from_coil_arrays)
-_squared_flux_value_and_coil_cotangents = jax.jit(
+_squared_flux_value = jit(_squared_flux_from_coil_arrays)
+_squared_flux_value_and_coil_cotangents = jit(
     jax.value_and_grad(_squared_flux_from_coil_arrays, argnums=1)
 )
 
@@ -135,7 +136,7 @@ class JaxSquaredFlux(Optimizable):
             self.fixed_surface_flux_spec(),
             self.field.coil_set_spec().field_inputs(),
         )
-        return float(host_array(value, dtype=np.float64))
+        return _host_float(value)
 
     @derivative_dec
     def dJ(self):

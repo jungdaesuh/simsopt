@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Integral
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -26,8 +26,8 @@ from simsopt_jax.core import coil_forces
 from simsopt_jax.core._device_scalars import placement_zero
 from simsopt_jax.core.biotsavart import biot_savart_B
 from simsopt_jax.core.curve_geometry import (
-    _filament_offset,
-    curve_filament_frame_from_dofs,
+    curve_filament_pack_from_dofs,
+    curve_gamma_and_gammadash_from_dofs,
     curve_geometry_from_dofs,
 )
 from simsopt_jax.core.curve_kernels import (
@@ -46,6 +46,8 @@ from simsopt_jax.core.specs import (
     CoilSetDofExtractionSpec,
     CoilSymmetrySpec,
     CurveFilamentSpec,
+    CurveSpec,
+    CurveXYZFourierSpec,
     FixedSurfaceFluxSpec,
     apply_coil_symmetry,
 )
@@ -475,6 +477,22 @@ def _curve_curve_penalty(
     return total
 
 
+def _has_curvature_terms(config: StageTwoObjectiveConfig) -> bool:
+    """Whether a curvature term, which reads base-curve second derivatives, is on."""
+    return config.curvature_weight is not None or config.mean_squared_curvature_weight is not None
+
+
+def _second_derivative_centerlines(config: StageTwoObjectiveConfig) -> int:
+    """Number of leading centerlines whose second derivatives the fused objective reads.
+
+    The curvature terms and the Lp force and torque terms (through the
+    regularized self-field of their target coils) read them, and only of the
+    ``num_basecurves`` base curves; no other term does.
+    """
+    reads = _has_curvature_terms(config) or _uses(config, ("force_weight", "torque_weight"))
+    return config.num_basecurves if reads else 0
+
+
 def stage_two_geometric_penalty(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -514,7 +532,7 @@ def stage_two_geometric_penalty(
             )
             result = result + 0.5 * config.individual_length_weight * jnp.sum(excess * excess)
 
-    if config.curvature_weight is not None or config.mean_squared_curvature_weight is not None:
+    if _has_curvature_terms(config):
         base_kappa = jax.vmap(kappa_pure)(base_gammadash, base_gammadashdash)
         if config.curvature_weight is not None:
             curvature = jax.vmap(
@@ -589,7 +607,9 @@ class StageTwoGeometry:
     ``gamma`` and ``gammadash`` ``(ncoils, nquadpoints, 3)`` and ``currents``
     ``(ncoils,)`` of every coil in extraction order; ``centerline_*``
     ``(ncenterlines, nquadpoints, 3)`` of the coil centerlines (see
-    :class:`StageTwoObjectiveConfig`).
+    :class:`StageTwoObjectiveConfig`), except that ``centerline_gammadashdash``
+    holds only the leading centerlines :func:`stage_two_geometry` was asked
+    to differentiate twice.
 
     Args:
         gamma: Array of shape (ncoils, nquadpoints, 3), coil positions in m.
@@ -597,7 +617,7 @@ class StageTwoGeometry:
         currents: Array of shape (ncoils,), coil currents in A.
         centerline_gamma: Array of shape (ncenterlines, nquadpoints, 3), centerline positions in m.
         centerline_gammadash: Array of shape (ncenterlines, nquadpoints, 3), centerline first parameter derivatives in m.
-        centerline_gammadashdash: Array of shape (ncenterlines, nquadpoints, 3), centerline second parameter derivatives in m.
+        centerline_gammadashdash: Array of shape (nsecond, nquadpoints, 3), second parameter derivatives in m of the first nsecond <= ncenterlines centerlines.
     """
 
     gamma: jax.Array
@@ -613,6 +633,65 @@ def _with_symmetry(*vectors: jax.Array, symmetry: CoilSymmetrySpec) -> tuple[jax
     if not symmetry.has_rotation:
         return vectors
     return tuple(vector @ symmetry.rotmat for vector in vectors)
+
+
+def _ordinary_curve_geometry(
+    curves: Sequence[CurveSpec],
+    second_derivative_curves: Sequence[CurveSpec],
+) -> dict[int, tuple[jax.Array, ...]]:
+    """Evaluate unique curves by identity, batching compatible XYZ Fourier specs.
+
+    Every curve gets ``(gamma, gammadash)``; batched XYZ Fourier curves and the
+    curves in ``second_derivative_curves`` also get ``gammadashdash``, so a
+    perturbation sample needs second derivatives only where they are used.
+    Only static layouts are grouped; each curve retains its own quadrature
+    values. Other curve kinds use their existing geometry evaluator unchanged.
+    """
+    second_derivative_ids = {id(curve) for curve in second_derivative_curves}
+    geometry_by_curve: dict[int, tuple[jax.Array, ...]] = {}
+    fourier_groups: dict[
+        tuple[int, tuple[int, ...], str, tuple[int, ...], str],
+        list[tuple[int, CurveXYZFourierSpec]],
+    ] = {}
+    unique_curves = {id(curve): curve for curve in curves}
+    for curve_id, curve in unique_curves.items():
+        if type(curve) is CurveXYZFourierSpec:
+            key = (
+                curve.order,
+                curve.dofs.shape,
+                str(curve.dofs.dtype),
+                curve.quadpoints.shape,
+                str(curve.quadpoints.dtype),
+            )
+            fourier_groups.setdefault(key, []).append((curve_id, curve))
+        elif curve_id in second_derivative_ids:
+            geometry_by_curve[curve_id] = curve_geometry_from_dofs(curve, curve.dofs)
+        else:
+            geometry_by_curve[curve_id] = curve_gamma_and_gammadash_from_dofs(curve, curve.dofs)
+    for group in fourier_groups.values():
+        batched_curve = CurveXYZFourierSpec(
+            dofs=jnp.stack(tuple(curve.dofs for _, curve in group)),
+            quadpoints=jnp.stack(tuple(curve.quadpoints for _, curve in group)),
+            order=group[0][1].order,
+        )
+        batched_geometry = jax.vmap(curve_geometry_from_dofs)(
+            batched_curve, batched_curve.dofs
+        )
+        # Static splitting avoids dynamic-slice scalar operands during eager
+        # linearization under the strict device-transfer guard.
+        gamma_parts, dash_parts, dashdash_parts = (
+            jax.lax.split(component, (1,) * len(group), axis=0)
+            for component in batched_geometry
+        )
+        for (curve_id, _), gamma, dash, dashdash in zip(
+            group, gamma_parts, dash_parts, dashdash_parts, strict=True
+        ):
+            geometry_by_curve[curve_id] = (
+                jax.lax.squeeze(gamma, (0,)),
+                jax.lax.squeeze(dash, (0,)),
+                jax.lax.squeeze(dashdash, (0,)),
+            )
+    return geometry_by_curve
 
 
 def stage_two_coil_geometry(
@@ -634,14 +713,10 @@ def stage_two_coil_geometry(
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
     geometry: list[tuple[jax.Array, jax.Array, jax.Array, jax.Array]] = []
-    geometry_by_curve: dict[int, tuple[jax.Array, ...]] = {}
+    curves = tuple(coil.curve for coil in coil_specs)
+    geometry_by_curve = _ordinary_curve_geometry(curves, curves)
     for coil_spec in coil_specs:
-        curve_id = id(coil_spec.curve)
-        curve_geometry = geometry_by_curve.get(curve_id)
-        if curve_geometry is None:
-            curve_geometry = curve_geometry_from_dofs(coil_spec.curve, coil_spec.curve.dofs)
-            geometry_by_curve[curve_id] = curve_geometry
-        gamma, gammadash, gammadashdash = curve_geometry
+        gamma, gammadash, gammadashdash = geometry_by_curve[id(coil_spec.curve)]
         gamma, gammadash, current = apply_coil_symmetry(
             gamma,
             gammadash,
@@ -667,18 +742,25 @@ def stage_two_geometry(
     extraction: CoilSetDofExtractionSpec,
     parameters: jax.Array,
     filaments_per_pack: int = 1,
+    second_derivative_centerlines: int | None = None,
 ) -> StageTwoGeometry:
     """Return the stacked coil and centerline geometry for the free DOF vector ``parameters``.
 
     ``parameters`` is the field's free DOF vector; coils keep extraction order
     and each group of ``filaments_per_pack`` coils has one centerline. The
     filaments of a pack are offsets of their pack's frame, which is evaluated
-    once, from the pack's first coil (see :class:`StageTwoObjectiveConfig`).
+    once per set of filaments, from the first pack that lists them; a later
+    pack (a symmetry image) may list the same filaments in any order (see
+    :class:`StageTwoObjectiveConfig`). Ordinary curves are differentiated
+    twice only for the leading ``second_derivative_centerlines`` centerlines,
+    so a perturbation sample needs second derivatives only where they are
+    read, as on native.
 
     Args:
         extraction: CoilSetDofExtractionSpec object, ordered coil layout and fixed DOF snapshots.
         parameters: Array of shape (ndofs,), field free DOFs in native units and extraction order.
         filaments_per_pack: int, validated consecutive pack size, one for ordinary coils.
+        second_derivative_centerlines: int or None, number of leading centerlines whose second derivatives are returned; None returns every centerline's.
 
     Returns:
         StageTwoGeometry object: coil and centerline arrays; field geometry includes filament offsets while penalties use centerlines.
@@ -688,33 +770,52 @@ def stage_two_geometry(
     # current's would otherwise be a symbolic zero) without coupling any
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
-    # (gamma, gammadash, gammadashdash) of a curve, followed for a filament
-    # pack by its rotated frame (normal, binormal and their derivatives); keyed
-    # by the curve of the coil, or of the pack's first coil for filaments.
-    curve_geometry: dict[int, tuple[jax.Array, ...]] = {}
-    filament_geometry: dict[int, tuple[jax.Array, jax.Array]] = {}
+    ncenterlines = len(coil_specs) // filaments_per_pack
+    nsecond = (
+        ncenterlines
+        if second_derivative_centerlines is None
+        else min(second_derivative_centerlines, ncenterlines)
+    )
+    # Ordinary geometry is keyed by curve identity. A pack's centerline and
+    # each filament's offset curve are cached per filament, because another
+    # pack (a symmetry image) may list the same filaments in another order.
+    curve_geometry = _ordinary_curve_geometry(
+        tuple(
+            coil.curve
+            for coil in coil_specs
+            if not isinstance(coil.curve, CurveFilamentSpec)
+        ),
+        tuple(
+            curve
+            for curve in (coil_specs[k * filaments_per_pack].curve for k in range(nsecond))
+            if not isinstance(curve, CurveFilamentSpec)
+        ),
+    )
+    filament_geometry: dict[int, tuple[tuple[jax.Array, ...], jax.Array, jax.Array]] = {}
     coils: list[tuple[jax.Array, jax.Array, jax.Array]] = []
-    centerlines: list[tuple[jax.Array, ...]] = []
+    centerlines: list[tuple[jax.Array, jax.Array]] = []
+    centerline_gammadashdashs: list[jax.Array] = []
     for index, coil_spec in enumerate(coil_specs):
         curve = coil_spec.curve
-        is_filament = isinstance(curve, CurveFilamentSpec)
-        source = coil_specs[index - index % filaments_per_pack].curve if is_filament else curve
-        if id(source) not in curve_geometry:
-            curve_geometry[id(source)] = (
-                curve_filament_frame_from_dofs(source, source.dofs)
-                if isinstance(source, CurveFilamentSpec)
-                else curve_geometry_from_dofs(source, source.dofs)
-            )
-        geometry = curve_geometry[id(source)]
         if isinstance(curve, CurveFilamentSpec):
             if id(curve) not in filament_geometry:
-                gamma, gammadash, _gammadashdash, normal, binormal, normal_dash, binormal_dash = geometry
-                filament_geometry[id(curve)] = (
-                    _filament_offset(gamma, normal, binormal, curve.dn, curve.db),
-                    _filament_offset(gammadash, normal_dash, binormal_dash, curve.dn, curve.db),
+                start = index - index % filaments_per_pack
+                # _check_packs guarantees every curve in this pack is a filament.
+                pack = cast(
+                    tuple[CurveFilamentSpec, ...],
+                    tuple(coil_specs[start + k].curve for k in range(filaments_per_pack)),
                 )
-            gamma, gammadash = filament_geometry[id(curve)]
+                *base_geometry, pack_gammas, pack_gammadashs = curve_filament_pack_from_dofs(
+                    pack[0], pack[0].dofs, tuple((filament.dn, filament.db) for filament in pack)
+                )
+                centerline = tuple(base_geometry)
+                filament_geometry.update(
+                    (id(filament), (centerline, pack_gammas[k], pack_gammadashs[k]))
+                    for k, filament in enumerate(pack)
+                )
+            geometry, gamma, gammadash = filament_geometry[id(curve)]
         else:
+            geometry = curve_geometry[id(curve)]
             gamma, gammadash = geometry[0], geometry[1]
         gamma, gammadash, current = apply_coil_symmetry(
             gamma, gammadash, coil_spec.current.value[0], coil_spec.symmetry
@@ -722,19 +823,27 @@ def stage_two_geometry(
         coils.append((gamma, gammadash, current + parameter_zero))
         if index % filaments_per_pack:
             continue
-        if is_filament:
-            centerlines.append(_with_symmetry(*geometry[:3], symmetry=coil_spec.symmetry))
+        if isinstance(curve, CurveFilamentSpec):
+            centerline_gamma, centerline_gammadash = _with_symmetry(*geometry[:2], symmetry=coil_spec.symmetry)
         else:
-            centerlines.append((gamma, gammadash, *_with_symmetry(geometry[2], symmetry=coil_spec.symmetry)))
+            centerline_gamma, centerline_gammadash = gamma, gammadash
+        centerlines.append((centerline_gamma, centerline_gammadash))
+        if index // filaments_per_pack < nsecond:
+            centerline_gammadashdashs.extend(_with_symmetry(geometry[2], symmetry=coil_spec.symmetry))
     gammas, gammadashs, currents = zip(*coils, strict=True)
-    centerline_gammas, centerline_gammadashs, centerline_gammadashdashs = zip(*centerlines, strict=True)
+    centerline_gammas, centerline_gammadashs = zip(*centerlines, strict=True)
+    centerline_gammadash = jnp.stack(centerline_gammadashs)
     return StageTwoGeometry(
         gamma=jnp.stack(gammas),
         gammadash=jnp.stack(gammadashs),
         currents=jnp.stack(currents),
         centerline_gamma=jnp.stack(centerline_gammas),
-        centerline_gammadash=jnp.stack(centerline_gammadashs),
-        centerline_gammadashdash=jnp.stack(centerline_gammadashdashs),
+        centerline_gammadash=centerline_gammadash,
+        centerline_gammadashdash=(
+            jnp.stack(centerline_gammadashdashs)
+            if centerline_gammadashdashs
+            else centerline_gammadash[:0]
+        ),
     )
 
 
@@ -873,7 +982,12 @@ def fused_stage_two_values(
         tuple of scalar arrays: (objective, squared_flux, penalties excluding flux, maximum absolute normal field in T, total base length in m). Flux units follow integral_BdotN; weighted sum units follow config.
     """
     config = problem.config
-    geometry = stage_two_geometry(problem.extraction, parameters, config.filaments_per_pack)
+    geometry = stage_two_geometry(
+        problem.extraction,
+        parameters,
+        config.filaments_per_pack,
+        _second_derivative_centerlines(config),
+    )
     flux_spec = problem.flux_spec
     magnetic_field = biot_savart_B(
         flux_spec.points,

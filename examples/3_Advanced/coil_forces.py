@@ -48,7 +48,8 @@ from simsopt.util import in_github_actions, calculate_modB_on_major_radius
 
 try:
     import jax
-    from simsopt_jax.runtime.host_boundary import snapshot_host_tree
+    from simsopt_jax.backend.dtypes import as_jax_float64
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.objectives import StageTwoObjectiveConfig, fused_stage_two_objective, make_stage_two_problem
     from simsopt_jax_adapters.geo import (
         JaxCurveCurveDistance, JaxCurveLength, JaxCurveSurfaceDistance,
@@ -71,7 +72,7 @@ if args.fused and not args.use_jax:
     parser.error("--fused requires --use-jax")
 if args.use_jax:
     if jax_import_error is not None:
-        parser.error(f"--use-jax requires Python >= 3.11 and jax/jaxlib >= 0.10: {jax_import_error}")
+        parser.error(f"--use-jax requires Python >= 3.12 and jax/jaxlib >= 0.12: {jax_import_error}")
     set_backend("jax", device="gpu" if args.device == "gpu" else "cpu", intent="parity")
 
 
@@ -222,17 +223,27 @@ def stage_two_problem():
 
 if args.fused:
     problem = stage_two_problem()
-    value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+    value_and_grad = jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
     # The fused kernel uses the field's DOF order; reporting uses the composite's.
     field_order = np.array([JF.dof_names.index(name) for name in bs.dof_names])
     objective_order = np.argsort(field_order)
 
 
 def fused_value_and_grad(dofs):
-    """Evaluate the frozen problem and return a host gradient in composite DOF order."""
-    value, gradient = jax.device_get(value_and_grad(
-        problem, jax.device_put(snapshot_host_tree(dofs[field_order])),
-    ))
+    """Evaluate the frozen fused problem and return a host gradient in composite DOF order.
+
+    The DOFs are placed on the device explicitly, so the evaluation also runs
+    under ``SIMSOPT_JAX_TRANSFER_GUARD=disallow``.
+
+    Args:
+        dofs (np.ndarray): Free DOFs of ``JF`` in its order, shape ``(len(JF.x),)``:
+            curve Fourier coefficients in metres and coil currents in amperes.
+
+    Returns:
+        tuple[float, np.ndarray]: The value of ``JF`` and its gradient with respect
+            to ``dofs``, shape ``(len(JF.x),)``, in ``JF``'s DOF order.
+    """
+    value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(dofs[field_order])))
     return float(value), gradient[objective_order]
 
 
@@ -309,8 +320,8 @@ dofs = cast(np.ndarray, JF.x)
 print(f"Optimization with FORCE_WEIGHT={FORCE_WEIGHT.value} and LENGTH_WEIGHT={LENGTH_WEIGHT.value}")
 # print("INITIAL OPTIMIZATION")
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+# The minimizer's last evaluation need not be at its result, so the outputs below use res.x.
+JF.x = res.x
 coils_to_vtk(coils, OUT_DIR + "coils_opt_short", close=True)
 
 pointData_surf = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
@@ -325,8 +336,7 @@ if args.fused:
     problem = stage_two_problem()
 # print("OPTIMIZATION WITH REDUCED LENGTH PENALTY\n")
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-if args.fused:
-    JF.x = res.x
+JF.x = res.x
 coils_to_vtk(coils, OUT_DIR + "coils_opt_force", close=True)
 pointData_surf = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + f"surf_opt_force_WEIGHT={FORCE_WEIGHT.value:e}_LWEIGHT={LENGTH_WEIGHT.value*10:e}", extra_data=pointData_surf)
@@ -335,7 +345,6 @@ s.to_vtk(OUT_DIR + f"surf_opt_force_WEIGHT={FORCE_WEIGHT.value:e}_LWEIGHT={LENGT
 bs.save(OUT_DIR + "biot_savart_opt.json")
 
 #Print out final important info:
-JF.x = res.x if args.fused else dofs
 J = JF.J()
 grad = JF.dJ()
 jf = Jf.J()

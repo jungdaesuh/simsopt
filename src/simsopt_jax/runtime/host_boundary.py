@@ -23,10 +23,14 @@ _TreeT = TypeVar("_TreeT")
 def disallow_host_transfers() -> Iterator[None]:
     """Refuse IMPLICIT host-to-device transfers for the duration of the block.
 
-    That refusal holds on every backend.  Explicit ``device_put``/``device_get``
-    always pass, and on CPU -- verified on jax 0.10.0, where no copy actually
-    happens -- implicit device-to-host (``np.sum(x)``, ``x.tolist()``) passes
-    too.
+    That refusal holds on every backend.  Explicit ``device_get`` passes, and so
+    does an explicit ``device_put`` of host values, within one backend, or from
+    the CPU to an accelerator.  JAX checks a ``device_put`` of an accelerator
+    array to the CPU as an implicit device-to-host copy and refuses it; the
+    placement helpers in ``simsopt_jax.backend.dtypes`` gather such arrays with
+    ``device_get`` first, so their explicit placements pass.  On CPU --
+    verified on jax 0.12.0.1, where no copy actually happens -- implicit
+    device-to-host (``np.sum(x)``, ``x.tolist()``) passes too.
 
     Returns:
         contextlib.AbstractContextManager[None] object: Scoped transfer guard
@@ -112,6 +116,8 @@ def snapshot_host_tree(value: _TreeT, *, dtype=None) -> _TreeT:
 
     Device arrays and tracers pass through unchanged. A private contiguous
     NumPy copy prevents both CPU buffer aliasing and delayed transfer reads.
+    The copy keeps a NumPy subclass, so JAX still sees, for example, a masked
+    array's mask and rejects it as it rejects the original.
 
     Args:
         value (pytree): JAX or host leaves of arbitrary shape, retaining their Python
@@ -133,7 +139,7 @@ def snapshot_host_tree(value: _TreeT, *, dtype=None) -> _TreeT:
             return leaf
         if isinstance(leaf, np.ndarray):
             leaf_dtype = leaf.dtype if dtype is None else dtype
-            return np.array(leaf, dtype=leaf_dtype, copy=True, order="C")
+            return np.array(leaf, dtype=leaf_dtype, copy=True, order="C", subok=True)
         if dtype is not None and (isinstance(leaf, np.generic) or np.isscalar(leaf)):
             return np.asarray(leaf, dtype=dtype)
         return leaf

@@ -6,6 +6,7 @@ evaluate Biot-Savart on CPU or GPU without a native field object.
 
 All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
+The public kernels cast every input to float64 and compute in float64.
 """
 
 from __future__ import annotations
@@ -16,20 +17,16 @@ from typing import cast
 
 import jax
 from simsopt_jax.backend import get_field_kernel_tuning, register_backend_cache_clear
+from simsopt_jax.backend.jit import jit
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from simsopt_jax.runtime.host_boundary import snapshot_host_tree
 
 
 from ._device_scalars import device_one as _device_one
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
     axis0_entries as _axis0_entries,
-    explicit_inv as _explicit_inv,
-    explicit_rsqrt as _explicit_rsqrt,
-    eye as _eye,
-    scalar_like as _scalar_like,
     zeros as _zeros,
 )
 from .reductions import pairwise_sum_axis as _pairwise_sum_axis
@@ -50,16 +47,13 @@ __all__ = [
 _MU0_OVER_4PI = 1e-7
 
 
-# ── Config reader (monkeypatchable by tests) ──────────────────────────
+# ── Config reader ─────────────────────────────────────────────────────
 
 
 def _read_tuning_config() -> tuple:
     """Return ``(coil_chunk_size, quadrature_block_size, point_chunk_size)``.
 
-    Single indirection point for all tuning knobs consumed by the kernel
-    factory.  Tests override this one function (+ ``invalidate_kernel_cache``)
-    instead of patching three separate stubs.
-
+    The forward and pullback kernel factories are keyed on these values.
     Resolves the backend config once to avoid repeated mode/policy lookups.
     """
     fkt = get_field_kernel_tuning()
@@ -110,21 +104,24 @@ def _radius_squared(diff):
     return jnp.sum(diff * diff, axis=-1)
 
 
-def _cross_product(left, right):
-    left_x = left[..., 0]
-    left_y = left[..., 1]
-    left_z = left[..., 2]
-    right_x = right[..., 0]
-    right_y = right[..., 1]
-    right_z = right[..., 2]
-    return jnp.stack(
-        (
-            left_y * right_z - left_z * right_y,
-            left_z * right_x - left_x * right_z,
-            left_x * right_y - left_y * right_x,
-        ),
-        axis=-1,
+def _components(vectors):
+    """Return the x, y and z components of ``vectors``, shape (..., 3)."""
+    return vectors[..., 0], vectors[..., 1], vectors[..., 2]
+
+
+def _cross_components(left, right):
+    """Return the components of ``left x right`` from component tuples."""
+    left_x, left_y, left_z = left
+    right_x, right_y, right_z = right
+    return (
+        left_y * right_z - left_z * right_y,
+        left_z * right_x - left_x * right_z,
+        left_x * right_y - left_y * right_x,
     )
+
+
+def _cross_product(left, right):
+    return jnp.stack(_cross_components(_components(left), _components(right)), axis=-1)
 
 
 # ── Tree utilities ────────────────────────────────────────────────────
@@ -195,12 +192,12 @@ def _coil_chunk_reduce(
             (
                 _slice_coil_chunk(gammas, 0, chunk_size),
                 _slice_coil_chunk(gammadashs, 0, chunk_size),
-                lax.dynamic_slice(currents, (0,), (chunk_size,)),
+                _slice_coil_chunk(currents, 0, chunk_size),
             ),
             (
                 _slice_coil_chunk(gammas, chunk_size, second_chunk_size),
                 _slice_coil_chunk(gammadashs, chunk_size, second_chunk_size),
-                lax.dynamic_slice(currents, (chunk_size,), (second_chunk_size,)),
+                _slice_coil_chunk(currents, chunk_size, second_chunk_size),
             ),
             reduce_chunk,
         )
@@ -214,11 +211,7 @@ def _coil_chunk_reduce(
         start = chunk_index * chunk_size
         chunk_gammas = _slice_coil_chunk(gammas, start, chunk_size)
         chunk_gammadashs = _slice_coil_chunk(gammadashs, start, chunk_size)
-        chunk_currents = lax.dynamic_slice(
-            currents,
-            (start,),
-            (chunk_size,),
-        )
+        chunk_currents = _slice_coil_chunk(currents, start, chunk_size)
         return _tree_add(
             acc,
             reduce_chunk(chunk_gammas, chunk_gammadashs, chunk_currents),
@@ -238,50 +231,72 @@ def _coil_chunk_reduce(
     return reduced
 
 
-def _quadrature_block_integral(
+def _contract_quadrature_sums(currents, components):
+    """Contract each component's per-coil quadrature sums with the currents.
+
+    ``components`` holds the x, y and z integrand arrays, each shape (C, Qb);
+    returns three scalars, ``sum_c currents[c] * pairwise_sum_q component[c, q]``.
+    """
+    return tuple(
+        jnp.einsum(
+            "c,c->",
+            currents,
+            _pairwise_sum_axis(component, axis=1),
+            precision=lax.Precision.HIGHEST,
+        )
+        for component in components
+    )
+
+
+def _quadrature_block_sum(
     x,
     gammas,
     gammadashs,
+    currents,
     *,
     block_size: int,
     integrand,
 ):
+    """Sum ``currents[c]`` times a component-major integrand over coils and nodes.
+
+    Each quadrature block's per-coil sums are contracted with the currents
+    before the blocks are added. Returns the x, y and z sums, three scalars.
+    """
     quadrature_count = gammas.shape[1]
+
+    def block_sum(block_gammas, block_gammadashs):
+        return _contract_quadrature_sums(
+            currents, integrand(x, block_gammas, block_gammadashs)
+        )
+
     # The single-block, exact two-block, and full-block-plus-tail >=3 paths use
     # different quadrature reduction-tree shapes. Keep parity tests pinned
     # across block boundaries when changing this routine.
     if block_size <= 0 or quadrature_count <= block_size:
-        values = integrand(x, gammas, gammadashs)
-        return _pairwise_sum_axis(values, axis=1) * _scalar_like(
-            values,
-            1.0 / values.shape[1],
-        )
+        return block_sum(gammas, gammadashs)
 
     block_count = (quadrature_count + block_size - 1) // block_size
     if block_count == 2:
         # Exact two-block shapes avoid padded loop overhead in B/B+dB hot paths.
         second_block_size = quadrature_count - block_size
-        return (
-            _two_chunk_sum(
-                (
-                    _slice_quadrature_block(gammas, 0, block_size),
-                    _slice_quadrature_block(gammadashs, 0, block_size),
+        return _two_chunk_sum(
+            (
+                _slice_quadrature_block(gammas, 0, block_size),
+                _slice_quadrature_block(gammadashs, 0, block_size),
+            ),
+            (
+                _slice_quadrature_block(gammas, block_size, second_block_size),
+                _slice_quadrature_block(
+                    gammadashs,
+                    block_size,
+                    second_block_size,
                 ),
-                (
-                    _slice_quadrature_block(gammas, block_size, second_block_size),
-                    _slice_quadrature_block(
-                        gammadashs,
-                        block_size,
-                        second_block_size,
-                    ),
-                ),
-                lambda gg, ggd: _pairwise_sum_axis(integrand(x, gg, ggd), axis=1),
-            )
-            / quadrature_count
+            ),
+            block_sum,
         )
 
     full_block_count, tail_size = divmod(quadrature_count, block_size)
-    zero = _zeros((gammas.shape[0], 3), dtype=jnp.float64)
+    zero = (_zeros((), dtype=jnp.float64),) * 3
 
     def body(block_index: int, acc):
         start = block_index * block_size
@@ -291,19 +306,16 @@ def _quadrature_block_integral(
             start,
             block_size,
         )
-        block_integrand = integrand(x, block_gammas, block_gammadashs)
-        return acc + _pairwise_sum_axis(block_integrand, axis=1)
+        return _tree_add(acc, block_sum(block_gammas, block_gammadashs))
 
-    integral_sum = lax.fori_loop(0, full_block_count, body, zero)
+    total = lax.fori_loop(0, full_block_count, body, zero)
     if tail_size:
         tail_start = full_block_count * block_size
-        tail_integrand = integrand(
-            x,
-            gammas[:, tail_start:],
-            gammadashs[:, tail_start:],
+        total = _tree_add(
+            total,
+            block_sum(gammas[:, tail_start:], gammadashs[:, tail_start:]),
         )
-        integral_sum = integral_sum + _pairwise_sum_axis(tail_integrand, axis=1)
-    return integral_sum / quadrature_count
+    return total
 
 
 # The Hessian integrand carries 27 doubles per (point, quadrature node) where
@@ -374,28 +386,48 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 
 # ── Physics integrands ────────────────────────────────────────────────
 
+# The B and A integrands are component-major: they split the coil data into
+# Cartesian components before forming ``gammas - x`` and return the x, y and z
+# components of the integrand as three arrays shaped like ``gammas[..., 0]``.
+# No per-node array carries a length-3 axis, so the coil-data VJP sums each
+# component over the vmapped point chunk as its own array. With the axis kept,
+# XLA from JAX 0.10.1 on lays those per-chunk sums out with the length-3 axis
+# minor and reduces the point axis at stride 3, several times slower on GPU.
+
+
+def _separation(x, gammas):
+    """Return the components of ``gammas - x`` and its exact squared length.
+
+    ``r2`` is exact, so point-on-coil singularities stay loud. ``x`` has shape
+    (3,) and ``gammas`` (C, Qb, 3); every returned array has shape (C, Qb).
+    """
+    dx, dy, dz = (
+        gamma - point for gamma, point in zip(_components(gammas), _components(x))
+    )
+    return (dx, dy, dz), dx * dx + dy * dy + dz * dz
+
 
 def _biot_savart_B_integrand(x, gammas, gammadashs):
-    diff = gammas - x
-    r2 = _radius_squared(diff)
-    r_inv = _explicit_rsqrt(r2)
-    r_inv3 = r_inv * _explicit_inv(r2)
-    cross = _cross_product(diff, gammadashs)
-    return cross * r_inv3[..., None]
+    (dx, dy, dz), r2 = _separation(x, gammas)
+    r_inv = lax.rsqrt(r2)
+    r_inv3 = r_inv * jnp.reciprocal(r2)
+    return tuple(
+        component * r_inv3
+        for component in _cross_components((dx, dy, dz), _components(gammadashs))
+    )
 
 
 def _biot_savart_A_integrand(x, gammas, gammadashs):
-    diff = gammas - x
-    r2 = _radius_squared(diff)
-    r_inv = _explicit_rsqrt(r2)
-    return gammadashs * r_inv[..., None]
+    _, r2 = _separation(x, gammas)
+    r_inv = lax.rsqrt(r2)
+    return tuple(tangent * r_inv for tangent in _components(gammadashs))
 
 
 def _biot_savart_B_and_dB_integrand(x, gammas, gammadashs):
     diff = x - gammas
     r2 = _radius_squared(diff)
-    r_inv = _explicit_rsqrt(r2)
-    r_inv3 = r_inv * _explicit_inv(r2)
+    r_inv = lax.rsqrt(r2)
+    r_inv3 = r_inv * jnp.reciprocal(r2)
     r_inv4 = r_inv3 * r_inv
     norm = r2 * r_inv
 
@@ -440,15 +472,23 @@ _INTEGRANDS = {
 def _one_point_dense(
     x, gammas, gammadashs, currents, *, integrand, quadrature_block_size=0
 ):
-    integral = _quadrature_block_integral(
+    # Every per-coil quadrature sum goes straight into its contraction with the
+    # currents; the stack, the block sum and the 1/Q scale act on the
+    # contracted values. Stacking per-coil sums let XLA (A100, jacfwd) fuse two
+    # of them into the stack, where every output element sums its quadrature
+    # block in a serial loop. Adding blocks or scaling there let XLA:CPU fuse
+    # that elementwise op into the reduction's YNN fusion, which then runs at
+    # about half the speed.
+    weighted_sum = _quadrature_block_sum(
         x,
         gammas,
         gammadashs,
+        currents,
         block_size=quadrature_block_size,
         integrand=integrand,
     )
-    return _float64_scalar(currents, _MU0_OVER_4PI) * jnp.einsum(
-        "c,cj->j", currents, integral, precision=lax.Precision.HIGHEST
+    return _float64_scalar(currents, _MU0_OVER_4PI / gammas.shape[1]) * jnp.stack(
+        weighted_sum
     )
 
 
@@ -602,7 +642,8 @@ def _make_kernel(
             )
         per_point = hessian_point
 
-    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN and integrand_key is _Integrand.B:
+    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN:
+        # Fused B and dB/dX kernel, built for ``_Integrand.B`` only.
 
         def B_and_jacobian_point(x, gammas, gammadashs, currents):
             return _coil_chunk_reduce(
@@ -624,15 +665,6 @@ def _make_kernel(
             )
         per_point = B_and_jacobian_point
 
-    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN:
-
-        def value_and_jacobian_point(x, gammas, gammadashs, currents):
-            f = lambda xx: one_point(xx, gammas, gammadashs, currents)
-            primals, tangents_fn = jax.linearize(f, x)
-            basis = _eye(3, dtype=jnp.float64)
-            return primals, jax.vmap(tangents_fn, in_axes=(0,))(basis)
-        per_point = value_and_jacobian_point
-
     kernel_point_cs = (
         hessian_point_chunk_size(point_cs)
         if diff_mode is _DiffMode.HESSIAN
@@ -649,7 +681,7 @@ def _make_kernel(
         return _point_chunk_reduce(points, chunk_fn, kernel_point_cs)
 
     kernel.__name__ = "biotsavart_forward"
-    return jax.jit(kernel)
+    return jit(kernel)
 
 
 def _get_kernel(integrand_key, diff_mode):
@@ -688,7 +720,7 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
         return pullback(v)
 
     kernel.__name__ = "biotsavart_vjp"
-    return jax.jit(kernel)
+    return jit(kernel)
 
 
 def _get_B_vjp_kernel():
@@ -700,9 +732,8 @@ def _get_B_vjp_kernel():
 def invalidate_kernel_cache() -> None:
     """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
-    Both the forward and the pullback kernel factories are cleared. Call after
-    overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``) to ensure
-    the next ``biot_savart_*`` call rebuilds with the new config.
+    Both the forward and the pullback kernel factories are cleared, so the
+    next ``biot_savart_*`` call rebuilds its kernel.
     """
     _make_kernel.cache_clear()
     _make_B_vjp_kernel.cache_clear()
@@ -714,6 +745,15 @@ register_backend_cache_clear(invalidate_kernel_cache)
 # ── Public API ────────────────────────────────────────────────────────
 
 
+def _float64_inputs(*values):
+    """Cast every input to float64 at the kernel boundary.
+
+    Host inputs are snapshotted; a float64 JAX array is used as is, since JAX
+    arrays are immutable.
+    """
+    return tuple(_as_jax_float64(value) for value in values)
+
+
 def _apply_forward_kernel(
     integrand_key,
     diff_mode,
@@ -722,9 +762,8 @@ def _apply_forward_kernel(
     gammadashs,
     currents,
 ):
-    """Apply one cached field kernel under the canonical forward trace scope."""
-
-    inputs = snapshot_host_tree((points, gammas, gammadashs, currents))
+    """Apply one cached field kernel to its inputs cast to float64."""
+    inputs = _float64_inputs(points, gammas, gammadashs, currents)
     return _get_kernel(integrand_key, diff_mode)(*inputs)
 
 
@@ -946,7 +985,7 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
             those of the contracted scalar per meter or per ampere; points are
             held fixed.
     """
-    inputs = snapshot_host_tree((points, v, gammas, gammadashs, currents))
+    inputs = _float64_inputs(points, v, gammas, gammadashs, currents)
     return _get_B_vjp_kernel()(*inputs)
 
 

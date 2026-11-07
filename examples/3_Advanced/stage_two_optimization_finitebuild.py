@@ -42,7 +42,8 @@ from simsopt.util import in_github_actions
 
 try:
     import jax
-    from simsopt_jax.runtime.host_boundary import snapshot_host_tree
+    from simsopt_jax.backend.dtypes import as_jax_float64
+    from simsopt_jax.backend.jit import jit
     from simsopt_jax.objectives import StageTwoObjectiveConfig, fused_stage_two_objective, make_stage_two_problem
     from simsopt_jax_adapters.geo import JaxCurveCurveDistance, JaxCurveLength
     from simsopt_jax_adapters.objectives import JaxSquaredFlux
@@ -62,7 +63,7 @@ if args.fused and not args.use_jax:
     parser.error("--fused requires --use-jax")
 if args.use_jax:
     if jax_import_error is not None:
-        parser.error(f"--use-jax requires Python >= 3.11 and jax/jaxlib >= 0.10: {jax_import_error}")
+        parser.error(f"--use-jax requires Python >= 3.12 and jax/jaxlib >= 0.12: {jax_import_error}")
     set_backend("jax", device="gpu" if args.device == "gpu" else "cpu", intent="parity")
 
 
@@ -167,7 +168,7 @@ else:
 # fact that Optimizable objects with J() and dJ() functions can be
 # multiplied by scalars and added:
 JF = Jf \
-    + LENGTH_PEN * cast(Optimizable, sum(QuadraticPenalty(Jls[i], Jls[i].J(), "max") for i in range(len(base_curves)))) \
+    + LENGTH_PEN * cast(Optimizable, sum(QuadraticPenalty(Jls[i], float(Jls[i].J()), "max") for i in range(len(base_curves)))) \
     + DIST_PEN * Jdist
 
 def stage_two_problem():
@@ -176,7 +177,7 @@ def stage_two_problem():
         num_basecurves=ncoils,
         filaments_per_pack=nfil,
         individual_length_weight=LENGTH_PEN,
-        individual_length_targets=tuple(J.J() for J in Jls),
+        individual_length_targets=tuple(float(J.J()) for J in Jls),
         curve_curve_minimum_distance=DIST_MIN,
         curve_curve_weight=DIST_PEN,
         curve_curve_pairs="all",
@@ -185,17 +186,29 @@ def stage_two_problem():
 
 if args.fused:
     problem = stage_two_problem()
-    value_and_grad = jax.jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+    value_and_grad = jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
     # The fused kernel uses the field's DOF order; reporting uses the composite's.
     field_order = np.array([JF.dof_names.index(name) for name in bs.dof_names])
     objective_order = np.argsort(field_order)
 
 
 def fused_value_and_grad(dofs):
-    """Evaluate the frozen problem and return a host gradient in composite DOF order."""
-    value, gradient = jax.device_get(value_and_grad(
-        problem, jax.device_put(snapshot_host_tree(dofs[field_order])),
-    ))
+    """Evaluate the frozen fused problem and return a host gradient in composite DOF order.
+
+    The DOFs are placed on the device explicitly, so the evaluation also runs
+    under ``SIMSOPT_JAX_TRANSFER_GUARD=disallow``.
+
+    Args:
+        dofs (np.ndarray): Free DOFs of ``JF`` in its order, shape ``(len(JF.x),)``:
+            curve Fourier coefficients in metres, frame rotation coefficients in
+            radians and unscaled current DOFs (each filament carries
+            ``1e5 / nfil`` amperes per unit).
+
+    Returns:
+        tuple[float, np.ndarray]: The value of ``JF`` and its gradient with respect
+            to ``dofs``, shape ``(len(JF.x),)``, in ``JF``'s DOF order.
+    """
+    value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(dofs[field_order])))
     return float(value), gradient[objective_order]
 
 
@@ -248,9 +261,8 @@ print("""
 """)
 
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 400, 'gtol': 1e-20, 'ftol': 1e-20}, tol=1e-20)
-
-if args.fused:
-    JF.x = res.x
+# The minimizer's last evaluation need not be at its result, so the outputs below use res.x.
+JF.x = res.x
 curves_to_vtk(curves_fb, OUT_DIR + f"curves_opt_fb_{config_str}")
 pointData = {"B_N": np.sum(np.asarray(bs.B()).reshape((nphi, ntheta, 3)) * s.unitnormal(), axis=2)[:, :, None]}
 s.to_vtk(OUT_DIR + f"surf_opt_fb_{config_str}", extra_data=pointData)

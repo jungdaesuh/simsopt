@@ -26,9 +26,12 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
 from simsopt.field.coil import RegularizedCoil
 from simsopt.field.force import _check_downsample, _check_quadpoints_consistency
+from simsopt_jax.backend.jit import jit
 from simsopt_jax.core import coil_forces
 from simsopt_jax.core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt_jax.runtime.host_boundary import host_array, host_tree
+
+from simsopt_jax_adapters.geo.curve_objectives import _host_float
 
 __all__ = [
     "JaxB2Energy",
@@ -38,10 +41,6 @@ __all__ = [
     "JaxSquaredMeanForce",
     "JaxSquaredMeanTorque",
 ]
-
-
-def _host_float(value) -> float:
-    return float(host_array(value, dtype=np.float64))
 
 
 def _stacked(coils, geometry) -> jax.Array:
@@ -114,12 +113,16 @@ class _CoilSetObjective(Optimizable):
 
     ``target_coils``, ``source_coils_coarse`` and ``source_coils_fine`` are the
     native attributes, read at every evaluation; ``source_coils``, as in
-    native, is the two source lists at construction.
+    native, is the two source lists at construction. Subclasses set ``_kernel``
+    and ``_kernel_grad`` to the jitted objective and its gradient.
     """
 
     _operands: Callable[[], tuple]
+    _derivative: Callable[..., Derivative]
+    _kernel: Callable[..., jax.Array]
+    _kernel_grad: Callable[..., tuple]
 
-    def __init__(self, target_coils, source_coils_coarse, source_coils_fine, downsample):
+    def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
         self.target_coils, self.source_coils_coarse, self.source_coils_fine = (
             _target_and_source_coils(target_coils, source_coils_coarse, source_coils_fine, downsample)
         )
@@ -133,39 +136,57 @@ class _CoilSetObjective(Optimizable):
     def _source_groups(self) -> tuple[coil_forces.CoilGroup, ...]:
         return tuple(_coil_group(coils) for coils in self._source_lists())
 
-    def _value(self, kernel):
-        return _host_float(kernel(*self._operands(), downsample=self.downsample))
-
     def _source_derivative(self, dsources) -> Derivative:
         total = Derivative()
         for coils, cotangents in zip(self._source_lists(), dsources, strict=True):
             total += _coil_derivative(coils, *cotangents)
         return total
 
+    def J(self):
+        """Return the objective value given by the formula in the class docstring.
+
+        Returns:
+            float: objective value with units given by the class contract.
+        """
+        return _host_float(self._kernel(*self._operands(), downsample=self.downsample))
+
+    @derivative_dec
+    def dJ(self):
+        """Project combined geometry/current cotangents onto native coil DOFs.
+
+        Shared DOFs accumulate; partials=True includes fixed DOF partials.
+
+        Returns:
+            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
+        """
+        return self._derivative(self._kernel_grad)
+
+    return_fn_map = {"J": J, "dJ": dJ}
+
 
 # One compiled program per objective, shapes, downsample and source-group count.
-_lp_force = jax.jit(coil_forces.lp_force, static_argnames=("downsample",))
-_lp_force_grad = jax.jit(
+_lp_force = jit(coil_forces.lp_force, static_argnames=("downsample",))
+_lp_force_grad = jit(
     jax.grad(coil_forces.lp_force, argnums=(0, 1, 4)), static_argnames=("downsample",)
 )
-_lp_torque = jax.jit(coil_forces.lp_torque, static_argnames=("downsample",))
-_lp_torque_grad = jax.jit(
+_lp_torque = jit(coil_forces.lp_torque, static_argnames=("downsample",))
+_lp_torque_grad = jit(
     jax.grad(coil_forces.lp_torque, argnums=(0, 1, 4)), static_argnames=("downsample",)
 )
-_squared_mean_force = jax.jit(coil_forces.squared_mean_force, static_argnames=("downsample",))
-_squared_mean_force_grad = jax.jit(
+_squared_mean_force = jit(coil_forces.squared_mean_force, static_argnames=("downsample",))
+_squared_mean_force_grad = jit(
     jax.grad(coil_forces.squared_mean_force, argnums=(0, 1)), static_argnames=("downsample",)
 )
-_squared_mean_torque = jax.jit(coil_forces.squared_mean_torque, static_argnames=("downsample",))
-_squared_mean_torque_grad = jax.jit(
+_squared_mean_torque = jit(coil_forces.squared_mean_torque, static_argnames=("downsample",))
+_squared_mean_torque_grad = jit(
     jax.grad(coil_forces.squared_mean_torque, argnums=(0, 1)), static_argnames=("downsample",)
 )
-_b2energy = jax.jit(coil_forces.b2energy, static_argnames=("downsample",))
-_b2energy_grad = jax.jit(
+_b2energy = jit(coil_forces.b2energy, static_argnames=("downsample",))
+_b2energy_grad = jit(
     jax.grad(coil_forces.b2energy, argnums=(0, 1, 2)), static_argnames=("downsample",)
 )
-_net_flux = jax.jit(coil_forces.net_flux, static_argnames=("downsample",))
-_net_flux_grad = jax.jit(
+_net_flux = jit(coil_forces.net_flux, static_argnames=("downsample",))
+_net_flux_grad = jit(
     jax.grad(coil_forces.net_flux, argnums=(0, 1, 2)), static_argnames=("downsample",)
 )
 
@@ -175,7 +196,8 @@ class _LpObjective(_CoilSetObjective):
 
     _native_name: str
 
-    def __init__(self, target_coils, source_coils_coarse, source_coils_fine, p, threshold, downsample):
+    def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None,
+                 p: float = 2.0, threshold: float = 0.0, downsample: int = 1):
         target_coils = _as_coil_list(target_coils)
         _check_regularized(target_coils, self._native_name)
         self._regularizations = _regularizations(target_coils)
@@ -236,31 +258,8 @@ class JaxLpCurveForce(_LpObjective):
     """
 
     _native_name = "LpCurveForce"
-
-    def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None,
-                 p: float = 2.0, threshold: float = 0.0, downsample: int = 1):
-        super().__init__(target_coils, source_coils_coarse, source_coils_fine, p, threshold, downsample)
-
-    def J(self):
-        """Return the objective value given by the formula in the class docstring.
-
-        Returns:
-            float: objective value with units given by the class contract.
-        """
-        return self._value(_lp_force)
-
-    @derivative_dec
-    def dJ(self):
-        """Project combined geometry/current cotangents onto native coil DOFs.
-
-        Shared DOFs accumulate; partials=True includes fixed DOF partials.
-
-        Returns:
-            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
-        """
-        return self._derivative(_lp_force_grad)
-
-    return_fn_map = {"J": J, "dJ": dJ}
+    _kernel = staticmethod(_lp_force)
+    _kernel_grad = staticmethod(_lp_force_grad)
 
 
 class JaxLpCurveTorque(_LpObjective):
@@ -301,31 +300,8 @@ class JaxLpCurveTorque(_LpObjective):
     """
 
     _native_name = "LpCurveTorque"
-
-    def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None,
-                 p: float = 2.0, threshold: float = 0.0, downsample: int = 1):
-        super().__init__(target_coils, source_coils_coarse, source_coils_fine, p, threshold, downsample)
-
-    def J(self):
-        """Return the objective value given by the formula in the class docstring.
-
-        Returns:
-            float: objective value with units given by the class contract.
-        """
-        return self._value(_lp_torque)
-
-    @derivative_dec
-    def dJ(self):
-        """Project combined geometry/current cotangents onto native coil DOFs.
-
-        Shared DOFs accumulate; partials=True includes fixed DOF partials.
-
-        Returns:
-            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
-        """
-        return self._derivative(_lp_torque_grad)
-
-    return_fn_map = {"J": J, "dJ": dJ}
+    _kernel = staticmethod(_lp_torque)
+    _kernel_grad = staticmethod(_lp_torque_grad)
 
 
 class _SquaredMeanObjective(_CoilSetObjective):
@@ -367,29 +343,8 @@ class JaxSquaredMeanForce(_SquaredMeanObjective):
             quadrature count. Default: 1.
     """
 
-    def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
-        super().__init__(target_coils, source_coils_coarse, source_coils_fine, downsample)
-
-    def J(self):
-        """Return the objective value given by the formula in the class docstring.
-
-        Returns:
-            float: objective value with units given by the class contract.
-        """
-        return self._value(_squared_mean_force)
-
-    @derivative_dec
-    def dJ(self):
-        """Project combined geometry/current cotangents onto native coil DOFs.
-
-        Shared DOFs accumulate; partials=True includes fixed DOF partials.
-
-        Returns:
-            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
-        """
-        return self._derivative(_squared_mean_force_grad)
-
-    return_fn_map = {"J": J, "dJ": dJ}
+    _kernel = staticmethod(_squared_mean_force)
+    _kernel_grad = staticmethod(_squared_mean_force_grad)
 
 
 class JaxSquaredMeanTorque(_SquaredMeanObjective):
@@ -420,29 +375,8 @@ class JaxSquaredMeanTorque(_SquaredMeanObjective):
             quadrature count. Default: 1.
     """
 
-    def __init__(self, target_coils, source_coils_coarse, source_coils_fine=None, downsample: int = 1):
-        super().__init__(target_coils, source_coils_coarse, source_coils_fine, downsample)
-
-    def J(self):
-        """Return the objective value given by the formula in the class docstring.
-
-        Returns:
-            float: objective value with units given by the class contract.
-        """
-        return self._value(_squared_mean_torque)
-
-    @derivative_dec
-    def dJ(self):
-        """Project combined geometry/current cotangents onto native coil DOFs.
-
-        Shared DOFs accumulate; partials=True includes fixed DOF partials.
-
-        Returns:
-            Array of shape (ndofs,): free-DOF gradient, or Derivative for partials=True; units are objective units per native DOF unit.
-        """
-        return self._derivative(_squared_mean_torque_grad)
-
-    return_fn_map = {"J": J, "dJ": dJ}
+    _kernel = staticmethod(_squared_mean_torque)
+    _kernel_grad = staticmethod(_squared_mean_torque_grad)
 
 
 class JaxB2Energy(Optimizable):

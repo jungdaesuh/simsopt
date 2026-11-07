@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import cast
-
 import numpy as np
 from unittest_jax_support import JaxTestCase, optional_jax_imports
 
@@ -16,6 +13,7 @@ from simsopt.geo import CurveXYZFourier
 
 with optional_jax_imports():
     from simsopt_jax_adapters.field import JaxNetFluxes
+    from geo.test_curve_objectives_jax import _partials
 
 
 def _objectives(stride: int, shared: bool):
@@ -59,10 +57,6 @@ def _objectives(stride: int, shared: bool):
     reference = NetFluxes(Coil(sampled, target.current), sources, downsample=1)
     adapter = JaxNetFluxes(target, sources, downsample=stride)
     return adapter, reference, (target_curve, source_curve, source_current)
-
-
-def _partials(objective: Optimizable) -> Derivative:
-    return cast(Callable[..., Derivative], objective.dJ)(partials=True)
 
 
 def _full_partial(partials: Derivative, owner: Optimizable) -> np.ndarray:
