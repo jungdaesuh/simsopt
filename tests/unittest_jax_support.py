@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager, ExitStack
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from unittest import TestCase, SkipTest, skipIf
+from unittest import TestCase, SkipTest, mock, skipIf
 import logging
 import os
 import subprocess
@@ -200,6 +200,13 @@ def _parity_device_for_lane(jax_module, lane: str):
 def parity_default_device(lane: str):
     with jax.default_device(_parity_device_for_lane(jax, lane)):
         yield
+
+
+def before_backend_initialization():
+    """Patch the runtime to see a process whose JAX backends are not initialized."""
+    return mock.patch(
+        "simsopt_jax.backend.runtime._jax_backends_initialized", return_value=False
+    )
 
 
 def require_cuda(reason: str) -> None:

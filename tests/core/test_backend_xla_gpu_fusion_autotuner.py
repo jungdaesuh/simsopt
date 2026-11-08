@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
+from unittest_jax_support import (
+    JAX_IMPORT_ERROR,
+    JaxTestCase,
+    before_backend_initialization,
+    optional_jax_imports,
+)
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -40,12 +45,7 @@ class TestBackendXlaGpuFusionAutotuner(JaxTestCase):
         """Run each test as if JAX had not initialized its backends, the only
         state in which the configuration exports the pins."""
         super().setUp()
-        self.patches.enter_context(
-            mock.patch(
-                "simsopt_jax.backend.runtime._jax_backends_initialized",
-                return_value=False,
-            )
-        )
+        self.patches.enter_context(before_backend_initialization())
 
     def test_compose_yields_lone_flag_for_empty_input(self):
         """Empty XLA flags become the single disabled-fusion-autotuner flag."""
