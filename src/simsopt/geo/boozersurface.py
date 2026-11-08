@@ -927,25 +927,17 @@ class BoozerSurface(Optimizable):
         x0 = x.copy()
         i = 0
         r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
-        norm = initial_norm = 1e6
-        while i < maxiter:
-            b = self._exact_residual(r, mask)
-            norm = np.linalg.norm(b)
-            if i == 0:
-                initial_norm = norm
-            if norm <= tol:
-                break
+        b = self._exact_residual(r, mask)
+        norm = initial_norm = np.linalg.norm(b)
+        while i < maxiter and norm > tol:
             J = self._exact_residual_jacobian(J, mask)
             dx = np.linalg.solve(J, b)
             dx += np.linalg.solve(J, b-J@dx)
             x -= dx
             s.set_dofs(x[:-2])
-            iota = x[-2]
-            G = x[-1]
+            iota, G = x[-2:]
             i += 1
             r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
-
-        if i > 0:
             b = self._exact_residual(r, mask)
             norm = np.linalg.norm(b)
 
@@ -958,7 +950,7 @@ class BoozerSurface(Optimizable):
 
         P, L, U = lu(J)
         res = {
-            "residual": r, "jacobian": J, "iter": i, "success": norm <= tol, "G": G, "s": s, "iota": iota, "PLU": (P, L, U),
+            "residual": r, "jacobian": J, "iter": i, "success": maxiter > 0 and norm <= tol, "G": G, "s": s, "iota": iota, "PLU": (P, L, U),
             "mask": mask, 'type': 'exact', "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp
         }
 
