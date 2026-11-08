@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports, run_fresh_process
 
 with optional_jax_imports():
     import jax
@@ -27,8 +27,6 @@ with optional_jax_imports():
     )
     from simsopt_jax_adapters.field import JaxBiotSavart
 import os
-import subprocess
-import sys
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
@@ -64,26 +62,10 @@ def _process_state() -> tuple[dict[str, str], dict[str, object]]:
     return env, dict(jax.config.values)
 
 
-def _run_cpu_child(name: str, **environment: str) -> subprocess.CompletedProcess[str]:
-    """Run the ``fresh_process`` script ``name`` in a CPU-only interpreter.
-
-    Args:
-        name (str): File name of the script in ``fresh_process``.
-        **environment (str): Further environment variables for the child.
-
-    Returns:
-        subprocess.CompletedProcess: The finished child, with captured text output.
-    """
-    return subprocess.run(
-        (sys.executable, str(_FRESH_PROCESS / name)),
-        env=dict(
-            os.environ, JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", **environment
-        ),
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+def _run_cpu_child(name: str, **environment: str):
+    """Run ``fresh_process/<name>`` in a CPU-only interpreter with ``environment`` added."""
+    env = dict(os.environ, JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", **environment)
+    return run_fresh_process(_FRESH_PROCESS / name, env=env, timeout=300)
 
 
 class TestSetBackendLifecycle(JaxTestCase):
@@ -154,12 +136,15 @@ class TestSetBackendLifecycle(JaxTestCase):
         completed = _run_cpu_child("rejected_set_backend_default_backend_lookup.py")
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_gpu_selection_after_initialization_keeps_the_allocator_env(self):
-        """Selecting the GPU in an initialized process warns about allocator settings
-        it cannot apply and leaves the caller's XLA variables unchanged."""
+    def test_gpu_selection_after_initialization_keeps_the_xla_env(self):
+        """Selecting the GPU in an initialized process leaves the caller's allocator
+        variables and ``XLA_FLAGS`` alone, so child processes do not inherit
+        settings this one never ran with. It warns about the allocator settings
+        and, once, about compiling without the CUDA autotuner pins."""
+        flags = "--xla_gpu_exclude_nondeterministic_ops=true"
         os.environ.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3"
-        os.environ["XLA_FLAGS"] = "--xla_gpu_exclude_nondeterministic_ops=true"
+        os.environ["XLA_FLAGS"] = flags
         self.assertTrue(runtime_module._jax_backends_initialized())
 
         with warnings.catch_warnings(record=True) as caught:
@@ -169,34 +154,19 @@ class TestSetBackendLifecycle(JaxTestCase):
         self.assertEqual(get_backend_mode(), "jax_gpu_fast")
         self.assertNotIn("XLA_PYTHON_CLIENT_PREALLOCATE", os.environ)
         self.assertEqual(os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"], "0.3")
+        self.assertEqual(os.environ["XLA_FLAGS"], flags)
         messages = [str(warning.message) for warning in caught]
         self.assertTrue(
             any("XLA_PYTHON_CLIENT_PREALLOCATE" in text for text in messages),
             messages,
         )
+        self.assertEqual(
+            sum("CUDA autotuner pins" in text for text in messages), 1, messages
+        )
         # Every warning names this call site, not a line inside simsopt.
         self.assertEqual({warning.filename for warning in caught}, {__file__}, messages)
         if {"cuda", "gpu"} & set(jax.extend.backend.backends()):
             self.assertEqual(jax.numpy.zeros(3).devices(), {jax.devices("gpu")[0]})
-
-    def test_gpu_selection_after_initialization_keeps_xla_flags(self):
-        """The CUDA autotuner pins, which XLA reads only at backend initialization,
-        are not exported to an initialized process, so child processes do not
-        inherit them; one warning says this process compiles without them."""
-        flags = "--xla_gpu_exclude_nondeterministic_ops=true"
-        os.environ["XLA_FLAGS"] = flags
-        self.assertTrue(runtime_module._jax_backends_initialized())
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            set_backend("jax", device="gpu")
-
-        self.assertEqual(get_backend_mode(), "jax_gpu_fast")
-        self.assertEqual(os.environ["XLA_FLAGS"], flags)
-        messages = [str(warning.message) for warning in caught]
-        self.assertEqual(
-            sum("CUDA autotuner pins" in text for text in messages), 1, messages
-        )
 
     def test_cpu_selection_after_initialization_keeps_xla_flags(self):
         """The fast CPU mode's compile preset, which XLA reads only at backend

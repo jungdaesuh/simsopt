@@ -236,19 +236,10 @@ def _rotation_alpha_impl(dofs: jax.Array, points: jax.Array, order: int) -> jax.
 def _rotation_alphadash_impl(
     dofs: jax.Array, points: jax.Array, order: int
 ) -> jax.Array:
-    """Derivative of the ``FrameRotation`` angle with respect to the curve parameter.
+    """d alpha / d phi of :func:`rotation_alpha` (same arguments), computed as its JVP.
 
-    Computed as the JVP of :func:`rotation_alpha`, matching native
-    ``FrameRotation.alphadash`` without its ``scale`` factor.
-
-    Args:
-        dofs (array-like): Fourier coefficients, shape (2*order+1,), in radians.
-        points (array-like): Normalized curve parameters phi in [0, 1), shape (Q,).
-        order (int): Highest Fourier mode; static under ``jit``.
-
-    Returns:
-        jax.Array: d alpha / d phi, shape (Q,), in radians per unit of the
-            normalized parameter, float64.
+    Matches native ``FrameRotation.alphadash`` without its ``scale`` factor;
+    shape (Q,), in radians per unit of the normalized parameter, float64.
     """
     points_jax = _as_jax_float64(points)
     _, alphadash = jax.jvp(
