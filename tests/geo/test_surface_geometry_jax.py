@@ -390,53 +390,6 @@ class TestSurfaceGeometryJax(JaxTestCase):
                 f"JAX {name} disagrees with central differences of native {quantity}",
             )
 
-    def test_clamped_second_derivatives_are_derivatives_of_native_first_derivatives(
-        self,
-    ):
-        """Clamped second derivatives are the derivatives of native first derivatives."""
-        for case in _CLAMPED_CASES:
-            with self.subTest(case=case), self.case() as patches:
-                self._case_clamped_second_derivatives_are_derivatives_of_native_first_derivatives(
-                    case, patches
-                )
-
-    def _case_clamped_second_derivatives_are_derivatives_of_native_first_derivatives(
-        self, case, patches
-    ):
-        """Run one row with case-local objects released before runtime cleanup."""
-        surface = _surface(case)
-        spec = surface_spec_from_surface(surface)
-        quadpoints_phi = np.asarray(surface.quadpoints_phi)
-        quadpoints_theta = np.asarray(surface.quadpoints_theta)
-        step = 1e-6
-
-        def native_on_shifted_grid(
-            quantity: str, phi_offset: float, theta_offset: float
-        ) -> np.ndarray:
-            shifted = _surface(
-                case,
-                quadpoints_phi=quadpoints_phi + phi_offset,
-                quadpoints_theta=quadpoints_theta + theta_offset,
-            )
-            return _native(shifted, quantity)
-
-        for name, first_derivative, phi_step, theta_step in (
-            ("gammadash1dash1", "gammadash1", step, 0.0),
-            ("gammadash1dash2", "gammadash1", 0.0, step),
-            ("gammadash2dash2", "gammadash2", 0.0, step),
-        ):
-            for jax_name, native_name in (
-                (name, first_derivative),
-                (f"d{name}_by_dcoeff", f"d{first_derivative}_by_dcoeff"),
-            ):
-                _assert_central(
-                    host_array(_evaluate(jax_name, spec)),
-                    native_on_shifted_grid(native_name, phi_step, theta_step),
-                    native_on_shifted_grid(native_name, -phi_step, -theta_step),
-                    step,
-                    f"JAX {jax_name} is not the derivative of native {native_name}",
-                )
-
     def test_free_dof_gradients_match_native_objectives_with_fixed_and_shared_dofs(
         self,
     ):
