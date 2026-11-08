@@ -939,9 +939,9 @@ class BoozerResidual(Optimizable):
     This term returns the Boozer residual penalty term
 
     .. math::
-       J = \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi + w (\text{label.J()-boozer_surface.constraint_weight})^2.
+       J = \frac{1}{2} \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi + \frac{w}{2} (\text{label.J()} - \text{boozer_surface.targetlabel})^2,
 
-    where
+    where :math:`w` is ``boozer_surface.constraint_weight`` (zero for BoozerExact surfaces) and
 
     .. math::
         \mathbf r = \frac{1}{\|\mathbf B\|}[G\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
@@ -1007,15 +1007,18 @@ class BoozerResidual(Optimizable):
         iota = self.boozer_surface.res['iota']
         G = self.boozer_surface.res['G']
         r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=self.boozer_surface.res['weight_inv_modB'])
-        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*(self.boozer_surface.label.J()-self.boozer_surface.targetlabel)]))
+        label_residual = self.boozer_surface.label.J()-self.boozer_surface.targetlabel
+        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*label_residual]))
         self._J = 0.5*np.sum(rtil**2)
 
         booz_surf = self.boozer_surface
         P, L, U = booz_surf.res['PLU']
         dconstraint_dcoils_vjp = booz_surf.res['vjp']
 
+        # explicit coil derivatives of the residual term and of the label term (nonzero for ToroidalFlux)
         dJ_by_dB = self.dJ_by_dB()
-        dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
+        dlabel_dcoils = booz_surf.label.dJ(partials=True)(self.biotsavart, as_derivative=True)
+        dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB) + self.constraint_weight*label_residual*dlabel_dcoils
 
         # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
         dl = np.zeros((J.shape[1],))
