@@ -65,7 +65,7 @@ def _process_state() -> tuple[dict[str, str], dict[str, object]]:
 def _run_cpu_child(name: str, **environment: str):
     """Run ``fresh_process/<name>`` in a CPU-only interpreter with ``environment`` added."""
     env = dict(os.environ, JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", **environment)
-    return run_fresh_process(_FRESH_PROCESS / name, env=env)
+    return run_fresh_process(_FRESH_PROCESS / name, env=env, timeout=300)
 
 
 class TestSetBackendLifecycle(JaxTestCase):

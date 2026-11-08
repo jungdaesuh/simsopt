@@ -234,6 +234,7 @@ def run_fresh_process(
     *arguments: str,
     env: Mapping[str, str] | None = None,
     cwd: Path | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``script`` with ``arguments`` in a new interpreter, capturing its text output."""
     return subprocess.run(
@@ -243,7 +244,7 @@ def run_fresh_process(
         capture_output=True,
         text=True,
         check=False,
-        timeout=300,
+        timeout=timeout,
     )
 
 

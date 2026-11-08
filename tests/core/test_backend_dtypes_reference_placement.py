@@ -142,7 +142,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
             }
         )
-        completed = run_fresh_process(_PLACEMENT_CHILD, "staged_device_array", env=environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "staged_device_array", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_reference_placement_handles_tracer_leaf_in_sequence(self):
@@ -243,7 +243,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 if x64_setting is not None:
                     environment["JAX_ENABLE_X64"] = x64_setting
                 completed = run_fresh_process(
-                    _FRESH_PROCESS / "raw_kernel_float64.py", env=environment
+                    _FRESH_PROCESS / "raw_kernel_float64.py", env=environment, timeout=300
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
 
@@ -252,7 +252,9 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         CPU mode runs the raw B kernel in float64 again (analytic on-axis loop
         field to 1e-13 relative)."""
         completed = run_fresh_process(
-            _FRESH_PROCESS / "set_backend_float64.py", env=dict(os.environ, JAX_PLATFORMS="cpu")
+            _FRESH_PROCESS / "set_backend_float64.py",
+            env=dict(os.environ, JAX_PLATFORMS="cpu"),
+            timeout=300,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
@@ -382,7 +384,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
             }
         )
-        completed = run_fresh_process(_PLACEMENT_CHILD, "unplaced_joins_committed", env=environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "unplaced_joins_committed", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_unplaced_values_follow_the_runtime_policy_in_a_cuda_process(self):
@@ -396,7 +398,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         require_cuda("CUDA device required for the two-backend placement check")
         environment = dict(os.environ)
         environment.update({"JAX_PLATFORMS": "cuda,cpu", "JAX_ENABLE_X64": "1"})
-        completed = run_fresh_process(_PLACEMENT_CHILD, "cuda_two_backend", env=environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "cuda_two_backend", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_explicit_cross_backend_moves_pass_a_disallow_guard(self):
@@ -462,7 +464,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 ),
             }
         )
-        completed = run_fresh_process(_PLACEMENT_CHILD, "cuda_sharded_cross_backend", env=environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "cuda_sharded_cross_backend", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_commit_in_place_commits_where_the_array_lives(self):
