@@ -29,7 +29,7 @@ with ``singular`` set and ``x`` at the iterate that met it; the caller
 raises. NaN steps continue, as natively. As natively, every Newton-type loop
 restores its starting point, with its derivatives or system,
 when it ends (without a singular step) at a larger or non-finite ``norm``
-than they started from (:func:`keep_iterate`); ``norm`` stays the final one,
+than they started from (native's ``_keep_iterate``); ``norm`` stays the final one,
 so ``success`` is False. There is no damping; only the penalty Newton has a
 divergence stop, native's ``divergence_factor``.
 
@@ -81,7 +81,6 @@ __all__ = [
     "boozer_penalty_lbfgsb",
     "boozer_penalty_newton",
     "boozer_residual_objective",
-    "keep_iterate",
 ]
 
 # Native refines the penalty Newton step with a second solve below this gradient norm.
@@ -190,28 +189,11 @@ def _lu(matrix: jax.Array):
     return (lu, pivots), jnp.all(jnp.isfinite(matrix)) & jnp.any(jnp.diagonal(lu) == 0)
 
 
-def keep_iterate(norm: jax.Array, initial_norm: jax.Array) -> jax.Array:
-    """Native ``_keep_iterate``: whether a solve keeps its final iterate rather
-    than restoring its starting point.
-
-    Args:
-        norm (jax.Array): Scalar shape () final value of the solve's convergence
-            measure, in that measure's units.
-        initial_norm (jax.Array): Scalar shape () value of the same measure at the
-            starting point.
-
-    Returns:
-        jax.Array: Scalar shape () bool, True when ``norm`` is finite and at most
-            ``initial_norm``.
-    """
-    return jnp.isfinite(norm) & (norm <= initial_norm)
-
-
 def _restore_on_failure(final, initial, norm, initial_norm, singular):
     """``initial`` (a pytree of the starting point's values) where native restores
-    its starting point, else ``final``: without a singular step, unless
-    :func:`keep_iterate`."""
-    restore = ~singular & ~keep_iterate(norm, initial_norm)
+    its starting point, else ``final``: without a singular step, unless native's
+    ``_keep_iterate`` (``norm`` finite and at most ``initial_norm``)."""
+    restore = ~singular & ~(jnp.isfinite(norm) & (norm <= initial_norm))
     return jax.tree.map(partial(jnp.where, restore), initial, final)
 
 
