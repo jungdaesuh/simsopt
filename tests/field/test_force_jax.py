@@ -363,13 +363,13 @@ class TestForceJax(JaxTestCase):
             "net_flux": lambda t, dd, q, r, s: coil_forces.net_flux(t[0][0], t[1][0], s[0], 1),
         }
 
-        def cast(tree, dtype):
+        def as_dtype(tree, dtype):
             return jax.tree_util.tree_map(lambda value: jnp.asarray(value, dtype=dtype), tree)
 
-        single = cast((targets, gammadashdashs, quadpoints, regularizations, sources), np.float32)
+        single = as_dtype((targets, gammadashdashs, quadpoints, regularizations, sources), np.float32)
         for name, kernel in cases.items():
             with self.subTest(kernel=name):
-                expected = np.asarray(kernel(*cast(single, np.float64)))
+                expected = np.asarray(kernel(*as_dtype(single, np.float64)))
                 actual = kernel(*single)
                 self.assertEqual(actual.dtype, np.float64)
                 self.assertTrue(np.all(np.isfinite(expected)))
