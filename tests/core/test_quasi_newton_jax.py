@@ -569,22 +569,21 @@ class TestQuasiNewtonJax(JaxTestCase):
             "L-BFGS-B maxls = 0": ("L-BFGS-B", x0, _options("L-BFGS-B", 100, maxls=0)),
             "BFGS without variables": ("BFGS", np.zeros(0), _options("BFGS", 100)),
         }
-        for case, (method, start, options) in raised.items():
-            with self.subTest(case=case), self.case():
-                with self.assertRaises(ValueError) as scipy_error:
-                    _scipy("rosenbrock", start, params, method, options)
-                with self.assertRaises(ValueError) as device_error:
-                    _device("rosenbrock", start, params, method, options, "cpu")
-                self.assertEqual(str(device_error.exception), str(scipy_error.exception), case)
+        for case, row in raised.items():
+            self._assert_raises_like_scipy(ValueError, case, "rosenbrock", *row)
         # Every exit evaluates the objective at x0 first, so its errors come first.
         exits = {case: ("L-BFGS-B", start, options) for case, (start, options) in stopped.items()} | raised
-        for case, (method, start, options) in exits.items():
-            with self.subTest(case=f"{case}, objective raising"), self.case():
-                with self.assertRaises(RuntimeError) as scipy_error:
-                    _scipy("unavailable", start, params, method, options)
-                with self.assertRaises(RuntimeError) as device_error:
-                    _device("unavailable", start, params, method, options, "cpu")
-                self.assertEqual(str(device_error.exception), str(scipy_error.exception), case)
+        for case, row in exits.items():
+            self._assert_raises_like_scipy(RuntimeError, f"{case}, objective raising", "unavailable", *row)
+
+    def _assert_raises_like_scipy(self, error, case, name, method, start, options, *, params=np.zeros(0)):
+        """SciPy and the device solver (on the CPU) raise ``error`` with the same message."""
+        with self.subTest(case=case), self.case():
+            with self.assertRaises(error) as scipy_error:
+                _scipy(name, start, params, method, options)
+            with self.assertRaises(error) as device_error:
+                _device(name, start, params, method, options, "cpu")
+            self.assertEqual(str(device_error.exception), str(scipy_error.exception), case)
 
     def test_nan_and_maxiter_zero_end_as_in_scipy(self):
         """A NaN wall gives BFGS status 3; maxiter=0 stops BFGS at x0 and L-BFGS-B after one step."""
