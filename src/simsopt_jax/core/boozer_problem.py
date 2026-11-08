@@ -27,22 +27,19 @@ residual, label, ``z(0, 0)``), and its derivatives are JAX transforms of it
 (:func:`~simsopt_jax.core.boozer_residual.residual_derivatives` and
 :func:`~simsopt_jax.core.boozer_residual.objective_derivatives`; the exact
 conditions are the gradient of the Lagrangian). For derivatives, the field is
-its Taylor model at the quadrature points
+its Taylor model of the order requested at the quadrature points
 (:func:`~simsopt_jax.core.boozer_residual.taylor_field`, coefficients from
-the fused ``B``/``dB/dX`` kernel and ``d2B/dXdX``) of the order requested:
-derivative outputs are exact at ``x`` and, to any order, in the coils at a
-fixed ``x``, and differentiating them again in ``x`` raises ``TypeError``.
-"At a fixed ``x``" means a transform that does not trace ``x``: one that
-traces it, even with a zero tangent for it (``jax.jvp`` with zeros for ``x``,
-``jax.vjp`` over the coils and ``x`` together), raises too. The
-values (``derivatives=0``) of the residual, the penalty and the BoozerExact
-system evaluate the field itself, so they can be differentiated in ``x`` and
-the coils to any order. The exact constraints are themselves gradients of the
-Lagrangian, so their values come from the first-order model: their partial
-derivatives in the coils at a fixed ``xl`` are exact to any order, their
-Jacobian in ``xl`` is ``derivatives=1``, and differentiating either in ``xl``
-raises ``TypeError``. Total derivatives through a surface that depends on the
-coils (a solved surface) are therefore not supported.
+the fused ``B``/``dB/dX`` kernel and ``d2B/dXdX``). The Taylor-model rule:
+outputs built on the model are exact at ``x`` and, to any order, in the coils
+at a fixed ``x``, but any transform of them that traces ``x`` raises
+``TypeError``, even with a zero tangent for it (``jax.jvp`` with zeros for ``x``,
+``jax.vjp`` over the coils and ``x`` together). The values
+(``derivatives=0``) of the residual, the penalty and the BoozerExact system
+evaluate the field itself and are differentiable in ``x`` and the coils to
+any order. The exact constraints are gradients of the Lagrangian, so their
+values use the first-order model and follow the rule in ``xl``; their
+Jacobian is ``derivatives=1``. Total derivatives through a surface that
+depends on the coils (a solved surface) are therefore not supported.
 
 Every function is jitted with the problem and ``x`` (cast to float64) as
 traced operands: new DOF, ``iota``, ``G``, coil, target and weight values
@@ -330,21 +327,10 @@ def _penalty_terms(
 
 @partial(jax.custom_jvp, nondiff_argnums=(1,))
 def _not_differentiable_in_x(x: jax.Array, refusal: str) -> jax.Array:
-    """``x`` itself, raising ``TypeError(refusal)`` for any derivative in it.
+    """``x`` itself; any derivative in it raises ``TypeError(refusal)``.
 
-    Outputs computed from it with the field's Taylor model of some order would
-    otherwise give derivatives in ``x`` that miss the field's next derivative.
-    Derivatives in the coils alone do not trace ``x`` and pass. A transform
-    that traces ``x`` raises even when its tangent is zero, because the rule
-    cannot tell zero from nonzero tangents at trace time. The guard compiles
-    to no operation.
-
-    Args:
-        x (jax.Array): Decision vector, any shape.
-        refusal (str): Message of the ``TypeError``.
-
-    Returns:
-        jax.Array: ``x`` unchanged.
+    This enforces the module's Taylor-model rule. It cannot tell zero from
+    nonzero tangents at trace time, and it compiles to no operation.
     """
     return x
 
@@ -487,11 +473,8 @@ def boozer_exact_constraints(
 
     ``xl`` is ``x`` followed by the multipliers of the label constraint and of
     ``z(0, 0) = 0``; the residual is not weighted. ``res`` is the gradient of
-    the Lagrangian, evaluated with the field's first-order Taylor model: its
-    derivatives in the coils at a fixed ``xl`` are exact to any order, but
-    neither it nor ``dres`` is differentiable in ``xl`` (``dres`` is the
-    Jacobian), so neither are total derivatives through a surface solved for
-    the coils.
+    the Lagrangian with the field's first-order Taylor model, so ``res`` and
+    its Jacobian ``dres`` follow the module's Taylor-model rule in ``xl``.
 
     Args:
         problem (BoozerProblem): Surface, coil and label snapshot with native units and
