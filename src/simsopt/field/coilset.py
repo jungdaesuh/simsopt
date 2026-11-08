@@ -284,9 +284,7 @@ class CoilSet(Optimizable):
 
         Returns:
             CurveSurfaceDistance: the penalty on all coil curves against
-            ``self.surface``, with the default ``surface_derivatives=False``:
-            it depends on the coil DOFs only, and is not notified when the
-            surface moves.
+            ``self.surface``, with the default ``surface_derivatives=False``.
         """
         curves = [coil.curve for coil in self.coils]
         return CurveSurfaceDistance(curves, self.surface, DISTANCE_THRESHOLD)

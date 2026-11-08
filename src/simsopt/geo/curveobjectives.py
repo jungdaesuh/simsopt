@@ -343,20 +343,14 @@ class CurveSurfaceDistance(Optimizable):
     points on all coils :math:`i` and on the surface lie more than
     :math:`d_\min` away from one another.
 
-    By default the surface is the fixed target of a coil optimization: the
-    penalty depends on the curve DOFs only, and the surface geometry is read
-    at each evaluation. With ``surface_derivatives=True`` the surface is a
-    parent as well, so its free DOFs are DOFs of the penalty and ``dJ``
-    includes their derivatives.
-
-    With ``surface_derivatives=False`` the surface is not a parent: ``J`` and
-    ``dJ`` read its current geometry, but cached consumers such as
-    :obj:`~simsopt.objectives.LeastSquaresProblem` are not notified when the
-    surface moves, and keep returning the value from before the move until
-    their own DOFs change. A caller who moves the target surface and needs
-    that notification passes ``surface_derivatives=True`` and fixes the
-    surface DOFs: the surface is then a parent with no DOFs in ``x``, and the
-    gradient is with respect to the curve DOFs only.
+    By default the surface is the fixed target of a coil optimization: it is
+    not a parent, the penalty depends on the curve DOFs only, and ``J`` and
+    ``dJ`` read the current surface geometry. Cached consumers such as
+    :obj:`~simsopt.objectives.LeastSquaresProblem` are then not notified when
+    the surface moves, and keep returning the value from before the move until
+    their own DOFs change. With ``surface_derivatives=True`` the surface is a
+    parent and ``dJ`` includes its free DOFs; fixing the surface DOFs as well
+    gives that notification with a gradient in the curve DOFs only.
 
     Args:
         curves (list[Curve]): the curves to penalize, positions in m.
