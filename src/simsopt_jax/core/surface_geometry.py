@@ -33,7 +33,10 @@ Where squared normal components, or derivative intermediates such as the cube of
 the normal's length, underflow or overflow float64, unit normals, areas and
 their derivatives can differ from native in finiteness: XLA on CPU flushes
 subnormal results to zero, and autodiff orders the arithmetic differently from
-native's hand-written derivatives.
+native's hand-written derivatives. At or next to a singular point the two can
+also differ by round-off: one side's normal can cancel to exactly zero, giving
+non-finite unit normals and area gradients, while the other's is a tiny nonzero
+vector with finite ones.
 """
 
 from __future__ import annotations
@@ -117,7 +120,9 @@ def _position_derivative(
     angle_derivative = derivative(
         _TWO_PI * spec.quadpoints_phi, _TWO_PI * spec.quadpoints_theta
     )
-    # Native's order (sum in radians, then scale) keeps exact cancellations exact.
+    # Native's order (sum in radians, then scale) keeps a sum that cancels exactly
+    # in radians exact after scaling. The sums themselves round differently from
+    # native's, so a near-cancellation can be exactly zero on one side only.
     return _TWO_PI ** (phi_order + theta_order) * angle_derivative
 
 
@@ -125,7 +130,8 @@ def _norm(vectors: jax.Array) -> jax.Array:
     """``sqrt(x*x + y*y + z*z)`` over the last axis, the native expression.
 
     Zero normals, and normals whose squares underflow past the subnormal range,
-    therefore give native's non-finite unit normals and area gradients.
+    therefore give non-finite unit normals and area gradients, as natively for
+    the same normal.
     """
     x, y, z = vectors[..., 0], vectors[..., 1], vectors[..., 2]
     return jnp.sqrt(x * x + y * y + z * z)
