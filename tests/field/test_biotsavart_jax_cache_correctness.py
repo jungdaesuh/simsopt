@@ -229,7 +229,7 @@ class TestBiotsavartJaxCacheCorrectness(JaxTestCase):
             "current_scale", "filament_offset", "rotation_scale", "rotation_matrix",
         ):
             for notifier in ("changed_object", "field", "field_x_setter"):
-                with self.subTest(parameter=parameter, notifier=notifier):
+                with self.subTest(parameter=parameter, notifier=notifier), self.case():
                     self._case_notified_non_dof_parameter_changes_match_native(
                         parameter, notifier
                     )
