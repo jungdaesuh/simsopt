@@ -93,8 +93,9 @@ class RegularGridInterpolant3D {
         const int value_size; // number of output dimensions of the interpolant, i.e. space that is mapped into
         const InterpolationRule rule; // the interpolation rule to use on each cell in the grid
         // whether an out-of-bounds query extrapolates from the nearest boundary cell or throws an
-        // error. Extrapolation gives NaN where the scaled grid index is not finite (a non-finite
-        // coordinate, or one so far out that the index overflows) and in a skipped cell.
+        // error. If set, a query in a skipped cell, outside the grid with a skipped nearest boundary
+        // cell, or where the scaled grid index is not finite (a non-finite coordinate, or one so far
+        // out that the index overflows), gives NaN.
         const bool out_of_bounds_ok;
 
         // location of the mesh nodes in [xmin, xmax], [ymin, ymax], and [zmin, zmax]
@@ -313,8 +314,7 @@ class RegularGridInterpolant3D {
 
         void interpolate_batch(std::function<Vec(Vec, Vec, Vec)> &f); // build the interpolant
 
-        // whether (x, y, z) lies in [xmin, xmax] x [ymin, ymax] x [zmin, zmax], with the same
-        // 1e-13 face tolerance as evaluate; false for a non-finite coordinate
+        // whether (x, y, z) lies in the grid, with evaluate's face tolerance; false for a non-finite coordinate
         bool in_bounds(double x, double y, double z) const;
         Vec evaluate(double x, double y, double z); // evaluate the interpolant at one location
         void evaluate_batch(Array& xyz, Array& fxyz); // evluate the interpolant at multiple locations

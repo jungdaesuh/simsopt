@@ -104,17 +104,14 @@ class Testing(unittest.TestCase):
 
     def test_out_of_bounds_in_one_coordinate(self):
         """
-        A point outside the domain in a single coordinate (beyond the 1e-13
-        face tolerance, or NaN, infinite or huge) is out of bounds: it must not
-        wrap into a neighbouring cell, and ``in_bounds_batch`` reports it as
-        outside. With out_of_bounds_ok=True every query overwrites the output:
-        a finite point gets the nearest boundary cell's polynomial, which
-        reproduces ``fun`` exactly, and a coordinate whose scaled grid index is
-        not finite (a non-finite coordinate, or one so far out that the index
-        overflows) gets NaN. A huge finite coordinate whose index stays finite
-        is also evaluated with that polynomial, which overflows here because
-        ``fun`` is quadratic. With out_of_bounds_ok=False
-        a runtime error is raised.
+        A point outside the grid in one coordinate (beyond the 1e-13 face
+        tolerance, or NaN, infinite or huge) is reported outside by
+        ``in_bounds_batch`` and must not wrap into a neighbouring cell. With
+        out_of_bounds_ok=True every query overwrites the output: a finite point
+        gets the nearest boundary cell's polynomial, which reproduces ``fun``
+        (and overflows for a huge coordinate, since ``fun`` is quadratic), and a
+        non-finite scaled grid index gives NaN. With out_of_bounds_ok=False it
+        raises.
         """
         np.random.seed(0)
         ranges = [(1.0, 4.0, 20), (1.1, 3.9, 10), (1.2, 3.8, 15)]

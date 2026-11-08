@@ -891,11 +891,10 @@ class InterpolatedField(sopp.InterpolatedField, MagneticField):
 
                   See also here
                   https://github.com/hiddenSymmetries/simsopt/pull/227 for a
-                  graphical illustration. A query in a skipped cell, or
-                  outside the domain with a skipped nearest boundary cell,
-                  returns NaN with ``extrapolate=True`` (so ``estimate_error_B`` and
-                  ``estimate_error_GradAbsB`` are NaN when a sample hits a
-                  skipped cell) and raises with ``extrapolate=False``.
+                  graphical illustration. A query in a skipped cell behaves as
+                  described under ``extrapolate``, so with ``extrapolate=True``
+                  ``estimate_error_B`` and ``estimate_error_GradAbsB`` are NaN
+                  when a sample hits a skipped cell.
 
         """
         MagneticField.__init__(self)
