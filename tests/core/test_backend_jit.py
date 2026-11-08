@@ -104,7 +104,7 @@ class CopyingJitTests(JaxTestCase):
         for name, fun, call in _PASSING_STYLES:
             with self.subTest(style=name):
                 f = jit(fun)
-                call(f, np.ones(_INPUT_LENGTH), slow(eye)).block_until_ready()
+                call(f, np.ones(_INPUT_LENGTH), eye).block_until_ready()  # compiles f
                 for _ in range(_ATTEMPTS):
                     buffer = aligned_host_copy(np.ones(_INPUT_LENGTH))
                     gate = slow(eye)
