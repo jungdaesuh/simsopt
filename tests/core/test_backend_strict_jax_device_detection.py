@@ -28,7 +28,8 @@ with optional_jax_imports():
         BackendPolicy,
         FieldKernelTuning,
         _config_from_mode,
-        _default_device_updates,
+        _default_device,
+        _expected_runtime_backend_names,
         _initialized_runtime_platform,
         _policy_from_config,
         get_field_kernel_tuning,
@@ -331,30 +332,12 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
         cpu, gpu = _FakeDevice("cpu"), _FakeDevice("gpu")
         both = {"cuda": [gpu], "cpu": [cpu]}
         rows = [
-            ("default matches", "jax_cpu_fast", "cpu", None, []),
-            ("selection matches", "jax_cpu_fast", "gpu", cpu, []),
-            ("selection by name", "jax_gpu_fast", "cpu", "gpu", []),
-            (
-                "stale selection",
-                "jax_gpu_fast",
-                "gpu",
-                cpu,
-                [("jax_default_device", None)],
-            ),
-            (
-                "initialized cpu",
-                "jax_cpu_fast",
-                "gpu",
-                None,
-                [("jax_default_device", cpu)],
-            ),
-            (
-                "initialized cuda",
-                "jax_gpu_parity",
-                "cpu",
-                None,
-                [("jax_default_device", gpu)],
-            ),
+            ("default matches", "jax_cpu_fast", "cpu", None, None),
+            ("selection matches", "jax_cpu_fast", "gpu", cpu, cpu),
+            ("selection by name", "jax_gpu_fast", "cpu", "gpu", "gpu"),
+            ("stale selection", "jax_gpu_fast", "gpu", cpu, None),
+            ("initialized cpu", "jax_cpu_fast", "gpu", None, cpu),
+            ("initialized cuda", "jax_gpu_parity", "cpu", None, gpu),
         ]
         for name, mode, default_backend, selected, expected in rows:
             with self.subTest(name), self.case():
@@ -364,14 +347,15 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                     devices_by_platform=both,
                 )
                 config = _config_from_mode(mode, strict=True)
+                backends = _expected_runtime_backend_names(config.jax_platform)
                 platform = "cpu" if mode.startswith("jax_cpu") else "cuda"
                 with warnings.catch_warnings():
                     warnings.simplefilter("error", RuntimeWarning)
                     self.assertEqual(
-                        _initialized_runtime_platform(fake_jax, config), platform
+                        _initialized_runtime_platform(fake_jax, config, backends), platform
                     )
-                    updates = _default_device_updates(fake_jax, config, platform)
-                self.assertEqual(list(updates), expected)
+                    device = _default_device(fake_jax, backends, platform)
+                self.assertIs(device, expected)
                 # Deciding changes no setting.
                 self.assertEqual(fake_jax.config.updates, [])
 
@@ -382,6 +366,7 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
             ("jax_gpu_fast", True, True),
             ("jax_gpu_parity", False, True),
         ]
+        cuda = _expected_runtime_backend_names("cuda")
         for mode, strict, raises in rows:
             with self.subTest(mode=mode, strict=strict), self.case():
                 fake_jax = _fake_initialized_jax(
@@ -393,10 +378,10 @@ class TestBackendStrictJaxDeviceDetection(JaxTestCase):
                 expected = r"Requested JAX platform 'cuda'.*initialized only \['cpu'\]"
                 if raises:
                     with self.assertRaisesRegex(RuntimeError, expected):
-                        _initialized_runtime_platform(fake_jax, config)
+                        _initialized_runtime_platform(fake_jax, config, cuda)
                 else:
                     with self.assertWarnsRegex(RuntimeWarning, expected):
-                        self.assertIsNone(_initialized_runtime_platform(fake_jax, config))
+                        self.assertIsNone(_initialized_runtime_platform(fake_jax, config, cuda))
                 self.assertEqual(fake_jax.config.updates, [])
 
     def test_set_backend_moves_new_arrays_and_fields_between_initialized_platforms(
