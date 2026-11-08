@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 from numpy.random import PCG64DXSM, Generator
 
+from simsopt._core.optimizable import Optimizable
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curveperturbed import GaussianSampler, PerturbationSample, CurvePerturbed
 from simsopt.field.biotsavart import BiotSavart
@@ -84,6 +85,39 @@ class Testing(unittest.TestCase):
         truth = fresh_field(bases, [sample, sample], RESAMPLE_POINTS)
         self.assert_field_moved_to(total.B(), total_before, truth + background_B)
         self.assert_field_moved_to(field.B(), B_before, truth)
+
+    def test_eager_dependent_reads_only_the_new_draw(self):
+        """A dependent that reads a fully fixed field on every bell never sees the old draw.
+
+        A new draw or sample must clear the field's cache and the geometry of
+        every coil it moves before any bell rings, or the dependent reads the old
+        field or a mix of new and old coils.
+        """
+        class Reader(Optimizable):
+            def __init__(self, field):
+                self.field = field
+                self.reads = []
+                Optimizable.__init__(self, depends_on=[field])
+
+            def recompute_bell(self, parent=None):
+                self.reads.append(self.field.B().copy())
+
+        coils, bases, sample = get_perturbed_coils(seed=6)
+        new_sample = PerturbationSample(sample.sampler, randomgen=Generator(PCG64DXSM(7)))
+        field = BiotSavart(coils)
+        field.fix_all()
+        field.set_points(RESAMPLE_POINTS)
+        reader = Reader(field)
+        curve = coils[0].curve
+        for change, samples in ((curve.resample, [sample, sample]),
+                                (lambda: setattr(curve, "sample", new_sample), [new_sample, sample])):
+            B_before = field.B().copy()
+            reader.reads.clear()
+            change()
+            truth = fresh_field(bases, samples, RESAMPLE_POINTS)
+            self.assertGreater(len(reader.reads), 0)
+            for B in reader.reads:
+                self.assert_field_moved_to(B, B_before, truth)
 
     def test_fully_fixed_field_follows_sample_reassignment(self):
         """A fully fixed field follows a new sample of one coil, and later draws of that sample."""

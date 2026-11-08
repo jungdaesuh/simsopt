@@ -1145,8 +1145,9 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         depends on it, directly or indirectly; its ancestors are not told. The
         owner of such an input (e.g. the draw of a
         :obj:`~simsopt.geo.curveperturbed.CurvePerturbed`) calls this after
-        each real change, in addition to :meth:`set_recompute_flag`. DOF setters
-        do not send this signal.
+        each real change and before :meth:`set_recompute_flag`, so that a
+        :meth:`recompute_bell` that computes at once reads no result this
+        signal clears. DOF setters do not send this signal.
         """
         self._on_non_dof_change()
         for weakref_child in self._children:

@@ -178,8 +178,13 @@ class PerturbationSample(GSONable):
         so a draw on only some of the ranks hangs.
         """
         self._sample = self.sampler.draw_sample(self.randomgen)
-        for curve in list(self._consumers.values()):
-            curve._sample_changed()
+        curves = list(self._consumers.values())
+        # Clear every cache of the new draw first, so that no dependent that
+        # computes on the bell reads a stale curve or field.
+        for curve in curves:
+            curve._notify_non_dof_change()
+        for curve in curves:
+            curve.set_recompute_flag()
 
     def __getitem__(self, deriv):
         """
@@ -261,12 +266,8 @@ class CurvePerturbed(sopp.Curve, Curve):
         self._sample._remove_consumer(self)
         self._sample = sample
         sample._add_consumer(self)
-        self._sample_changed()
-
-    def _sample_changed(self):
-        """Invalidate this curve and its dependents after its perturbation changed."""
-        self.set_recompute_flag()
         self._notify_non_dof_change()
+        self.set_recompute_flag()
 
     def resample(self):
         """Equivalent to ``self.sample.resample()``."""

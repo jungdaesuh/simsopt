@@ -134,6 +134,10 @@ class Curve(Optimizable):
         """
         self.invalidate_cache()
 
+    def _on_non_dof_change(self):
+        """Clear the cached geometry, which derives from inputs that just changed."""
+        self.invalidate_cache()
+
     def plot(self, engine="matplotlib", ax=None, show=True, plot_derivative=False, close=False, axis_equal=True, **kwargs):
         """
         Plot the curve in 3D using ``matplotlib.pyplot``, ``mayavi``, or ``plotly``.
