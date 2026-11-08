@@ -710,7 +710,7 @@ class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
     Second derivatives of a SurfaceXYZTensorFourier with all dimensions clamped,
     compared to central differences of the first derivatives. Even nfp leaves the
     phi factor nfp**2/2 exact under integer division; odd nfp does not, and the
-    theta factor 1/2 is loaded at every nfp.
+    theta factor 1/2 is lost at every nfp.
     """
     phi0 = 0.13
     theta0 = 0.37
