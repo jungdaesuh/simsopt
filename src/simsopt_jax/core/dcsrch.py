@@ -392,14 +392,12 @@ def dcsrch_iterate(
     new_stp = jnp.where(stalled, stx, new_stp)
 
     searching = task == FG
-    updated = DcsrchState(
+    updated = replace(
+        state,
         brackt=brackt,
         stage=stage,
-        ginit=state.ginit,
-        gtest=state.gtest,
         gx=gx,
         gy=gy,
-        finit=state.finit,
         fx=fx,
         fy=fy,
         stx=stx,
