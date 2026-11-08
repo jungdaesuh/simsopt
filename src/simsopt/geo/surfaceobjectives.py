@@ -279,6 +279,19 @@ class ToroidalFlux(Optimizable):
         dJ_by_dcoils = self.biotsavart.A_vjp(dJ_by_dA)
         return dJ_by_dcoils
 
+    def _dJ_by_dsurfacecoefficients_dcoils_vjp(self, v):
+        """
+        Calculate the coil derivative of ``v @ self.dJ_by_dsurfacecoefficients()``, i.e. the
+        vector-Jacobian product of the mixed second derivative with respect to the surface
+        coefficients and the coils.
+        """
+        ntheta = self.surface.gamma().shape[1]
+        xtheta = self.surface.gammadash2()[self.idx]
+        dx = self.surface.dgamma_by_dcoeff()[self.idx] @ v
+        dxtheta = self.surface.dgammadash2_by_dcoeff()[self.idx] @ v
+        dA, dgradA = self.biotsavart.A_and_dA_vjp(dxtheta/ntheta, dx[:, :, None] * xtheta[:, None, :]/ntheta)
+        return dA + dgradA
+
 
 class PrincipalCurvature(Optimizable):
     r"""
@@ -1093,12 +1106,18 @@ def boozer_surface_dexactresidual_dcoils_dcurrents_vjp(lm, booz_surf, iota, G):
     return lm_times_dres_dcoils+lm_times_dlabel_dcoils
 
 
-def boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
+def boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf, iota, G, weight_inv_modB=True, constraint_weight=None):
     r"""
     For a given surface with points x on it, this function computes the
     vector-Jacobian product of \lm^T * dlsqgrad_dcoils, \lm^T * dlsqgrad_dcurrents:
     lm^T dresidual_dcoils    = lm^T [dr_dsurface]^T[dr_dcoils]    + sum r_i lm^T d2ri_dsdc
     lm^T dresidual_dcurrents = lm^T [dr_dsurface]^T[dr_dcurrents] + sum r_i lm^T d2ri_dsdcurrents
+
+    With a ToroidalFlux label, the label penalty's gradient w (l - l0) dl/ds also
+    depends on the coils, which adds
+    w (lm^T dl/ds) dl/dcoils + w (l - l0) lm^T d2l/dsdcoils.
+    w is ``constraint_weight``, the weight of the solve, and defaults to
+    ``booz_surf.constraint_weight``.
 
     G is known for exact boozer surfaces, so if G=None is passed, then that
     value is used instead.
@@ -1121,7 +1140,17 @@ def boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf, iota, G, weight_inv_modB=T
     v2 = np.sum(r.reshape((-1, 3, 1))*np.sum(lm[None, None, :]*d2r_dsdB, axis=-1).reshape((-1, 3, 3)), axis=1)
     v3 = np.sum(r.reshape((-1, 3, 1, 1))*np.sum(lm[None, None, None, :]*d2r_dsdgradB, axis=-1).reshape((-1, 3, 3, 3)), axis=1)
     dres_dcoils = biotsavart.B_and_dB_vjp(v1+v2, v3)
-    return dres_dcoils[0]+dres_dcoils[1]
+
+    # Of the labels, only ToroidalFlux depends on the coils.
+    label = booz_surf.label
+    if not isinstance(label, ToroidalFlux):
+        return dres_dcoils[0]+dres_dcoils[1]
+    w = booz_surf.constraint_weight if constraint_weight is None else constraint_weight
+    lm_s = lm[:surface.local_full_dof_size]
+    lm_times_dl_ds = lm_s @ label.dJ_by_dsurfacecoefficients()
+    lm_times_dlabelgrad_dcoils = lm_times_dl_ds * label.dJ_by_dcoils() \
+        + (label.J() - booz_surf.targetlabel) * label._dJ_by_dsurfacecoefficients_dcoils_vjp(lm_s)
+    return dres_dcoils[0]+dres_dcoils[1]+w*lm_times_dlabelgrad_dcoils
 
 
 def boozer_surface_residual_dB(surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False):

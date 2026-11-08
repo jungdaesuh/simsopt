@@ -554,7 +554,7 @@ class BoozerSurface(Optimizable):
         P, L, U = lu(d2val)
         res = {
             "residual": r, "jacobian": dval, "hessian": d2val, "iter": i, "success": norm <= tol, "G": None,
-            "PLU": (P, L, U), "vjp": partial(boozer_surface_dlsqgrad_dcoils_vjp, weight_inv_modB=weight_inv_modB),
+            "PLU": (P, L, U), "vjp": partial(boozer_surface_dlsqgrad_dcoils_vjp, weight_inv_modB=weight_inv_modB, constraint_weight=constraint_weight),
             "type": "ls", "weight_inv_modB": weight_inv_modB
         }
         sdofs, iota, res['G'] = _split_x(x, G is not None)
