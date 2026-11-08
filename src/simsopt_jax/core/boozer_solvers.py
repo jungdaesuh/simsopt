@@ -20,18 +20,18 @@ program (a ``lax.while_loop`` on the problem's device):
   :mod:`simsopt_jax.core.quasi_newton` runs them.
 
 The Newton-type stopping tests are native's, including how a NaN norm ends
-them, and so is the ``norm`` whose ``norm <= tol`` is native's ``success``. ``tol``,
-``maxiter`` and ``stab`` are float64 operands (``maxiter`` may be ``inf``),
-so new values reuse the program. ``x`` is cast to float64, as the
-formulations cast it, so the iterates and ``dJ/dx`` are float64 too. Where native's ``np.linalg.solve`` raises
-``LinAlgError`` (an exactly zero LU pivot of a finite matrix), the loop stops
-with ``singular`` set and ``x`` at the iterate that met it; the caller
-raises. NaN steps continue, as natively. As natively, every Newton-type loop
-restores its starting point, with its derivatives or system,
-when it ends (without a singular step) at a larger or non-finite ``norm``
-than they started from (native's ``_keep_iterate``); ``norm`` stays the final one,
-so ``success`` is False. There is no damping; only the penalty Newton has a
-divergence stop, native's ``divergence_factor``.
+them, and so is the ``norm`` whose ``norm <= tol`` is native's ``success``.
+``tol``, ``maxiter`` and ``stab`` are float64 operands (``maxiter`` may be
+``inf``), so new values reuse the program. ``x`` is cast to float64, as the
+formulations cast it, so the iterates and ``dJ/dx`` are float64 too. Where
+native's ``np.linalg.solve`` raises ``LinAlgError`` (an exactly zero LU pivot
+of a finite matrix), the loop stops with ``singular`` set and ``x`` at the
+iterate that met it; the caller raises. NaN steps continue, as natively. As
+natively, every Newton-type loop that ends (without a singular step) at a
+larger or non-finite ``norm`` than at its start restores its starting point,
+with its derivatives or system (native's ``_keep_iterate``); ``norm`` stays the
+final one, so ``success`` is False. There is no damping; only the penalty
+Newton has a divergence stop, native's ``divergence_factor``.
 
 The coil adjoints are ``res['vjp']`` as cotangents of ``problem.coils``:
 :func:`boozer_exact_residual_coil_vjp` is native's;
