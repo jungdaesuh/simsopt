@@ -731,7 +731,8 @@ class JaxBoozerResidual(Optimizable):
 
     where :math:`\mathbf r` is the Boozer residual of :class:`JaxBoozerSurface` (with the solve's
     ``weight_inv_modB``) at the solved :math:`\iota` and :math:`G` on a
-    ``SurfaceXYZTensorFourier`` copy of the solved surface with the same quadrature points,
+    copy of the solved surface of its class (and, for ``SurfaceXYZTensorFourier``, its
+    ``clamped_dims``) with the same quadrature points,
     :math:`n_r = 3 n_\varphi n_\theta`, :math:`l` the solver's label with target :math:`l_0`, and
     :math:`w_c` the solver's ``constraint_weight`` at construction (0 for BoozerExact, whose
     ``constraint_weight`` is None, as natively). Unlike the solver's penalty, it
@@ -755,6 +756,10 @@ class JaxBoozerResidual(Optimizable):
             leaves its evaluation points unchanged except for shared label callbacks
             during re-solves.
 
+    Raises:
+        TypeError: If the solver's surface is not exactly a ``SurfaceXYZFourier`` or
+            ``SurfaceXYZTensorFourier`` (subclasses may override the geometry).
+
     With a ``ToroidalFlux`` label on a BoozerLS solver use this class rather than native
     ``BoozerResidual``.
     """
@@ -763,13 +768,24 @@ class JaxBoozerResidual(Optimizable):
         Optimizable.__init__(self, depends_on=[boozer_surface])
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
-        surface = SurfaceXYZTensorFourier(
+        # The copy keeps the solved surface's class and clamped dimensions, so its DOFs give the same geometry.
+        if type(in_surface) is SurfaceXYZTensorFourier:
+            representation = {"clamped_dims": list(in_surface.clamped_dims)}
+        elif type(in_surface) is SurfaceXYZFourier:
+            representation = {}
+        else:
+            raise TypeError(
+                "JaxBoozerResidual supports SurfaceXYZFourier and SurfaceXYZTensorFourier surfaces, "
+                f"got {type(in_surface).__name__}."
+            )
+        surface = type(in_surface)(
             mpol=in_surface.mpol,
             ntor=in_surface.ntor,
             stellsym=in_surface.stellsym,
             nfp=in_surface.nfp,
             quadpoints_phi=in_surface.quadpoints_phi,
             quadpoints_theta=in_surface.quadpoints_theta,
+            **representation,
         )
         surface.set_dofs(in_surface.get_dofs())
         # BoozerExact surfaces have no label penalty (constraint_weight is None), as natively.

@@ -17,7 +17,8 @@ explicit ToroidalFlux and current-derived ``G`` terms that native misses,
 checked through re-solves. Then: settings
 read at every solve, no recompilation for new values, no implicit transfers,
 fixed surface DOFs solved for as natively, the BoozerExact adjoint without
-stellarator symmetry, ``BoozerResidual`` on BoozerExact solves, and
+stellarator symmetry, ``BoozerResidual`` on BoozerExact solves,
+``JaxBoozerResidual`` on ``SurfaceXYZFourier`` and clamped tensor solves, and
 unsupported inputs. BFGS and L-BFGS-B run SciPy's
 algorithms on the device by default; the ``host_bfgs`` option runs SciPy
 itself on the jitted penalty, as before, and the device programs' scratch
@@ -1399,6 +1400,72 @@ class TestBoozerSurfaceJax(JaxTestCase):
             copied.dJ(), fresh.dJ(), "copied objective gradient after a coil change"
         )
 
+    def test_boozer_residual_keeps_the_solved_surface_representation(self):
+        """On a BoozerLS solve of a ``SurfaceXYZFourier`` and of a tensor surface
+        with a clamped dimension, ``JaxBoozerResidual``'s copy has the solved
+        geometry, and its value and coil gradient are native ``BoozerResidual``'s
+        evaluated on the solved surface itself (Volume label, ``G`` optimized,
+        where native's gradient is the derivative). An unclamped tensor copy of
+        these DOFs is a different surface."""
+        _, base_currents, axis, nfp, bs = get_data("ncsx")
+        G0 = _G0(nfp, base_currents)
+        grid = dict(
+            quadpoints_phi=np.linspace(0, 1 / nfp, 20, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1, 20, endpoint=False),
+        )
+        surfaces = {
+            "SurfaceXYZFourier": SurfaceXYZFourier(
+                mpol=3, ntor=3, stellsym=True, nfp=nfp, **grid
+            ),
+            "clamped SurfaceXYZTensorFourier": SurfaceXYZTensorFourier(
+                mpol=3,
+                ntor=3,
+                stellsym=True,
+                nfp=nfp,
+                clamped_dims=[True, False, False],
+                **grid,
+            ),
+        }
+        for name, surface in surfaces.items():
+            with self.subTest(surface=name), self.case():
+                surface.fit_to_curve(axis, 0.1, flip_theta=True)
+                label = Volume(surface)
+                boozer = JaxBoozerSurface(
+                    JaxBiotSavart(bs.coils),
+                    surface,
+                    label,
+                    label.J(),
+                    _WEIGHT,
+                    {"verbose": False, "weight_inv_modB": False},
+                )
+                boozer.minimize_boozer_penalty_constraints_newton(
+                    maxiter=0,
+                    constraint_weight=_WEIGHT,
+                    iota=_IOTA,
+                    G=G0,
+                    weight_inv_modB=False,
+                )
+                residual = JaxBoozerResidual(boozer, boozer.biotsavart)
+                self.assertIs(type(residual.surface), type(surface))
+                np.testing.assert_array_equal(residual.surface.gamma(), surface.gamma())
+                unclamped = SurfaceXYZTensorFourier(
+                    mpol=3, ntor=3, stellsym=True, nfp=nfp, **grid
+                )
+                unclamped.set_dofs(surface.get_dofs())
+                self.assertGreater(
+                    np.abs(unclamped.gamma() - surface.gamma()).max(), 0.1
+                )
+                on_solved_surface = BoozerResidual(boozer, BiotSavart(bs.coils))
+                on_solved_surface.surface = surface
+                assert_matches_native(
+                    residual.J(), on_solved_surface.J(), f"{name} JaxBoozerResidual"
+                )
+                assert_matches_native(
+                    residual.dJ(),
+                    on_solved_surface.dJ(),
+                    f"{name} JaxBoozerResidual gradient",
+                )
+
     def test_ls_adjoint_with_a_toroidal_flux_label_is_the_derivative_of_the_solve(self):
         """With a ToroidalFlux label the BoozerLS penalty depends on the coils
         through the label too. The coil gradients of native objectives on a
@@ -1930,7 +1997,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
             )
 
     def test_boundary_refuses_unsupported_inputs(self):
-        """Solver construction rejects unsupported surface classes."""
+        """Solver and residual construction reject unsupported surface classes."""
         _, _, axis, nfp, bs = get_data("ncsx")
         field = JaxBiotSavart(bs.coils)
         rz = SurfaceRZFourier(mpol=2, ntor=2, nfp=nfp)
@@ -1962,3 +2029,12 @@ class TestBoozerSurfaceJax(JaxTestCase):
         # As natively, G from the currents needs fixed currents for coil gradients.
         with self.assertRaises(AssertionError):
             JaxBoozerSurface(field, xyz, Volume(xyz), 1.0, 1.0).run_code(_IOTA)
+
+        class Subclassed(SurfaceXYZFourier):
+            pass
+
+        subclassed = Subclassed(mpol=2, ntor=2, nfp=nfp)
+        with self.assertRaisesRegex(TypeError, "JaxBoozerResidual supports"):
+            JaxBoozerResidual(
+                JaxBoozerSurface(field, subclassed, Volume(subclassed), 1.0, 1.0), field
+            )
