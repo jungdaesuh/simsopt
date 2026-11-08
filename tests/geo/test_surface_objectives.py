@@ -459,6 +459,30 @@ class BoozerResidualTests(unittest.TestCase):
 
                 taylor_test1(f, df, field.x, epsilons=np.power(2., -np.asarray(range(13, 19))))
 
+    def test_boozerresidual_rejects_surface_subclasses(self):
+        """
+        BoozerResidual raises a TypeError for subclasses of SurfaceXYZFourier and
+        SurfaceXYZTensorFourier, which BoozerSurface accepts but whose geometry a
+        copy of the base class would lose.
+        """
+        class SubclassedXYZFourier(SurfaceXYZFourier):
+            pass
+
+        class SubclassedXYZTensorFourier(SurfaceXYZTensorFourier):
+            pass
+
+        base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
+        phis = np.linspace(0, 1/nfp, 10, endpoint=False)
+        thetas = np.linspace(0, 1, 10, endpoint=False)
+        for cls in [SubclassedXYZFourier, SubclassedXYZTensorFourier]:
+            with self.subTest(surface=cls.__name__):
+                s = cls(nfp=nfp, stellsym=True, mpol=3, ntor=3, quadpoints_phi=phis, quadpoints_theta=thetas)
+                s.fit_to_curve(ma, 0.1, flip_theta=True)
+                label = Volume(s)
+                boozer_surface = BoozerSurface(bs, s, label, label.J(), constraint_weight=100.)
+                with self.assertRaisesRegex(TypeError, cls.__name__):
+                    BoozerResidual(boozer_surface, bs)
+
     def test_boozerresidual_exact_surface(self):
         """
         BoozerResidual on a BoozerExact surface, which has no label penalty
