@@ -507,11 +507,7 @@ def boozer_penalty_residual(
         TypeError: When the ``derivatives >= 1`` outputs are differentiated in ``x``.
     """
 
-    x = as_jax_float64(x)
-    if derivatives:
-        x = _not_differentiable_in_x(
-            x, _derivative_outputs_refusal("boozer_penalty_residual", derivatives)
-        )
+    x = _decision_vector(x, "boozer_penalty_residual", derivatives)
 
     def residuals(point):
         residual, label_residual, z_residual = _penalty_terms(
