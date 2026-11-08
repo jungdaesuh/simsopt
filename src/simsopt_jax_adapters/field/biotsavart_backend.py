@@ -817,9 +817,9 @@ class JaxBiotSavart(Optimizable):
             self._fixed_dofs_maybe_changed = False
 
     def _current_captured_coil_state_fingerprint(self) -> tuple[bytes, ...]:
-        """Fixed coordinates and non-DOF coil parameters (current scales, filament
-        offsets, frame-rotation scales), fingerprinted once at the first read
-        after a dependency notification."""
+        """Fixed coordinates, non-DOF coil parameters (current scales, filament
+        offsets, frame-rotation scales) and perturbation sample contents,
+        fingerprinted once at the first read after a dependency notification."""
         return tuple(
             np.ascontiguousarray(
                 np.asarray(opt.local_full_x, dtype=np.float64)[
@@ -827,7 +827,11 @@ class JaxBiotSavart(Optimizable):
                 ]
             ).tobytes()
             for opt in self.unique_dof_lineage
-        ) + (coil_graph_parameters(self.ancestors).tobytes(),)
+        ) + (coil_graph_parameters(self.ancestors).tobytes(),) + tuple(
+            np.ascontiguousarray(array).tobytes()
+            for opt in self.ancestors if isinstance(opt, CurvePerturbed)
+            for array in opt.sample._sample
+        )
 
     def _perturbation_samples_changed(self) -> bool:
         return any(
