@@ -341,8 +341,8 @@ def boozer_penalty_newton(
         )
         return gradient, hessian
 
-    gradient, hessian = derivatives(x)
-    initial_norm = jnp.linalg.norm(gradient)
+    start = (x, *derivatives(x))
+    initial_norm = jnp.linalg.norm(start[1])
 
     def proceed(state):
         _, _, _, iterations, norm, singular = state
@@ -369,11 +369,9 @@ def boozer_penalty_newton(
         gradient, hessian = derivatives(x)
         return x, gradient, hessian, iterations, jnp.linalg.norm(gradient), singular
 
-    initial = (x, gradient, hessian, jnp.asarray(0, jnp.int32), initial_norm, jnp.asarray(False))
-    x_final, gradient_final, hessian_final, iterations, norm, singular = lax.while_loop(proceed, step, initial)
-    x, gradient, hessian = _restore_on_failure(
-        (x_final, gradient_final, hessian_final), (x, gradient, hessian), norm, initial_norm, singular
-    )
+    initial = (*start, jnp.asarray(0, jnp.int32), initial_norm, jnp.asarray(False))
+    *final, iterations, norm, singular = lax.while_loop(proceed, step, initial)
+    x, gradient, hessian = _restore_on_failure(tuple(final), start, norm, initial_norm, singular)
     return BoozerPenaltyNewtonResult(x, gradient, hessian, iterations, norm, singular)
 
 
