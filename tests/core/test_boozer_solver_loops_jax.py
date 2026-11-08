@@ -154,6 +154,12 @@ def _compiled_afresh(solver, static_argnames: tuple[str, ...]):
     return jit(body, static_argnames=static_argnames)
 
 
+def _substitute(patches, formulations):
+    """Patch each ``boozer_solvers`` formulation for the rest of the case."""
+    for attribute, formulation in formulations.items():
+        patches.enter_context(mock.patch.object(boozer_solvers, attribute, formulation))
+
+
 def _run(name: str, x: jax.Array, maxiter: float = _MAXITER, divergence_factor=None):
     """The loop ``name`` compiled afresh (so it traces the substituted formulation);
     ``divergence_factor`` goes to the penalty Newton."""
@@ -191,10 +197,7 @@ class TestBoozerSolverLoopsJax(JaxTestCase):
         formulations, reached, second_matrix = _CASES[name]
         with self.assertRaisesRegex(np.linalg.LinAlgError, "Singular matrix"):
             np.linalg.solve(second_matrix, np.ones(2))
-        for attribute, formulation in formulations.items():
-            patches.enter_context(
-                mock.patch.object(boozer_solvers, attribute, formulation)
-            )
+        _substitute(patches, formulations)
         with parity_default_device(parity_lane):
             result = _run(name, jnp.asarray(_START))
             singular, iterations, x = (
@@ -231,10 +234,7 @@ class TestBoozerSolverLoopsJax(JaxTestCase):
     ):
         """Run one row with case-local objects released before runtime cleanup."""
         formulations, norm, restored = _GROWING_CASES[name]
-        for attribute, formulation in formulations.items():
-            patches.enter_context(
-                mock.patch.object(boozer_solvers, attribute, formulation)
-            )
+        _substitute(patches, formulations)
         with parity_default_device(parity_lane):
             result = _run(name, jnp.asarray(_START), maxiter=2.0)
             values = {
@@ -255,10 +255,7 @@ class TestBoozerSolverLoopsJax(JaxTestCase):
         formulations, _, restored = _GROWING_CASES["penalty-newton"]
         for factor, steps in ((1e3, 3), (None, 40)):
             with self.subTest(factor=factor), self.case() as patches:
-                for attribute, formulation in formulations.items():
-                    patches.enter_context(
-                        mock.patch.object(boozer_solvers, attribute, formulation)
-                    )
+                _substitute(patches, formulations)
                 result = _run(
                     "penalty-newton", jnp.asarray(_START), maxiter=40.0, divergence_factor=factor
                 )
