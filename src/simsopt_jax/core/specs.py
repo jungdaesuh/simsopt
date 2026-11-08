@@ -622,31 +622,14 @@ _FILAMENT_FRAME_EXTRA_DERIVATIVES = {"centroid": 1, "frenet": 2}
 
 
 def _filament_base_derivative_order(frame_kind: str, order: int) -> int:
-    """Return the base-curve derivative order a filament frame needs.
-
-    Args:
-        frame_kind (str): "centroid" or "frenet".
-        order (int): Number of parameter derivatives of the filament position.
-
-    Returns:
-        int: Number of parameter derivatives of the base curve the frame needs.
-    """
+    """Base-curve derivatives a ``frame_kind`` filament needs for ``order`` of its own."""
     return order + _FILAMENT_FRAME_EXTRA_DERIVATIVES[frame_kind]
 
 
 def _require_sample_derivatives(spec: CurvePerturbedSpec, order: int) -> None:
-    """Reject a perturbed curve whose sample lacks a needed derivative.
+    """Raise, as native ``PerturbationSample`` does, when the sample lacks derivative ``order``.
 
-    Native ``PerturbationSample`` raises when a derivative above its sampler's
-    ``n_derivs`` is requested; the zero placeholders above
-    ``spec.sample_derivatives`` are not derivatives and must not be used.
-
-    Args:
-        spec (CurvePerturbedSpec): Immutable perturbed-curve payload.
-        order (int): Number of parameter derivatives of the curve position needed.
-
-    Raises:
-        ValueError: The sample provides fewer than ``order`` derivatives.
+    The zero placeholders above ``spec.sample_derivatives`` are not derivatives.
     """
     if order > spec.sample_derivatives:
         raise ValueError(
@@ -658,18 +641,10 @@ def _require_sample_derivatives(spec: CurvePerturbedSpec, order: int) -> None:
 
 
 def _require_curve_derivatives(spec: CurveSpec, order: int) -> None:
-    """Reject a curve whose perturbation samples lack derivatives a filament needs.
+    """:func:`_require_sample_derivatives` on every perturbed layer of ``spec``.
 
-    Applies ``_require_sample_derivatives`` to every perturbed layer below a
-    filament frame, including the extra base derivatives the frame consumes,
-    so a filament spec is rejected when it is built rather than evaluated.
-
-    Args:
-        spec (CurveSpec): Immutable curve geometry.
-        order (int): Number of parameter derivatives of the curve position needed.
-
-    Raises:
-        ValueError: A perturbed layer provides fewer than the needed derivatives.
+    Counts the extra base derivatives filament frames consume, so a filament
+    spec is rejected when it is built rather than evaluated.
     """
     if isinstance(spec, CurvePerturbedSpec):
         _require_sample_derivatives(spec, order)
