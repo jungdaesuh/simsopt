@@ -147,6 +147,7 @@ from .dcsrch import (
     ERROR,
     FG,
     DcsrchState,
+    _py_min,
     _select,
     dcsrch_iterate,
     dcsrch_start,
@@ -236,11 +237,6 @@ class QuasiNewtonResult:
     status: jax.Array
     message: jax.Array
     hess_inv: jax.Array | LbfgsbCorrections
-
-
-def _py_min(a, b):
-    """Python's ``min(a, b)``: ``b`` only if ``b < a`` (so a NaN ``b`` gives ``a``)."""
-    return jnp.where(b < a, b, a)
 
 
 def _raises(result, *operands):

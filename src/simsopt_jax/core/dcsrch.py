@@ -183,14 +183,14 @@ def _select(predicate, on_true, on_false):
     return jax.tree.map(lambda a, b: jnp.where(predicate, a, b), on_true, on_false)
 
 
-def _min(a, b, lbfgsb: bool):
-    """C's ``fmin`` (a NaN is ignored), or Python's ``min(a, b)`` (``b`` only if ``b < a``)."""
-    return jnp.fmin(a, b) if lbfgsb else jnp.where(b < a, b, a)
+def _py_min(a, b):
+    """Python's ``min(a, b)``: ``b`` only if ``b < a`` (so a NaN ``b`` gives ``a``)."""
+    return jnp.where(b < a, b, a)
 
 
-def _max(a, b, lbfgsb: bool):
-    """C's ``fmax`` (a NaN is ignored), or Python's ``max(a, b)`` (``b`` only if ``b > a``)."""
-    return jnp.fmax(a, b) if lbfgsb else jnp.where(b > a, b, a)
+def _py_max(a, b):
+    """Python's ``max(a, b)``: ``b`` only if ``b > a``."""
+    return jnp.where(b > a, b, a)
 
 
 def dcsrch_start(stp, f, g, *, ftol: float, stpmin: float, stpmax: float):
@@ -236,12 +236,13 @@ def _scale(theta, da, db, lbfgsb: bool):
     """DCSTEP's ``s``, the largest of ``|theta|``, ``|da|`` and ``|db|``."""
     if lbfgsb:
         return jnp.fmax(jnp.abs(theta), jnp.fmax(jnp.abs(da), jnp.abs(db)))
-    return _max(_max(jnp.abs(theta), jnp.abs(da), False), jnp.abs(db), False)
+    return _py_max(_py_max(jnp.abs(theta), jnp.abs(da)), jnp.abs(db))
 
 
 def _dcstep(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stpmax, lbfgsb: bool):
     """DCSTEP: the safeguarded trial step and the updated interval, each of
     its four cases computed and the one that applies selected."""
+    minimum, maximum = (jnp.fmin, jnp.fmax) if lbfgsb else (_py_min, _py_max)
     sgnd = dp * (dx / jnp.abs(dx)) if lbfgsb else jnp.sign(dp) * jnp.sign(dx)
 
     # First case: a higher function value; the minimum is bracketed.
@@ -273,7 +274,7 @@ def _dcstep(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stpmax, lbfgs
     stpq = stp + (dp / (dp - dx)) * (stx - stp)
     toward_sty = stp + 0.66 * (sty - stp)
     bracketed = jnp.where(jnp.abs(stpc - stp) < jnp.abs(stpq - stp), stpc, stpq)
-    bracketed = jnp.where(stp > stx, _min(toward_sty, bracketed, lbfgsb), _max(toward_sty, bracketed, lbfgsb))
+    bracketed = jnp.where(stp > stx, minimum(toward_sty, bracketed), maximum(toward_sty, bracketed))
     extrapolated = jnp.where(jnp.abs(stpc - stp) > jnp.abs(stpq - stp), stpc, stpq)
     if lbfgsb:
         extrapolated = jnp.fmax(stpmin, jnp.fmin(stpmax, extrapolated))
@@ -380,8 +381,9 @@ def dcsrch_iterate(
     new_stp = jnp.where(brackt & (gap >= _P66 * state.width1), stx + _P5 * (sty - stx), new_stp)
     width1 = jnp.where(brackt, state.width, state.width1)
     width = jnp.where(brackt, gap, state.width)
-    stmin = jnp.where(brackt, _min(stx, sty, lbfgsb), new_stp + _XTRAPL * (new_stp - stx))
-    stmax = jnp.where(brackt, _max(stx, sty, lbfgsb), new_stp + _XTRAPU * (new_stp - stx))
+    minimum, maximum = (jnp.fmin, jnp.fmax) if lbfgsb else (_py_min, _py_max)
+    stmin = jnp.where(brackt, minimum(stx, sty), new_stp + _XTRAPL * (new_stp - stx))
+    stmax = jnp.where(brackt, maximum(stx, sty), new_stp + _XTRAPU * (new_stp - stx))
     if lbfgsb:
         new_stp = jnp.fmin(jnp.fmax(new_stp, stpmin), stpmax)
     else:
