@@ -15,12 +15,21 @@ from simsopt.geo.curveobjectives import LpCurveTorsion, CurveCurveDistance
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 
 
-def circle(points, radius):
-    """Planar circle of ``radius`` (m) on the quadrature ``points``."""
-    curve = CurveXYZFourier(points, 2)
+POINTS = np.linspace(0, 1, 64, endpoint=False)
+SAMPLER = GaussianSampler(POINTS, 0.05, 0.3, n_derivs=1)
+
+
+def circle(radius):
+    """Planar circle of ``radius`` (m) on ``POINTS``."""
+    curve = CurveXYZFourier(POINTS, 2)
     curve.set("xc(1)", radius)
     curve.set("ys(1)", radius)
     return curve
+
+
+def seeded_sample(seed):
+    """A draw of ``SAMPLER`` from a generator seeded with ``seed``."""
+    return PerturbationSample(SAMPLER, randomgen=Generator(PCG64DXSM(seed)))
 
 
 class CurvePerturbationTesting(unittest.TestCase):
@@ -185,11 +194,9 @@ class CurvePerturbationTesting(unittest.TestCase):
         draw each curve must equal its base curve plus the new perturbation,
         including a curve that wraps a sharing curve.
         """
-        points = np.linspace(0, 1, 64, endpoint=False)
-        sampler = GaussianSampler(points, 0.05, 0.3, n_derivs=1)
-        sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(3)))
-        outer_sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(4)))
-        base1, base2 = circle(points, 1.0), circle(points, 1.5)
+        sample = seeded_sample(3)
+        outer_sample = seeded_sample(4)
+        base1, base2 = circle(1.0), circle(1.5)
         curve1 = CurvePerturbed(base1, sample)
         curve2 = CurvePerturbed(base2, sample)
         nested = CurvePerturbed(curve2, outer_sample)
@@ -213,11 +220,9 @@ class CurvePerturbationTesting(unittest.TestCase):
         one. Each must still move on a new draw, and registering a curve twice
         must not notify it twice.
         """
-        points = np.linspace(0, 1, 64, endpoint=False)
-        sampler = GaussianSampler(points, 0.05, 0.3, n_derivs=1)
-        sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(5)))
-        other_sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(6)))
-        base1, base2 = circle(points, 1.0), circle(points, 1.5)
+        sample = seeded_sample(5)
+        other_sample = seeded_sample(6)
+        base1, base2 = circle(1.0), circle(1.5)
         curve1 = CurvePerturbed(base1, sample)
         curve2 = CurvePerturbed(base2, other_sample)
         curve2.name = curve1.name
@@ -235,21 +240,17 @@ class CurvePerturbationTesting(unittest.TestCase):
 
     def test_sample_does_not_keep_its_curves_alive(self):
         """A sample holds its curves by weak references, so a curve dropped by the caller is freed."""
-        points = np.linspace(0, 1, 64, endpoint=False)
-        sampler = GaussianSampler(points, 0.05, 0.3, n_derivs=1)
-        sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(9)))
-        curve = weakref.ref(CurvePerturbed(circle(points, 1.0), sample))
+        sample = seeded_sample(9)
+        curve = weakref.ref(CurvePerturbed(circle(1.0), sample))
         gc.collect()
         self.assertIsNone(curve())
         sample.resample()
 
     def test_sample_reassignment_moves_the_curve(self):
         """A curve given a new sample takes its draw at once and follows only that sample."""
-        points = np.linspace(0, 1, 64, endpoint=False)
-        sampler = GaussianSampler(points, 0.05, 0.3, n_derivs=1)
-        old_sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(7)))
-        new_sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(8)))
-        base = circle(points, 1.0)
+        old_sample = seeded_sample(7)
+        new_sample = seeded_sample(8)
+        base = circle(1.0)
         curve = CurvePerturbed(base, old_sample)
         curve.gamma()
 
@@ -269,10 +270,8 @@ class CurvePerturbationTesting(unittest.TestCase):
         ``copy.copy`` shares the random generator with the original, so the
         two draw from one stream; pickle and ``copy.deepcopy`` copy it.
         """
-        points = np.linspace(0, 1, 64, endpoint=False)
-        sampler = GaussianSampler(points, 0.05, 0.3, n_derivs=1)
-        sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(5)))
-        base = circle(points, 1.0)
+        sample = seeded_sample(5)
+        base = circle(1.0)
         curve = CurvePerturbed(base, sample)
         gamma = curve.gamma().copy()
         copiers = {"pickle": lambda s: pickle.loads(pickle.dumps(s)), "copy": copy.copy, "deepcopy": copy.deepcopy}
