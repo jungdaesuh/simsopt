@@ -133,6 +133,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -331,6 +332,11 @@ _ZOOM_DELTA1 = 0.2
 _ZOOM_DELTA2 = 0.1
 # ``rhok`` where ``y^T s`` is exactly zero.
 _RHOK_DIVIDE_BY_ZERO = 1000.0
+# line_search_wolfe1's ``DCSRCH(phi, derphi, c1, c2, xtol, amin, amax)``.
+_wolfe1_start = partial(dcsrch_start, ftol=_C1, stpmin=_AMIN, stpmax=_AMAX)
+_wolfe1_iterate = partial(
+    dcsrch_iterate, ftol=_C1, gtol=_C2, xtol=_WOLFE1_XTOL, stpmin=_AMIN, stpmax=_AMAX, lbfgsb=False
+)
 
 # What the pending evaluation is for: the start, a DCSRCH trial, a
 # ``scalar_search_wolfe2`` step, a ``_zoom`` trial; or the solve ended.
@@ -482,10 +488,7 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     # stops after 100 evaluations and at a non-finite step.
     wolfe1 = s.phase == _WOLFE1
     wolfe1_evals = s.wolfe1_evals + 1
-    line, wolfe1_step, task = dcsrch_iterate(
-        s.line, alpha, f_t, dphi_t,
-        ftol=_C1, gtol=_C2, xtol=_WOLFE1_XTOL, stpmin=_AMIN, stpmax=_AMAX, lbfgsb=False,
-    )
+    line, wolfe1_step, task = _wolfe1_iterate(s.line, alpha, f_t, dphi_t)
     wolfe1_running = wolfe1 & (wolfe1_evals < _WOLFE1_MAXITER)
     wolfe1_accept = wolfe1_running & (task == CONVERGENCE)
     wolfe1_next = wolfe1_running & (task == FG) & jnp.isfinite(wolfe1_step)
@@ -603,7 +606,7 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     pk = -(s.H @ s.g)
     derphi0 = jnp.dot(s.g, pk)
     alpha1 = _initial_step(s.f, s.old_old_fval, derphi0)
-    line, start_task = dcsrch_start(alpha1, s.f, derphi0, ftol=_C1, stpmin=_AMIN, stpmax=_AMAX)
+    line, start_task = _wolfe1_start(alpha1, s.f, derphi0)
     wolfe1_start = start & (start_task != ERROR)
     s = replace(s, 
         pk=jnp.where(start, pk, s.pk),
@@ -663,7 +666,7 @@ def minimize_bfgs(
         raise ValueError("zero-size array to reduction operation maximum which has no identity")
     zero = jnp.zeros((), x0.dtype)
     count = jnp.asarray(0, jnp.int32)
-    line, _ = dcsrch_start(zero, zero, zero, ftol=_C1, stpmin=_AMIN, stpmax=_AMAX)
+    line, _ = _wolfe1_start(zero, zero, zero)
     state = _BfgsState(
         phase=jnp.asarray(_INIT, jnp.int32),
         x_trial=x0,
@@ -718,6 +721,10 @@ _LNSRLB_XTOL = 0.1
 _STPMX = 1e10
 _EPSMCH = 2.220446049250313e-16
 _FLOAT_EPS = float(np.finfo(float).eps)
+_lnsrlb_start = partial(dcsrch_start, ftol=_LNSRLB_FTOL, stpmin=0.0, stpmax=_STPMX)
+_lnsrlb_iterate = partial(
+    dcsrch_iterate, ftol=_LNSRLB_FTOL, gtol=_LNSRLB_GTOL, xtol=_LNSRLB_XTOL, stpmin=0.0, stpmax=_STPMX, lbfgsb=True
+)
 
 # Steps of formt's k-sum per loop trip. Rolled, every step pays a GPU launch and
 # loop overhead; fully unrolled, the graph and its compile time grow with
@@ -980,10 +987,7 @@ def _lbfgsb_step(s: _LbfgsbState, f_t, g_t, ftol, gtol, maxiter, maxfun, maxls) 
     # lnsrlb after the trial: DCSRCH, then another trial (at most maxls), or
     # the new iterate.
     gd = jnp.dot(g_t, s.d)
-    line, step, task = dcsrch_iterate(
-        s.line, s.stp, f_t, gd,
-        ftol=_LNSRLB_FTOL, gtol=_LNSRLB_GTOL, xtol=_LNSRLB_XTOL, stpmin=0.0, stpmax=_STPMX, lbfgsb=True,
-    )
+    line, step, task = _lnsrlb_iterate(s.line, s.stp, f_t, gd)
     new_x = searching & (task != FG)
     exhausted = searching & (task == FG) & (s.ifun >= maxls)
     trial = searching & (task == FG) & ~exhausted
@@ -1027,7 +1031,7 @@ def _lbfgsb_step(s: _LbfgsbState, f_t, g_t, ftol, gtol, maxiter, maxfun, maxls) 
     memory = _select(search, memory_new, memory)
     dnorm = jnp.linalg.norm(d)
     stp = jnp.where(iterations == 0, jnp.fmin(1.0 / dnorm, _STPMX), 1.0)
-    line_new, _ = dcsrch_start(stp, f, gd_new, ftol=_LNSRLB_FTOL, stpmin=0.0, stpmax=_STPMX)
+    line_new, _ = _lnsrlb_start(stp, f, gd_new)
     abnormal = abnormal | (search & not_descent)
     search = search & ~not_descent
 
@@ -1127,7 +1131,7 @@ def minimize_lbfgsb(
         return _lbfgsb_input_error(x0, ftol / _FLOAT_EPS, maxcor, maxiter, maxfun)
     zero = jnp.zeros((), x0.dtype)
     count = jnp.asarray(0, jnp.int32)
-    line, _ = dcsrch_start(zero, zero, zero, ftol=_LNSRLB_FTOL, stpmin=0.0, stpmax=_STPMX)
+    line, _ = _lnsrlb_start(zero, zero, zero)
     state = _LbfgsbState(
         phase=jnp.asarray(_LB_INIT, jnp.int32),
         x_trial=x0,
