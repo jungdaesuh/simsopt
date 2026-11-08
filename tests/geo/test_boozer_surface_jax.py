@@ -713,13 +713,8 @@ class TestBoozerSurfaceJax(JaxTestCase):
         with parity_default_device(parity_lane):
             jax_problem = _problem(True, "ls")
             boozer = jax_problem.boozer
-            problem = boozer_problem(
-                boozer.biotsavart, boozer.surface, boozer.label, boozer.targetlabel, _WEIGHT
-            )
-            x = place_float64(
-                np.concatenate((boozer.surface.get_dofs(), [_IOTA, jax_problem.G0])),
-                problem.targetlabel,
-            )
+            problem = boozer._problem(_WEIGHT)
+            x = place_float64(boozer._decision_vector(_IOTA, jax_problem.G0), problem.targetlabel)
             scalar = place_float64(1.0, problem.targetlabel)
             options = {"optimize_G": True, "weight_inv_modB": False}
 
