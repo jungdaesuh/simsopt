@@ -354,6 +354,25 @@ class TestBiotsavartJaxStateCache(JaxTestCase):
             "not np.array_equal(np.asarray(field.B()), before)",
         )
 
+    def test_notified_in_place_sample_edit_refreshes_the_field(self):
+        """An in-place edit of the sample's arrays reaches the adapter's B, dB/dX and
+        B VJP at the next notification, as it reaches native."""
+        base = _base_curves(1)[0]
+        sampler = GaussianSampler(base.quadpoints, 1e-3, 0.2, n_derivs=1)
+        sample = PerturbationSample(sampler, randomgen=np.random.default_rng(2025))
+        perturbed = CurvePerturbed(base, sample)
+        field, native = _fields([Coil(perturbed, Current(1e5))])
+        _assert_field_matches_native(field, native)
+
+        before = np.asarray(field.B()).copy()
+        sample[0][:, 0] += 0.05
+        perturbed.set_recompute_flag()
+        _assert_field_matches_native(field, native)
+        self.assertTrue(
+            not np.array_equal(np.asarray(field.B()), before),
+            "not np.array_equal(np.asarray(field.B()), before)",
+        )
+
     def test_backend_reconfiguration_rebuilds_the_coil_state(self):
         """Backend invalidation rebuilds cached coil state once while retaining native
         field agreement."""
