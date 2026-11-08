@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TypeAlias
+from typing import Callable, Tuple
 
 import numpy as np
 from unittest_jax_support import JAX_IMPORT_ERROR, JaxTestCase, optional_jax_imports
@@ -37,9 +36,11 @@ with optional_jax_imports():
     from simsopt_jax_adapters.field import JaxBiotSavart
 
 
-GeometryFunction: TypeAlias = Callable[
+# typing.Callable and typing.Tuple keep this runtime alias importable on Python 3.8,
+# where unittest discovery must reach the JAX gate and skip.
+GeometryFunction = Callable[
     ["CoilSetDofExtractionSpec", "jax.Array"],
-    tuple["jax.Array", "jax.Array", "jax.Array", "jax.Array"],
+    Tuple["jax.Array", "jax.Array", "jax.Array", "jax.Array"],
 ]
 
 
