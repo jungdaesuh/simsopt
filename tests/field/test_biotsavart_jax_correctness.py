@@ -426,9 +426,7 @@ class TestBiotsavartJaxCorrectness(JaxTestCase):
         for wrapper in _COMPOSED_WRAPPERS:
             for fixed in [False, True]:
                 for quantity in _FIELDS:
-                    with self.subTest(
-                        wrapper=wrapper, fixed=fixed, quantity=quantity
-                    ), self.case():
+                    with self.subTest(wrapper=wrapper, fixed=fixed, quantity=quantity):
                         self._case_composed_curves_match_native_fields_owner_vjps_and_finite_difference(
                             wrapper, fixed, quantity
                         )
