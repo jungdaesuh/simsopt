@@ -76,6 +76,8 @@ def _table_probe(kind: str):
         "positional-only x": lambda x, /, table: _scaled(received, x, table),
         "keyword-only table": lambda x, *, table: _scaled(received, x, table),
         "positional-or-keyword": lambda x, table: _scaled(received, x, table),
+        "defaulted last": lambda x, table, label="": _scaled(received, x, table),
+        "*args": lambda x, *tables: _scaled(received, x, tables[-1]),
     }
     return received, probes[kind]
 
@@ -126,6 +128,15 @@ class CopyingJitTests(JaxTestCase):
         cases = (
             ("argnums, positional", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=1), positional),
             ("negative argnums", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=-1), positional),
+            # -1 names ``label``, which this call leaves out, so ``table`` is dynamic.
+            ("negative argnums", "defaulted last", lambda j, fun: j(fun, static_argnums=-1), positional),
+            ("negative argnums", "*args", lambda j, fun: j(fun, static_argnums=-1), positional),
+            (
+                "negative argnums, keyword",
+                "defaulted last",
+                lambda j, fun: j(fun, static_argnums=-1),
+                lambda f, x: f(x, table, label="static"),
+            ),
             ("argnums, keyword", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=1), keyword),
             ("argnames, positional", "positional-or-keyword", lambda j, fun: j(fun, static_argnames="table"), positional),
             ("argnames, keyword", "positional-or-keyword", lambda j, fun: j(fun, static_argnames="table"), keyword),
