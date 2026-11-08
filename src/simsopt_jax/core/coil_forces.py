@@ -81,7 +81,7 @@ def regularized_self_field(gamma, gammadash, gammadashdash, quadpoints, current,
         Array of shape (n, 3): regularized self magnetic field in T.
     """
     return B_regularized_pure(
-        *(as_jax_float64(value) for value in (gamma, gammadash, gammadashdash, quadpoints, current, regularization))
+        *map(as_jax_float64, (gamma, gammadash, gammadashdash, quadpoints, current, regularization))
     )
 
 
@@ -92,7 +92,8 @@ def _float64_group(group: CoilGroup) -> CoilGroup:
 
 
 def _sampled(group: CoilGroup, downsample: int) -> CoilGroup:
-    gammas, gammadashs, currents = group
+    """Return a coil group in float64 at every ``downsample``-th quadrature point."""
+    gammas, gammadashs, currents = _float64_group(group)
     return gammas[:, ::downsample], gammadashs[:, ::downsample], currents
 
 
@@ -150,10 +151,9 @@ def _regularized_force_densities(
 
     Apply the same quadrature stride to every geometry input and source group.
     """
-    targets = _sampled(_float64_group(targets), downsample)
-    sources = tuple(_sampled(_float64_group(group), downsample) for group in sources)
-    gammadashdashs, quadpoints = as_jax_float64(gammadashdashs), as_jax_float64(quadpoints)
-    regularizations = as_jax_float64(regularizations)
+    targets = _sampled(targets, downsample)
+    sources = tuple(_sampled(group, downsample) for group in sources)
+    gammadashdashs, quadpoints, regularizations = map(as_jax_float64, (gammadashdashs, quadpoints, regularizations))
     _gammas, gammadashs, currents = targets
     gammadash_norms = jnp.linalg.norm(gammadashs, axis=-1)
     tangents = gammadashs / gammadash_norms[:, :, None]
@@ -257,8 +257,8 @@ def squared_mean_force(targets: CoilGroup, sources: tuple[CoilGroup, ...], downs
     Returns:
         Array: scalar squared integrated force in MN^2.
     """
-    targets = _sampled(_float64_group(targets), downsample)
-    sources = tuple(_sampled(_float64_group(group), downsample) for group in sources)
+    targets = _sampled(targets, downsample)
+    sources = tuple(_sampled(group, downsample) for group in sources)
     gammas, gammadashs, currents = targets
     gammadash_norms = jnp.linalg.norm(gammadashs, axis=-1)[:, :, None]
     tangents = gammadashs / gammadash_norms
@@ -283,8 +283,8 @@ def squared_mean_torque(targets: CoilGroup, sources: tuple[CoilGroup, ...], down
     Returns:
         Array: scalar squared integrated torque in (MN m)^2.
     """
-    targets = _sampled(_float64_group(targets), downsample)
-    sources = tuple(_sampled(_float64_group(group), downsample) for group in sources)
+    targets = _sampled(targets, downsample)
+    sources = tuple(_sampled(group, downsample) for group in sources)
     gammas, gammadashs, currents = targets
     centers = jax.vmap(centroid_pure)(gammas, gammadashs)
     arclengths = jnp.linalg.norm(gammadashs, axis=-1)
@@ -329,6 +329,6 @@ def net_flux(target_gamma, target_gammadash, sources: CoilGroup, downsample: int
     Returns:
         Array: scalar net external flux in Wb.
     """
-    target_gamma, target_gammadash = as_jax_float64(target_gamma), as_jax_float64(target_gammadash)
+    target_gamma, target_gammadash = map(as_jax_float64, (target_gamma, target_gammadash))
     vector_potential = biot_savart_A(target_gamma[::downsample], *_float64_group(sources))
     return net_ext_fluxes_pure(target_gammadash, vector_potential, downsample)
