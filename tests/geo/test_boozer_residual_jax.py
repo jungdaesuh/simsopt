@@ -125,11 +125,7 @@ def _surface(
         stellsym (bool): Whether the surface is stellarator symmetric.
         nfp (int): Number of field periods.
         clamped (bool): Clamp the tensor surface's ``x`` and ``z`` dimensions.
-        fit_grid (bool): Use the full-period ``8 x 9`` grid on which
-            ``fit_to_curve`` determines every DOF of every kind. The test grids
-            do not: for example, a non-stellarator-symmetric XYZ surface on its
-            half-period ``4 x 6`` grid has rank 60 of 75, and native's
-            ``FullPivHouseholderQR`` then picks build-dependent free DOFs.
+        fit_grid (bool): Use the full-period ``8 x 9`` fit grid of :func:`_fitted_surface`.
 
     Returns:
         SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier: The
@@ -174,8 +170,11 @@ def _fitted_surface(
         fitted surface; its DOFs are the unique least-squares solution.
 
     Raises:
-        AssertionError: If the fit grid leaves a DOF undetermined, so that the
-            fitted DOFs would depend on which native build solves the fit.
+        AssertionError: If the fit grid leaves a DOF undetermined. Native's
+            ``FullPivHouseholderQR`` then picks build-dependent free DOFs, as on
+            the half-period ``4 x 6`` test grid of a non-stellarator-symmetric
+            XYZ surface (rank 60 of 75); the ``8 x 9`` fit grid determines every
+            DOF of every kind.
     """
     surface = _surface(kind, stellsym, nfp, clamped, fit_grid=True)
     ndofs = surface.get_dofs().size
