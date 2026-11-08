@@ -163,6 +163,45 @@ class Testing(unittest.TestCase):
                         interpolant.evaluate_batch(xyz, fhxyz)
                         np.testing.assert_allclose(fhxyz, expected, rtol=1e-10, atol=1e-10)
 
+    def test_overflowing_scaled_index_gives_nan(self):
+        """
+        A finite coordinate so far out that its scaled grid index
+        ``n * (value - lo) / (hi - lo)`` overflows gives NaN in every output
+        component with out_of_bounds_ok=True, and raises without it. The
+        interpolant is linear and of a constant, so the boundary cell's
+        polynomial stays finite at that coordinate: only the overflow check can
+        produce the NaN.
+        """
+        ranges = [(1.0, 4.0, 20), (1.1, 3.9, 10), (1.2, 3.8, 15)]
+        values = np.array([0.25, -0.5, 0.125])
+        dim = len(values)
+
+        def fun(xs, ys, zs):
+            return np.tile(values, len(xs))
+
+        rule = sopp.UniformInterpolationRule(1)
+        interpolant_ok = sopp.RegularGridInterpolant3D(rule, *ranges, dim, True)
+        interpolant_ok.interpolate_batch(fun)
+        interpolant_strict = sopp.RegularGridInterpolant3D(rule, *ranges, dim, False)
+        interpolant_strict.interpolate_batch(fun)
+
+        center = np.array([0.5 * (lo + hi) for lo, hi, _ in ranges])
+        for axis, (lo, hi, n) in enumerate(ranges):
+            cell = (hi - lo) / n
+            overflow = 2 * (np.finfo(float).max / n)
+            for value in (overflow, -overflow):
+                with self.subTest(axis=axis, value=value):
+                    with np.errstate(over="ignore"):
+                        self.assertTrue(np.isinf(n * (value - lo) / (hi - lo)))
+                    self.assertTrue(np.isfinite((value - lo) / cell))
+                    xyz = center[None, :].copy()
+                    xyz[0, axis] = value
+                    fhxyz = np.ones((1, dim))
+                    interpolant_ok.evaluate_batch(xyz, fhxyz)
+                    self.assertTrue(np.all(np.isnan(fhxyz)), fhxyz)
+                    with self.assertRaisesRegex(RuntimeError, rf"{'xyz'[axis]}idxs=-?inf not within \[0, {n}\)"):
+                        interpolant_strict.evaluate_batch(xyz, fhxyz)
+
     def test_skip(self):
         """
         Check that the interpolant correctly identifies which regions in the
