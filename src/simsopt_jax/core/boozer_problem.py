@@ -354,13 +354,16 @@ def _refuse_derivatives_in_x(refusal, primals, tangents):
     raise TypeError(refusal)
 
 
-def _derivative_outputs_refusal(formulation: str, derivatives: int) -> str:
-    """The refusal of :func:`_not_differentiable_in_x` for outputs requested
-    with ``derivatives >= 1`` from a formulation whose value is the field's."""
-    return (
+def _decision_vector(x: jax.Array, formulation: str, derivatives: int) -> jax.Array:
+    """``x`` in float64, refusing derivatives in it when ``derivatives >= 1``."""
+    x = as_jax_float64(x)
+    if not derivatives:
+        return x
+    return _not_differentiable_in_x(
+        x,
         f"{formulation}(derivatives={derivatives}) is not differentiable in x: its outputs "
         f"use the field's Taylor model of order {derivatives}. Differentiate the "
-        "derivatives=0 value instead; coil derivatives at a fixed x are exact."
+        "derivatives=0 value instead; coil derivatives at a fixed x are exact.",
     )
 
 
@@ -403,11 +406,7 @@ def boozer_surface_residual(
         TypeError: When the ``derivatives >= 1`` outputs are differentiated in ``x``.
     """
 
-    x = as_jax_float64(x)
-    if derivatives:
-        x = _not_differentiable_in_x(
-            x, _derivative_outputs_refusal("boozer_surface_residual", derivatives)
-        )
+    x = _decision_vector(x, "boozer_surface_residual", derivatives)
 
     def residual(point):
         return _boozer_terms(
@@ -459,11 +458,7 @@ def boozer_penalty_constraints(
         TypeError: When the ``derivatives >= 1`` outputs are differentiated in ``x``.
     """
 
-    x = as_jax_float64(x)
-    if derivatives:
-        x = _not_differentiable_in_x(
-            x, _derivative_outputs_refusal("boozer_penalty_constraints", derivatives)
-        )
+    x = _decision_vector(x, "boozer_penalty_constraints", derivatives)
 
     def penalty(point):
         residual, label_residual, z_residual = _penalty_terms(
@@ -591,7 +586,7 @@ def boozer_exact_residual(
         raise RuntimeError(
             "Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier"
         )
-    x = as_jax_float64(x)
+    x = _decision_vector(x, "boozer_exact_residual", derivatives)
     axis = not problem.surface.stellsym
 
     def system(point):
@@ -608,8 +603,5 @@ def boozer_exact_residual(
 
     if derivatives == 0:
         return system(x)
-    x = _not_differentiable_in_x(
-        x, _derivative_outputs_refusal("boozer_exact_residual", derivatives)
-    )
     value, jacobian = residual_derivatives(system, x, derivatives)
     return value, jacobian
