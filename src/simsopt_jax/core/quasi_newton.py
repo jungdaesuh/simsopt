@@ -544,7 +544,8 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     grad_called = init | wolfe1 | wolfe2_last | wolfe2_slope | zoom_slope
     njev = s.njev + (grad_called & ~grad_counted)
 
-    s = replace(s, 
+    s = replace(
+        s,
         nfev=s.nfev + moved,
         njev=njev,
         last_x=x_t,
@@ -584,7 +585,8 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     stop = converged | small_step | non_finite
     H = _bfgs_inverse_hessian_update(s.H, sk, yk)
     iterate = accept & ~stop & (gnorm > gtol) & (k < maxiter)
-    s = replace(s, 
+    s = replace(
+        s,
         x=jnp.where(accept, x_t, s.x),
         f=jnp.where(accept, f_t, s.f),
         g=jnp.where(accept, g_t, s.g),
@@ -593,7 +595,8 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
         gnorm=jnp.where(accept, gnorm, jnp.where(init, gnorm0, s.gnorm)),
         H=jnp.where(accept & ~stop, H, s.H),
     )
-    s = replace(s, 
+    s = replace(
+        s,
         x=jnp.where(init, x_t, s.x),
         f=jnp.where(init, f_t, s.f),
         g=jnp.where(init, g_t, s.g),
@@ -608,7 +611,8 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     alpha1 = _initial_step(s.f, s.old_old_fval, derphi0)
     line, start_task = _wolfe1_start(alpha1, s.f, derphi0)
     wolfe1_start = start & (start_task != ERROR)
-    s = replace(s, 
+    s = replace(
+        s,
         pk=jnp.where(start, pk, s.pk),
         derphi0=jnp.where(start, derphi0, s.derphi0),
         line=_select(wolfe1_start, line, s.line),
@@ -618,7 +622,8 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
     )
     wolfe2_start = wolfe1_failed | (start & (start_task == ERROR))
     alpha1 = _py_min(_initial_step(s.f, s.old_old_fval, s.derphi0), _AMAX)
-    s = replace(s, 
+    s = replace(
+        s,
         alpha=jnp.where(wolfe2_start, alpha1, s.alpha),
         alpha0=jnp.where(wolfe2_start, 0.0, s.alpha0),
         phi_a0=jnp.where(wolfe2_start, s.f, s.phi_a0),
@@ -629,18 +634,15 @@ def _bfgs_step(s: _BfgsState, f_t, g_t, gtol, maxiter, xrtol) -> _BfgsState:
 
     line_search_failed = wolfe2_failed | zoom_failed
     done = (init & ~start) | line_search_failed | (accept & ~iterate)
-    return replace(s, 
+    return replace(
+        s,
         phase=jnp.where(done, _DONE, s.phase),
-        precision_lost=s.precision_lost
-        | line_search_failed
-        | (accept & ~converged & ~small_step & non_finite),
+        precision_lost=s.precision_lost | line_search_failed | (accept & ~converged & ~small_step & non_finite),
         x_trial=s.x + s.alpha * s.pk,
     )
 
 
-def minimize_bfgs(
-    value_and_grad: ValueAndGrad, x0: jax.Array, gtol, maxiter, xrtol=0.0
-) -> QuasiNewtonResult:
+def minimize_bfgs(value_and_grad: ValueAndGrad, x0: jax.Array, gtol, maxiter, xrtol=0.0) -> QuasiNewtonResult:
     """``scipy.optimize.minimize(value_and_grad, x0, jac=True, method="BFGS",
     options={"gtol": gtol, "maxiter": maxiter, "xrtol": xrtol})``.
 
