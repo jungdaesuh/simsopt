@@ -132,7 +132,7 @@ class PerturbationSample(GSONable):
         """
         self.sampler = sampler
         self.randomgen = randomgen   # If not None, most likely fail with serialization
-        self._consumers = []
+        self._consumers = weakref.WeakValueDictionary()  # registered curves by id
         if sample:
             self._sample = sample
         else:
@@ -160,38 +160,15 @@ class PerturbationSample(GSONable):
             state: the dictionary returned by :meth:`__getstate__`.
         """
         self.__dict__.update(state)
-        self._consumers = []
+        self._consumers = weakref.WeakValueDictionary()
 
-    def add_consumer(self, curve):
-        """
-        Register a curve whose geometry depends on this sample.
+    def _add_consumer(self, curve):
+        """Notify ``curve``, held by a weak reference, on every :meth:`resample`."""
+        self._consumers[id(curve)] = curve
 
-        Only a weak reference is kept, so registering does not extend the
-        lifetime of ``curve``. Curves are compared by identity, so another curve
-        that compares equal to ``curve`` stays registered and registering the
-        same curve twice has no further effect.
-
-        Args:
-            curve: a :obj:`CurvePerturbed` (or any ``Optimizable``) to notify
-                whenever :meth:`resample` draws a new sample.
-        """
-        if not any(ref() is curve for ref in self._consumers):
-            self._consumers.append(weakref.ref(curve))
-
-    def remove_consumer(self, curve):
-        """
-        Stop notifying ``curve`` when :meth:`resample` draws a new sample.
-
-        Curves are compared by identity, so another curve that compares equal
-        to ``curve`` stays registered. References to consumers that no longer
-        exist are dropped as well.
-
-        Args:
-            curve: a consumer previously passed to :meth:`add_consumer`; a curve
-                that is not registered is ignored.
-        """
-        self._consumers = [ref for ref in self._consumers
-                           if (consumer := ref()) is not None and consumer is not curve]
+    def _remove_consumer(self, curve):
+        """Stop notifying ``curve``; a curve that is not registered is ignored."""
+        self._consumers.pop(id(curve), None)
 
     def resample(self):
         """
@@ -201,7 +178,6 @@ class PerturbationSample(GSONable):
         cached geometry and propagates to its dependents, and
         ``_notify_non_dof_change()``, which clears results that a bell leaves in
         place when no DOF is free (e.g. the native cache of a fully fixed field).
-        References to consumers that no longer exist are dropped.
 
         A new draw rings dependents exactly as a DOF change does, so
         :obj:`~simsopt.geo.surfaceobjectives.ToroidalFlux` and
@@ -215,11 +191,8 @@ class PerturbationSample(GSONable):
         so a draw on only some of the ranks hangs.
         """
         self._sample = self.sampler.draw_sample(self.randomgen)
-        live = [c for c in (ref() for ref in self._consumers) if c is not None]
-        self._consumers = [weakref.ref(c) for c in live]
-        for consumer in live:
-            consumer.set_recompute_flag()
-            consumer._notify_non_dof_change()
+        for curve in list(self._consumers.values()):
+            curve._sample_changed()
 
     def __getitem__(self, deriv):
         """
@@ -285,7 +258,7 @@ class CurvePerturbed(sopp.Curve, Curve):
         sopp.Curve.__init__(self, curve.quadpoints)
         Curve.__init__(self, depends_on=[curve])
         self._sample = sample
-        sample.add_consumer(self)
+        sample._add_consumer(self)
 
     @property
     def sample(self):
@@ -314,9 +287,13 @@ class CurvePerturbed(sopp.Curve, Curve):
         Args:
             sample: the new :obj:`PerturbationSample`.
         """
-        self._sample.remove_consumer(self)
+        self._sample._remove_consumer(self)
         self._sample = sample
-        sample.add_consumer(self)
+        sample._add_consumer(self)
+        self._sample_changed()
+
+    def _sample_changed(self):
+        """Invalidate this curve and its dependents after its perturbation changed."""
         self.set_recompute_flag()
         self._notify_non_dof_change()
 

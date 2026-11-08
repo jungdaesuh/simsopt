@@ -1,7 +1,9 @@
 import copy
+import gc
 import json
 import pickle
 import unittest
+import weakref
 from unittest import mock
 from numpy.random import PCG64DXSM, Generator
 
@@ -222,7 +224,7 @@ class CurvePerturbationTesting(unittest.TestCase):
         self.assertEqual(curve1, curve2)
 
         curve2.sample = sample
-        sample.add_consumer(curve2)
+        sample._add_consumer(curve2)
         curve1.gamma()
         curve2.gamma()
         with mock.patch.object(curve2, "set_recompute_flag", wraps=curve2.set_recompute_flag) as invalidate:
@@ -230,6 +232,16 @@ class CurvePerturbationTesting(unittest.TestCase):
         invalidate.assert_called_once()
         np.testing.assert_allclose(curve1.gamma(), base1.gamma() + sample[0], rtol=0, atol=1e-15)
         np.testing.assert_allclose(curve2.gamma(), base2.gamma() + sample[0], rtol=0, atol=1e-15)
+
+    def test_sample_does_not_keep_its_curves_alive(self):
+        """A sample holds its curves by weak references, so a curve dropped by the caller is freed."""
+        points = np.linspace(0, 1, 64, endpoint=False)
+        sampler = GaussianSampler(points, 0.05, 0.3, n_derivs=1)
+        sample = PerturbationSample(sampler, randomgen=Generator(PCG64DXSM(9)))
+        curve = weakref.ref(CurvePerturbed(circle(points, 1.0), sample))
+        gc.collect()
+        self.assertIsNone(curve())
+        sample.resample()
 
     def test_sample_reassignment_moves_the_curve(self):
         """A curve given a new sample takes its draw at once and follows only that sample."""
