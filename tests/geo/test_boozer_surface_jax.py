@@ -521,24 +521,14 @@ class TestBoozerSurfaceJax(JaxTestCase):
         """BFGS (or L-BFGS-B), then the penalty Newton. Near convergence the
         quasi-Newton walk's last line searches follow round-off (its iteration
         count can differ by one or two), so the polished solution, the Newton
-        step count and flags are compared."""
-        for limited_memory in (False, True):
-            for case_id_0, optimize_G in zip(
-                ["G", "G-from-currents"], [True, False], strict=True
-            ):
-                for case_id_1, weight_inv_modB in zip(
-                    ["weighted", "unweighted"], [True, False], strict=True
-                ):
-                    with self.subTest(
-                        limited_memory=limited_memory,
-                        case_id_0=case_id_0,
-                        optimize_G=optimize_G,
-                        case_id_1=case_id_1,
-                        weight_inv_modB=weight_inv_modB,
-                    ), self.case():
-                        self._case_ls_run_code_matches_native(
-                            optimize_G, weight_inv_modB, limited_memory
-                        )
+        step count and flags are compared. L-BFGS-B runs the same penalty as
+        BFGS, so it has one row (G optimized, unweighted)."""
+        rows = [(False, optimize_G, weighted) for optimize_G in (True, False) for weighted in (True, False)]
+        for limited_memory, optimize_G, weight_inv_modB in (*rows, (True, True, False)):
+            with self.subTest(
+                limited_memory=limited_memory, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB
+            ), self.case():
+                self._case_ls_run_code_matches_native(optimize_G, weight_inv_modB, limited_memory)
 
     def _case_ls_run_code_matches_native(self, optimize_G, weight_inv_modB, limited_memory):
         """Run one row with case-local objects released before runtime cleanup."""
