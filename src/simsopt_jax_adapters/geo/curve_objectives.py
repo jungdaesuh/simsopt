@@ -174,11 +174,14 @@ def _class_geometry_derivative(curves, class_members, class_dgammas, class_dgamm
     class_dgammas, class_dgammadashes = host_tree(
         (class_dgammas, class_dgammadashes), dtype=np.float64
     )
-    positions = [_class_positions(class_members)[index] for index in range(len(curves))]
+    if not len(class_members) == len(class_dgammas) == len(class_dgammadashes):
+        raise ValueError("expected one geometry cotangent stack per quadrature class")
+    positions = _class_positions(class_members)
+    rows = [positions[index] for index in range(len(curves))]
     return _sum_curve_vjp_contributions(
         curves,
-        [class_dgammas[cls][row] for cls, row in positions],
-        [class_dgammadashes[cls][row] for cls, row in positions],
+        [class_dgammas[cls][row] for cls, row in rows],
+        [class_dgammadashes[cls][row] for cls, row in rows],
     )
 
 
