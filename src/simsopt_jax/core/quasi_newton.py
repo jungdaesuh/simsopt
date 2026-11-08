@@ -120,7 +120,21 @@ evaluated and counted again (at a NaN-containing ``x0``, a second time at the
 start; not on the exits for invalid inputs, which request nothing after the
 first evaluation). The port counts it once, so for such points ``nfev``,
 ``njev`` and, at an L-BFGS-B ``maxfun`` limit, the status and message can
-differ from SciPy's. Not provided: bounds, callbacks and SciPy's other options
+differ from SciPy's.
+
+Known difference in range: SciPy updates BFGS's inverse Hessian as
+``A1 @ (H @ A2) + rho s s^T`` with ``A1 = I - rho s y^T`` and ``A2 = A1^T``
+formed as matrices, two dense products costing O(n^3) per iteration; the port
+applies ``A2`` and then ``A1`` as rank-one updates, ``H - (H y)(rho s)^T`` and
+then minus ``(rho s)(y^T H A2)``, matrix-vector and outer products costing
+O(n^2). Its intermediates ``H y`` and ``y^T H A2`` carry the scale of ``H``
+times ``y``, which SciPy's never do (``rho`` multiplies ``s y^T`` before ``H``
+does), so where that exceeds float64's range the port's update is NaN and
+SciPy's can be finite: ``H = [[1e200]]``, ``s = [1]``, ``y = [1e200]`` gives
+NaN in the port and ``[[1e-200]]`` in SciPy. SciPy's update overflows only
+where an entry of ``s y^T``, ``H A2`` or the result does.
+
+Not provided: bounds, callbacks and SciPy's other options
 (``c1`` and ``c2`` keep SciPy's defaults, so its check of them cannot fail;
 ``norm``, ``eps``, ``hess_inv0``).
 """
@@ -450,10 +464,12 @@ def _bfgs_inverse_hessian_update(H: jax.Array, sk: jax.Array, yk: jax.Array) -> 
     """
     rhok_inv = jnp.dot(yk, sk)
     rhok = jnp.where(rhok_inv == 0.0, _RHOK_DIVIDE_BY_ZERO, 1.0 / rhok_inv)
-    # SciPy's factored order, H A2 = H - (H y) (rho s)^T and then A1 applied to
-    # it: the expanded rank-two form can cancel to an indefinite H. Each outer
-    # product takes rho s, as SciPy's (rho s) s^T does, so none underflows for
-    # |s| below 1e-154; outer products keep the update O(n^2).
+    # SciPy's factors applied in its order as rank-one updates, H A2 = H -
+    # (H y) (rho s)^T and then A1 (H A2): the expanded rank-two form can cancel
+    # to an indefinite H. Each outer product takes rho s, as SciPy's (rho s) s^T
+    # does, so none underflows for |s| below 1e-154; outer products keep the
+    # update O(n^2). H y can overflow where SciPy's products do not (module
+    # docstring, "Known difference in range").
     rho_s = rhok * sk
     HA2 = H - jnp.outer(H @ yk, rho_s)
     return HA2 - jnp.outer(rho_s, yk @ HA2) + jnp.outer(rho_s, sk)
