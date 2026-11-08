@@ -191,19 +191,8 @@ if args.fused:
 
 
 def fused_value_and_grad(dofs):
-    """Evaluate the frozen fused problem at composite DOFs.
-
-    The DOFs are placed on the device explicitly, so the evaluation also runs
-    under ``SIMSOPT_JAX_TRANSFER_GUARD=disallow``.
-
-    Args:
-        dofs: Array of shape (ndofs,), free DOFs of ``JF`` in its DOF order, in native
-            geometry (m) and current (A) units.
-
-    Returns:
-        tuple: ``(value, gradient)``: the objective as a float, in the units of ``JF``, and
-            its host gradient, of shape (ndofs,), in ``JF``'s DOF order.
-    """
+    """Fused value and host gradient of JF at its DOFs, in JF's DOF order."""
+    # Explicit placement: also runs under SIMSOPT_JAX_TRANSFER_GUARD=disallow.
     value, gradient = jax.device_get(value_and_grad(problem, as_jax_float64(dofs[field_order])))
     return float(value), gradient[objective_order]
 

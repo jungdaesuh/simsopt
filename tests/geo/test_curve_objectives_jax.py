@@ -8,6 +8,7 @@ with optional_jax_imports():
     import simsopt_jax  # noqa: F401
     import jax
     import jax.numpy as jnp
+    from jax.extend.core import jaxprs_in_params
     from core.test_buffer_ownership import _host_array, make_execution_gate
     from simsopt._core.derivative import Derivative
     from simsopt._core.optimizable import Optimizable
@@ -247,10 +248,8 @@ def _point_pair_distance_shapes(adapter):
         for equation in jaxpr.eqns:
             if equation.primitive.name == "sqrt" and equation.outvars[0].aval.ndim == 3:
                 yield equation.outvars[0].aval.shape
-            for param in equation.params.values():
-                inner = getattr(param, "jaxpr", param)
-                if hasattr(inner, "eqns"):
-                    yield from shapes(inner)
+            for inner in jaxprs_in_params(equation.params):
+                yield from shapes(inner)
 
     return sorted(shapes(jax.make_jaxpr(total)(*snapshot.operands).jaxpr))
 

@@ -14,7 +14,7 @@
     "tests/core/test_grouped_field_without_coils.py",
     "tests/core/test_device_one_gradient_path.py",
     "tests/core/test_kernel_numeric_helpers.py",
-    "tests/core/test_optional_jax_gate.py",
+    "tests/core/test_unittest_jax_support.py",
     "tests/core/test_placement_zero.py",
     "tests/core/test_state_tokens.py",
     "tests/field/test_biotsavart_field_pullback.py",

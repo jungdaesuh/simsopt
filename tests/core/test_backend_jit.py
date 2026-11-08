@@ -63,35 +63,33 @@ with optional_jax_imports():
     jax.tree_util.register_pytree_node_class(_Table)
 
 
+def _scaled(received: list, x, table):
+    """``x * sum(table.values)``, appending ``table`` to ``received``."""
+    received.append(table)
+    return x * jnp.sum(jnp.asarray(table.values))
+
+
 def _table_probe(kind: str):
-    """``x * sum(table.values)`` with the parameter kinds ``kind`` names,
-    recording each ``table`` it receives."""
+    """``_scaled`` with the parameter kinds ``kind`` names, and the tables it receives."""
     received = []
-
-    def positional_only(x, /, table):
-        received.append(table)
-        return x * jnp.sum(jnp.asarray(table.values))
-
-    def keyword_only(x, *, table):
-        received.append(table)
-        return x * jnp.sum(jnp.asarray(table.values))
-
-    def positional_or_keyword(x, table):
-        received.append(table)
-        return x * jnp.sum(jnp.asarray(table.values))
-
     probes = {
-        "positional-only x": positional_only,
-        "keyword-only table": keyword_only,
-        "positional-or-keyword": positional_or_keyword,
+        "positional-only x": lambda x, /, table: _scaled(received, x, table),
+        "keyword-only table": lambda x, *, table: _scaled(received, x, table),
+        "positional-or-keyword": lambda x, table: _scaled(received, x, table),
+        "defaulted last": lambda x, table, label="": _scaled(received, x, table),
+        "*args": lambda x, *tables: _scaled(received, x, tables[-1]),
     }
     return received, probes[kind]
 
 
-def _recording_copy(copied: list, value):
-    """``snapshot_host_tree(value)``, appending ``value`` to ``copied``."""
-    copied.append(value)
-    return snapshot_host_tree(value)
+def _recording_copies(copies: list):
+    """Patch ``snapshot_host_tree`` to append each ``(value, copy)`` pair to ``copies``."""
+
+    def record(value):
+        copies.append((value, snapshot_host_tree(value)))
+        return copies[-1][1]
+
+    return mock.patch.object(jit_module, "snapshot_host_tree", record)
 
 
 class CopyingJitTests(JaxTestCase):
@@ -106,7 +104,7 @@ class CopyingJitTests(JaxTestCase):
         for name, fun, call in _PASSING_STYLES:
             with self.subTest(style=name):
                 f = jit(fun)
-                call(f, np.ones(_INPUT_LENGTH), slow(eye)).block_until_ready()
+                call(f, np.ones(_INPUT_LENGTH), eye).block_until_ready()  # compiles f
                 for _ in range(_ATTEMPTS):
                     buffer = aligned_host_copy(np.ones(_INPUT_LENGTH))
                     gate = slow(eye)
@@ -118,43 +116,30 @@ class CopyingJitTests(JaxTestCase):
                 else:
                     self.fail("the gate finished before every overwrite; race not probed")
 
-    def test_static_arguments_keep_identity_and_compile_once(self):
-        """Static arguments, even pytrees of NumPy arrays, are passed as-is and never recompile."""
-        table = _Table(np.arange(3.0))
-        selectors = (
-            ("argnums", {"static_argnums": 1}, lambda f, x: f(x, table)),
-            ("negative argnums", {"static_argnums": -1}, lambda f, x: f(x, table)),
-            ("argnames, positional", {"static_argnames": "table"}, lambda f, x: f(x, table)),
-            ("argnames, keyword", {"static_argnames": "table"}, lambda f, x: f(x, table=table)),
-            ("argnums, keyword", {"static_argnums": 1}, lambda f, x: f(x, table=table)),
-        )
-        for name, options, call in selectors:
-            with self.subTest(selector=name):
-                self._check_static_table(table, options, call)
-
-    def _check_static_table(self, table, options, call):
-        seen = []
-
-        def scaled(x, table):
-            seen.append(table)
-            return x * jnp.sum(jnp.asarray(table.values))
-
-        f = jit(scaled, **options)
-        for _ in range(3):
-            np.testing.assert_array_equal(call(f, np.ones(2)), np.full(2, 3.0))
-        self.assertEqual(len(seen), 1)
-        self.assertIs(seen[0], table)
-        self.assertEqual(f._cache_size(), 1)
-
     def test_static_selectors_match_raw_jit(self):
-        """Positional-only, keyword-only and iterator selectors make the arguments
-        static that ``jax.jit`` does, and the dynamic NumPy argument is copied."""
+        """Every selector form makes the arguments static that ``jax.jit`` does:
+        static ones, even pytrees of NumPy arrays, pass by identity and never
+        recompile, and dynamic NumPy arguments are copied."""
         table = _Table(np.arange(3.0))
         positional = lambda f, x: f(x, table)
         keyword = lambda f, x: f(x, table=table)
         # (name, probe kind, compile with the selector, call); each compile
         # builds a fresh iterator.
         cases = (
+            ("argnums, positional", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=1), positional),
+            ("negative argnums", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=-1), positional),
+            # -1 names ``label``, which this call leaves out, so ``table`` is dynamic.
+            ("negative argnums", "defaulted last", lambda j, fun: j(fun, static_argnums=-1), positional),
+            ("negative argnums", "*args", lambda j, fun: j(fun, static_argnums=-1), positional),
+            (
+                "negative argnums, keyword",
+                "defaulted last",
+                lambda j, fun: j(fun, static_argnums=-1),
+                lambda f, x: f(x, table, label="static"),
+            ),
+            ("argnums, keyword", "positional-or-keyword", lambda j, fun: j(fun, static_argnums=1), keyword),
+            ("argnames, positional", "positional-or-keyword", lambda j, fun: j(fun, static_argnames="table"), positional),
+            ("argnames, keyword", "positional-or-keyword", lambda j, fun: j(fun, static_argnames="table"), keyword),
             ("argnames", "positional-only x", lambda j, fun: j(fun, static_argnames="table"), positional),
             ("argnums", "positional-only x", lambda j, fun: j(fun, static_argnums=1), keyword),
             ("argnames", "keyword-only table", lambda j, fun: j(fun, static_argnames="table"), keyword),
@@ -175,15 +160,18 @@ class CopyingJitTests(JaxTestCase):
                 received, fun = _table_probe(kind)
                 f = compile_with(jit, fun)
                 x = np.ones(2)
-                copied = []
-                with mock.patch.object(
-                    jit_module, "snapshot_host_tree", partial(_recording_copy, copied)
-                ):
-                    for _ in range(2):
+                copies = []
+                with _recording_copies(copies):
+                    for _ in range(3):
                         np.testing.assert_array_equal(call(f, x), np.full(2, 3.0))
+                self.assertEqual(len(received), 1)
+                if kind == "positional-or-keyword":  # every selector here makes ``table`` static
+                    self.assertIs(received[0], table)
                 self.assertEqual(received[0] is table, raw_received[0] is table)
                 self.assertEqual(f._cache_size(), 1)
+                copied = [value for value, _ in copies]
                 self.assertTrue(any(value is x for value in copied), copied)
+                self.assertEqual(any(value is table for value in copied), raw_received[0] is not table)
 
     def test_every_decorator_form_compiles_with_its_options(self):
         """``@jit``, ``partial(jit, ...)``, ``@jit(...)`` and ``jit(f, ...)`` give the same wrapper."""
@@ -227,17 +215,11 @@ class CopyingJitTests(JaxTestCase):
 
     def test_jax_array_inputs_are_not_copied(self):
         """Arguments without NumPy leaves skip the copy; NumPy leaves are copied privately."""
-        original = jit_module.snapshot_host_tree
         copies = []
-
-        def recording(value):
-            copies.append((value, original(value)))
-            return copies[-1][1]
-
         add = jit(lambda a, tree: a + tree["b"][0] * tree["b"][1])
         values = jnp.arange(3.0)
         host = np.arange(3.0)
-        with mock.patch.object(jit_module, "snapshot_host_tree", recording):
+        with _recording_copies(copies):
             add(values, {"b": [values, values]})
             add(values, tree={"b": (values, 2.0)})
             self.assertEqual(copies, [])

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports, require_cuda
+from unittest_jax_support import (
+    JaxTestCase,
+    optional_jax_imports,
+    require_cuda,
+    run_fresh_process,
+)
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -17,8 +22,6 @@ with optional_jax_imports():
 
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import cast
 from unittest import mock
@@ -28,26 +31,8 @@ import numpy as np
 
 # Two host devices exist only if XLA is told so before it initializes, so the
 # multi-device checks run in a child process.
-_PLACEMENT_CHILD = (
-    Path(__file__).resolve().with_name("fresh_process") / "backend_dtypes_placement.py"
-)
-
-
-def _run_fresh_process_child(name, environment, *arguments):
-    """Run the ``fresh_process`` script ``name`` with ``arguments`` in a new interpreter."""
-    return subprocess.run(
-        (sys.executable, str(_PLACEMENT_CHILD.with_name(name)), *arguments),
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-
-
-def _run_placement_child(scenario, environment):
-    """Run one ``fresh_process/backend_dtypes_placement.py`` scenario."""
-    return _run_fresh_process_child(_PLACEMENT_CHILD.name, environment, scenario)
+_FRESH_PROCESS = Path(__file__).resolve().with_name("fresh_process")
+_PLACEMENT_CHILD = _FRESH_PROCESS / "backend_dtypes_placement.py"
 
 
 class TestBackendDtypesReferencePlacement(JaxTestCase):
@@ -157,7 +142,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
             }
         )
-        completed = _run_placement_child("staged_device_array", environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "staged_device_array", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_reference_placement_handles_tracer_leaf_in_sequence(self):
@@ -257,8 +242,8 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 environment.pop("JAX_ENABLE_X64", None)
                 if x64_setting is not None:
                     environment["JAX_ENABLE_X64"] = x64_setting
-                completed = _run_fresh_process_child(
-                    "raw_kernel_float64.py", environment
+                completed = run_fresh_process(
+                    _FRESH_PROCESS / "raw_kernel_float64.py", env=environment, timeout=300
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
 
@@ -266,8 +251,10 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         """With x64 disabled after ``simsopt_jax`` was imported, selecting either
         CPU mode runs the raw B kernel in float64 again (analytic on-axis loop
         field to 1e-13 relative)."""
-        completed = _run_fresh_process_child(
-            "set_backend_float64.py", dict(os.environ, JAX_PLATFORMS="cpu")
+        completed = run_fresh_process(
+            _FRESH_PROCESS / "set_backend_float64.py",
+            env=dict(os.environ, JAX_PLATFORMS="cpu"),
+            timeout=300,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
@@ -397,7 +384,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
             }
         )
-        completed = _run_placement_child("unplaced_joins_committed", environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "unplaced_joins_committed", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_unplaced_values_follow_the_runtime_policy_in_a_cuda_process(self):
@@ -411,7 +398,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
         require_cuda("CUDA device required for the two-backend placement check")
         environment = dict(os.environ)
         environment.update({"JAX_PLATFORMS": "cuda,cpu", "JAX_ENABLE_X64": "1"})
-        completed = _run_placement_child("cuda_two_backend", environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "cuda_two_backend", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_explicit_cross_backend_moves_pass_a_disallow_guard(self):
@@ -477,7 +464,7 @@ class TestBackendDtypesReferencePlacement(JaxTestCase):
                 ),
             }
         )
-        completed = _run_placement_child("cuda_sharded_cross_backend", environment)
+        completed = run_fresh_process(_PLACEMENT_CHILD, "cuda_sharded_cross_backend", env=environment, timeout=300)
         self.assertTrue(completed.returncode == 0, completed.stdout + completed.stderr)
 
     def test_commit_in_place_commits_where_the_array_lives(self):

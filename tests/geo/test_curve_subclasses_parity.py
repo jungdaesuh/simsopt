@@ -97,7 +97,7 @@ def _make_native_jax_curves(seed: int) -> tuple[JaxCurveXYZFourier, JaxCurvePlan
     """Native JaxCurve twins of CurveXYZFourier and CurvePlanarFourier, same DOF layouts."""
     xyz = JaxCurveXYZFourier(24, 3)
     dofs = 0.05 * parity_rng(seed).normal(size=xyz.dof_size)
-    dofs[[2, 8, 15]] += (1.0, 1.0, 0.3)  # xc(1), ys(1), zs(1)
+    dofs[[xyz.local_dof_names.index(name) for name in ("xc(1)", "ys(1)", "zs(1)")]] += (1.0, 1.0, 0.3)
     xyz.x = dofs
     planar = JaxCurvePlanarFourier(20, 3)
     planar.x = _make_planar_curve(seed).get_dofs()
