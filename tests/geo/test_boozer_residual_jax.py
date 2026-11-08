@@ -1418,10 +1418,10 @@ class TestBoozerResidualJax(JaxTestCase):
         rows = boozer_exact_residual_rows(setup.surface)
         formulations = {
             "residual": lambda x, xl: jax_boozer_surface_residual(
-                problem, x, derivatives=1, optimize_G=True
+                problem, x, derivatives=2, optimize_G=True
             ),
             "penalty": lambda x, xl: boozer_penalty_constraints(
-                problem, x, derivatives=1, optimize_G=True
+                problem, x, derivatives=2, optimize_G=True
             ),
             "exact constraints": lambda x, xl: boozer_exact_constraints(
                 problem, xl, derivatives=1
