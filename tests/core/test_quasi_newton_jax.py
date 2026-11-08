@@ -289,6 +289,18 @@ class TestQuasiNewtonJax(JaxTestCase):
         else:
             assert_matches_native(result.hess_inv, expected.hess_inv, f"{name} hess_inv", rtol)
 
+    def _assert_ends_as_scipy(self, cases, params=np.zeros(0)):
+        """Each ``case: (name, x0, method, options, status)`` ends with SciPy's
+        status (asserted on SciPy's run), record and ``x`` on every lane."""
+        for case, (name, x0, method, options, status) in cases.items():
+            expected = _scipy(name, x0, params, method, options)
+            for lane in _LANES:
+                with self.subTest(lane=lane, case=case), self.case():
+                    self.assertEqual(expected.status, status, f"{case}: SciPy's status changed")
+                    result, message = _device(name, x0, params, method, options, lane)
+                    self._assert_scipy_record(expected, result, message, case)
+                    assert_matches_native(result.x, expected.x, f"{case} x", _FAILURE_RTOL)
+
     def test_early_iterates_match_scipy(self):
         """Capped at k iterations, both solvers stop as SciPy does with its
         iterate to round-off, at every k where round-off determines SciPy's
@@ -307,18 +319,20 @@ class TestQuasiNewtonJax(JaxTestCase):
         stops at nine there (``_EARLY_NUMERIC_ITERATIONS``); the record is still
         compared at ten, and the converged comparison follows that walk to its
         end."""
-        for lane in _LANES:
-            for method in ("BFGS", "L-BFGS-B"):
-                for name in _problems():
+        for method in ("BFGS", "L-BFGS-B"):
+            for name, (x0, params) in _problems().items():
+                expected = [
+                    _scipy(name, x0, params, method, _options(method, k)) for k in range(1, _EARLY_ITERATIONS + 1)
+                ]
+                for lane in _LANES:
                     with self.subTest(lane=lane, method=method, name=name), self.case():
-                        self._case_early_iterates_match_scipy(lane, method, name)
+                        self._case_early_iterates_match_scipy(lane, method, name, expected)
 
-    def _case_early_iterates_match_scipy(self, lane, method, name):
+    def _case_early_iterates_match_scipy(self, lane, method, name, scipy_results):
         x0, params = _problems()[name]
         numeric_iterations = _EARLY_NUMERIC_ITERATIONS.get((method, name), _EARLY_ITERATIONS)
-        for k in range(1, _EARLY_ITERATIONS + 1):
+        for k, expected in enumerate(scipy_results, start=1):
             options = _options(method, k)
-            expected = _scipy(name, x0, params, method, options)
             self.assertEqual(expected.status, 1, f"{name}: SciPy converged before k={k}")
             result, message = _device(name, x0, params, method, options, lane)
             self._assert_scipy_record(expected, result, message, f"{method} {name} k={k}")
@@ -337,16 +351,16 @@ class TestQuasiNewtonJax(JaxTestCase):
         ``_ROUND_OFF_WALKS``, which end at SciPy's solution to what ``gtol``
         allows, with SciPy's status and its message or one that round-off
         gives SciPy from x0 moved by an ulp."""
-        for lane in _LANES:
-            for method in ("BFGS", "L-BFGS-B"):
-                for name in _problems():
+        for method in ("BFGS", "L-BFGS-B"):
+            options = _options(method, 5000) if method == "BFGS" else _options(method, 5000, maxcor=10)
+            for name, (x0, params) in _problems().items():
+                expected = _scipy(name, x0, params, method, options)
+                for lane in _LANES:
                     with self.subTest(lane=lane, method=method, name=name), self.case():
-                        self._case_converged_solves_match_scipy(lane, method, name)
+                        self._case_converged_solves_match_scipy(lane, method, name, options, expected)
 
-    def _case_converged_solves_match_scipy(self, lane, method, name):
+    def _case_converged_solves_match_scipy(self, lane, method, name, options, expected):
         x0, params = _problems()[name]
-        options = _options(method, 5000) if method == "BFGS" else _options(method, 5000, maxcor=10)
-        expected = _scipy(name, x0, params, method, options)
         self.assertEqual(expected.status, 0, f"{name}: SciPy did not converge")
         result, message = _device(name, x0, params, method, options, lane)
         if (method, name) in _ROUND_OFF_WALKS:  # Round-off decides these counts; see _ROUND_OFF_WALKS.
@@ -366,42 +380,27 @@ class TestQuasiNewtonJax(JaxTestCase):
 
     def test_failed_line_searches_end_as_in_scipy(self):
         """A contradicting gradient: BFGS loses precision (status 2), L-BFGS-B is ABNORMAL."""
-        cases = {
-            "BFGS": ("contradicting", np.ones(4), _options("BFGS", 100)),
-            "L-BFGS-B": ("contradicting", np.ones(4), _options("L-BFGS-B", 100)),
+        self._assert_ends_as_scipy({
+            "BFGS": ("contradicting", np.ones(4), "BFGS", _options("BFGS", 100), 2),
+            "L-BFGS-B": ("contradicting", np.ones(4), "L-BFGS-B", _options("L-BFGS-B", 100), 2),
             # One trial per line search: a search that needs a second restarts
             # from an empty memory, and fails without corrections.
-            "L-BFGS-B restart": ("rosenbrock", _problems()["rosenbrock"][0], _options("L-BFGS-B", 100, maxls=1)),
-        }
-        for lane in _LANES:
-            for case, (name, x0, options) in cases.items():
-                with self.subTest(lane=lane, case=case), self.case():
-                    method = "BFGS" if case == "BFGS" else "L-BFGS-B"
-                    expected = _scipy(name, x0, np.zeros(0), method, options)
-                    self.assertEqual(expected.status, 2, f"{case}: SciPy did not fail its line search")
-                    result, message = _device(name, x0, np.zeros(0), method, options, lane)
-                    self._assert_scipy_record(expected, result, message, case)
-                    assert_matches_native(result.x, expected.x, f"{case} x", _FAILURE_RTOL)
+            "L-BFGS-B restart": (
+                "rosenbrock", _problems()["rosenbrock"][0], "L-BFGS-B", _options("L-BFGS-B", 100, maxls=1), 2
+            ),
+        })
 
     def test_bfgs_line_search_fallbacks_take_scipys_paths(self):
         """DCSRCH failing (a NaN step past an infinite wall, a start below
         ``amin``) or exhausting ``wolfe2``'s doublings leads where SciPy's does."""
-        cases = {
+        self._assert_ends_as_scipy({
             # Converges after zooming in scalar_search_wolfe2.
-            "infinite wall": ("inf-wall", np.array([0.0, 0.2]), _options("BFGS", 100), 0),
+            "infinite wall": ("inf-wall", np.array([0.0, 0.2]), "BFGS", _options("BFGS", 100), 0),
             # Each iteration ends with the tenth doubling, its gradient requested by BFGS.
-            "unbounded": ("linear", np.array([0.5, -1.0]), _options("BFGS", 5), 1),
+            "unbounded": ("linear", np.array([0.5, -1.0]), "BFGS", _options("BFGS", 5), 1),
             # One iteration: the inverse Hessian is still the identity.
-            "steep": ("steep", np.array([0.3, -0.2, 0.25]), _options("BFGS", 1), 1),
-        }
-        for lane in _LANES:
-            for case, (name, x0, options, status) in cases.items():
-                with self.subTest(lane=lane, case=case), self.case():
-                    expected = _scipy(name, x0, np.zeros(0), "BFGS", options)
-                    self.assertEqual(expected.status, status, case)
-                    result, message = _device(name, x0, np.zeros(0), "BFGS", options, lane)
-                    self._assert_scipy_record(expected, result, message, case)
-                    assert_matches_native(result.x, expected.x, f"{case} x", _FAILURE_RTOL)
+            "steep": ("steep", np.array([0.3, -0.2, 0.25]), "BFGS", _options("BFGS", 1), 1),
+        })
 
     def test_bfgs_update_keeps_badly_scaled_inverse_hessian(self):
         """On f = 5e17 x^2 from x = 1 the first update's rho s s^T (1e-18) lies
@@ -417,11 +416,11 @@ class TestQuasiNewtonJax(JaxTestCase):
         variable each update sets H to s / y = 1 / (2 * 5e17), to round-off,
         whatever H was."""
         x0 = np.ones(1)
-        for lane in _LANES:
-            for maxiter in (1, 100):
+        for maxiter in (1, 100):
+            options = _options("BFGS", maxiter)
+            expected = _scipy("badly-scaled", x0, np.zeros(0), "BFGS", options)
+            for lane in _LANES:
                 with self.subTest(lane=lane, maxiter=maxiter), self.case():
-                    options = _options("BFGS", maxiter)
-                    expected = _scipy("badly-scaled", x0, np.zeros(0), "BFGS", options)
                     self.assertEqual(expected.status, 1 if maxiter == 1 else 0, "SciPy's status changed")
                     result, message = _device("badly-scaled", x0, np.zeros(0), "BFGS", options, lane)
                     if maxiter == 1:
@@ -554,10 +553,10 @@ class TestQuasiNewtonJax(JaxTestCase):
             "maxcor = 0": (x0, _options("L-BFGS-B", 100, maxcor=0)),
             "no variables": (np.zeros(0), _options("L-BFGS-B", 100)),
         }
-        for lane in _LANES:
-            for case, (start, options) in stopped.items():
+        for case, (start, options) in stopped.items():
+            expected = _scipy("rosenbrock", start, params, "L-BFGS-B", options)
+            for lane in _LANES:
                 with self.subTest(lane=lane, case=case), self.case():
-                    expected = _scipy("rosenbrock", start, params, "L-BFGS-B", options)
                     self.assertEqual(expected.status, 2, f"{case}: SciPy did not stop")
                     result, message = _device("rosenbrock", start, params, "L-BFGS-B", options, lane)
                     self._assert_scipy_record(expected, result, message, case)
@@ -590,17 +589,11 @@ class TestQuasiNewtonJax(JaxTestCase):
     def test_nan_and_maxiter_zero_end_as_in_scipy(self):
         """A NaN wall gives BFGS status 3; maxiter=0 stops BFGS at x0 and L-BFGS-B after one step."""
         x0, params = _problems()["rosenbrock"]
-        cases = {
-            "BFGS nan": ("nan-wall", np.zeros(3), "BFGS", _options("BFGS", 100)),
-            "BFGS maxiter=0": ("rosenbrock", x0, "BFGS", _options("BFGS", 0)),
-            "L-BFGS-B maxiter=0": ("rosenbrock", x0, "L-BFGS-B", _options("L-BFGS-B", 0)),
-        }
-        expected_status = {"BFGS nan": 3, "BFGS maxiter=0": 1, "L-BFGS-B maxiter=0": 1}
-        for lane in _LANES:
-            for case, (name, start, method, options) in cases.items():
-                with self.subTest(lane=lane, case=case), self.case():
-                    expected = _scipy(name, start, params, method, options)
-                    self.assertEqual(expected.status, expected_status[case], case)
-                    result, message = _device(name, start, params, method, options, lane)
-                    self._assert_scipy_record(expected, result, message, case)
-                    assert_matches_native(result.x, expected.x, f"{case} x", _FAILURE_RTOL)
+        self._assert_ends_as_scipy(
+            {
+                "BFGS nan": ("nan-wall", np.zeros(3), "BFGS", _options("BFGS", 100), 3),
+                "BFGS maxiter=0": ("rosenbrock", x0, "BFGS", _options("BFGS", 0), 1),
+                "L-BFGS-B maxiter=0": ("rosenbrock", x0, "L-BFGS-B", _options("L-BFGS-B", 0), 1),
+            },
+            params,
+        )
