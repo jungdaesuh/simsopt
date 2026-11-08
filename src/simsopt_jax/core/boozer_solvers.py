@@ -66,6 +66,7 @@ from .boozer_problem import (
     boozer_penalty_residual,
     boozer_surface_residual,
 )
+from .dcsrch import _select
 from .quasi_newton import QuasiNewtonResult, minimize_bfgs, minimize_lbfgsb
 from .specs import GroupedCoilSetSpec
 
@@ -194,7 +195,7 @@ def _restore_on_failure(final, initial, norm, initial_norm, singular):
     its starting point, else ``final``: without a singular step, unless native's
     ``_keep_iterate`` (``norm`` finite and at most ``initial_norm``)."""
     restore = ~singular & ~(jnp.isfinite(norm) & (norm <= initial_norm))
-    return jax.tree.map(partial(jnp.where, restore), initial, final)
+    return _select(restore, initial, final)
 
 
 def _advance(x, step, iterations, singular):

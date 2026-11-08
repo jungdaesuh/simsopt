@@ -178,6 +178,11 @@ class DcsrchState:
     width1: jax.Array
 
 
+def _select(predicate, on_true, on_false):
+    """``jnp.where(predicate, ...)`` leaf by leaf over two pytrees of one structure."""
+    return jax.tree.map(lambda a, b: jnp.where(predicate, a, b), on_true, on_false)
+
+
 def _min(a, b, lbfgsb: bool):
     """C's ``fmin`` (a NaN is ignored), or Python's ``min(a, b)`` (``b`` only if ``b < a``)."""
     return jnp.fmin(a, b) if lbfgsb else jnp.where(b < a, b, a)
@@ -404,5 +409,5 @@ def dcsrch_iterate(
     )
     # A finished search keeps its saved variables but the stage, as SciPy's do.
     finished = replace(state, stage=stage)
-    state = jax.tree.map(lambda new, old: jnp.where(searching, new, old), updated, finished)
+    state = _select(searching, updated, finished)
     return state, jnp.where(searching, new_stp, stp), task

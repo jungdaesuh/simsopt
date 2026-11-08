@@ -142,7 +142,15 @@ from jax.scipy.linalg import solve_triangular
 
 from simsopt_jax.pytree import pytree_dataclass
 
-from .dcsrch import CONVERGENCE, ERROR, FG, DcsrchState, dcsrch_iterate, dcsrch_start
+from .dcsrch import (
+    CONVERGENCE,
+    ERROR,
+    FG,
+    DcsrchState,
+    _select,
+    dcsrch_iterate,
+    dcsrch_start,
+)
 
 __all__ = [
     "BFGS_MESSAGES",
@@ -228,10 +236,6 @@ class QuasiNewtonResult:
     status: jax.Array
     message: jax.Array
     hess_inv: jax.Array | LbfgsbCorrections
-
-
-def _select(predicate, new, old):
-    return jax.tree.map(lambda a, b: jnp.where(predicate, a, b), new, old)
 
 
 def _py_min(a, b):
