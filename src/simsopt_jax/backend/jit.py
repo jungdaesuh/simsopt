@@ -33,7 +33,6 @@ __all__ = ["CopyingJit", "jit"]
 
 # Argument types that never hold a NumPy array; JAX arrays include tracers.
 _NUMPY_FREE_TYPES = (jax.Array, bool, int, float, complex, str, type(None))
-_NO_POSITIONS: frozenset[int] = frozenset()
 
 
 def _index_tuple(argnums) -> tuple[int, ...]:
@@ -55,37 +54,38 @@ def _static_selectors(
 ) -> tuple[tuple[int, ...], tuple[str, ...]]:
     """The positional indices and keyword names ``jax.jit`` treats as static.
 
-    Follows ``jax.jit`` (``infer_argnums_and_argnames``): a selector given
-    alone implies the other through ``fun``'s positional-or-keyword
-    parameters, at their indices in the full signature; both given are taken
-    as they are, and a callable without an inspectable signature (some
-    builtins) implies nothing. Negative indices stay negative and are
-    resolved against the number of positional arguments of each call.
-
-    Args:
-        fun (callable): Function whose signature implies a missing selector.
-        argnums (int, iterable of int or None): ``static_argnums`` of ``jax.jit``.
-        argnames (str, iterable of str or None): ``static_argnames`` of ``jax.jit``.
-
-    Returns:
-        tuple: The static indices and the static names, each a tuple.
+    Resolved once, as JAX 0.12 does (``resolve_argnums``) and as
+    ``simsopt.geo.jit`` does: a selector given alone implies the other through
+    ``fun``'s positional-or-keyword parameters, and a negative index names its
+    parameter in the signature, so it is made non-negative here. Only for a
+    ``fun`` with ``*args`` does it stay negative and count from each call's
+    last positional argument. A callable without an inspectable signature
+    (some builtins) implies nothing.
     """
     nums = () if argnums is None else _index_tuple(argnums)
     names = () if argnames is None else _str_tuple(argnames)
-    if (argnums is None) == (argnames is None):
-        return nums, names
     try:
-        parameters = inspect.signature(fun).parameters
+        parameters = tuple(inspect.signature(fun).parameters.values())
     except (TypeError, ValueError):
         return nums, names
-    implied = [
-        (i, name)
-        for i, (name, parameter) in enumerate(parameters.items())
+    named = [
+        (i, parameter.name)
+        for i, parameter in enumerate(parameters)
         if parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
     ]
-    if argnames is None:
-        return nums, tuple(name for i, name in implied if i in nums)
-    return tuple(i for i, name in implied if name in names), names
+    if argnums is None and argnames is not None:
+        nums = tuple(i for i, name in named if name in names)
+    elif argnames is None and argnums is not None:
+        names = tuple(name for i, name in named if i in nums or i - len(parameters) in nums)
+    if not any(parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+        positional = sum(
+            parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            for parameter in parameters
+        )
+        # Out-of-range indices stay as given so that jax.jit rejects them.
+        nums = tuple(i + positional if -positional <= i < 0 else i for i in nums)
+    return nums, names
 
 
 def _holds_numpy(value) -> bool:
@@ -144,17 +144,14 @@ class CopyingJit:
         Returns:
             pytree: The compiled function's outputs, placed by JAX.
         """
-        static = (
-            {i + len(args) if i < 0 else i for i in self._static_argnums}
-            if self._static_argnums
-            else _NO_POSITIONS
-        )
-        dynamic = (
-            (value for i, value in enumerate(args) if i not in static) if static else args
-        )
-        if any(map(_holds_numpy, dynamic)):
+        static, count = self._static_argnums, len(args)
+        if any(
+            _holds_numpy(value)
+            for i, value in enumerate(args)
+            if i not in static and i - count not in static
+        ):
             args = tuple(
-                value if i in static else snapshot_host_tree(value)
+                value if i in static or i - count in static else snapshot_host_tree(value)
                 for i, value in enumerate(args)
             )
         names = self._static_argnames

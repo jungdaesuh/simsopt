@@ -127,19 +127,12 @@ def taylor_field(
 def _require_derivative_order(derivatives: int, highest: int) -> None:
     """Check that ``derivatives`` is an integer order from 0 to ``highest``.
 
-    Native ``BoozerSurface`` checks the same range with ``assert``; this raises
-    ``ValueError`` instead so the check also holds under ``python -O``. A higher order
-    would use a field model too short for it, and a float or bool that compares equal
-    to an order is not one.
-
-    Args:
-        derivatives (int): Requested derivative order.
-        highest (int): Highest order the caller supports.
-
     Raises:
         ValueError: If ``derivatives`` is a bool, not an integer, or outside
             ``0..highest``.
     """
+    # Native asserts the range; a ValueError also holds under python -O, and a
+    # bool or float equal to an order is not one.
     if (
         isinstance(derivatives, bool)
         or not isinstance(derivatives, numbers.Integral)

@@ -121,9 +121,9 @@ def jit(fun, **args):
 
     Dynamic NumPy pytree leaves are private copies, preserving ndarray subclasses.
     Static compiled arguments retain their identity and compilation cache keys.
-    Compiled calls use ``jax.default_device(native_jax_device())`` for uncommitted
-    inputs; committed JAX inputs keep their placement. With jit disabled, all
-    NumPy leaves are copied and ``fun`` runs in the caller's device context.
+    Calls run under ``jax.default_device(native_jax_device())``, also with jit
+    disabled, so uncommitted inputs land there; committed JAX inputs keep their
+    placement. With jit disabled, all NumPy leaves are copied.
     Plain dict, defaultdict and OrderedDict inputs preserve their key order;
     other registered pytrees use JAX traversal. Opaque unregistered container
     leaves retain their identity and contents. Captured arrays and JAX inputs
@@ -149,10 +149,11 @@ def jit(fun, **args):
     @wraps(fun)
     def on_native_device(*fun_args, **fun_kwargs):
         if not use_jit:
-            return run(
-                *tuple(_snapshot_plain(value) for value in fun_args),
-                **{name: _snapshot_plain(value) for name, value in fun_kwargs.items()},
-            )
+            with jax.default_device(native_jax_device()):
+                return run(
+                    *tuple(_snapshot_plain(value) for value in fun_args),
+                    **{name: _snapshot_plain(value) for name, value in fun_kwargs.items()},
+                )
         if static_argnums:
             count = len(fun_args)
             fun_args = tuple(

@@ -134,11 +134,7 @@ def _surface(
         stellsym (bool): Whether the surface is stellarator symmetric.
         nfp (int): Number of field periods.
         clamped (bool): Clamp the tensor surface's ``x`` and ``z`` dimensions.
-        fit_grid (bool): Use the full-period ``8 x 9`` grid on which
-            ``fit_to_curve`` determines every DOF of every kind. The test grids
-            do not: for example, a non-stellarator-symmetric XYZ surface on its
-            half-period ``4 x 6`` grid has rank 60 of 75, and native's
-            ``FullPivHouseholderQR`` then picks build-dependent free DOFs.
+        fit_grid (bool): Use the full-period ``8 x 9`` fit grid of :func:`_fitted_surface`.
 
     Returns:
         SurfaceRZFourier | SurfaceXYZFourier | SurfaceXYZTensorFourier: The
@@ -183,8 +179,11 @@ def _fitted_surface(
         fitted surface; its DOFs are the unique least-squares solution.
 
     Raises:
-        AssertionError: If the fit grid leaves a DOF undetermined, so that the
-            fitted DOFs would depend on which native build solves the fit.
+        AssertionError: If the fit grid leaves a DOF undetermined. Native's
+            ``FullPivHouseholderQR`` then picks build-dependent free DOFs, as on
+            the half-period ``4 x 6`` test grid of a non-stellarator-symmetric
+            XYZ surface (rank 60 of 75); the ``8 x 9`` fit grid determines every
+            DOF of every kind.
     """
     surface = _surface(kind, stellsym, nfp, clamped, fit_grid=True)
     ndofs = surface.get_dofs().size
@@ -193,6 +192,14 @@ def _fitted_surface(
         raise AssertionError(f"{kind} fit grid determines {rank} of {ndofs} DOFs.")
     surface.fit_to_curve(axis, 0.1, flip_theta=True)
     return surface
+
+
+def _assert_same_coil_pullbacks(test, pullbacks, cotangent, name):
+    """The two coil pullbacks of ``cotangent`` agree leaf by leaf, as native values do."""
+    leaves = [jax.tree.leaves(pullback(cotangent)[0]) for pullback in pullbacks]
+    test.assertTrue(len(leaves[0]) == len(leaves[1]) > 0, "coil leaves")
+    for leaf, (a, e) in enumerate(zip(*leaves, strict=True)):
+        assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
 
 
 def _setup(
@@ -1251,11 +1258,7 @@ class TestBoozerResidualJax(JaxTestCase):
                 cotangent = place_float64(
                     rng.standard_normal(value.shape), problem.targetlabel
                 )
-                actual = jax.tree.leaves(pullback(cotangent)[0])
-                expected = jax.tree.leaves(expected_pullback(cotangent)[0])
-                self.assertTrue(len(actual) == len(expected) > 0, "coil leaves")
-                for leaf, (a, e) in enumerate(zip(actual, expected)):
-                    assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
+                _assert_same_coil_pullbacks(self, (pullback, expected_pullback), cotangent, name)
 
     def test_exact_constraint_values_refuse_derivatives_in_xl(self):
         """``boozer_exact_constraints(derivatives=0)`` is a gradient built with the
@@ -1414,13 +1417,8 @@ class TestBoozerResidualJax(JaxTestCase):
 
         cotangent = place_float64(rng.standard_normal(xl.shape), problem.targetlabel)
 
-        def coil_pullback(constraints):
-            return jax.vjp(partial(constraints, point=xl), problem.coils)[1](cotangent)[0]
-
-        leaves = [jax.tree.leaves(coil_pullback(c)) for c in (exact, reference)]
-        self.assertTrue(len(leaves[0]) == len(leaves[1]) > 0, "coil leaves")
-        for leaf, (a, e) in enumerate(zip(*leaves, strict=True)):
-            assert_matches_native(a, host_array(e), f"coil VJP [{leaf}]")
+        pullbacks = [jax.vjp(partial(c, point=xl), problem.coils)[1] for c in (exact, reference)]
+        _assert_same_coil_pullbacks(self, pullbacks, cotangent, "exact constraints")
 
     def test_formulations_cast_the_decision_vector_to_float64(self):
         """A float32 decision vector is evaluated in float64: every formulation

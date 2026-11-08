@@ -34,13 +34,7 @@ def device_one(reference: jax.Array) -> jax.Array:
 
     The value is ``exp`` of :func:`placement_zero`, which reads no value of
     ``reference``, so a nonfinite entry (an infinite coil current) cannot turn
-    the 1 into NaN and spread to every product ``device_one(r) * y``. Its
-    derivative is zero, and ``stop_gradient`` also computes it as zero: a
-    differentiable, value-reading 1 such as ``exp(sum(r - r))`` sends the full
-    cotangent ``c`` of every such product into ``r`` as ``+c`` and ``-c``, and
-    when ``c`` dwarfs ``r``'s own cotangent ``g`` -- ``mu0/4pi`` scaling a field
-    whose currents are its reference -- ``(g + c) - c`` keeps only ``u |c|`` of
-    ``g``'s accuracy.
+    the 1 into NaN; its derivative is zero.
 
     Args:
         reference (jax.Array): Reference array of any shape whose dtype and execution
