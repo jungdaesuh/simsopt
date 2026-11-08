@@ -114,7 +114,7 @@ def _curve_perturbed_spec_from_curve(curve: CurvePerturbed, *, separate_owners: 
     # zero placeholders that the spec's sample_derivatives marks as absent.
     sample_derivatives = min(len(curve.sample._sample) - 1, 3)
     zero = np.zeros_like(curve.sample[0])
-    sample = [curve.sample[k] if k <= sample_derivatives else zero for k in range(4)]
+    sample = [curve.sample[k] if k <= max(sample_derivatives, 1) else zero for k in range(4)]
     return make_curve_perturbed_spec(
         dofs=_optimizable_dof_layout(curve, separate_owners=separate_owners)[0],
         quadpoints=curve.quadpoints,
