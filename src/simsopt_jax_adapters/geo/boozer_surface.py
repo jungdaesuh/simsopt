@@ -145,15 +145,24 @@ def _place(values, problem: BoozerProblem) -> jax.Array:
     return explicit_device_array(np.asarray(values, dtype=np.float64), dtype=np.float64, reference=problem.targetlabel)
 
 
-def _optimize_result(result: QuasiNewtonResult, messages: tuple[str, ...]) -> OptimizeResult:
+def _optimize_result(result: QuasiNewtonResult) -> OptimizeResult:
     """SciPy's ``OptimizeResult`` of a device solve, on the host, with SciPy's
-    fields in SciPy's order: BFGS's or L-BFGS-B's (whose ``hess_inv`` is an
-    ``LbfgsInvHessProduct``)."""
+    fields and messages in SciPy's order: BFGS's or L-BFGS-B's (whose
+    ``hess_inv`` is an ``LbfgsInvHessProduct``)."""
     result = host_tree(result)
+    if isinstance(result.hess_inv, LbfgsbCorrections):
+        count = int(result.hess_inv.count)
+        hess_inv = LbfgsInvHessProduct(result.hess_inv.s[:count], result.hess_inv.y[:count])
+        messages = LBFGSB_MESSAGES
+        order = ("fun", "jac", "nfev", "njev", "nit", "status", "message", "x", "success", "hess_inv")
+    else:
+        hess_inv, messages = result.hess_inv, BFGS_MESSAGES
+        order = ("fun", "jac", "hess_inv", "nfev", "njev", "status", "success", "message", "x", "nit")
     status = int(result.status)
     fields = {
         "fun": float(result.fun),
         "jac": result.jac,
+        "hess_inv": hess_inv,
         "nfev": int(result.nfev),
         "njev": int(result.njev),
         "status": status,
@@ -162,13 +171,6 @@ def _optimize_result(result: QuasiNewtonResult, messages: tuple[str, ...]) -> Op
         "x": result.x,
         "nit": int(result.iterations),
     }
-    if isinstance(result.hess_inv, LbfgsbCorrections):
-        count = int(result.hess_inv.count)
-        fields["hess_inv"] = LbfgsInvHessProduct(result.hess_inv.s[:count], result.hess_inv.y[:count])
-        order = ("fun", "jac", "nfev", "njev", "nit", "status", "message", "x", "success", "hess_inv")
-    else:
-        fields["hess_inv"] = result.hess_inv
-        order = ("fun", "jac", "hess_inv", "nfev", "njev", "status", "success", "message", "x", "nit")
     return OptimizeResult({key: fields[key] for key in order})
 
 
@@ -430,32 +432,14 @@ class JaxBoozerSurface(Optimizable):
 
         if host_bfgs:
             res = minimize(penalty, x, jac=True, method=method, options=options)
-        elif limited_memory:
-            res = _optimize_result(
-                boozer_penalty_lbfgsb(
-                    problem,
-                    _place(x, problem),
-                    _place(options["ftol"], problem),
-                    _place(options["gtol"], problem),
-                    _place(options["maxiter"], problem),
-                    maxcor=options["maxcor"],
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                ),
-                LBFGSB_MESSAGES,
-            )
         else:
-            res = _optimize_result(
-                boozer_penalty_bfgs(
-                    problem,
-                    _place(x, problem),
-                    _place(options["gtol"], problem),
-                    _place(options["maxiter"], problem),
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                ),
-                BFGS_MESSAGES,
-            )
+            flags = dict(optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+            start, tol, maxiter = (_place(value, problem) for value in (x, tol, maxiter))
+            if limited_memory:
+                result = boozer_penalty_lbfgsb(problem, start, tol, tol, maxiter, maxcor=options["maxcor"], **flags)
+            else:
+                result = boozer_penalty_bfgs(problem, start, tol, maxiter, **flags)
+            res = _optimize_result(result)
         # As natively, a failed solve that ended at a larger or non-finite value restores its start.
         xsol, fsol, gsol = res.x, res.fun, res.jac
         if not res.success:
