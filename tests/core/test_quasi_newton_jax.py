@@ -1,41 +1,13 @@
 """``simsopt_jax.core.quasi_newton`` against SciPy 1.18's BFGS and L-BFGS-B.
 
-Each solver runs beside ``scipy.optimize.minimize(jac=True)`` on a quadratic
-(eigenvalues 1 to 1e3), the Rosenbrock function and an ill-conditioned
-quartic (scales 1 to 1e6), SciPy evaluating the same JAX objective on the CPU.
-Capped after k = 1, ..., 10 iterations, each solve stops at ``maxiter``
-(status 1) with SciPy's message, iteration and evaluation counts, and its
-iterate and ``hess_inv`` (BFGS's matrix; L-BFGS-B's correction pairs in the
-order of SciPy's ring buffer) agree with SciPy's, relative to the largest
-entry, to 1e-12, ``fun`` and ``jac`` to 1e-11 (up to k = 9 for L-BFGS-B on
-the quadratic, see ``_EARLY_NUMERIC_ITERATIONS``). Capped, L-BFGS-B holds
-three corrections, so its memory wraps. Run to convergence (ten corrections),
-status, message, counts and ``x`` (to 1e-12) are SciPy's, ``fun`` and ``jac``
-agree absolutely to 1e-14 and 1e-12, and ``hess_inv`` agrees
-to 1e-7 after forty or more updates; L-BFGS-B's 100 to 200 iterations on the
-quadratic and the quartic follow round-off instead (their counts change with
-how XLA compiles the loop), and there the solutions agree to 1e-5, what
-``gtol = 1e-6`` leaves two points with unit smallest curvature (measured worst
-3.1e-7); on the quadratic round-off also picks the convergence test that stops
-the walk, for SciPy as for the port, so either convergence message passes
-there (``_ROUND_OFF_WALKS``).
-
-A gradient that contradicts the value fails every line search: BFGS ends with
-SciPy's status 2 ("precision loss", after DCSRCH and then
-``line_search_wolfe2`` fail), L-BFGS-B with "ABNORMAL", and with ``maxls=1``
-L-BFGS-B also restarts from an empty memory before that, with SciPy's counts.
-BFGS's fallbacks take SciPy's paths: past an infinite wall DCSRCH's step turns
-NaN and ``scalar_search_wolfe2`` zooms; on a linear objective its ten
-doublings end its loop; a first step below ``amin`` (gradients of 1e110)
-stops DCSRCH at its start. A NaN wall ends BFGS with status 3, and
-``maxiter=0`` ends BFGS at once and L-BFGS-B after one iteration, as in SciPy.
-Corrections near 1e-100 underflow formt's products and reset L-BFGS-B's memory
-as in SciPy (compared op by op, see that test), and a BFGS update by a step
-whose s s^T underflows is SciPy's (compared with SciPy's expression).
-Invalid inputs end or raise as in SciPy. Each case runs on the CPU and, when
-present, the GPU lane. The zoom's interpolants and trial steps, which these
-objectives reach only partly, are checked against SciPy's ``_cubicmin``,
-``_quadmin`` and ``_zoom`` directly.
+Each solver runs beside ``scipy.optimize.minimize(jac=True)``, SciPy evaluating
+the same JAX objective on the CPU. On a quadratic, the Rosenbrock function and
+an ill-conditioned quartic, capped after k = 1, ..., 10 iterations and run to
+convergence, the status, message, counts, iterate, ``fun``, ``jac`` and
+``hess_inv`` are SciPy's to round-off. Failed line searches, BFGS's fallbacks,
+NaN walls, underflowing updates and invalid inputs end as in SciPy, and the
+zoom's interpolants match SciPy's. Each case runs on the CPU and, when present,
+the GPU lane.
 """
 from __future__ import annotations
 
@@ -72,26 +44,18 @@ import scipy
 from scipy.optimize import LbfgsInvHessProduct, OptimizeResult, minimize
 from scipy.optimize import _linesearch as scipy_linesearch
 
-# Early iterations: status, message and counts are compared up to k = 10;
-# iterates, fun, jac and hess_inv up to k = 10 unless listed here (see
-# test_early_iterates_match_scipy for why L-BFGS-B on the quadratic stops at 9).
+# Records are compared up to k = 10, numbers up to the k listed (see test_early_iterates_match_scipy).
 _EARLY_ITERATIONS = 10
 _EARLY_NUMERIC_ITERATIONS = {("L-BFGS-B", "quadratic"): 9}
 _EARLY_RTOL = 1e-12
 _FINAL_RTOL = 1e-5
 _FAILURE_RTOL = 1e-12
 _TINY_RTOL = 1e-14
-# hess_inv after a converged walk: forty or more updates, each rounded
-# differently (XLA's sums and fused multiply-adds); measured worst 1.1e-9 of the
-# largest entry, BFGS on the Rosenbrock function.
+# Forty or more updates, each rounded differently (worst 1.1e-9, BFGS on the Rosenbrock function).
 _CONVERGED_HESS_INV_RTOL = 1e-7
-# Measured worst early gaps (JAX 0.12.0.1 CPU and GPU, SciPy 1.18.1): iterates
-# 4.3e-13, BFGS on the quartic on the GPU; fun and jac, which magnify an
-# iterate's difference, 1.2e-12 of their size, L-BFGS-B on the quadratic at
-# k = 9 on the GPU.
+# Worst early gaps (JAX 0.12.0.1, SciPy 1.18.1): iterates 4.3e-13; fun and jac, which magnify them, 1.2e-12.
 _EARLY_FUN_JAC_RTOL = 10 * _EARLY_RTOL
-# At a converged solution fun and jac are near zero, so they are compared
-# absolutely (measured worst 3.3e-24 and 4.5e-14 where the walks match).
+# Near zero at a converged solution, so compared absolutely (worst 3.3e-24 and 4.5e-14).
 _CONVERGED_FUN_ATOL = 1e-14
 _CONVERGED_JAC_ATOL = 1e-12
 _LBFGSB_PGTOL = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
@@ -99,17 +63,10 @@ _LBFGSB_FTOL = "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
 # Converged walks that round-off decides, each with the messages besides SciPy's
 # that round-off also gives SciPy itself; their counts are not compared.
 _ROUND_OFF_WALKS = {
-    # 180 to 200 iterations: early-iterate gaps grow from 1e-16 to 1e-1 by k = 110.
-    # Round-off also picks the convergence test that stops it. From x0 moved by an
-    # ulp in one entry (40 draws), SciPy 1.18.0 and 1.18.1 stop twice on
-    # FTOL, else on PGTOL (nit 179 to 191), on a NumPy objective, and never on
-    # this JAX objective under JAX 0.12.0.1; with f and each entry of g moved by
-    # up to an ulp at every evaluation, 8 times in 200. The port, which rounds
-    # differently at every iteration, stops on FTOL in 5 of those 40 draws on
-    # JAX 0.12.0.1's CPU lane (jaxlib's CPU LAPACK calls are SciPy's).
+    # 180 to 200 iterations; round-off also picks the convergence test, for SciPy too
+    # (SciPy 1.18 from x0 moved by an ulp, on a NumPy objective: 2 FTOL stops in 40 draws).
     ("L-BFGS-B", "quadratic"): frozenset({_LBFGSB_PGTOL, _LBFGSB_FTOL}),
-    # Its count changes with how XLA compiles the same loop (JAX 0.12.0.1: 114 on
-    # the CPU lane, 96 on the GPU lane; SciPy 1.18.1 109).
+    # Its count changes with how XLA compiles the loop (JAX 0.12.0.1: 114 CPU, 96 GPU; SciPy 109).
     ("L-BFGS-B", "ill-conditioned"): frozenset(),
 }
 _GTOL = 1e-6
