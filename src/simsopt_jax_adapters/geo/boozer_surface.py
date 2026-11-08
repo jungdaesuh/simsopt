@@ -88,12 +88,9 @@ from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 from simsopt.objectives.utilities import forward_backward
 from simsopt_jax.backend.dtypes import explicit_device_array
-from simsopt_jax.core.boozer_problem import (
-    BoozerProblem,
-    boozer_penalty_constraints,
-    boozer_penalty_residual,
-)
+from simsopt_jax.core.boozer_problem import BoozerProblem, boozer_penalty_residual
 from simsopt_jax.core.boozer_solvers import (
+    _penalty_value_and_grad,
     boozer_exact_newton,
     boozer_exact_residual_coil_vjp,
     boozer_penalty_bfgs,
@@ -419,16 +416,10 @@ class JaxBoozerSurface(Optimizable):
             options["maxcor"] = 200
             options["ftol"] = tol
 
+        value_and_grad = _penalty_value_and_grad(problem, optimize_G, weight_inv_modB)
+
         def penalty(x):
-            return host_tree(
-                boozer_penalty_constraints(
-                    problem,
-                    _place(x, problem),
-                    derivatives=1,
-                    optimize_G=optimize_G,
-                    weight_inv_modB=weight_inv_modB,
-                )
-            )
+            return host_tree(value_and_grad(_place(x, problem)))
 
         if host_bfgs:
             res = minimize(penalty, x, jac=True, method=method, options=options)
