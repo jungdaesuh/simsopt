@@ -48,6 +48,7 @@ from scipy.optimize import _linesearch as scipy_linesearch
 _EARLY_ITERATIONS = 10
 _EARLY_NUMERIC_ITERATIONS = {("L-BFGS-B", "quadratic"): 9}
 _EARLY_RTOL = 1e-12
+# gtol = 1e-6 leaves two points with unit smallest curvature this far apart (measured worst 3.1e-7).
 _FINAL_RTOL = 1e-5
 _FAILURE_RTOL = 1e-12
 _TINY_RTOL = 1e-14
