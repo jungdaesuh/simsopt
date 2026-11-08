@@ -727,25 +727,24 @@ class SurfaceXYZTensorFourierClampedTests(unittest.TestCase):
             dict mapping the output name to a list of relative Frobenius errors,
             one per step in ``self.steps``.
         """
-        rng = np.random.default_rng(3)
         errors = {}
+        lo = (0, 0)
         for h in self.steps:
             offsets = np.asarray([-h, 0.0, h])
             if direction == "phi":
                 phis, thetas = self.phi0 + offsets, np.asarray([self.theta0])
                 first, second = "gammadash1", "gammadash1dash1"
-                lo, mid, hi = (0, 0), (1, 0), (2, 0)
+                mid, hi = (1, 0), (2, 0)
             else:
                 phis, thetas = np.asarray([self.phi0]), self.theta0 + offsets
                 first, second = "gammadash2", "gammadash2dash2"
-                lo, mid, hi = (0, 0), (0, 1), (0, 2)
+                mid, hi = (0, 1), (0, 2)
             s = SurfaceXYZTensorFourier(
                 nfp=nfp, stellsym=False, mpol=2, ntor=2,
                 clamped_dims=[True, True, True],
                 quadpoints_phi=phis, quadpoints_theta=thetas)
-            if not errors:
-                perturbation = 0.05 * rng.standard_normal(len(s.x))
-            s.x = np.asarray(s.x) + perturbation
+            # The same perturbation at every step: a fresh generator with one seed.
+            s.x = np.asarray(s.x) + 0.05 * np.random.default_rng(3).standard_normal(len(s.x))
             for d1_name, d2_name in [(first, second),
                                      (f"d{first}_by_dcoeff", f"d{second}_by_dcoeff")]:
                 d1 = getattr(s, d1_name)()
