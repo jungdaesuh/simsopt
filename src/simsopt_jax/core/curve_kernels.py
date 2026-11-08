@@ -50,7 +50,7 @@ def distance_candidate_pure(points1, points2, minimum_distance):
     Returns:
         Array: bool scalar candidate decision.
     """
-    points1, points2 = as_jax_float64(points1), as_jax_float64(points2)
+    points1, points2 = map(as_jax_float64, (points1, points2))
     minimum_distance = snapshot_host_tree(minimum_distance)
     delta = points1[:, None, :] - points2[None, :, :]
     squared_distances = (
@@ -111,7 +111,7 @@ def kappa_pure(d1gamma, d2gamma):
     Returns:
         Array of shape (n,): curvature in 1/m.
     """
-    return _kappa_pure(as_jax_float64(d1gamma), as_jax_float64(d2gamma))
+    return _kappa_pure(*map(as_jax_float64, (d1gamma, d2gamma)))
 
 
 @jit
@@ -137,9 +137,7 @@ def curvature_p_norm_from_kappa_pure(kappa, gammadash, p, desired_kappa):
     Returns:
         Array: scalar penalty in m^(1-p).
     """
-    return _curvature_p_norm_from_kappa_pure(
-        *(as_jax_float64(value) for value in (kappa, gammadash, p, desired_kappa))
-    )
+    return _curvature_p_norm_from_kappa_pure(*map(as_jax_float64, (kappa, gammadash, p, desired_kappa)))
 
 
 @jit
@@ -162,7 +160,7 @@ def mean_squared_curvature_pure(kappa, gammadash):
     Returns:
         Array: scalar arclength-averaged squared curvature in 1/m^2.
     """
-    return _mean_squared_curvature_pure(as_jax_float64(kappa), as_jax_float64(gammadash))
+    return _mean_squared_curvature_pure(*map(as_jax_float64, (kappa, gammadash)))
 
 
 @jit
@@ -197,9 +195,7 @@ def curve_curve_distance_penalty_pure(
     Returns:
         Array: scalar penalty in m^4.
     """
-    gamma1, gammadash1, gamma2, gammadash2 = (
-        as_jax_float64(value) for value in (gamma1, gammadash1, gamma2, gammadash2)
-    )
+    gamma1, gammadash1, gamma2, gammadash2 = map(as_jax_float64, (gamma1, gammadash1, gamma2, gammadash2))
     minimum_distance, candidate = snapshot_host_tree((minimum_distance, candidate))
     normalization = staged_like(gamma1, int(gamma1.shape[0]) * int(gamma2.shape[0]))
     return _candidate_pair_penalty(
@@ -233,8 +229,8 @@ def curve_surface_distance_penalty_pure(
     Returns:
         Array: scalar penalty in m^5.
     """
-    curve_gamma, curve_gammadash, surface_gamma, surface_normal = (
-        as_jax_float64(value) for value in (curve_gamma, curve_gammadash, surface_gamma, surface_normal)
+    curve_gamma, curve_gammadash, surface_gamma, surface_normal = map(
+        as_jax_float64, (curve_gamma, curve_gammadash, surface_gamma, surface_normal)
     )
     minimum_distance, candidate = snapshot_host_tree((minimum_distance, candidate))
     return _candidate_pair_penalty(

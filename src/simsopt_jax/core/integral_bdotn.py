@@ -70,9 +70,7 @@ def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     Returns:
         Array: scalar objective in T^2 m^2 (quadratic flux), dimensionless (normalized), or m^2 (local).
     """
-    return _integral_BdotN(
-        as_jax_float64(Bcoil), as_jax_float64(target), as_jax_float64(normal), definition
-    )
+    return _integral_BdotN(*map(as_jax_float64, (Bcoil, target, normal)), definition)
 
 
 @partial(jit, static_argnames=("definition",))
