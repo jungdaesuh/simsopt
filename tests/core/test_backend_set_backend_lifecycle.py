@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import JaxTestCase, optional_jax_imports, run_fresh_process
 
 with optional_jax_imports():
     import jax
@@ -27,8 +27,6 @@ with optional_jax_imports():
     )
     from simsopt_jax_adapters.field import JaxBiotSavart
 import os
-import subprocess
-import sys
 import warnings
 from contextlib import nullcontext
 from pathlib import Path
@@ -64,26 +62,10 @@ def _process_state() -> tuple[dict[str, str], dict[str, object]]:
     return env, dict(jax.config.values)
 
 
-def _run_cpu_child(name: str, **environment: str) -> subprocess.CompletedProcess[str]:
-    """Run the ``fresh_process`` script ``name`` in a CPU-only interpreter.
-
-    Args:
-        name (str): File name of the script in ``fresh_process``.
-        **environment (str): Further environment variables for the child.
-
-    Returns:
-        subprocess.CompletedProcess: The finished child, with captured text output.
-    """
-    return subprocess.run(
-        (sys.executable, str(_FRESH_PROCESS / name)),
-        env=dict(
-            os.environ, JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", **environment
-        ),
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+def _run_cpu_child(name: str, **environment: str):
+    """Run ``fresh_process/<name>`` in a CPU-only interpreter with ``environment`` added."""
+    env = dict(os.environ, JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", **environment)
+    return run_fresh_process(_FRESH_PROCESS / name, env=env)
 
 
 class TestSetBackendLifecycle(JaxTestCase):

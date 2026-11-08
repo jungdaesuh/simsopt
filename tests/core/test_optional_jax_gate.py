@@ -1,30 +1,22 @@
 """The optional-JAX gate skips only for an unsupported runtime, never for a broken package."""
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 from unittest import TestCase, skipIf
 
-from unittest_jax_support import JAX_IMPORT_ERROR
+from unittest_jax_support import JAX_IMPORT_ERROR, optional_jax_imports, run_fresh_process
+
+with optional_jax_imports():
+    from simsopt_jax._requirements import _require_jax_version
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 _FRESH_PROCESS = Path(__file__).resolve().with_name("fresh_process")
 
 
-def _run_child(script: str, *arguments: str) -> subprocess.CompletedProcess:
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (str(_TESTS_ROOT), environment.get("PYTHONPATH", ""))
-    )
-    return subprocess.run(
-        (sys.executable, str(_FRESH_PROCESS / script), *arguments),
-        cwd=_TESTS_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _run_child(script: str, *arguments: str):
+    path = os.pathsep.join((str(_TESTS_ROOT), os.environ.get("PYTHONPATH", "")))
+    environment = dict(os.environ, PYTHONPATH=path)
+    return run_fresh_process(_FRESH_PROCESS / script, *arguments, env=environment, cwd=_TESTS_ROOT)
 
 
 @skipIf(JAX_IMPORT_ERROR is not None, JAX_IMPORT_ERROR or "")
@@ -45,8 +37,6 @@ class TestOptionalJaxGate(TestCase):
 
     def test_version_gate_accepts_every_0_12_release_and_rejects_0_11(self):
         """The floor is the 0.12 series: four-part and local releases pass, 0.11 fails."""
-        from simsopt_jax._requirements import _require_jax_version
-
         for version in ("0.12.0", "0.12.0.1", "0.12.1", "0.12.0.1+cuda12", "0.13.0", "1.0.0"):
             with self.subTest(version=version):
                 _require_jax_version("jax", version)

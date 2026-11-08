@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, ExitStack
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from pathlib import Path
 from unittest import TestCase, SkipTest, skipIf
 import logging
 import os
+import subprocess
 import sys
 import gc
 
@@ -218,6 +220,24 @@ def aligned_host_copy(values, *, misaligned: bool = False) -> np.ndarray:
     array = storage[offset : offset + values.size].reshape(values.shape)
     array[...] = values
     return array
+
+
+def run_fresh_process(
+    script: Path,
+    *arguments: str,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``script`` with ``arguments`` in a new interpreter, capturing its text output."""
+    return subprocess.run(
+        (sys.executable, str(script), *arguments),
+        env=env,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
 
 
 def host_array(value, *, dtype=None) -> np.ndarray:
