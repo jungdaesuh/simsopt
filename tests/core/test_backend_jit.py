@@ -165,6 +165,8 @@ class CopyingJitTests(JaxTestCase):
                     for _ in range(3):
                         np.testing.assert_array_equal(call(f, x), np.full(2, 3.0))
                 self.assertEqual(len(received), 1)
+                if kind == "positional-or-keyword":  # every selector here makes ``table`` static
+                    self.assertIs(received[0], table)
                 self.assertEqual(received[0] is table, raw_received[0] is table)
                 self.assertEqual(f._cache_size(), 1)
                 copied = [value for value, _ in copies]
