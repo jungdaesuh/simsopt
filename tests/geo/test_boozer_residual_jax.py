@@ -186,6 +186,14 @@ def _fitted_surface(
     return surface
 
 
+def _assert_same_coil_pullbacks(test, pullbacks, cotangent, name):
+    """The two coil pullbacks of ``cotangent`` agree leaf by leaf, as native values do."""
+    leaves = [jax.tree.leaves(pullback(cotangent)[0]) for pullback in pullbacks]
+    test.assertTrue(len(leaves[0]) == len(leaves[1]) > 0, "coil leaves")
+    for leaf, (a, e) in enumerate(zip(*leaves, strict=True)):
+        assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
+
+
 def _setup(
     kind: str, stellsym: bool, label: str, clamped: bool = False, seed: int = 0
 ) -> _Setup:
@@ -1243,11 +1251,7 @@ class TestBoozerResidualJax(JaxTestCase):
                 cotangent = place_float64(
                     rng.standard_normal(value.shape), problem.targetlabel
                 )
-                actual = jax.tree.leaves(pullback(cotangent)[0])
-                expected = jax.tree.leaves(expected_pullback(cotangent)[0])
-                self.assertTrue(len(actual) == len(expected) > 0, "coil leaves")
-                for leaf, (a, e) in enumerate(zip(actual, expected)):
-                    assert_matches_native(a, host_array(e), f"{name} coil VJP [{leaf}]")
+                _assert_same_coil_pullbacks(self, (pullback, expected_pullback), cotangent, name)
 
     def test_exact_constraint_values_refuse_derivatives_in_xl(self):
         """``boozer_exact_constraints(derivatives=0)`` is a gradient built with the
@@ -1402,13 +1406,8 @@ class TestBoozerResidualJax(JaxTestCase):
 
         cotangent = place_float64(rng.standard_normal(xl.shape), problem.targetlabel)
 
-        def coil_pullback(constraints):
-            return jax.vjp(partial(constraints, point=xl), problem.coils)[1](cotangent)[0]
-
-        leaves = [jax.tree.leaves(coil_pullback(c)) for c in (exact, reference)]
-        self.assertTrue(len(leaves[0]) == len(leaves[1]) > 0, "coil leaves")
-        for leaf, (a, e) in enumerate(zip(*leaves, strict=True)):
-            assert_matches_native(a, host_array(e), f"coil VJP [{leaf}]")
+        pullbacks = [jax.vjp(partial(c, point=xl), problem.coils)[1] for c in (exact, reference)]
+        _assert_same_coil_pullbacks(self, pullbacks, cotangent, "exact constraints")
 
     def test_formulations_cast_the_decision_vector_to_float64(self):
         """A float32 decision vector is evaluated in float64: every formulation
