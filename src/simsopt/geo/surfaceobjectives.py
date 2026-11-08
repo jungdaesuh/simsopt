@@ -6,6 +6,7 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.types import RealArray
 from .surface import Surface
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+from .surfacexyzfourier import SurfaceXYZFourier
 from ..objectives.utilities import forward_backward
 
 __all__ = ['Area', 'Volume', 'ToroidalFlux', 'PrincipalCurvature',
@@ -966,11 +967,14 @@ class BoozerResidual(Optimizable):
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
 
-        # same number of points as on the solved surface
-        phis = in_surface.quadpoints_phi
-        thetas = in_surface.quadpoints_theta
-
-        s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
+        # A copy of the solved surface, with its class, settings and points. BoozerSurface
+        # only takes SurfaceXYZTensorFourier and SurfaceXYZFourier surfaces.
+        settings = dict(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp,
+                        quadpoints_phi=in_surface.quadpoints_phi, quadpoints_theta=in_surface.quadpoints_theta)
+        if isinstance(in_surface, SurfaceXYZTensorFourier):
+            s = SurfaceXYZTensorFourier(clamped_dims=in_surface.clamped_dims, **settings)
+        else:
+            s = SurfaceXYZFourier(**settings)
         s.set_dofs(in_surface.get_dofs())
 
         # BoozerExact surfaces have no label penalty (constraint_weight is None)
