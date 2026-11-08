@@ -862,7 +862,7 @@ class BoozerSurfaceTests(unittest.TestCase):
         np.testing.assert_array_equal(s.get_dofs(), x)
 
     def test_residual_equation_newton_nonpositive_maxiter(self):
-        """Non-positive limits skip Newton steps and report failure, as upstream does."""
+        """Non-positive limits skip Newton steps and retain upstream's success sentinel."""
         _, boozer_surface = get_boozer_surface(boozer_type="exact", converge=False)
         s = boozer_surface.surface
         dofs = s.get_dofs().copy()
@@ -871,8 +871,8 @@ class BoozerSurfaceTests(unittest.TestCase):
         for maxiter in (0, -1):
             with self.subTest(maxiter=maxiter):
                 boozer_surface.need_to_run_code = True
-                # A converged initial residual must still report failure when
-                # no iterations are requested.
+                # A converged initial residual must still use upstream's 1e6
+                # sentinel when no iterations are requested.
                 residual = np.zeros_like(initial_residual)
                 with mock.patch('simsopt.geo.boozersurface.boozer_surface_residual',
                                 return_value=(residual, jacobian)), \
