@@ -204,18 +204,16 @@ def _curve_gamma_kernel(
     )
 
 
-def _curve_quadpoints(spec: CurveSpec, *, reference):
-    quadpoints = _as_explicit_array(spec.quadpoints, reference=reference)
-    return quadpoints, _ones_like_runtime(quadpoints)
-
-
 def _parameter_derivative_kernel(kernel, tangents):
     """Return ``qp -> d kernel(qp) / d qp`` along ``tangents``."""
     return lambda qp: jax.jvp(kernel, (qp,), (tangents,))[1]
 
 
-def _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, tangents, *, order) -> tuple[jax.Array, ...]:
+def _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, *, order) -> tuple[jax.Array, ...]:
     """Return ``gamma_kernel`` and its first ``order`` parameter derivatives by nested JVPs."""
+    if order == 0:
+        return (gamma_kernel(quadpoints),)
+    tangents = _ones_like_runtime(quadpoints)
     gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
     terms = [gamma, gammadash]
     derivative_kernel = gamma_kernel
@@ -292,13 +290,7 @@ def _rotation_alpha_terms_from_dofs(
     def alphadash(qp):
         return jaxrotationdash_pure(rotation_dofs, qp, rotation_spec.order)
 
-    dash_terms = (
-        (alphadash(quadpoints),)
-        if order == 1
-        else _curve_geometry_terms_from_kernel(
-            alphadash, quadpoints, _ones_like_runtime(quadpoints), order=order - 1
-        )
-    )
+    dash_terms = _curve_geometry_terms_from_kernel(alphadash, quadpoints, order=order - 1)
     terms = (jaxrotation_pure(rotation_dofs, quadpoints, rotation_spec.order), *dash_terms)
     return tuple(rotation_scale * term for term in terms)
 
@@ -323,13 +315,8 @@ def _curve_geometry_terms_from_dofs(spec: CurveSpec, dofs, order: int) -> tuple[
         spec,
         dofs,
     )
-    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
-    return _curve_geometry_terms_from_kernel(
-        gamma_kernel,
-        quadpoints,
-        tangents,
-        order=order,
-    )
+    quadpoints = _as_explicit_array(spec.quadpoints, reference=dofs)
+    return _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, order=order)
 
 
 def _add_curve_perturbation(spec: CurvePerturbedSpec, *geometry_terms) -> tuple[jax.Array, ...]:

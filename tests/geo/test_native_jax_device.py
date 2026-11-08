@@ -226,11 +226,14 @@ class TestNativeJaxDevice(JaxTestCase):
                 )
 
     def test_native_jit_runs_on_cpu_with_cuda_default_in_fresh_process(self):
-        """Under ``JAX_PLATFORMS=cuda,cpu`` native jitted kernels return CPU arrays."""
+        """Under ``JAX_PLATFORMS=cuda,cpu`` native kernels return CPU arrays,
+        also with jit disabled (``SIMSGEOJIT=0``)."""
         require_cuda("CUDA JAX device required")
-        environment = _with_gpu_determinism(_fresh_environment())
-        environment["JAX_PLATFORMS"] = "cuda,cpu"
-        _run_fresh_process("native_jit_device_policy.py", environment=environment)
+        for use_jit in ("1", "0"):
+            with self.subTest(SIMSGEOJIT=use_jit):
+                environment = _with_gpu_determinism(_fresh_environment())
+                environment.update(JAX_PLATFORMS="cuda,cpu", SIMSGEOJIT=use_jit)
+                _run_fresh_process("native_jit_device_policy.py", environment=environment)
 
     def test_native_jit_wrapper_preserves_results(self):
         """The native ``jit`` wrapper returns ``jax.jit``'s result on ``native_jax_device()``."""

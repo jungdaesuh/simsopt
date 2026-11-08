@@ -113,24 +113,17 @@ def _curve_perturbed_spec_from_curve(curve: CurvePerturbed, *, separate_owners: 
     # The spec carries the sample and up to three derivatives; missing ones are
     # zero placeholders that the spec's sample_derivatives marks as absent.
     sample_derivatives = min(len(curve.sample._sample) - 1, 3)
-    sample_gamma = curve.sample[0]
-    sample_gammadash = curve.sample[1]
-    sample_gammadashdash = (
-        curve.sample[2] if sample_derivatives >= 2 else np.zeros_like(sample_gamma)
-    )
-    sample_gammadashdashdash = (
-        curve.sample[3] if sample_derivatives >= 3 else np.zeros_like(sample_gamma)
-    )
-
+    zero = np.zeros_like(curve.sample[0])
+    sample = [curve.sample[k] if k <= max(sample_derivatives, 1) else zero for k in range(4)]
     return make_curve_perturbed_spec(
         dofs=_optimizable_dof_layout(curve, separate_owners=separate_owners)[0],
         quadpoints=curve.quadpoints,
         base_curve=curve_spec_from_adapter_curve(curve.curve, separate_owners=separate_owners),
         base_curve_map=_optimizable_dof_map_spec(curve, curve.curve, separate_owners=separate_owners),
-        sample_gamma=sample_gamma,
-        sample_gammadash=sample_gammadash,
-        sample_gammadashdash=sample_gammadashdash,
-        sample_gammadashdashdash=sample_gammadashdashdash,
+        sample_gamma=sample[0],
+        sample_gammadash=sample[1],
+        sample_gammadashdash=sample[2],
+        sample_gammadashdashdash=sample[3],
         sample_derivatives=sample_derivatives,
     )
 
