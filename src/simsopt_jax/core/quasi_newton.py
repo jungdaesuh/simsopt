@@ -103,30 +103,21 @@ only when it differs from the last one), ``hess_inv`` and SciPy's checks of
 its inputs without bounds are SciPy's. These claims are checked against
 SciPy 1.18 only; other SciPy versions may differ in them.
 
-Iterates agree with SciPy to round-off, not bitwise: XLA sums dot and matrix
-products in its own order and may fuse a multiply and an add into one
-rounding (it does on CPU and GPU), and BFGS forms SciPy's update ``A1 (H A2)
-+ rho s s^T``, with ``A1 = I - rho s y^T`` and ``A2 = A1^T``, in SciPy's order
-but from outer products, in O(n^2) where SciPy's two matrix products cost
-O(n^3). So a decision that hinges on the last bit can go the other way than
-in SciPy: a memory reset under underflow, or a trial point equal to an
-earlier one, which SciPy does not count again. Run op by op, the port makes
-SciPy's decisions there too. A long walk magnifies the round-off, so it can
-part from SciPy's, as SciPy's own run does when its sums round differently:
-the counts then differ, a converged walk ends at SciPy's solution only to
-what ``gtol`` allows (L-BFGS-B's possibly by its other convergence test), and
-a walk stopped by ``maxiter`` can end elsewhere.
-L-BFGS-B's walks part sooner than BFGS's.
+Iterates agree with SciPy to round-off, not bitwise: XLA orders sums and may
+fuse a multiply and an add, and BFGS forms SciPy's update from outer products,
+in O(n^2) where SciPy's matrix products cost O(n^3). A decision that hinges on
+the last bit (a memory reset under underflow, a trial point equal to an
+earlier one) can go the other way; run op by op, the port decides as SciPy.
+A long walk magnifies the round-off and can part from SciPy's (L-BFGS-B's
+sooner): the counts differ, a converged walk ends at SciPy's solution only to
+what ``gtol`` allows (L-BFGS-B's possibly by its other test), and a walk
+stopped by ``maxiter`` can end elsewhere.
 
-Known differences in counting: SciPy compares a point with its cached one by
-array equality, so a point with a NaN coordinate never matches it and is
-evaluated and counted again (at a NaN-containing ``x0``, a second time at the
-start; not on the exits for invalid inputs, which request nothing after the
-first evaluation). The port counts it once, so for such points ``nfev``,
-``njev`` and, at an L-BFGS-B ``maxfun`` limit, the status and message can
-differ from SciPy's. Not provided: bounds, callbacks and SciPy's other options
-(``c1`` and ``c2`` keep SciPy's defaults, so its check of them cannot fail;
-``norm``, ``eps``, ``hess_inv0``).
+SciPy evaluates and counts a point with a NaN coordinate again, since its
+cache compares points by equality; the port counts it once, so ``nfev``,
+``njev`` and, at an L-BFGS-B ``maxfun`` limit, the status can differ there.
+Not provided: bounds, callbacks and SciPy's other options (``c1`` and ``c2``
+keep SciPy's defaults; ``norm``, ``eps``, ``hess_inv0``).
 """
 
 from __future__ import annotations
