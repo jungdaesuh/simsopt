@@ -887,13 +887,14 @@ class TestBoozerSurfaceJax(JaxTestCase):
         assert_matches_native(res["hessian"], hessian, f"stab={stab} hessian")
 
     def test_failed_scipy_solves_restore_their_start_as_natively(self):
-        """A failed BFGS (``host_bfgs``) or ``least_squares`` solve that ends at a
-        larger or non-finite penalty value or residual norm than at its start
-        restores the start, as natively; one that ends lower keeps its iterate.
-        SciPy's solver is replaced, natively and in JAX, by a failed solve that
-        ends at ``x0 + delta`` or, for ``delta=None``, by SciPy's own capped at
-        two iterations or evaluations."""
-        for solver in ("LBFGS", "ls"):
+        """A failed BFGS (``host_bfgs`` or on the device), L-BFGS-B (on the
+        device) or ``least_squares`` solve that ends at a larger or non-finite
+        penalty value or residual norm than at its start restores the start, as
+        natively; one that ends lower keeps its iterate. SciPy's solver, and the
+        device solver, is replaced by a failed solve that ends at ``x0 + delta``
+        or, for ``delta=None``, by the solver itself capped at two iterations or
+        evaluations."""
+        for solver in ("LBFGS", "BFGS", "L-BFGS-B", "ls"):
             for delta in (None, 1e-2, np.nan):
                 with self.subTest(solver=solver, delta=delta), self.case() as patches:
                     self._case_failed_scipy_solves_restore_their_start_as_natively(
@@ -913,6 +914,25 @@ class TestBoozerSurfaceJax(JaxTestCase):
             value, gradient = fun(end)
             return OptimizeResult(x=end, fun=value, jac=gradient, nit=1, success=False)
 
+        def failed_device_solve(real_solver):
+            def solve(*args, **kwargs):
+                arguments = inspect.signature(real_solver).bind(*args, **kwargs).arguments
+                arguments["maxiter"] = place_float64(2.0 if delta is None else 1.0, arguments["maxiter"])
+                result = real_solver(**arguments)
+                if delta is None:
+                    return result
+                end = arguments["x"] + delta
+                value, gradient = boozer_penalty_constraints(
+                    arguments["problem"],
+                    end,
+                    derivatives=1,
+                    optimize_G=arguments["optimize_G"],
+                    weight_inv_modB=arguments["weight_inv_modB"],
+                )
+                return replace(result, x=end, fun=value, jac=gradient)
+
+            return solve
+
         def failed_least_squares(fun, x, jac, **kwargs):
             if delta is None:
                 return least_squares(fun, x, jac=jac, **{**kwargs, "max_nfev": 2})
@@ -922,14 +942,16 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 x=end, fun=residual, grad=jacobian.T @ residual, jac=jacobian, status=0
             )
 
-        native_name, jax_name, replacement = {
-            "LBFGS": ("minimize", "minimize", failed_minimize),
-            "ls": ("least_squares", "_least_squares", failed_least_squares),
+        native_name, native_replacement, jax_name, jax_replacement = {
+            "LBFGS": ("minimize", failed_minimize, "minimize", failed_minimize),
+            "BFGS": ("minimize", failed_minimize, "boozer_penalty_bfgs", failed_device_solve(boozer_penalty_bfgs)),
+            "L-BFGS-B": (
+                "minimize", failed_minimize, "boozer_penalty_lbfgsb", failed_device_solve(boozer_penalty_lbfgsb)
+            ),
+            "ls": ("least_squares", failed_least_squares, "_least_squares", failed_least_squares),
         }[solver]
-        patches.enter_context(
-            mock.patch(f"simsopt.geo.boozersurface.{native_name}", replacement)
-        )
-        patches.enter_context(mock.patch.object(jax_boozer_surface, jax_name, replacement))
+        patches.enter_context(mock.patch(f"simsopt.geo.boozersurface.{native_name}", native_replacement))
+        patches.enter_context(mock.patch.object(jax_boozer_surface, jax_name, jax_replacement))
         native, jax_problem = _pair("ls")
         start = native.boozer.surface.get_dofs()
         results = []
@@ -940,11 +962,11 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 "G": problem.G0,
                 "weight_inv_modB": False,
             }
-            if solver == "LBFGS":
-                if problem is jax_problem:
+            if solver != "ls":
+                if solver == "LBFGS" and problem is jax_problem:
                     options["host_bfgs"] = True
                 res = problem.boozer.minimize_boozer_penalty_constraints_LBFGS(
-                    tol=1e-10, maxiter=10, limited_memory=False, **options
+                    tol=1e-10, maxiter=10, limited_memory=solver == "L-BFGS-B", **options
                 )
             else:
                 res = problem.boozer.minimize_boozer_penalty_constraints_ls(
@@ -958,7 +980,7 @@ class TestBoozerSurfaceJax(JaxTestCase):
                 self.assertEqual(moved, 0.0, "a worse failed iterate was kept")
                 self.assertEqual((res["iota"], res["G"]), (_IOTA, problem.G0))
             results.append(res)
-        arrays = ("fun", "gradient") if solver == "LBFGS" else ("residual", "gradient", "jacobian")
+        arrays = ("residual", "gradient", "jacobian") if solver == "ls" else ("fun", "gradient")
         _assert_same_solve(
             jax_problem, native, results[1], results[0], arrays, f"{solver} delta={delta}", 1e-10
         )
