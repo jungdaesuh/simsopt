@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from unittest_jax_support import JaxTestCase, optional_jax_imports
+from unittest_jax_support import (
+    JaxTestCase,
+    before_backend_initialization,
+    optional_jax_imports,
+)
 
 with optional_jax_imports():
     import simsopt_jax  # noqa: F401
@@ -26,13 +30,6 @@ import os
 def _config(jax_platform):
     return BackendConfig(
         mode="jax_cpu_parity", backend="jax", jax_platform=jax_platform
-    )
-
-
-def _before_backend_initialization():
-    """Patch the runtime to see a process whose JAX backends are not initialized."""
-    return mock.patch(
-        "simsopt_jax.backend.runtime._jax_backends_initialized", return_value=False
     )
 
 
@@ -140,7 +137,7 @@ class TestBackendXlaCompilePreset(JaxTestCase):
         before JAX initializes its backends."""
         patches = self.patches
         patches.enter_context(mock.patch.dict(os.environ))
-        patches.enter_context(_before_backend_initialization())
+        patches.enter_context(before_backend_initialization())
         os.environ.pop(_XLA_FLAGS_ENV, None)
         _apply_cpu_compile_preset_env(_config("cpu"), _policy(parity_mode=False))
         self.assertTrue(
@@ -152,7 +149,7 @@ class TestBackendXlaCompilePreset(JaxTestCase):
         """Re-applying the config (e.g. repeated init) must not duplicate the preset."""
         patches = self.patches
         patches.enter_context(mock.patch.dict(os.environ))
-        patches.enter_context(_before_backend_initialization())
+        patches.enter_context(before_backend_initialization())
         os.environ.pop(_XLA_FLAGS_ENV, None)
         _apply_cpu_compile_preset_env(_config("cpu"), _policy())
         _apply_cpu_compile_preset_env(_config("cpu"), _policy())

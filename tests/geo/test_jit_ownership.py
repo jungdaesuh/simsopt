@@ -104,13 +104,15 @@ class JitOwnershipTests(unittest.TestCase):
         with mock.patch.dict(parameters, {"jit": False}):
             wrapped = jit_module.jit(record)
         x, y = np.ones(3), np.ones(4)
-        with mock.patch.object(jit_module, "native_jax_device") as device:
+        device = object()
+        with mock.patch.object(jit_module, "native_jax_device", return_value=device), \
+                mock.patch.object(jit_module.jax, "default_device") as context:
             held, nested = wrapped(x, nested={"arrays": [y]})
         x[:] = 4
         y[:] = 7
         np.testing.assert_array_equal(held, np.ones(3))
         np.testing.assert_array_equal(nested["arrays"][0], np.ones(4))
-        device.assert_not_called()
+        context.assert_called_once_with(device)
         self.assertEqual(wrapped.__name__, record.__name__)
 
     def test_compiled_dispatch_receives_owned_inputs_under_native_device_context(self):
@@ -158,9 +160,7 @@ class JitOwnershipTests(unittest.TestCase):
                     values[:] = -7.0
                 for actual, values in zip(held, expected):
                     np.testing.assert_array_equal(actual, values)
-                # With jit disabled, fun runs in the caller's device context.
-                device = jit_module.native_jax_device() if use_jit else jnp.asarray(0.0).device
-                self.assertEqual(held[0].devices(), {device})
+                self.assertEqual(held[0].devices(), {jit_module.native_jax_device()})
 
     def test_real_jax_static_arguments_and_wraps_metadata_are_preserved(self):
         def powers(values, order, *, scale):
