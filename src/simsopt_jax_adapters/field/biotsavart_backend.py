@@ -214,6 +214,7 @@ def _grouped_grad_absB_from_spec(points, coil_set_spec):
     )
 
 
+@partial(jit, static_argnames=("kernel", "batch_size"))
 def _per_coil_unit_field_with_batch_size(points, coil_set_spec, kernel, *, batch_size):
     """Per-coil unit-current field as a list of JAX arrays.
 
@@ -223,8 +224,9 @@ def _per_coil_unit_field_with_batch_size(points, coil_set_spec, kernel, *, batch
     ``∂F/∂I_k`` for the matching spatial-derivative kernel.
 
     The output is a list of ``ncoils`` separate JAX arrays — one per
-    coil. The JAX kernel cache provides compile-time reuse within a
-    quadrature group.
+    coil. One compiled program per kernel and coil chunk size builds the
+    unit current and splits the per-coil rows, so no host value is staged
+    at evaluation.
     """
     compute_points = _as_jax_float64(points)
     ncoils = sum(len(group.coil_indices) for group in coil_set_spec.groups)
@@ -817,9 +819,9 @@ class JaxBiotSavart(Optimizable):
             self._fixed_dofs_maybe_changed = False
 
     def _current_captured_coil_state_fingerprint(self) -> tuple[bytes, ...]:
-        """Fixed coordinates and non-DOF coil parameters (current scales, filament
-        offsets, frame-rotation scales), fingerprinted once at the first read
-        after a dependency notification."""
+        """Fixed coordinates, non-DOF coil parameters (current scales, filament
+        offsets, frame-rotation scales) and perturbation sample contents,
+        fingerprinted once at the first read after a dependency notification."""
         return tuple(
             np.ascontiguousarray(
                 np.asarray(opt.local_full_x, dtype=np.float64)[
@@ -827,7 +829,11 @@ class JaxBiotSavart(Optimizable):
                 ]
             ).tobytes()
             for opt in self.unique_dof_lineage
-        ) + (coil_graph_parameters(self.ancestors).tobytes(),)
+        ) + (coil_graph_parameters(self.ancestors).tobytes(),) + tuple(
+            np.ascontiguousarray(array).tobytes()
+            for opt in self.ancestors if isinstance(opt, CurvePerturbed)
+            for array in opt.sample._sample
+        )
 
     def _perturbation_samples_changed(self) -> bool:
         return any(
