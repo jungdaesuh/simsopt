@@ -770,12 +770,8 @@ def stage_two_geometry(
     # current's would otherwise be a symbolic zero) without coupling any
     # parameter's tangent or cotangent into the currents.
     parameter_zero = placement_zero(parameters)
-    ncenterlines = len(coil_specs) // filaments_per_pack
-    nsecond = (
-        ncenterlines
-        if second_derivative_centerlines is None
-        else min(second_derivative_centerlines, ncenterlines)
-    )
+    # The first coil of each pack whose centerline is differentiated twice.
+    second_derivative_leads = coil_specs[::filaments_per_pack][:second_derivative_centerlines]
     # Ordinary geometry is keyed by curve identity. A pack's centerline and
     # each filament's offset curve are cached per filament, because another
     # pack (a symmetry image) may list the same filaments in another order.
@@ -786,9 +782,9 @@ def stage_two_geometry(
             if not isinstance(coil.curve, CurveFilamentSpec)
         ),
         tuple(
-            curve
-            for curve in (coil_specs[k * filaments_per_pack].curve for k in range(nsecond))
-            if not isinstance(curve, CurveFilamentSpec)
+            coil.curve
+            for coil in second_derivative_leads
+            if not isinstance(coil.curve, CurveFilamentSpec)
         ),
     )
     filament_geometry: dict[int, tuple[tuple[jax.Array, ...], jax.Array, jax.Array]] = {}
@@ -828,7 +824,7 @@ def stage_two_geometry(
         else:
             centerline_gamma, centerline_gammadash = gamma, gammadash
         centerlines.append((centerline_gamma, centerline_gammadash))
-        if index // filaments_per_pack < nsecond:
+        if index // filaments_per_pack < len(second_derivative_leads):
             centerline_gammadashdashs.extend(_with_symmetry(geometry[2], symmetry=coil_spec.symmetry))
     gammas, gammadashs, currents = zip(*coils, strict=True)
     centerline_gammas, centerline_gammadashs = zip(*centerlines, strict=True)
