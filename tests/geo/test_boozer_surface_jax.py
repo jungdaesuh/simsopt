@@ -602,10 +602,8 @@ class TestBoozerSurfaceJax(JaxTestCase):
         )
         self.assertFalse(native_res["success"])
         self.assertEqual(native_res["iter"], maxiter)
-        self.assertEqual(
-            tuple(jax_res["info"][key] for key in ("nfev", "njev", "status", "message")),
-            tuple(native_res["info"][key] for key in ("nfev", "njev", "status", "message")),
-        )
+        keys = ("nfev", "njev", "status", "message")
+        self.assertEqual(tuple(jax_res["info"][key] for key in keys), tuple(native_res["info"][key] for key in keys))
         # info is SciPy's OptimizeResult: its fields in its order, hess_inv
         # included. The steps carry the iterates' difference, and H magnifies
         # it (measured 2.1e-11 for sk, 6.3e-11 for H, of the largest entry).
