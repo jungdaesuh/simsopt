@@ -1,6 +1,7 @@
 import unittest
 import numpy as np
 from simsopt.field.biotsavart import BiotSavart
+from simsopt.field.coil import Coil
 from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual
 from simsopt.configs.zoo import get_data
 from simsopt.geo.boozersurface import BoozerSurface
@@ -33,6 +34,7 @@ def taylor_test1(f, df, x, epsilons=None, direction=None, atol=1e-9):
                                              f"err_old={err_old:.2e}, ratio={err/err_old:.4f}")
         err_old = err
     print("###################################################################")
+    return dfx
 
 
 def taylor_test2(f, df, d2f, x, epsilons=None, direction1=None, direction2=None):
@@ -402,9 +404,8 @@ class BoozerResidualTests(unittest.TestCase):
                 res = boozer_surface.solve_residual_equation_exactly_newton(
                     tol=boozer_surface.options['newton_tol'], maxiter=40, iota=-0.406)
                 self.assertTrue(res['success'])
-                br = BoozerResidual(boozer_surface, bs)
-                self.assertEqual(br.constraint_weight, 0.)
-                self.assert_taylor_test(bs, br)
+                self.assertEqual(BoozerResidual(boozer_surface, bs).constraint_weight, 0.)
+                self.assert_taylor_test(bs, boozer_surface)
 
     def test_boozerresidual_wrapped_label(self):
         """
@@ -417,9 +418,17 @@ class BoozerResidualTests(unittest.TestCase):
         boozer_surface = BoozerSurface(bs, unwrapped.surface, label, label.J())
         boozer_surface.run_code(unwrapped.res['iota'], G=unwrapped.res['G'])
         self.assertTrue(boozer_surface.res['success'])
-        self.assert_taylor_test(bs, BoozerResidual(boozer_surface, bs))
+        self.assert_taylor_test(bs, boozer_surface)
 
-    def assert_taylor_test(self, bs, br):
+    def assert_taylor_test(self, bs, boozer_surface):
+        """
+        Taylor test of BoozerResidual for a field with the same coils and scaled
+        currents. On the solved field itself the residual stays near zero along
+        the whole test, so any gradient would pass.
+        """
+        objective_field = BiotSavart([Coil(c.curve, 1.1 * c.current) for c in bs.coils])
+        br = BoozerResidual(boozer_surface, objective_field)
+
         def f(dofs):
             bs.x = dofs
             return br.J()
@@ -428,8 +437,8 @@ class BoozerResidualTests(unittest.TestCase):
             bs.x = dofs
             return br.dJ()
 
-        taylor_test1(f, df, bs.x,
-                     epsilons=np.power(2., -np.asarray(range(13, 19))))
+        directional_derivative = taylor_test1(f, df, bs.x, epsilons=np.power(2., -np.asarray(range(13, 19))))
+        self.assertGreater(abs(directional_derivative), 1e-2)
 
 
 class LabelTests(unittest.TestCase):
