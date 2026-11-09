@@ -643,6 +643,27 @@ class OptimizableTests(unittest.TestCase):
         full_x = test_obj1.full_x
         self.assertTrue(np.allclose(full_x, new_vals))
 
+    def test_non_dof_change_reaches_dependents_only(self):
+        """The signal reaches the object and its dependents, fixed or not, and rings no bell."""
+        reached = []
+
+        class Recording(OptClassWithParents):
+            def _on_non_dof_change(self):
+                reached.append(id(self))
+
+        ancestor = Recording(1.0, depends_on=[Adder(n=1)])
+        middle = Recording(1.0, depends_on=[ancestor])
+        leaf = Recording(1.0, depends_on=[middle])
+        sibling = Recording(1.0, depends_on=[ancestor])
+        leaf.local_fix_all()
+        opts = (ancestor, middle, leaf, sibling)
+        for opt in opts:
+            opt.new_x = False
+
+        middle._notify_non_dof_change()
+        self.assertEqual([reached.count(id(opt)) for opt in opts], [0, 1, 1, 0])
+        self.assertEqual([opt.new_x for opt in opts], [False] * 4, "the signal rang a recompute bell")
+
     def test_full_fix(self):
         adder = Adder(n=3, x0=[1, 2, 3], names=['x', 'y', 'z'])
         iden = Identity(x=10, dof_fixed=True)
