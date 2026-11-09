@@ -109,7 +109,7 @@ class PerturbationSample(GSONable):
 
     Every :obj:`CurvePerturbed` built on a sample is registered with it, so
     :meth:`resample` refreshes all curves that share the sample and every
-    object that depends on them (e.g. coils).
+    object that depends on them (e.g. coils and Biot-Savart fields).
     The registry holds weak references and compares curves by identity, so
     curves with equal names are notified separately. It is never serialized
     or copied: pickling or copying a sample yields one with no registered
@@ -162,7 +162,9 @@ class PerturbationSample(GSONable):
         """
         Draw a new sample and refresh every registered curve.
 
-        Each curve clears its cached geometry and invalidates its dependents.
+        Each curve clears its cached geometry and invalidates its dependents,
+        including results that a bell leaves in place when no DOF is free (e.g.
+        the native cache of a fully fixed field).
 
         A new draw rings dependents exactly as a DOF change does, so
         :obj:`~simsopt.geo.surfaceobjectives.ToroidalFlux` and
@@ -176,7 +178,12 @@ class PerturbationSample(GSONable):
         so a draw on only some of the ranks hangs.
         """
         self._sample = self.sampler.draw_sample(self.randomgen)
-        for curve in list(self._consumers.values()):
+        curves = list(self._consumers.values())
+        # Clear every cache of the new draw first, so that no dependent that
+        # computes on the bell reads a stale curve or field.
+        for curve in curves:
+            curve._notify_non_dof_change()
+        for curve in curves:
             curve.set_recompute_flag()
 
     def __getitem__(self, deriv):
@@ -259,6 +266,7 @@ class CurvePerturbed(sopp.Curve, Curve):
         self._sample._remove_consumer(self)
         self._sample = sample
         sample._add_consumer(self)
+        self._notify_non_dof_change()
         self.set_recompute_flag()
 
     def resample(self):
