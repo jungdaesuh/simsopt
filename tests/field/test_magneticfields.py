@@ -1173,6 +1173,37 @@ class Testing(unittest.TestCase):
             old_err_1 = err_1
             old_err_2 = err_2
 
+    def test_interpolated_field_extrapolates_outside_the_grid(self):
+        """
+        With ``extrapolate=True`` a point outside the grid gets the field
+        extrapolated from the nearest boundary cell, close to the exact
+        :math:`B_\\phi = B_0 R_0 / R` of a toroidal field within a fraction of a
+        cell, and independent of the points evaluated before it.
+        """
+        R0, B0 = 1.0, 1.0
+        field = ToroidalField(R0, B0)
+        rrange, zrange = (1.0, 4.0, 20), (-1.0, 1.0, 8)
+        interpolated = InterpolatedField(field, 4, rrange, (0, 2*np.pi, 8), zrange, extrapolate=True)
+        cell = (rrange[1] - rrange[0]) / rrange[2]
+        # (R, phi, z): half a cell below rmin, 0.3 cells above rmax, 0.2 above
+        # zmax, and three cells below rmin
+        outside = np.array([[rrange[0] - 0.5*cell, 0.3, 0.2],
+                            [rrange[1] + 0.3*cell, 1.0, -0.4],
+                            [2.0, 2.0, zrange[1] + 0.2],
+                            [rrange[0] - 3.0*cell, 0.5, 0.0]])
+
+        def B_phi_at(points):
+            interpolated.set_points_cyl(points)
+            return interpolated.B_cyl()[:, 1].copy()
+
+        near = outside[:3]
+        np.testing.assert_allclose(B_phi_at(near), B0*R0/near[:, 0], rtol=1e-3)
+        after_inner = B_phi_at(outside)
+        # An inside batch of the same shape reuses the output buffers, so a
+        # value it leaves behind would show up below.
+        B_phi_at(np.array([[3.0, 0.5*i, 0.0] for i in range(len(outside))]))
+        np.testing.assert_array_equal(B_phi_at(outside), after_inner)
+
     def test_get_set_points_cyl_cart(self):
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
         

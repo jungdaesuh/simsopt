@@ -964,26 +964,64 @@ class SurfaceClassifier():
         self.dist.interpolate_batch(fbatch)
 
     def evaluate_xyz(self, xyz):
+        """
+        Evaluate the interpolated signed distance at cartesian points.
+
+        Args:
+            xyz (array, shape (npoints, 3)): Cartesian coordinates
+                :math:`(x, y, z)` of the points [m].
+
+        Returns:
+            array, shape (npoints, 1): Signed distance [m],
+            positive inside the surface, negative outside, and -1 for a point
+            outside the interpolation grid (which encloses the surface).
+        """
         rphiz = np.zeros_like(xyz)
         rphiz[:, 0] = np.linalg.norm(xyz[:, :2], axis=1)
         rphiz[:, 1] = np.mod(np.arctan2(xyz[:, 1], xyz[:, 0]), 2*np.pi)
         rphiz[:, 2] = xyz[:, 2]
-        # initialize to -1 since the regular grid interpolant will just keep
-        # that value when evaluated outside of bounds
-        d = -np.ones((xyz.shape[0], 1))
-        self.dist.evaluate_batch(rphiz, d)
-        return d
+        return self.evaluate_rphiz(rphiz)
 
     def evaluate_rphiz(self, rphiz):
-        # initialize to -1 since the regular grid interpolant will just keep
-        # that value when evaluated outside of bounds
-        d = -np.ones((rphiz.shape[0], 1))
+        r"""
+        Evaluate the interpolated signed distance at cylindrical points.
+
+        Args:
+            rphiz (array, shape (npoints, 3)): Cylindrical coordinates
+                :math:`(R, \phi, z)` of the points, with :math:`R` and
+                :math:`z` in [m] and :math:`\phi \in [0, 2\pi]` in [rad].
+
+        Returns:
+            array, shape (npoints, 1): Signed distance [m],
+            positive inside the surface, negative outside, and -1 for a point
+            outside the interpolation grid (which encloses the surface).
+        """
+        d = np.empty((rphiz.shape[0], 1))
         self.dist.evaluate_batch(rphiz, d)
+        # The grid covers the surface with a margin, so a point outside it is
+        # outside the surface. The interpolant would extrapolate its boundary
+        # cells there, which can have either sign.
+        d[~self.dist.in_bounds_batch(rphiz)] = -1.
         return d
 
     @SimsoptRequires(gridToVTK is not None,
                      "to_vtk method requires pyevtk module")
     def to_vtk(self, filename, h=0.01):
+        r"""
+        Write the interpolated signed distance to a VTK structured grid file.
+
+        The signed distance is sampled on a uniform :math:`(R, \phi, z)` grid
+        spanning the classifier's :math:`R` and :math:`z` ranges and
+        :math:`\phi \in [0, 2\pi]`, and stored as the point data
+        ``"levelset"``. As in :meth:`evaluate_rphiz`, it is -1 at samples
+        outside the interpolation grid.
+
+        Args:
+            filename (str): Output path without extension; ``pyevtk`` appends
+                ``.vts``.
+            h (float): Approximate sampling step [m] in :math:`R` and
+                :math:`z`; :math:`\phi` uses the same step in [rad].
+        """
 
         nr = int((self.rrange[1]-self.rrange[0])/h)
         nphi = int(2*np.pi/h)
@@ -1001,9 +1039,7 @@ class SurfaceClassifier():
         RPhiZ[:, 0] = R.flatten()
         RPhiZ[:, 1] = Phi.flatten()
         RPhiZ[:, 2] = Z.flatten()
-        vals = -np.ones((R.size, 1))
-        self.dist.evaluate_batch(RPhiZ, vals)
-        vals = vals.reshape(R.shape)
+        vals = self.evaluate_rphiz(RPhiZ).reshape(R.shape)
         gridToVTK(filename, X, Y, Z, pointData={"levelset": vals})
 
 
