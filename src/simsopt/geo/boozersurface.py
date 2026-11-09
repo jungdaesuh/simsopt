@@ -462,9 +462,14 @@ class BoozerSurface(Optimizable):
         res = minimize(
             fun, x, jac=True, method=method,
             options=options)
+        fsol, gsol = res.fun, res.jac
+        if not res.success:
+            # A failed solve can leave the Biot-Savart points at a rejected trial step, and after a failed line
+            # search L-BFGS-B also reports that step's value and gradient. Evaluating at res.x corrects both.
+            fsol, gsol = fun(res.x)
 
         resdict = {
-            "fun": res.fun, "gradient": res.jac, "iter": res.nit, "info": res, "success": res.success, "G": None, 'weight_inv_modB': weight_inv_modB, 'type': 'ls'
+            "fun": fsol, "gradient": gsol, "iter": res.nit, "info": res, "success": res.success, "G": None, 'weight_inv_modB': weight_inv_modB, 'type': 'ls'
         }
         if G is None:
             s.set_dofs(res.x[:-1])
@@ -670,6 +675,8 @@ class BoozerSurface(Optimizable):
             iota = res.x[-2]
             G = res.x[-1]
             resdict['G'] = G
+        # The solver's last evaluation, which placed the Biot-Savart points, can be a rejected trial step.
+        self.biotsavart.set_points(s.gamma().reshape((-1, 3)))
         resdict['s'] = s
         resdict['iota'] = iota
 

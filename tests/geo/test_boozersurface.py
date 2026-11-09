@@ -597,6 +597,31 @@ class BoozerSurfaceTests(unittest.TestCase):
                 for returned, expected in evaluate(res):
                     np.testing.assert_allclose(returned, expected, rtol=1e-12, atol=1e-12 * np.abs(expected).max())
 
+    def test_failed_scipy_solves_report_the_returned_surface(self):
+        """After a failed SciPy solve the reported values and the Biot-Savart points belong to the returned surface."""
+        with self.subTest(method='L-BFGS-B'):
+            # From a converged surface the line search fails at round-off level.
+            _, boozer_surface = get_boozer_surface(boozer_type="ls")
+            s = boozer_surface.surface
+            boozer_surface.need_to_run_code = True
+            res = boozer_surface.minimize_boozer_penalty_constraints_LBFGS(
+                tol=1e-16, maxiter=1, iota=boozer_surface.res['iota'], G=boozer_surface.res['G'],
+                constraint_weight=100., weight_inv_modB=False)
+            self.assertFalse(res['success'])
+            np.testing.assert_array_equal(boozer_surface.biotsavart.get_points_cart(), s.gamma().reshape((-1, 3)))
+            fun, gradient = boozer_surface.boozer_penalty_constraints_vectorized(
+                np.concatenate((s.get_dofs(), [res['iota'], res['G']])), derivatives=1, constraint_weight=100.,
+                optimize_G=True, weight_inv_modB=False)
+            self.assertEqual(res['fun'], fun)
+            np.testing.assert_array_equal(res['gradient'], gradient)
+        with self.subTest(method='trf'):
+            _, boozer_surface = get_boozer_surface(boozer_type="ls", converge=False)
+            res = boozer_surface.minimize_boozer_penalty_constraints_ls(
+                maxiter=4, iota=-0.406, G=-2.0, constraint_weight=100., method='trf')
+            self.assertFalse(res['success'])
+            np.testing.assert_array_equal(boozer_surface.biotsavart.get_points_cart(),
+                                          boozer_surface.surface.gamma().reshape((-1, 3)))
+
     def test_boozer_surface_quadpoints(self):
         """ 
         this unit test checks that the quadpoints mask for stellarator symmetric Boozer Surfaces are correctly initialized
