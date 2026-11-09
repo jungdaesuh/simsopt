@@ -367,7 +367,7 @@ class BoozerResidualTests(unittest.TestCase):
         """
         Taylor test for derivative of surface non QS ratio wrt coil parameters
         """
-        for label in ["Volume"]:
+        for label in ["Volume", "ToroidalFlux"]:
             for optimize_G in [True, False]:
                 for weight_inv_modB in [True, False]:
                     with self.subTest(label=label, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB):
