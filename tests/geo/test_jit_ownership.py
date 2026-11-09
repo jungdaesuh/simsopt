@@ -98,6 +98,8 @@ class RegisteredArrays:
 
 class JitOwnershipTests(unittest.TestCase):
     def test_no_jit_snapshots_nested_inputs_and_retains_plain_execution(self):
+        """With jit off, bare and nested arrays are copied, the call runs on the native device, and the name is kept."""
+
         def record(x, *, nested):
             return x, nested
 
@@ -163,6 +165,8 @@ class JitOwnershipTests(unittest.TestCase):
                 self.assertEqual(held[0].devices(), {jit_module.native_jax_device()})
 
     def test_real_jax_static_arguments_and_wraps_metadata_are_preserved(self):
+        """Positional and keyword statics compile on the native device, and the wrapper keeps the function metadata."""
+
         def powers(values, order, *, scale):
             """Scaled powers with positional and keyword static parameters."""
             return scale * jnp.sum(values**order)
@@ -178,6 +182,7 @@ class JitOwnershipTests(unittest.TestCase):
         self.assertEqual(wrapped.__doc__, powers.__doc__)
 
     def test_tracers_grad_hessian_nested_jit_and_vmap_preserve_derivatives(self):
+        """grad, Hessian, raw jax.jit and vmap through the wrapper match analytic derivatives, with jit on and off."""
         values = np.linspace(0.25, 1.0, 4)
         for use_jit in (True, False):
             with self.subTest(jit=use_jit), mock.patch.dict(parameters, {"jit": use_jit}):
@@ -190,6 +195,7 @@ class JitOwnershipTests(unittest.TestCase):
                 np.testing.assert_allclose(jax.vmap(wrapped)(batch), np.sum(batch**3, axis=1), rtol=1e-14, atol=0)
 
     def test_plain_builtin_mappings_preserve_key_order_and_factory(self):
+        """With jit off, copied dict, OrderedDict and defaultdict inputs keep their type, key order and factory."""
         mappings: list[dict[object, np.ndarray | list[float]]] = [
             {1: np.array([2.0]), "a": np.array([3.0])},
             {"z": np.array([2.0]), "a": np.array([3.0])},
@@ -211,6 +217,7 @@ class JitOwnershipTests(unittest.TestCase):
         self.assertIs(identity(mappings[-1]).default_factory, list)
 
     def test_explicit_statics_without_signature(self):
+        """Explicit static selectors compile builtins such as getattr and min, which have no signature."""
         with mock.patch.dict(parameters, {"jit": True}):
             attribute = jit(getattr, static_argnums=1)
             minimum = jit(min, static_argnums=(0, 1))
@@ -218,6 +225,7 @@ class JitOwnershipTests(unittest.TestCase):
         self.assertEqual(int(minimum(3, 2)), 2)
 
     def test_unregistered_dictionaries_are_opaque_leaves_without_hooks(self):
+        """With jit off, dictionaries JAX does not register are returned as is and their item setters never run."""
         with mock.patch.dict(parameters, {"jit": False}):
             wrapped = jit(lambda values: values)
         for kind in (FrozenDictionary, TransformDictionary, UserDict):
@@ -229,6 +237,7 @@ class JitOwnershipTests(unittest.TestCase):
                 self.assertEqual(getattr(incoming, "setter_calls", 0), 0)
 
     def test_registered_custom_pytree_snapshots_dynamic_numpy_leaves(self):
+        """NumPy leaves of a registered custom pytree are copied at call time, with jit on and off."""
         for use_jit in (False, True):
             with self.subTest(jit=use_jit), mock.patch.dict(parameters, {"jit": use_jit}):
                 wrapped = jit(lambda container: jnp.asarray(container.values))
@@ -239,6 +248,7 @@ class JitOwnershipTests(unittest.TestCase):
                 np.testing.assert_array_equal(held, expected)
 
     def test_matrix_semantics_and_storage_with_jit_off(self):
+        """With jit off, an np.matrix input is copied and keeps its type and matrix product."""
         with mock.patch.dict(parameters, {"jit": False}):
             square = jit(lambda value: (value, value * value))
         matrix = np.matrix([[1.0, 2.0], [3.0, 4.0]])
@@ -251,6 +261,7 @@ class JitOwnershipTests(unittest.TestCase):
         np.testing.assert_array_equal(result, [[7.0, 10.0], [15.0, 22.0]])
 
     def test_mask_semantics_and_storage_with_jit_off(self):
+        """With jit off, a masked-array input is copied with its mask, and the result still ignores masked entries."""
         with mock.patch.dict(parameters, {"jit": False}):
             square = jit(lambda value: (value, value * value))
         masked = np.ma.array([2.0, 9.0], mask=[False, True])
@@ -302,6 +313,7 @@ class JitOwnershipTests(unittest.TestCase):
                                     lambda wrapped, static: wrapped(2.0, options=static), (_static_array(),))
 
     def test_jax_input_donation_is_preserved(self):
+        """donate_argnums still donates a JAX array input, which is deleted after the call."""
         with mock.patch.dict(parameters, {"jit": True}):
             wrapped = jit(lambda value: value + 1, donate_argnums=0)
         value = jax.device_put(np.ones(3), jax.devices("cpu")[0])  # noqa: TID251 test places on a chosen device
