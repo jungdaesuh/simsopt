@@ -1,8 +1,11 @@
 import unittest
 import numpy as np
 from simsopt.field.biotsavart import BiotSavart
-from simsopt.field.coil import Coil
-from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual
+from simsopt.field.coil import Coil, coils_via_symmetries
+from simsopt.geo.curve import RotatedCurve
+from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
+from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, boozer_surface_residual
 from simsopt.configs.zoo import get_data
 from simsopt.geo.boozersurface import BoozerSurface
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
@@ -411,6 +414,74 @@ class BoozerResidualTests(unittest.TestCase):
 
         taylor_test1(f, df, coeffs,
                      epsilons=np.power(2., -np.asarray(range(13, 19))))
+
+    def test_boozerresidual_surface_classes(self):
+        """
+        BoozerResidual on BoozerLS solves on a SurfaceXYZFourier and on a clamped
+        SurfaceXYZTensorFourier: its value is the penalty on the solved surface
+        and its gradient passes a Taylor test.
+        """
+        base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
+        # Coils without stellarator symmetry, the flipped coils carrying 2% more
+        # current, so that the clamped modes of the solved surface are not zero.
+        curves_flipped = [RotatedCurve(c, 0, True) for c in base_curves]
+        bs_nonsym = BiotSavart(coils_via_symmetries(base_curves + curves_flipped,
+                                                    base_currents + [-1.02 * c for c in base_currents], nfp, False))
+        G0 = 2. * np.pi * nfp * sum(abs(c.get_value()) for c in base_currents) * (4 * np.pi * 10**(-7) / (2 * np.pi))
+        phis = np.linspace(0, 1/nfp, 20, endpoint=False)
+        thetas = np.linspace(0, 1, 20, endpoint=False)
+        cases = {"SurfaceXYZFourier": (bs, SurfaceXYZFourier(
+                     nfp=nfp, stellsym=True, mpol=3, ntor=3, quadpoints_phi=phis, quadpoints_theta=thetas)),
+                 "clamped SurfaceXYZTensorFourier": (bs_nonsym, SurfaceXYZTensorFourier(
+                     nfp=nfp, stellsym=False, mpol=3, ntor=3, clamped_dims=[False, True, True],
+                     quadpoints_phi=phis, quadpoints_theta=thetas))}
+        for name, (field, s) in cases.items():
+            with self.subTest(surface=name):
+                s.fit_to_curve(ma, 0.1, flip_theta=True)
+                label = Volume(s)
+                boozer_surface = BoozerSurface(field, s, label, label.J(), constraint_weight=100.,
+                                               options={'weight_inv_modB': False})
+                boozer_surface.run_code(-0.406, G=G0)
+                res = boozer_surface.res
+                self.assertTrue(res['success'])
+                br = BoozerResidual(boozer_surface, field)
+                r = boozer_surface_residual(s, res['iota'], res['G'], field, weight_inv_modB=False)[0]
+                penalty = 0.5 * np.sum(r**2) / r.size + 0.5 * 100. * (label.J() - boozer_surface.targetlabel)**2
+                self.assertAlmostEqual(br.J(), penalty, delta=1e-12 * penalty)
+
+                def f(dofs):
+                    field.x = dofs
+                    return br.J()
+
+                def df(dofs):
+                    field.x = dofs
+                    return br.dJ()
+
+                taylor_test1(f, df, field.x, epsilons=np.power(2., -np.asarray(range(13, 19))))
+
+    def test_boozerresidual_rejects_surface_subclasses(self):
+        """
+        BoozerResidual raises a TypeError for subclasses of SurfaceXYZFourier and
+        SurfaceXYZTensorFourier, which BoozerSurface accepts but whose geometry a
+        copy of the base class would lose.
+        """
+        class SubclassedXYZFourier(SurfaceXYZFourier):
+            pass
+
+        class SubclassedXYZTensorFourier(SurfaceXYZTensorFourier):
+            pass
+
+        base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
+        phis = np.linspace(0, 1/nfp, 10, endpoint=False)
+        thetas = np.linspace(0, 1, 10, endpoint=False)
+        for cls in [SubclassedXYZFourier, SubclassedXYZTensorFourier]:
+            with self.subTest(surface=cls.__name__):
+                s = cls(nfp=nfp, stellsym=True, mpol=3, ntor=3, quadpoints_phi=phis, quadpoints_theta=thetas)
+                s.fit_to_curve(ma, 0.1, flip_theta=True)
+                label = Volume(s)
+                boozer_surface = BoozerSurface(bs, s, label, label.J(), constraint_weight=100.)
+                with self.assertRaisesRegex(TypeError, cls.__name__):
+                    BoozerResidual(boozer_surface, bs)
 
     def test_boozerresidual_exact_surface(self):
         """
