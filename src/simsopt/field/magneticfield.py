@@ -58,6 +58,10 @@ class MagneticField(sopp.MagneticField, Optimizable):
         if np.any(self.dofs_free_status):
             self.clear_cached_properties()
 
+    def _on_non_dof_change(self):
+        """Clear the cache, which :meth:`recompute_bell` keeps when no DOF is free."""
+        self.clear_cached_properties()
+
     def __add__(self, other):
         """Add two magnetic fields."""
         return MagneticFieldSum([self, other])
