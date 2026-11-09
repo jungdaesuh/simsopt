@@ -643,6 +643,20 @@ class BoozerSurfaceTests(unittest.TestCase):
                 self.assertTrue(res['success'])
                 np.testing.assert_array_equal(s.get_dofs(), x)
 
+    def test_penalty_newton_divergence_factor(self):
+        """Penalty Newton stops once the gradient norm exceeds divergence_factor times its starting value."""
+        _, boozer_surface = get_boozer_surface(boozer_type="ls", converge=False)
+        dofs = boozer_surface.surface.get_dofs()
+        # From this unconverged start with a wrong G, the first step multiplies the gradient norm by about 4e3.
+        for divergence_factor, iterations in [(100., 1), (None, 5)]:
+            with self.subTest(divergence_factor=divergence_factor):
+                boozer_surface.surface.set_dofs(dofs)
+                boozer_surface.need_to_run_code = True
+                res = boozer_surface.minimize_boozer_penalty_constraints_newton(
+                    maxiter=5, iota=-0.406, G=-2.0, constraint_weight=100., weight_inv_modB=False,
+                    divergence_factor=divergence_factor)
+                self.assertEqual(res['iter'], iterations)
+
     def test_boozer_surface_quadpoints(self):
         """ 
         this unit test checks that the quadpoints mask for stellarator symmetric Boozer Surfaces are correctly initialized
