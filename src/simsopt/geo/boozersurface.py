@@ -966,6 +966,10 @@ class BoozerSurface(Optimizable):
             i += 1
             r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
 
+        if i > 0:
+            b = self._exact_residual(r, mask)
+            norm = np.linalg.norm(b)
+
         J = self._exact_residual_jacobian(J, mask)
 
         P, L, U = lu(J)

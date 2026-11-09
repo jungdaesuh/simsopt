@@ -622,6 +622,22 @@ class BoozerSurfaceTests(unittest.TestCase):
             np.testing.assert_array_equal(boozer_surface.biotsavart.get_points_cart(),
                                           boozer_surface.surface.gamma().reshape((-1, 3)))
 
+    def test_residual_equation_newton_success_is_that_of_the_final_iterate(self):
+        """A solve that converges on its last allowed iteration succeeds."""
+        for stellsym in [True, False]:
+            with self.subTest(stellsym=stellsym):
+                _, boozer_surface = get_boozer_surface(boozer_type="exact", stellsym=stellsym, converge=False)
+                s = boozer_surface.surface
+                x0 = s.get_dofs()
+                res = boozer_surface.solve_residual_equation_exactly_newton(tol=1e-10, maxiter=20, iota=-0.406)
+                self.assertTrue(res['success'])
+                x, iterations = s.get_dofs(), res['iter']
+                s.set_dofs(x0)
+                boozer_surface.need_to_run_code = True
+                res = boozer_surface.solve_residual_equation_exactly_newton(tol=1e-10, maxiter=iterations, iota=-0.406)
+                self.assertTrue(res['success'])
+                np.testing.assert_array_equal(s.get_dofs(), x)
+
     def test_boozer_surface_quadpoints(self):
         """ 
         this unit test checks that the quadpoints mask for stellarator symmetric Boozer Surfaces are correctly initialized
