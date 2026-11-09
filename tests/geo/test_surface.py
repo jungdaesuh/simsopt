@@ -13,7 +13,7 @@ from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 from simsopt.geo.surfacehenneberg import SurfaceHenneberg
 from simsopt.geo.surfacegarabedian import SurfaceGarabedian
 from simsopt.geo.surface import signed_distance_from_surface, SurfaceScaled, \
-    best_nphi_over_ntheta
+    SurfaceClassifier, best_nphi_over_ntheta
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 from .surface_test_helpers import get_surface, get_boozer_surface
@@ -354,6 +354,40 @@ class SurfaceDistanceTests(unittest.TestCase):
         s.fit_to_curve(c, 0.2, flip_theta=False)
         d = signed_distance_from_surface(xyz, s)
         assert np.allclose(d, [-0.8, 0.2, -0.8])
+
+
+class SurfaceClassifierTests(unittest.TestCase):
+    def test_classifier_sign_inside_and_outside_its_grid(self):
+        """
+        For a circular torus with major radius 1 m and minor radius 0.3 m the
+        exact signed distance is :math:`a - \\sqrt{(R - R_0)^2 + z^2}`. Inside
+        the classifier grid the interpolant matches it; every point outside the
+        grid lies outside the torus and is classified as -1, including far
+        points beyond the outer and vertical faces and points near the axis
+        R = 0, where extrapolating the boundary cells gives either sign.
+        """
+        R0, a = 1.0, 0.3
+        s = SurfaceRZFourier.from_nphi_ntheta(nfp=1, nphi=64, ntheta=64, mpol=1, ntor=0, range="full torus")
+        s.set_rc(0, 0, R0)
+        s.set_rc(1, 0, a)
+        s.set_zs(1, 0, a)
+        rng = np.random.default_rng(0)
+        for p in (1, 2, 3):
+            with self.subTest(p=p):
+                sc = SurfaceClassifier(s, p=p, h=0.05)
+                (rmin, rmax), (zmin, zmax) = sc.rrange, sc.zrange
+                inside_grid = np.stack([rng.uniform(rmin, rmax, 50), rng.uniform(0, 2*np.pi, 50),
+                                        rng.uniform(zmin, zmax, 50)], axis=1)
+                exact = a - np.hypot(inside_grid[:, 0] - R0, inside_grid[:, 2])
+                np.testing.assert_allclose(sc.evaluate_rphiz(inside_grid)[:, 0], exact, atol=1e-2)
+                # (R, phi, z) beyond rmax, zmax, zmin, and between the axis and rmin
+                outside_grid = np.array([[1.824, 0.0, 0.85], [1.824, 2.0, -0.85], [rmax + 0.1, 1.0, 0.0],
+                                         [6.0, 3.0, 0.0], [R0, 4.0, zmax + 0.2], [R0, 5.0, zmin - 5.0],
+                                         [0.5*rmin, 1.0, 0.0], [1e-3, 2.0, 0.2]])
+                np.testing.assert_array_equal(sc.evaluate_rphiz(outside_grid), -1.0)
+                xyz = np.stack([outside_grid[:, 0]*np.cos(outside_grid[:, 1]),
+                                outside_grid[:, 0]*np.sin(outside_grid[:, 1]), outside_grid[:, 2]], axis=1)
+                np.testing.assert_array_equal(sc.evaluate_xyz(xyz), -1.0)
 
 
 class SurfaceScaledTests(unittest.TestCase):
