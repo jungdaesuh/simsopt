@@ -354,16 +354,27 @@ class CurveSurfaceDistance(Optimizable):
         self.dJ_dgamma = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=0)(gammac, lc, gammas, ns))
         self.dJ_dlc = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=1)(gammac, lc, gammas, ns))
         self.candidates = None
+        self._candidates_surface_gamma = np.zeros((0, 3))
         super().__init__(depends_on=curves)  # Bharat's comment: Shouldn't we add surface here
 
     def recompute_bell(self, parent=None):
         self.candidates = None
 
     def compute_candidates(self):
-        if self.candidates is None:
-            candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
-                [c.gamma() for c in self.curves], [self.surface.gamma().reshape((-1, 3))], self.minimum_distance)
-            self.candidates = candidates
+        """
+        Find the curves within ``minimum_distance`` of the surface. They are
+        found again after a curve changes or the surface moves; the surface
+        need not be a parent, so its points are compared with those at the
+        last search.
+
+        Returns:
+            None: the result is stored in ``self.candidates``.
+        """
+        gamma = self.surface.gamma()
+        if self.candidates is None or not np.array_equal(gamma, self._candidates_surface_gamma):
+            self.candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+                [c.gamma() for c in self.curves], [gamma.reshape((-1, 3))], self.minimum_distance)
+            self._candidates_surface_gamma = gamma.copy()
 
     def shortest_distance_among_candidates(self):
         self.compute_candidates()
