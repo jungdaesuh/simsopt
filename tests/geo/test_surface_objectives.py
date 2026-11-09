@@ -256,8 +256,6 @@ class MajorRadiusTests(unittest.TestCase):
                 for optimize_G in [True, False]:
                     for weight_inv_modB in [True, False]:
                         with self.subTest(label=label, boozer_type=boozer_type, optimize_G=optimize_G):
-                            if boozer_type == 'ls' and label == 'ToroidalFlux':
-                                continue
                             if boozer_type == 'exact' and optimize_G is False:
                                 continue
                             if boozer_type == 'exact' and weight_inv_modB:
@@ -290,8 +288,6 @@ class IotasTests(unittest.TestCase):
             for label in ["Volume", "ToroidalFlux"]:
                 for optimize_G in [True, False]:
                     for weight_inv_modB in [True, False]:
-                        if boozer_type == 'ls' and label == 'ToroidalFlux':
-                            continue
                         if boozer_type == 'exact' and optimize_G is False:
                             continue
                         if boozer_type == 'exact' and weight_inv_modB:
@@ -321,6 +317,35 @@ class IotasTests(unittest.TestCase):
                      epsilons=np.power(2., -np.asarray(range(13, 19))), atol=2e-8)
 
 
+    def test_iotas_derivative_uses_the_weight_of_the_solve(self):
+        """
+        The BoozerLS adjoint of a ToroidalFlux label uses the label penalty weight
+        of the Newton solve, which need not be the surface's constraint_weight.
+        """
+        bs, boozer_surface = get_boozer_surface(label="ToroidalFlux", boozer_type='ls')
+        io = Iotas(boozer_surface)
+        solution = boozer_surface.surface.get_dofs()
+        iota, G = boozer_surface.res['iota'], boozer_surface.res['G']
+
+        def solve(dofs):
+            bs.x = dofs
+            boozer_surface.surface.set_dofs(solution)
+            res = boozer_surface.minimize_boozer_penalty_constraints_newton(
+                tol=1e-11, maxiter=40, constraint_weight=10., iota=iota, G=G, weight_inv_modB=False)
+            self.assertTrue(res['success'])
+
+        def f(dofs):
+            solve(dofs)
+            return io.J()
+
+        def df(dofs):
+            solve(dofs)
+            return io.dJ()
+
+        taylor_test1(f, df, bs.x,
+                     epsilons=np.power(2., -np.asarray(range(13, 19))), atol=2e-8)
+
+
 class NonQSRatioTests(unittest.TestCase):
     def test_nonQSratio_derivative(self):
         """
@@ -331,8 +356,6 @@ class NonQSRatioTests(unittest.TestCase):
                 for weight_inv_modB in [True, False]:
                     for optimize_G in [True, False]:
                         for fix_coil_dof in [True, False]:
-                            if boozer_type == 'ls' and label == 'ToroidalFlux':
-                                continue
                             if boozer_type == 'exact' and optimize_G is False:
                                 continue
                             if boozer_type == 'exact' and weight_inv_modB:
