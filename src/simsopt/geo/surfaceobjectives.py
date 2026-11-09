@@ -6,6 +6,7 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.types import RealArray
 from .surface import Surface
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+from .surfacexyzfourier import SurfaceXYZFourier
 from ..objectives.utilities import forward_backward
 
 __all__ = ['Area', 'Volume', 'ToroidalFlux', 'PrincipalCurvature',
@@ -952,13 +953,21 @@ class BoozerResidual(Optimizable):
     This term returns the Boozer residual penalty term
 
     .. math::
-       J = \frac{1}{2} \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi + \frac{w}{2} (\text{label.J()} - \text{boozer_surface.targetlabel})^2,
+       J = \frac{1}{2 n_r} \sum_{i=1}^{n_r} r_i^2 + \frac{w}{2} (\text{label.J()} - \text{boozer_surface.targetlabel})^2,
 
-    where :math:`w` is ``boozer_surface.constraint_weight`` (zero for BoozerExact surfaces) and
+    where :math:`r_i` are the components of the residual
 
     .. math::
         \mathbf r = \frac{1}{\|\mathbf B\|}[G\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
 
+    at the surface's quadrature points (the :math:`1/\|\mathbf B\|` factor only with the solve's
+    ``weight_inv_modB``), :math:`n_r = 3 n_\varphi n_\theta` with :math:`n_\varphi` and
+    :math:`n_\theta` the numbers of quadrature points, and :math:`w` is
+    ``boozer_surface.constraint_weight`` (zero for BoozerExact surfaces).
+
+    Raises:
+        TypeError: If the surface of ``boozer_surface`` is not exactly a ``SurfaceXYZFourier`` or
+            ``SurfaceXYZTensorFourier`` (subclasses may override the geometry).
     """
 
     def __init__(self, boozer_surface, bs):
@@ -966,11 +975,18 @@ class BoozerResidual(Optimizable):
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
 
-        # same number of points as on the solved surface
-        phis = in_surface.quadpoints_phi
-        thetas = in_surface.quadpoints_theta
-
-        s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
+        # A copy of the solved surface, with its class, settings and points. Only the exact
+        # classes are copied: a subclass may override the geometry the DOFs give.
+        if type(in_surface) is SurfaceXYZTensorFourier:
+            representation = dict(clamped_dims=in_surface.clamped_dims)
+        elif type(in_surface) is SurfaceXYZFourier:
+            representation = {}
+        else:
+            raise TypeError("BoozerResidual supports SurfaceXYZFourier and SurfaceXYZTensorFourier surfaces, "
+                            f"got {type(in_surface).__name__}.")
+        s = type(in_surface)(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym,
+                             nfp=in_surface.nfp, quadpoints_phi=in_surface.quadpoints_phi,
+                             quadpoints_theta=in_surface.quadpoints_theta, **representation)
         s.set_dofs(in_surface.get_dofs())
 
         # BoozerExact surfaces have no label penalty (constraint_weight is None)
