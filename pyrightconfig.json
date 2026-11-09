@@ -1,0 +1,24 @@
+{
+  "include": [
+    "src/simsopt_jax",
+    "src/simsopt_jax_adapters",
+    "tests/core/test_backend.py",
+    "tests/core/fresh_process",
+    "tests/core/test_state_tokens.py",
+    "tests/core/test_jax_helpers.py",
+    "tests/core/test_jax_placement.py",
+    "tests/field/test_biotsavart_jax.py",
+    "tests/field/test_biotsavart_jax_state_cache.py",
+    "tests/geo/fresh_process",
+    "tests/geo/test_curve_specs_jax.py",
+    "tests/geo/test_native_jit_device.py",
+    "tests/unittest_jax_support.py",
+    "examples/2_Intermediate/stage_two_optimization.py"
+  ],
+  "extraPaths": [
+    "src",
+    "tests"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}
