@@ -379,17 +379,47 @@ class Testing(unittest.TestCase):
         curves = [c.curve for c in get_data("ncsx", coil_order=10)[4].coils]
         surface = SurfaceRZFourier.from_nphi_ntheta(nfp=3, nphi=32, ntheta=32, ntor=0)
         surface.set('rc(0,0)', 1.6)
+        for options in ({}, {'surface_derivatives': True}):
+            with self.subTest(**options):
+                surface.set('rc(1,0)', 0.2)
+                surface.set('zs(1,0)', 0.2)
+                J = CurveSurfaceDistance(curves, surface, 0.1, **options)
+                self.assertEqual(J.J(), 0.)
+                surface.set('rc(1,0)', 0.3)
+                surface.set('zs(1,0)', 0.3)
+                fresh = CurveSurfaceDistance(curves, surface, 0.1, **options)
+                self.assertGreater(fresh.J(), 0.)
+                # candidates may come in another order, which changes the sum by rounding
+                np.testing.assert_allclose(J.J(), fresh.J(), rtol=1e-13, atol=0)
+                np.testing.assert_allclose(J.dJ(), fresh.dJ(), rtol=1e-13, atol=0)
+
+    def test_curve_surface_distance_surface_derivative(self):
+        """The derivative in the surface dofs, opt-in, passes a Taylor test."""
+        base_curves, _, _, _, bs = get_data("ncsx", coil_order=10)
+        curves = [c.curve for c in bs.coils]
+        surface = SurfaceRZFourier.from_nphi_ntheta(nfp=3, nphi=32, ntheta=32, ntor=0)
+        surface.set('rc(0,0)', 1.6)
         surface.set('rc(1,0)', 0.2)
         surface.set('zs(1,0)', 0.2)
-        J = CurveSurfaceDistance(curves, surface, 0.1)
-        self.assertEqual(J.J(), 0.)
-        surface.set('rc(1,0)', 0.3)
-        surface.set('zs(1,0)', 0.3)
-        fresh = CurveSurfaceDistance(curves, surface, 0.1)
-        self.assertGreater(fresh.J(), 0.)
-        # candidates may come in another order, which changes the sum by rounding
-        np.testing.assert_allclose(J.J(), fresh.J(), rtol=1e-13, atol=0)
-        np.testing.assert_allclose(J.dJ(), fresh.dJ(), rtol=1e-13, atol=0)
+        curve_names = [name for c in base_curves for name in c.dof_names]
+        self.assertEqual(CurveSurfaceDistance(curves, surface, 1.0).dof_names, curve_names)
+        # 5 m exceeds every coil-surface distance, so J is smooth along h
+        J = CurveSurfaceDistance(curves, surface, 5.0, surface_derivatives=True)
+        self.assertEqual(J.dof_names, curve_names + surface.dof_names)
+        x = surface.x
+        h = 1e-2 * np.random.default_rng(0).random(x.size)
+        deriv = np.sum(J.dJ(partials=True)(surface) * h)
+        self.assertGreater(np.abs(deriv), 1e-10)
+        err = np.inf
+        for i in range(1, 8):
+            eps = 0.5**i
+            surface.x = x + eps * h
+            Jp = float(J.J())
+            surface.x = x - eps * h
+            Jm = float(J.J())
+            err_new = np.abs((Jp - Jm) / (2 * eps) - deriv)
+            self.assertLess(err_new, 0.3 * err)
+            err = err_new
 
     def test_linking_number(self):
         for downsample in [1, 2, 5]:
