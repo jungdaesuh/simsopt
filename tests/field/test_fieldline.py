@@ -5,7 +5,8 @@ from pathlib import Path
 
 from simsopt.field.magneticfieldclasses import ToroidalField, PoloidalField, InterpolatedField, UniformInterpolationRule
 from simsopt.field.tracing import compute_fieldlines, particles_to_vtk, plot_poincare_data, \
-    MinRStoppingCriterion, MinZStoppingCriterion, MaxRStoppingCriterion, MaxZStoppingCriterion
+    MinRStoppingCriterion, MinZStoppingCriterion, MaxRStoppingCriterion, MaxZStoppingCriterion, \
+    LevelsetStoppingCriterion, SurfaceClassifier
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.configs.zoo import get_data
 from simsopt.field.coil import Coil, Current
@@ -77,6 +78,28 @@ class FieldlineTesting(unittest.TestCase):
                 np.testing.assert_allclose(res_tys[i][:, 3], Z0[i], atol=1e-12)
         with self.assertRaises(AssertionError):
             compute_fieldlines(Bfield, R0, Z0, tmax=10, phi0=[0.1, 0.2])
+
+    def test_levelset_stops_outside_the_classifier_grid(self):
+        """
+        A toroidal field line is a circle at constant (R, z). One started outside
+        a circular torus (R0 = 1 m, a = 0.3 m) and outside its classifier grid,
+        where extrapolating the boundary cells of the degree-3 signed distance
+        gives a positive value, is stopped at once; one inside the torus runs
+        to tmax.
+        """
+        s = SurfaceRZFourier.from_nphi_ntheta(nfp=1, nphi=64, ntheta=64, mpol=1, ntor=0, range="full torus")
+        s.set_rc(0, 0, 1.0)
+        s.set_rc(1, 0, 0.3)
+        s.set_zs(1, 0, 0.3)
+        sc = SurfaceClassifier(s, p=3, h=0.05)
+        tmax = 20
+        res_tys, res_phi_hits = compute_fieldlines(
+            ToroidalField(1.0, 1.0), [1.824, 1.1], [0.85, 0.0], tmax=tmax,
+            stopping_criteria=[LevelsetStoppingCriterion(sc)])
+        self.assertLess(res_tys[0][-1, 0], 1e-3)
+        self.assertEqual(res_phi_hits[0][-1, 1], -1)
+        self.assertEqual(len(res_phi_hits[1]), 0)
+        self.assertEqual(res_tys[1][-1, 0], tmax)
 
     def test_poincare_tokamak(self):
         # Test a simple circular tokamak geometry that
