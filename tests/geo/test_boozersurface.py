@@ -560,6 +560,43 @@ class BoozerSurfaceTests(unittest.TestCase):
         assert res['success'], f"Optimization did not succeed. Residual norm: {residual_norm:.2e}, Residual: {res['residual']}"
 
 
+    def test_failed_solves_that_end_worse_restore_the_starting_point(self):
+        """A failed solve that ends worse returns its starting surface, iota and G, with results evaluated there."""
+        _, ls = get_boozer_surface(boozer_type="ls", converge=False)
+        _, exact = get_boozer_surface(boozer_type="exact", converge=False)
+        # From this start with a wrong G, each solver ends worse after 2 to 5 iterations.
+        iota, G = 0., -10.
+        penalty = {'constraint_weight': 100., 'weight_inv_modB': False}
+        x = lambda b: np.concatenate((b.surface.get_dofs(), [iota, G]))
+        cases = {
+            'penalty newton': (
+                ls, lambda: ls.minimize_boozer_penalty_constraints_newton(maxiter=3, iota=iota, G=G, **penalty),
+                lambda res: zip((res['residual'], res['hessian']),
+                                ls.boozer_penalty_constraints_vectorized(x(ls), derivatives=2, optimize_G=True, **penalty)[1:])),
+            'penalty ls manual': (
+                ls, lambda: ls.minimize_boozer_penalty_constraints_ls(maxiter=3, iota=iota, G=G, method='manual', **penalty),
+                lambda res: [(res['gradient'],
+                              ls.boozer_penalty_constraints_vectorized(x(ls), derivatives=1, optimize_G=True, **penalty)[1]),
+                             (res['jacobian'], ls.minimize_boozer_penalty_constraints_ls(
+                                 maxiter=0, iota=iota, G=G, method='manual', **penalty)['jacobian'])]),
+            'exact constraints newton': (
+                exact, lambda: exact.minimize_boozer_exact_constraints_newton(maxiter=3, iota=iota, G=G),
+                lambda res: zip((res['residual'], res['jacobian']),
+                                exact.boozer_exact_constraints(np.concatenate((x(exact), [0., 0.])), derivatives=1))),
+        }
+        for name, (boozer_surface, solve, evaluate) in cases.items():
+            with self.subTest(solver=name):
+                dofs = boozer_surface.surface.get_dofs()
+                boozer_surface.need_to_run_code = True
+                res = solve()
+                self.assertFalse(res['success'])
+                np.testing.assert_array_equal(boozer_surface.surface.get_dofs(), dofs)
+                self.assertEqual((res['iota'], res['G']), (iota, G))
+                np.testing.assert_array_equal(boozer_surface.biotsavart.get_points_cart(),
+                                              boozer_surface.surface.gamma().reshape((-1, 3)))
+                for returned, expected in evaluate(res):
+                    np.testing.assert_allclose(returned, expected, rtol=1e-12, atol=1e-12 * np.abs(expected).max())
+
     def test_boozer_surface_quadpoints(self):
         """ 
         this unit test checks that the quadpoints mask for stellarator symmetric Boozer Surfaces are correctly initialized
