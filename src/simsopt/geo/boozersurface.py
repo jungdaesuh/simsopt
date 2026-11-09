@@ -94,6 +94,8 @@ class BoozerSurface(Optimizable):
       the gradient :math:`J^T r` of the residual vector.
     - :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_exact_constraints_newton`: the norm of the optimality
       conditions returned by :obj:`~simsopt.geo.BoozerSurface.boozer_exact_constraints`.
+    - :obj:`~simsopt.geo.BoozerSurface.solve_residual_equation_exactly_newton`: the norm of the masked residual
+      and the label (and, without stellarator symmetry, z) constraints.
 
     The SciPy solvers used by :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_penalty_constraints_LBFGS` and
     :obj:`~simsopt.geo.BoozerSurface.minimize_boozer_penalty_constraints_ls` return the last point their line
@@ -948,12 +950,15 @@ class BoozerSurface(Optimizable):
         if G is None:
             G = 2. * np.pi * np.sum(np.abs([c.current.get_value() for c in self.biotsavart.coils])) * (4 * np.pi * 10**(-7) / (2 * np.pi))
         x = np.concatenate((s.get_dofs(), [iota, G]))
+        x0 = x.copy()
         i = 0
         r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
-        norm = 1e6
+        norm = initial_norm = 1e6
         while i < maxiter:
             b = self._exact_residual(r, mask)
             norm = np.linalg.norm(b)
+            if i == 0:
+                initial_norm = norm
             if norm <= tol:
                 break
             J = self._exact_residual_jacobian(J, mask)
@@ -969,6 +974,11 @@ class BoozerSurface(Optimizable):
         if i > 0:
             b = self._exact_residual(r, mask)
             norm = np.linalg.norm(b)
+
+        if not _keep_iterate(norm, initial_norm):
+            s.set_dofs(x0[:-2])
+            iota, G = x0[-2:]
+            r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
 
         J = self._exact_residual_jacobian(J, mask)
 

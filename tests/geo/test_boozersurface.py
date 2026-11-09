@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 from simsopt.field.coil import coils_via_symmetries
-from simsopt.geo.boozersurface import BoozerSurface
+from simsopt.geo.boozersurface import BoozerSurface, boozer_surface_residual
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
 from simsopt.geo.surfaceobjectives import ToroidalFlux, Area
@@ -583,6 +583,11 @@ class BoozerSurfaceTests(unittest.TestCase):
                 exact, lambda: exact.minimize_boozer_exact_constraints_newton(maxiter=3, iota=iota, G=G),
                 lambda res: zip((res['residual'], res['jacobian']),
                                 exact.boozer_exact_constraints(np.concatenate((x(exact), [0., 0.])), derivatives=1))),
+            # Two steps end below the 1e6 placeholder norm, so this also checks the starting norm is compared.
+            'residual equation newton': (
+                exact, lambda: exact.solve_residual_equation_exactly_newton(maxiter=2, iota=iota, G=G),
+                lambda res: [(res['residual'],
+                              boozer_surface_residual(exact.surface, iota, G, exact.biotsavart, derivatives=1)[0])]),
         }
         for name, (boozer_surface, solve, evaluate) in cases.items():
             with self.subTest(solver=name):
