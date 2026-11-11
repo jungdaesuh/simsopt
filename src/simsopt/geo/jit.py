@@ -1,10 +1,13 @@
 import functools
+import os
 
 import jax
 import numpy as np
-jax.config.update('jax_platform_name', 'cpu')
 from jax import jit as jaxjit
 from .config import parameters
+
+if "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
+    jax.config.update("jax_platform_name", "cpu")
 
 
 def _copy_numpy_leaves(x):
