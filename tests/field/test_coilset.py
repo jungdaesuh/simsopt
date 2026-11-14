@@ -1,3 +1,4 @@
+import gc
 import unittest
 import os
 from simsopt.field.coilset import CoilSet, ReducedCoilSet, Coil
@@ -166,6 +167,34 @@ class TestCoilSet(unittest.TestCase):
         length = self.coilset.total_length
         self.assertIsNotNone(length)
         self.assertTrue(length > 0)
+
+    def test_total_length_registers_no_children(self):
+        """
+        total_length must not leave a temporary Optimizable registered with the coils' curves: it would be
+        freed only by a cyclic garbage collection and notified of every DOF change until then.
+        """
+        coilset = self.coilset
+        multiplicity = len(coilset.coils) / len(coilset.base_coils)
+        expected = (sum(CurveLength(coil.curve) for coil in coilset.base_coils) * multiplicity).J()
+        graph = list({id(o): o for c in coilset.coils for o in [c] + c.ancestors}.values())
+
+        def live_children():
+            return [sum(ref() is not None for ref in o._children) for o in graph]
+
+        gc.collect()
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            before = live_children()
+            length = coilset.total_length
+            after = live_children()
+        finally:
+            if was_enabled:
+                gc.enable()
+        self.assertEqual(after, before, "total_length left children registered with the coils' curves")
+        np.testing.assert_array_equal(length, expected)
+        self.assertIs(type(length), type(expected))
+        self.assertEqual(length.dtype, expected.dtype)
 
     def test_coilset_to_vtk(self):
         with ScratchDir("."):

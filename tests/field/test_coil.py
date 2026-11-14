@@ -20,6 +20,7 @@ from simsopt.field.coil import Coil, RegularizedCoil, Current, ScaledCurrent, Cu
 from simsopt.field.coil import coils_to_makegrid, coils_to_focus, coils_to_vtk, load_coils_from_makegrid_file
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.selffield import regularization_circ
+from simsopt.geo.curveobjectives import CurveLength
 from simsopt._core.json import GSONEncoder, GSONDecoder, SIMSON
 from simsopt.configs import get_data
 
@@ -532,6 +533,21 @@ class CoilDiagnosticsGraphTesting(unittest.TestCase):
                     np.testing.assert_array_equal(actual[key], expected[key],
                                                   err_msg=f"coils_to_vtk {key} differs from the BiotSavart reference")
 
+    def test_coils_to_focus_registers_no_children(self):
+        curves = [c.curve for c in self.coils[:2]]
+        currents = [c.current for c in self.coils[:2]]
+        expected_lengths = ['{:23.15E}'.format(CurveLength(c).J()) for c in curves]
+
+        with ScratchDir("."):
+            _, before, after = self.call_without_cyclic_gc(
+                lambda: coils_to_focus('test.focus', curves, currents, nfp=2, stellsym=True))
+            with open('test.focus') as f:
+                lines = f.read().splitlines()
+        self.assertEqual(after, before, "coils_to_focus left children registered with the coil graph")
+        header = '# Nseg current Ifree Length Lfree target_length '
+        rows = [lines[i + 1].split() for i, line in enumerate(lines) if line == header]
+        self.assertEqual([[row[3], row[5]] for row in rows], [[length.strip()] * 2 for length in expected_lengths])
+
 
 class CoilForceReferenceTesting(unittest.TestCase):
     """``force``, ``torque`` and the coils_to_vtk arrays equal the BiotSavart reference bit for bit."""
@@ -573,7 +589,6 @@ class CoilForceReferenceTesting(unittest.TestCase):
         coils[1].curve.x = coils[1].curve.x + 0.01
         coils[1].current.x = coils[1].current.x * 1.1
         self.assert_matches_reference(coils)
-
 
 
 if __name__ == "__main__":
