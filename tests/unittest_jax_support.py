@@ -40,6 +40,7 @@ def optional_jax_imports() -> Iterator[None]:
 
 
 with optional_jax_imports():
+    from simsopt_jax.backend.dtypes import explicit_device_array
     from simsopt_jax.backend.runtime import _export_xla_flag_defaults
     from simsopt_jax.backend.runtime import get_backend_config, set_backend
     from simsopt_jax.backend.runtime import host_array as _host_array
@@ -354,3 +355,45 @@ def run_fresh_process(
 def host_array(value, *, dtype=None) -> np.ndarray:
     """Defined without JAX so test modules import it outside ``optional_jax_imports``."""
     return _host_array(value, dtype=dtype)
+
+
+def place_float64(values, reference: jax.Array) -> jax.Array:
+    """``values`` as a float64 array placed like ``reference``."""
+    return explicit_device_array(values, dtype=np.float64, reference=reference)
+
+
+@contextmanager
+def jax_compilations() -> Iterator[list[str]]:
+    """Names of the JAX trace, lowering and compile events inside the block."""
+    events: list[str] = []
+
+    def record(event: str, duration_secs: float, **kwargs: str | int) -> None:
+        if event.startswith("/jax/core/compile/"):
+            events.append(event)
+
+    jax.monitoring.register_event_duration_secs_listener(record)
+    try:
+        yield events
+    finally:
+        jax.monitoring.unregister_event_duration_listener(record)
+
+
+def assert_matches_native(actual, expected, name: str, rtol: float = 1e-12, scale: float | None = None) -> None:
+    """``actual`` has native's shape and agrees with native's ``expected`` to ``rtol`` times ``scale``, by default the
+    largest native entry (a float64 round-off bound where JAX and native sum in different orders)."""
+    actual = host_array(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    assert actual.shape == expected.shape, f"{name}: shape {actual.shape} != native {expected.shape}"
+    reference = np.max(np.abs(expected), initial=0.0) if scale is None else scale
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=rtol * reference, err_msg=f"{name} differs from native")
+
+
+def assert_errors_shrink(
+    testcase: TestCase, errors, factor: float, floor: float = 0.0, msg: str | None = None, *, initial: float = np.inf
+) -> None:
+    """Each error is below ``factor`` times the one before it (``initial`` before the first), or below ``floor`` when
+    that is larger (a Taylor test at halving steps)."""
+    previous = initial
+    for error in errors:
+        testcase.assertLess(error, max(floor, factor * previous), msg)
+        previous = error

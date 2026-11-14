@@ -7,6 +7,7 @@ from .curve_objectives import (
     JaxLpCurveCurvature,
     JaxMeanSquaredCurvature,
 )
+from .surface_specs import surface_spec_from_surface
 
 __all__ = (
     "JaxCurveCurveDistance",
@@ -14,4 +15,5 @@ __all__ = (
     "JaxCurveSurfaceDistance",
     "JaxLpCurveCurvature",
     "JaxMeanSquaredCurvature",
+    "surface_spec_from_surface",
 )
