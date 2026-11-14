@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 from unittest import SkipTest, TestCase, skipIf
 
 import numpy as np
@@ -46,6 +46,11 @@ with optional_jax_imports():
     from simsopt_jax.backend.runtime import host_tree
     import jax.numpy as jnp
     from simsopt_jax.backend.jit import jit
+    from simsopt._core.derivative import Derivative
+    from simsopt._core.optimizable import Optimizable
+    from simsopt.geo import CurveXYZFourier, SurfaceRZFourier
+    from simsopt_jax.objectives import fused_stage_two_objective
+    from simsopt_jax_adapters.field import JaxBiotSavart
 
 
 @skipIf(JAX_IMPORT_ERROR is not None, JAX_IMPORT_ERROR or "")
@@ -261,6 +266,74 @@ def make_execution_gate():
         return jnp.where(product[0, 0] > 0, value, -value)
 
     return lambda value: gate(value, matrix)
+
+
+def objective_partials(objective: Optimizable) -> Derivative:
+    """The partial derivatives of ``objective``, fixed DOFs included."""
+    return cast(Callable[..., Derivative], objective.dJ)(partials=True)
+
+
+def assert_matches_native_including_nans(
+    name: str, native: Optimizable, adapter: Optimizable, *, active: bool = False,
+) -> None:
+    """Value, free gradient and partials equal to native, non-finite entries included."""
+    native_value = float(native.J())
+    if active:
+        assert native_value > 0.0, f"{name} must be active at the test state"
+    np.testing.assert_allclose(adapter.J(), native_value, rtol=1e-12, atol=1e-14, err_msg=name)
+    native_gradient = native.dJ()
+    if active:
+        assert np.all(np.isfinite(native_gradient)), name
+    np.testing.assert_allclose(adapter.dJ(), native_gradient, rtol=1e-11, atol=1e-13, err_msg=f"{name} free gradient")
+    native_partials, adapter_partials = objective_partials(native), objective_partials(adapter)
+    assert set(adapter_partials.data) == set(native_partials.data), name
+    for owner, expected in native_partials.data.items():
+        # Fixed DOFs keep their partials, as in the native Derivative.
+        np.testing.assert_allclose(adapter_partials.data[owner], expected, rtol=1e-11, atol=1e-13,
+                                   err_msg=f"{name} partials of {owner.name}")
+
+
+def segment_curve(x_center, x_amplitude, numquadpoints=15):
+    """``x = x_center + x_amplitude cos(2 pi t)``, ``y = z = 0``: zero tangent at ``t = 0``."""
+    curve = CurveXYZFourier(numquadpoints, 1)
+    curve.set("xc(0)", x_center)
+    curve.set("xc(1)", x_amplitude)
+    return curve
+
+
+def circle_curve(center, radius, numquadpoints=20):
+    """A circle of ``radius`` about ``center``, parallel to the x-y plane, as a Fourier curve."""
+    curve = CurveXYZFourier(numquadpoints, 1)
+    curve.set("xc(0)", center[0])
+    curve.set("yc(0)", center[1])
+    curve.set("zc(0)", center[2])
+    curve.set("xc(1)", radius)
+    curve.set("ys(1)", radius)
+    return curve
+
+
+# Minimum distances at which the squared distance of the two points rounds to the
+# squared threshold: with and without fused multiply-adds the candidate test
+# differs in the last bit (both directions).
+DISTANCE_TIE_CASES = (((0.2, 0.5, 0.3), 0.6164414002968976), ((0.1, 0.4, 0.1), 0.42426406871192857))
+
+_QA_INPUT = Path(__file__).resolve().parent / "test_files" / "input.LandremanPaul2021_QA"
+
+
+def qa_surface() -> SurfaceRZFourier:
+    """Half a field period of the Landreman-Paul QA boundary on an 8 by 9 grid."""
+    return SurfaceRZFourier.from_vmec_input(str(_QA_INPUT), range="half period", nphi=8, ntheta=9)
+
+
+def native_field_gradient(native: Optimizable, field: JaxBiotSavart) -> np.ndarray:
+    """The native gradient in the order of the field's free DOFs."""
+    return np.asarray(native.dJ(partials=True)(field))
+
+
+if JAX_IMPORT_ERROR is None:
+    # The fused Stage-II objective and its value and gradient, compiled once for every test module that uses them.
+    compiled_stage_two_value_and_grad = jit(jax.value_and_grad(fused_stage_two_objective, argnums=1))
+    compiled_stage_two_objective = jit(fused_stage_two_objective)
 
 
 def run_fresh_process(
