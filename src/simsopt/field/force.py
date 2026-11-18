@@ -790,12 +790,12 @@ def squared_mean_force_pure(gammas_targets, gammas_sources, gammadashs_targets, 
     The objective function is
 
     .. math:
-        J = \sum_i \left(\frac{\int \frac{d\vec{F}_i}{d\ell_i} d\ell_i}{L_i}\right)^2
+        J = \sum_i \left(\int \frac{d\vec{F}_i}{d\ell_i} d\ell_i\right)^2
 
-    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length, 
-    in units of MN/m. The units of the squared mean force are therefore (MN/m)^2.
-    :math:`L_i` is the total coil length,
-    and :math:`\ell_i` is arclength along the ith coil. The units of the objective function are (MN/m)^2, where MN = meganewtons.
+    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length,
+    in units of MN/m, and :math:`\ell_i` is arclength along the ith coil.
+    The integral is the net force on the ith coil, in MN; it is not divided by the coil length.
+    The units of the objective function are MN^2, where MN = meganewtons.
 
     Source coils may be split into coarse and fine groups (with potentially different quadrature
     counts). The fine sources are downsampled to match the coarse resolution when used.
@@ -889,7 +889,7 @@ def squared_mean_force_pure(gammas_targets, gammas_sources, gammadashs_targets, 
     )
     # already multiplied by (mu_0/(4*pi)) in _mutual_B_field_at_point_pure, 
     # which gives a factor of (mu_0/(4*pi))^2 = 1e-14
-    # Then convert from (N/m)^2 to (MN/m)^2 by dividing by (1e6)^2 = 1e12
+    # Then convert from (N)^2 to (MN)^2 by dividing by (1e6)^2 = 1e12
     mean_forces_squared = jnp.sum(jnp.linalg.norm(mean_forces, axis=-1) ** 2)
     return mean_forces_squared * 1e-12
 
@@ -902,12 +902,12 @@ class SquaredMeanForce(Optimizable):
     The objective function is
 
     .. math:
-        J = \sum_i \left(\frac{\int \frac{d\vec{F}_i}{d\ell_i} d\ell_i}{L_i}\right)^2
+        J = \sum_i \left(\int \frac{d\vec{F}_i}{d\ell_i} d\ell_i\right)^2
 
-    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length, 
-    in units of MN/m. The units of the squared mean force are therefore (MN/m)^2.
-    :math:`L_i` is the total coil length,
-    and :math:`\ell_i` is arclength along the ith coil. The units of the objective function are (MN/m)^2, where MN = meganewtons.
+    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length,
+    in units of MN/m, and :math:`\ell_i` is arclength along the ith coil.
+    The integral is the net force on the ith coil, in MN; it is not divided by the coil length.
+    The units of the objective function are MN^2, where MN = meganewtons.
     
     This class assumes there are two (or three) distinct lists of coils,
     which may have different finite-build parameters and/or different numbers of quadrature points. 
@@ -1104,14 +1104,14 @@ def lp_force_pure(
     The objective function is
 
     .. math::
-        J = \frac{1}{p}\sum_i\frac{1}{L_i}\left(\int \text{max}(|d\vec{F}/d\ell_i| - F_0 , 0)^p d\ell_i\right)
+        J = \frac{1}{p}\sum_i\left(\int \text{max}(|d\vec{F}/d\ell_i| - F_0 , 0)^p d\ell_i\right)
 
-    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length, 
-    in units of MN/m, where MN = meganewtons. 
-    The units of the objective function are therefore (MN/m)^p.
+    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length,
+    in units of MN/m, where MN = meganewtons.
     :math:`d\ell_i` is the arclength along the ith coil,
-    :math:`L_i` is the total coil length,
     and :math:`F_0 ` is a threshold force at the ith coil.
+    The integral is not divided by the coil length,
+    so the units of the objective function are (MN/m)^p m.
 
     Args:
         gammas_targets (array, shape (m,n,3)): 
@@ -1222,13 +1222,14 @@ class LpCurveForce(Optimizable):
     The objective function is
 
     .. math::
-        J = \frac{1}{p}\sum_i\frac{1}{L_i}\left(\int \text{max}(|d\vec{F}/d\ell_i| - F_0 , 0)^p d\ell_i\right)
+        J = \frac{1}{p}\sum_i\left(\int \text{max}(|d\vec{F}/d\ell_i| - F_0 , 0)^p d\ell_i\right)
 
-    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length, 
-    in units of MN/m, where MN = meganewtons. The units of the objective function are therefore (MN/m)^p.
+    where :math:`\frac{d\vec{F}_i}{d\ell_i}` is the Lorentz force per unit length,
+    in units of MN/m, where MN = meganewtons.
     :math:`d\ell_i` is the arclength along the ith coil,
-    :math:`L_i` is the total coil length,
     and :math:`F_0 ` is a threshold force at the ith coil.
+    The integral is not divided by the coil length,
+    so the units of the objective function are (MN/m)^p m.
 
     This class assumes there are two (or three) distinct lists of coils,
     which may have different finite-build parameters and/or different numbers of quadrature points. 
@@ -1433,14 +1434,14 @@ def lp_torque_pure(
     The objective function is
 
     .. math::
-        J = \frac{1}{p}\sum_i\frac{1}{L_i}\left(\int \text{max}(|d\vec{T}/d\ell_i| - T_0 , 0)^p d\ell_i\right)
+        J = \frac{1}{p}\sum_i\left(\int \text{max}(|d\vec{T}/d\ell_i| - T_0 , 0)^p d\ell_i\right)
 
-    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,  
-    in units of MN, where MN = meganewtons. 
-    The units of the objective function are therefore (MN)^p.
+    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,
+    in units of MN, where MN = meganewtons.
     :math:`d\ell_i` is the arclength along the ith coil,
-    :math:`L_i` is the total coil length,
     and :math:`T_0 ` is a threshold torque per unit length at the ith coil.
+    The integral is not divided by the coil length,
+    so the units of the objective function are (MN)^p m.
 
     Args:
         gammas_targets (array, shape (m,n,3)): Array of target coil positions.
@@ -1545,14 +1546,14 @@ class LpCurveTorque(Optimizable):
     The objective function is
 
     .. math::
-        J = \frac{1}{p}\sum_i\frac{1}{L_i}\left(\int \text{max}(|d\vec{T}/d\ell_i| - T_0 , 0)^p d\ell_i\right)
+        J = \frac{1}{p}\sum_i\left(\int \text{max}(|d\vec{T}/d\ell_i| - T_0 , 0)^p d\ell_i\right)
 
-    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,  
-    in units of MN, where MN = meganewtons. 
-    The units of the objective function are therefore (MN)^p.
+    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,
+    in units of MN, where MN = meganewtons.
     :math:`d\ell_i` is the arclength along the ith coil,
-    :math:`L_i` is the total coil length,
     and :math:`T_0 ` is a threshold torque per unit length at the ith coil.
+    The integral is not divided by the coil length,
+    so the units of the objective function are (MN)^p m.
 
     This class assumes there are two (or three) distinct lists of coils,
     which may have different finite-build parameters and/or different numbers of quadrature points. 
@@ -1751,12 +1752,13 @@ def squared_mean_torque(
     The objective function is
 
     .. math:
-        J = \sum_i(\frac{\int \frac{d\vec{T}_i}{d\ell_i} d\ell_i}{L_i})^2
-        
-    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,  
-    in units of MN. The units of the squared mean torque are therefore (MN)^2.
-    :math:`d\ell_i` is the arclength along the ith coil,
-    :math:`L_i` is the total coil length.
+        J = \sum_i \left(\int \frac{d\vec{T}_i}{d\ell_i} d\ell_i\right)^2
+
+    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,
+    in units of MN, and :math:`d\ell_i` is the arclength along the ith coil.
+    The integral is the net torque on the ith coil about its centroid, in MN m;
+    it is not divided by the coil length.
+    The units of the objective function are (MN m)^2, where MN = meganewtons.
 
     Args:
         gammas_targets (array, shape (m,n,3)): Array of target coil positions.
@@ -1831,7 +1833,7 @@ def squared_mean_torque(
     )
     # already multiplied by (mu_0/(4*pi)) in _mutual_B_field_at_point_pure, 
     # which gives a factor of (mu_0/(4*pi))^2 = 1e-14
-    # Then convert from (N)^2 to (MN)^2 by dividing by (1e6)^2 = 1e12
+    # Then convert from (N m)^2 to (MN m)^2 by dividing by (1e6)^2 = 1e12
     mean_torques_squared = jnp.sum(jnp.linalg.norm(mean_torques, axis=-1) ** 2)
     return mean_torques_squared * 1e-12
 
@@ -1844,14 +1846,14 @@ class SquaredMeanTorque(Optimizable):
     The objective function is
 
     .. math:
-        J = \sum_i(\frac{\int \frac{d\vec{T}_i}{d\ell_i} d\ell_i}{L_i})^2
-        
-    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,  
-    in units of MN. The units of the squared mean torque are therefore (MN)^2.
-    :math:`d\ell_i` is the arclength along the ith coil,
-    :math:`L_i` is the total coil length.
+        J = \sum_i \left(\int \frac{d\vec{T}_i}{d\ell_i} d\ell_i\right)^2
 
-    The units of the objective function are (MN)^2, where MN = meganewtons.
+    where :math:`\frac{d\vec{T}_i}{d\ell_i}` is the Lorentz torque per unit length,
+    in units of MN, and :math:`d\ell_i` is the arclength along the ith coil.
+    The integral is the net torque on the ith coil about its centroid, in MN m;
+    it is not divided by the coil length.
+
+    The units of the objective function are (MN m)^2, where MN = meganewtons.
     
     This class assumes there are two (or three) distinct lists of coils,
     which may have different finite-build parameters and/or different numbers of quadrature points. 
