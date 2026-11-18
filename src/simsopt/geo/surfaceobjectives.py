@@ -6,6 +6,7 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.types import RealArray
 from .surface import Surface
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+from .surfacexyzfourier import SurfaceXYZFourier
 from ..objectives.utilities import forward_backward
 
 __all__ = ['Area', 'Volume', 'ToroidalFlux', 'PrincipalCurvature',
@@ -278,6 +279,19 @@ class ToroidalFlux(Optimizable):
         dJ_by_dA = xtheta/ntheta
         dJ_by_dcoils = self.biotsavart.A_vjp(dJ_by_dA)
         return dJ_by_dcoils
+
+    def _dJ_by_dsurfacecoefficients_dcoils_vjp(self, v):
+        """
+        Calculate the coil derivative of ``v @ self.dJ_by_dsurfacecoefficients()``, i.e. the
+        vector-Jacobian product of the mixed second derivative with respect to the surface
+        coefficients and the coils.
+        """
+        ntheta = self.surface.gamma().shape[1]
+        xtheta = self.surface.gammadash2()[self.idx]
+        dx = self.surface.dgamma_by_dcoeff()[self.idx] @ v
+        dxtheta = self.surface.dgammadash2_by_dcoeff()[self.idx] @ v
+        dA, dgradA = self.biotsavart.A_and_dA_vjp(dxtheta/ntheta, dx[:, :, None] * xtheta[:, None, :]/ntheta)
+        return dA + dgradA
 
 
 class PrincipalCurvature(Optimizable):
@@ -939,13 +953,21 @@ class BoozerResidual(Optimizable):
     This term returns the Boozer residual penalty term
 
     .. math::
-       J = \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi + w (\text{label.J()-boozer_surface.constraint_weight})^2.
+       J = \frac{1}{2 n_r} \sum_{i=1}^{n_r} r_i^2 + \frac{w}{2} (\text{label.J()} - \text{boozer_surface.targetlabel})^2,
 
-    where
+    where :math:`r_i` are the components of the residual
 
     .. math::
         \mathbf r = \frac{1}{\|\mathbf B\|}[G\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
 
+    at the surface's quadrature points (the :math:`1/\|\mathbf B\|` factor only with the solve's
+    ``weight_inv_modB``), :math:`n_r = 3 n_\varphi n_\theta` with :math:`n_\varphi` and
+    :math:`n_\theta` the numbers of quadrature points, and :math:`w` is
+    ``boozer_surface.constraint_weight`` (zero for BoozerExact surfaces).
+
+    Raises:
+        TypeError: If the surface of ``boozer_surface`` is not exactly a ``SurfaceXYZFourier`` or
+            ``SurfaceXYZTensorFourier`` (subclasses may override the geometry).
     """
 
     def __init__(self, boozer_surface, bs):
@@ -953,11 +975,18 @@ class BoozerResidual(Optimizable):
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
 
-        # same number of points as on the solved surface
-        phis = in_surface.quadpoints_phi
-        thetas = in_surface.quadpoints_theta
-
-        s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
+        # A copy of the solved surface, with its class, settings and points. Only the exact
+        # classes are copied: a subclass may override the geometry the DOFs give.
+        if type(in_surface) is SurfaceXYZTensorFourier:
+            representation = dict(clamped_dims=in_surface.clamped_dims)
+        elif type(in_surface) is SurfaceXYZFourier:
+            representation = {}
+        else:
+            raise TypeError("BoozerResidual supports SurfaceXYZFourier and SurfaceXYZTensorFourier surfaces, "
+                            f"got {type(in_surface).__name__}.")
+        s = type(in_surface)(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym,
+                             nfp=in_surface.nfp, quadpoints_phi=in_surface.quadpoints_phi,
+                             quadpoints_theta=in_surface.quadpoints_theta, **representation)
         s.set_dofs(in_surface.get_dofs())
 
         # BoozerExact surfaces have no label penalty (constraint_weight is None)
@@ -1007,15 +1036,18 @@ class BoozerResidual(Optimizable):
         iota = self.boozer_surface.res['iota']
         G = self.boozer_surface.res['G']
         r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=self.boozer_surface.res['weight_inv_modB'])
-        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*(self.boozer_surface.label.J()-self.boozer_surface.targetlabel)]))
+        label_residual = self.boozer_surface.label.J()-self.boozer_surface.targetlabel
+        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*label_residual]))
         self._J = 0.5*np.sum(rtil**2)
 
         booz_surf = self.boozer_surface
         P, L, U = booz_surf.res['PLU']
         dconstraint_dcoils_vjp = booz_surf.res['vjp']
 
+        # explicit coil derivatives of the residual term and of the label term (nonzero for ToroidalFlux)
         dJ_by_dB = self.dJ_by_dB()
-        dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
+        dlabel_dcoils = booz_surf.label.dJ(partials=True)(self.biotsavart, as_derivative=True)
+        dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB) + self.constraint_weight*label_residual*dlabel_dcoils
 
         # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
         dl = np.zeros((J.shape[1],))
@@ -1090,12 +1122,18 @@ def boozer_surface_dexactresidual_dcoils_dcurrents_vjp(lm, booz_surf, iota, G):
     return lm_times_dres_dcoils+lm_times_dlabel_dcoils
 
 
-def boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
+def boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf, iota, G, weight_inv_modB=True, constraint_weight=None):
     r"""
     For a given surface with points x on it, this function computes the
     vector-Jacobian product of \lm^T * dlsqgrad_dcoils, \lm^T * dlsqgrad_dcurrents:
     lm^T dresidual_dcoils    = lm^T [dr_dsurface]^T[dr_dcoils]    + sum r_i lm^T d2ri_dsdc
     lm^T dresidual_dcurrents = lm^T [dr_dsurface]^T[dr_dcurrents] + sum r_i lm^T d2ri_dsdcurrents
+
+    With a ToroidalFlux label, the label penalty's gradient w (l - l0) dl/ds also
+    depends on the coils, which adds
+    w (lm^T dl/ds) dl/dcoils + w (l - l0) lm^T d2l/dsdcoils.
+    w is ``constraint_weight``, the weight of the solve, and defaults to
+    ``booz_surf.constraint_weight``.
 
     G is known for exact boozer surfaces, so if G=None is passed, then that
     value is used instead.
@@ -1118,7 +1156,17 @@ def boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf, iota, G, weight_inv_modB=T
     v2 = np.sum(r.reshape((-1, 3, 1))*np.sum(lm[None, None, :]*d2r_dsdB, axis=-1).reshape((-1, 3, 3)), axis=1)
     v3 = np.sum(r.reshape((-1, 3, 1, 1))*np.sum(lm[None, None, None, :]*d2r_dsdgradB, axis=-1).reshape((-1, 3, 3, 3)), axis=1)
     dres_dcoils = biotsavart.B_and_dB_vjp(v1+v2, v3)
-    return dres_dcoils[0]+dres_dcoils[1]
+
+    # Of the labels, only ToroidalFlux depends on the coils.
+    label = booz_surf.label
+    if not isinstance(label, ToroidalFlux):
+        return dres_dcoils[0]+dres_dcoils[1]
+    w = booz_surf.constraint_weight if constraint_weight is None else constraint_weight
+    lm_s = lm[:surface.local_full_dof_size]
+    lm_times_dl_ds = lm_s @ label.dJ_by_dsurfacecoefficients()
+    lm_times_dlabelgrad_dcoils = lm_times_dl_ds * label.dJ_by_dcoils() \
+        + (label.J() - booz_surf.targetlabel) * label._dJ_by_dsurfacecoefficients_dcoils_vjp(lm_s)
+    return dres_dcoils[0]+dres_dcoils[1]+w*lm_times_dlabelgrad_dcoils
 
 
 def boozer_surface_residual_dB(surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False):
