@@ -5,7 +5,7 @@ from simsopt.field.coil import Coil, coils_via_symmetries
 from simsopt.geo.curve import RotatedCurve
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, boozer_surface_residual
+from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, boozer_surface_residual, boozer_surface_dlsqgrad_dcoils_vjp
 from simsopt.configs.zoo import get_data
 from simsopt.geo.boozersurface import BoozerSurface
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
@@ -414,6 +414,38 @@ class BoozerResidualTests(unittest.TestCase):
 
         taylor_test1(f, df, coeffs,
                      epsilons=np.power(2., -np.asarray(range(13, 19))))
+
+    def test_lsq_gradient_coil_vjp_with_label_residual(self):
+        """
+        Taylor test of boozer_surface_dlsqgrad_dcoils_vjp, the coil derivative of
+        lm^T (gradient of the BoozerLS penalty), with a ToroidalFlux label away from
+        its target. On a converged solve the label residual and the surface gradient
+        are about zero, which hides the label terms
+        w (lm^T dl/ds) dl/dcoils and w (l - l0) lm^T d2l/dsdcoils; here both are O(1).
+        """
+        for weight_inv_modB in [True, False]:
+            with self.subTest(weight_inv_modB=weight_inv_modB):
+                bs, boozer_surface = get_boozer_surface(label="ToroidalFlux", boozer_type='ls', optimize_G=True,
+                                                        weight_inv_modB=weight_inv_modB)
+                constraint_weight = 100.
+                x = np.concatenate((boozer_surface.surface.x, [boozer_surface.res['iota'], boozer_surface.res['G']]))
+                boozer_surface.targetlabel = 1.2 * boozer_surface.label.J()
+                lm = np.random.default_rng(0).standard_normal(x.size)
+
+                def f(dofs):
+                    bs.x = dofs
+                    gradient = boozer_surface.boozer_penalty_constraints_vectorized(
+                        x, derivatives=1, constraint_weight=constraint_weight, optimize_G=True,
+                        weight_inv_modB=weight_inv_modB)[1]
+                    return lm @ gradient
+
+                def df(dofs):
+                    f(dofs)
+                    return boozer_surface_dlsqgrad_dcoils_vjp(
+                        lm, boozer_surface, x[-2], x[-1], weight_inv_modB=weight_inv_modB,
+                        constraint_weight=constraint_weight)(bs)
+
+                taylor_test1(f, df, bs.x, epsilons=np.power(2., -np.asarray(range(10, 17))))
 
     def test_boozerresidual_surface_classes(self):
         """
