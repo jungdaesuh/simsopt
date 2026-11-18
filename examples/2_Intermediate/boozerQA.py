@@ -28,20 +28,23 @@ There is also a penalty on the total coil length as a regularizer to prevent the
 too complex.  The BFGS optimizer is used, and quasisymmetry is improved substantially on the surface.
 
 More details on this work can be found at doi:10.1017/S0022377822000563 or arxiv:2203.03753.
-Use --use-jax with --device {cpu,gpu} to select the optional JAX field and Boozer surface.
+Use --use-jax with --device {cpu,gpu} to select the optional JAX field, Boozer surface and
+NonQuasiSymmetricRatio.
 """
 
 try:
     from simsopt_jax.backend import set_backend
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
+    from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
 except ImportError as error:
     jax_import_error = str(error)
 else:
     jax_import_error = None
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--use-jax", action="store_true", help="Use the optional JAX field and Boozer surface")
+parser.add_argument("--use-jax", action="store_true",
+                    help="Use the optional JAX field, Boozer surface and NonQuasiSymmetricRatio")
 parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
 args = parser.parse_args()
 if args.use_jax:
@@ -92,13 +95,17 @@ bs_diagnostic = BiotSavart(bs.coils) if args.use_jax else bs
 out_res = boozer_surface_residual(s, res['iota'], res['G'], bs_diagnostic, derivatives=0)[0]
 print(f"NEWTON {res['success']}: iter={res['iter']}, iota={res['iota']:.3f}, vol={s.volume():.3f}, ||residual||={np.linalg.norm(out_res):.3e}")
 ## SET UP THE OPTIMIZATION PROBLEM AS A SUM OF OPTIMIZABLES ##
-bs_nonQS = JaxBiotSavart(bs.coils) if args.use_jax else BiotSavart(bs.coils)
+# JaxNonQuasiSymmetricRatio leaves the field's evaluation points unchanged, so it can share the surface's field.
+bs_nonQS = bs if args.use_jax else BiotSavart(bs.coils)
 mr = MajorRadius(boozer_surface)
 ls = [CurveLength(c) for c in base_curves]
 
 J_major_radius = QuadraticPenalty(mr, mr.J(), 'identity')  # target major radius is that computed on the initial surface
 J_iotas = QuadraticPenalty(Iotas(boozer_surface), res['iota'], 'identity')  # target rotational transform is that computed on the initial surface
-J_nonQSRatio = NonQuasiSymmetricRatio(boozer_surface, bs_nonQS)
+if args.use_jax:
+    J_nonQSRatio = JaxNonQuasiSymmetricRatio(boozer_surface, bs_nonQS)
+else:
+    J_nonQSRatio = NonQuasiSymmetricRatio(boozer_surface, bs_nonQS)
 Jls = QuadraticPenalty(sum(ls), float(sum(ls).J()), 'max')
 
 # sum the objectives together
