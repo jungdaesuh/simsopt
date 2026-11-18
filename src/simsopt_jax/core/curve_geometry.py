@@ -39,6 +39,7 @@ from .specs import (
     _filament_base_derivative_order,
     _require_sample_derivatives,
 )
+from .surface_geometry import _norm
 
 
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
@@ -345,6 +346,28 @@ def curve_gamma_and_gammadash_from_spec(spec: CurveSpec):
             each shape (Q, 3), in meters.
     """
     return curve_gamma_and_gammadash_from_dofs(spec, spec.dofs)
+
+
+def curve_length_from_dofs(spec: CurveSpec, dofs: jax.Array) -> jax.Array:
+    """Native CurveLength from a curve spec and its full input DOFs.
+
+    Compose ``curve_gamma_and_gammadash_from_dofs`` with native's mean tangent
+    norm. Different Fourier summation orders can differ by a few ulps of
+    length; a nearly active quadratic length penalty propagates that scalar
+    round-off to its gradient. Zero tangents retain the undefined norm
+    derivative, as natively.
+
+    Args:
+        spec (CurveSpec): Immutable curve layout and quadrature grid in turns.
+        dofs (jax.Array): Shape (ndofs,) full native curve coefficients, including fixed
+            DOFs; position coefficients are in meters.
+
+    Returns:
+        jax.Array: Scalar shape () mean tangent magnitude in meters, using the native
+            full-turn quadrature convention.
+    """
+    _, tangent = curve_gamma_and_gammadash_from_dofs(spec, dofs)
+    return jnp.mean(_norm(tangent))
 
 
 def curve_gamma_and_gammadash_from_dofs(
