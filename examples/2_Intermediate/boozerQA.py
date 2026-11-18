@@ -29,13 +29,15 @@ too complex.  The BFGS optimizer is used, and quasisymmetry is improved substant
 
 More details on this work can be found at doi:10.1017/S0022377822000563 or arxiv:2203.03753.
 Use --use-jax with --device {cpu,gpu} to select the optional JAX field, Boozer surface and
-NonQuasiSymmetricRatio.
+NonQuasiSymmetricRatio, and add --fused to run each exact solve, objective and gradient as one JAX call.
 """
 
 try:
     from simsopt_jax.backend import set_backend
+    from simsopt_jax.backend.runtime import host_array
     from simsopt_jax_adapters.field import JaxBiotSavart
     from simsopt_jax_adapters.geo.boozer_surface import JaxBoozerSurface
+    from simsopt_jax_adapters.geo.single_stage_exact import JaxExactSingleStage
     from simsopt_jax_adapters.geo.surface_objectives import JaxNonQuasiSymmetricRatio
 except ImportError as error:
     jax_import_error = str(error)
@@ -45,8 +47,12 @@ else:
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--use-jax", action="store_true",
                     help="Use the optional JAX field, Boozer surface and NonQuasiSymmetricRatio")
+parser.add_argument("--fused", action="store_true", help="Fuse the exact solve, objective and gradient with --use-jax")
 parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
+parser.add_argument("--maxiter", type=int, help="Override the outer BFGS iteration limit")
 args = parser.parse_args()
+if args.fused and not args.use_jax:
+    parser.error("--fused requires --use-jax")
 if args.use_jax:
     if jax_import_error is not None:
         parser.error(f"--use-jax requires Python >= 3.12 and jax/jaxlib >= 0.12: {jax_import_error}")
@@ -126,13 +132,39 @@ def progress(J, grad):
     return outstr
 
 
+def fused_progress(evaluation):
+    nonqs, solved_iota, radius, length = evaluation.terms
+    outstr = f"J={evaluation.value:.1e}, J_nonQSRatio={nonqs:.2e}, iota={solved_iota:.2e}, mr={radius:.2e}"
+    outstr += f", Len={length:.1f}, ║∇J║={np.linalg.norm(evaluation.gradient):.1e}"
+    return outstr
+
+
 # Print the progress line on every 50th evaluation and after each optimization.
 PRINT_EVERY = 50
 evaluation_count = 0
 
+if args.fused:
+    # One immutable snapshot of the solved surface and the free coil DOFs; the warm start is passed in and out.
+    evaluator = JaxExactSingleStage.from_boozer_surface(
+        boozer_surface, bs, base_curves, iota_target=float(res['iota']),
+        major_radius_target=J_major_radius.cons, length_target=Jls.cons,
+    )
+    fused_state = evaluator.initial_state
+    fused_dofs = JF.x  # coil DOFs of fused_state, the last converged surface
+
 
 def fun(dofs):
-    global evaluation_count
+    global evaluation_count, fused_state, fused_dofs
+    if args.fused:
+        evaluation = evaluator.evaluate(dofs, fused_state)
+        fused_state = evaluation.state
+        if evaluation.success:
+            fused_dofs = dofs
+        evaluation_count += 1
+        if evaluation_count % PRINT_EVERY == 0:
+            print(fused_progress(evaluation))
+        return evaluation.value, evaluation.gradient
+
     # save these as a backup in case the boozer surface Newton solve fails
     sdofs_prev = boozer_surface.surface.x
     iota_prev = boozer_surface.res['iota']
@@ -182,9 +214,24 @@ print("""
 """)
 # Number of iterations to perform:
 MAXITER = 50 if in_github_actions else 1e3
+if args.maxiter is not None:
+    MAXITER = args.maxiter
 
 res = minimize(fun, dofs, jac=True, method='BFGS', options={'maxiter': MAXITER}, tol=1e-15)
 print(f"{res.nfev} evaluations: J={res.fun:.1e}, ║∇J║={np.linalg.norm(res.jac):.1e}")
+if args.fused:
+    # Copy the optimum and its surface into the native objects for the output files. If the
+    # surface solve fails there, keep the last converged coils and surface, which belong together.
+    evaluation = evaluator.evaluate(np.asarray(res.x, dtype=np.float64), fused_state)
+    if evaluation.success:
+        fused_dofs = res.x
+    else:
+        print("The surface solve at the optimum failed; writing the last converged coils and surface.")
+    JF.x = fused_dofs
+    final_inner = host_array(evaluation.state.x)
+    boozer_surface.surface.set_dofs(final_inner[:-2])
+    boozer_surface.res['iota'] = float(final_inner[-2])
+    boozer_surface.res['G'] = float(final_inner[-1])
 curves_to_vtk(all_curves, OUT_DIR + "curves_opt")
 boozer_surface.surface.to_vtk(OUT_DIR + "surf_opt")
 
