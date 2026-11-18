@@ -1,4 +1,7 @@
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 #include "regular_grid_interpolant_3d.h"
 #include <xtensor/containers/xarray.hpp>
 #include "xtensor/core/xlayout.hpp"
@@ -80,8 +83,7 @@ int RegularGridInterpolant3D<Array>::locate_unsafe(double x, double y, double z)
 }
 
 template<class Array>
-void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, double z, double* res){
-
+std::array<double, 3> RegularGridInterpolant3D<Array>::scaled_coordinates(double& x, double& y, double& z) const {
     // to avoid funny business when the data is just a tiny bit out of bounds
     // due to machine precision, we perform this check and shift
     if(x >= xmax) x -= _EPS_;
@@ -90,18 +92,45 @@ void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, doubl
     else if (y <= ymin) y += _EPS_;
     if(z >= zmax) z -= _EPS_;
     else if (z <= zmin) z += _EPS_;
+    return {nx*(x-xmin)/(xmax-xmin), ny*(y-ymin)/(ymax-ymin), nz*(z-zmin)/(zmax-zmin)};
+}
 
-    int xidx = int(nx*(x-xmin)/(xmax-xmin)); // find idx so that xmesh[xidx] <= x <= xs[xidx+1]
-    int yidx = int(ny*(y-ymin)/(ymax-ymin));
-    int zidx = int(nz*(z-zmin)/(zmax-zmin));
-    if(!out_of_bounds_ok){
-        if(xidx < 0 || xidx >= nx)
-            throw std::runtime_error(fmt::format("xidxs={} not within [0, {}]", xidx, nx-1));
-        if(yidx < 0 || yidx >= ny)
-            throw std::runtime_error(fmt::format("yidxs={} not within [0, {}]", yidx, ny-1));
-        if(zidx < 0 || zidx >= nz)
-            throw std::runtime_error(fmt::format("zidxs={} not within [0, {}]", zidx, nz-1));
+template<class Array>
+bool RegularGridInterpolant3D<Array>::in_bounds(double x, double y, double z) const {
+    const std::array<double, 3> scaled_indices = scaled_coordinates(x, y, z);
+    return inside_axis(scaled_indices[0], nx) && inside_axis(scaled_indices[1], ny)
+        && inside_axis(scaled_indices[2], nz);
+}
+
+template<class Array>
+void RegularGridInterpolant3D<Array>::evaluate_inplace(double x, double y, double z, double* res){
+    const std::array<double, 3> scaled_indices = scaled_coordinates(x, y, z);
+    const std::array<int, 3> cell_counts = {nx, ny, nz};
+    std::array<int, 3> cell_indices;
+    // A point is inside when every scaled index is in [0, n); NaN fails the
+    // comparisons too. Outside, out_of_bounds_ok extrapolates the polynomial of
+    // the nearest boundary cell, so every query writes res; a non-finite scaled
+    // index has no such value and gives NaN, and so does a skipped cell (see
+    // evaluate_local). (std::to_string: the bundled fmt overlaps a memcpy when
+    // it formats a double.)
+    for (int axis = 0; axis < 3; ++axis) {
+        const double scaled = scaled_indices[axis];
+        if (!inside_axis(scaled, cell_counts[axis])) {
+            if(!out_of_bounds_ok)
+                throw std::runtime_error(std::string(1, "xyz"[axis]) + "idxs="
+                    + std::to_string(scaled) + " not within [0, "
+                    + std::to_string(cell_counts[axis]) + ")");
+            if(!std::isfinite(scaled)) {
+                std::fill(res, res + value_size, std::numeric_limits<double>::quiet_NaN());
+                return;
+            }
+        }
+        // Clamp in double before the int conversion, which is undefined beyond int range.
+        cell_indices[axis] = int(std::clamp(std::floor(scaled), 0., double(cell_counts[axis] - 1)));
     }
+    const int xidx = cell_indices[0];
+    const int yidx = cell_indices[1];
+    const int zidx = cell_indices[2];
     double xlocal = (x-xmesh[xidx])/hx;
     double ylocal = (y-ymesh[yidx])/hy;
     double zlocal = (z-zmesh[zidx])/hz;
@@ -114,10 +143,11 @@ void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double 
     int degree = rule.degree;
     auto got = all_local_vals_map.find(cell_idx);
     if (got == all_local_vals_map.end()) {
-        if(out_of_bounds_ok)
-            return;
-        else
+        // a skipped cell holds no interpolant
+        if(!out_of_bounds_ok)
             throw std::runtime_error(fmt::format("cell_idx={} not in all_local_vals_map", cell_idx));
+        std::fill(res, res + value_size, std::numeric_limits<double>::quiet_NaN());
+        return;
     }
 
     double* vals_local = got->second.data();
@@ -125,12 +155,15 @@ void RegularGridInterpolant3D<Array>::evaluate_local(double x, double y, double 
     if constexpr (xsimd::simd_type<double>::size >= 3){
         // batches have no per-lane operator[] anymore; build the 3-lane input via a
         // small contiguous buffer + load, and read results back via store + index.
-        
-        alignas(xs::default_arch::alignment()) double xyz_arr[4] {x, y, z, 0.0};
+        // both buffers hold a full batch (simdcount lanes); unused lanes are zero.
+        // The length is at least 3 so that this discarded branch still compiles
+        // when a batch is narrower (clang checks it, e.g. 2 lanes with SSE2).
+        constexpr int nlanes = std::max(simdcount, 3);
+        alignas(xs::default_arch::alignment()) double xyz_arr[nlanes] = {x, y, z};
         simd_t xyz = xs::load_aligned(xyz_arr);
         for (int k = 0; k < degree+1; ++k) {
             simd_t temp = this->rule.basis_fun(k, xyz);
-            alignas(xs::default_arch::alignment()) double temp_arr[4];
+            alignas(xs::default_arch::alignment()) double temp_arr[nlanes];
             temp.store_aligned(temp_arr);
             pkxs[k] = temp_arr[0];
             pkys[k] = temp_arr[1];
