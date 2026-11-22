@@ -335,7 +335,9 @@ def trace_particles_starting_on_curve(curve, field, nparticles, tmax=1e-4,
         Ekin: kinetic energy in Joule, defaults to 3.52MeV
         tol: tolerance for the adaptive ode solver
         comm: MPI communicator to parallelize over
-        seed: random seed
+        seed: seed of the local ``np.random.RandomState`` that draws the
+              initial positions and parallel speeds; the global NumPy
+              random state is neither read nor reseeded
         umin: the parallel speed is defined as  ``v_par = u * speed_total``
               where  ``u`` is drawn uniformly in ``[umin, umax]``
         umax: see ``umin``
@@ -357,10 +359,10 @@ def trace_particles_starting_on_curve(curve, field, nparticles, tmax=1e-4,
     """
     m = mass
     speed_total = sqrt(2*Ekin/m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
-    np.random.seed(seed)
-    us = np.random.uniform(low=umin, high=umax, size=(nparticles, ))
+    rng = np.random.RandomState(seed)
+    us = rng.uniform(low=umin, high=umax, size=(nparticles, ))
     speed_par = us*speed_total
-    xyz, _ = draw_uniform_on_curve(curve, nparticles, safetyfactor=10)
+    xyz, _ = draw_uniform_on_curve(curve, nparticles, safetyfactor=10, randomgen=rng)
     return trace_particles(
         field, xyz, speed_par, tmax=tmax, mass=mass, charge=charge,
         Ekin=Ekin, tol=tol, comm=comm, phis=phis,
@@ -391,7 +393,9 @@ def trace_particles_starting_on_surface(surface, field, nparticles, tmax=1e-4,
         Ekin: kinetic energy in Joule, defaults to 3.52MeV
         tol: tolerance for the adaptive ode solver
         comm: MPI communicator to parallelize over
-        seed: random seed
+        seed: seed of the local ``np.random.RandomState`` that draws the
+              initial positions and parallel speeds; the global NumPy
+              random state is neither read nor reseeded
         umin: the parallel speed is defined as  ``v_par = u * speed_total``
               where  ``u`` is drawn uniformly in ``[umin, umax]``.
         umax: see ``umin``
@@ -413,10 +417,10 @@ def trace_particles_starting_on_surface(surface, field, nparticles, tmax=1e-4,
     """
     m = mass
     speed_total = sqrt(2*Ekin/m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
-    np.random.seed(seed)
-    us = np.random.uniform(low=umin, high=umax, size=(nparticles, ))
+    rng = np.random.RandomState(seed)
+    us = rng.uniform(low=umin, high=umax, size=(nparticles, ))
     speed_par = us*speed_total
-    xyz, _ = draw_uniform_on_surface(surface, nparticles, safetyfactor=10)
+    xyz, _ = draw_uniform_on_surface(surface, nparticles, safetyfactor=10, randomgen=rng)
     return trace_particles(
         field, xyz, speed_par, tmax=tmax, mass=mass, charge=charge,
         Ekin=Ekin, tol=tol, comm=comm, phis=phis,
@@ -654,7 +658,7 @@ def compute_poloidal_transits(res_tys, ma=None, flux=True):
     return ntransits
 
 
-def compute_fieldlines(field, R0, Z0, tmax=200, tol=1e-7, phis=[], stopping_criteria=[], comm=None):
+def compute_fieldlines(field, R0, Z0, tmax=200, tol=1e-7, phis=[], stopping_criteria=[], comm=None, phi0=0):
     r"""
     Compute magnetic field lines by solving
 
@@ -662,19 +666,24 @@ def compute_fieldlines(field, R0, Z0, tmax=200, tol=1e-7, phis=[], stopping_crit
 
         [\dot x, \dot y, \dot z] = B(x, y, z)
 
-    Integration is initialized on the :math:`\phi = 0` plane.
+    Integration is initialized on the :math:`\phi = \phi_0` plane(s).
 
     Args:
-        field: the magnetic field :math:`B`
-        R0: list of radial components of initial points
-        Z0: list of vertical components of initial points
-        tmax: for how long to trace. will do roughly ``|B|*tmax/(2*pi*r0)`` revolutions of the device
-        tol: tolerance for the adaptive ode solver
-        phis: list of angles in [0, 2pi] for which intersection with the plane
-              corresponding to that phi should be computed
-        stopping_criteria: list of stopping criteria, mostly used in
-                           combination with the ``LevelsetStoppingCriterion``
-                           accessed via :obj:`simsopt.field.tracing.SurfaceClassifier`.
+        field (MagneticField): the magnetic field :math:`B`.
+        R0 (list, array): radial components of the initial points.
+        Z0 (list, array): vertical components of the initial points.
+        tmax (float): longest allowable integration 'time'. Will do roughly
+            ``|B|*tmax/(2*pi*r0)`` revolutions of the device, unless one of the
+            stopping criteria is hit first.
+        tol (float): tolerance for the adaptive ode solver.
+        phis (list, array): angles in [0, 2pi] for which intersection with the plane
+            corresponding to that phi should be computed.
+        stopping_criteria (list): list of stopping criteria, mostly used in
+            combination with the ``LevelsetStoppingCriterion``
+            accessed via :obj:`simsopt.field.tracing.SurfaceClassifier`.
+        comm (MPI.Comm, optional): MPI communicator to parallelize over.
+        phi0 (float, list, array): toroidal angle of the initial points. A single
+            value is used for all initial points.
 
     Returns: 2 element tuple containing
         - ``res_tys``:
@@ -691,9 +700,12 @@ def compute_fieldlines(field, R0, Z0, tmax=200, tol=1e-7, phis=[], stopping_crit
             was hit. If `idx<0`, then `stopping_criteria[int(-idx)-1]` was hit.
     """
     assert len(R0) == len(Z0)
+    phi0 = np.asarray(phi0, dtype=float)
+    assert phi0.ndim == 0 or len(phi0) == len(R0)
     nlines = len(R0)
     xyz_inits = np.zeros((nlines, 3))
-    xyz_inits[:, 0] = np.asarray(R0)
+    xyz_inits[:, 0] = np.cos(phi0) * np.asarray(R0)
+    xyz_inits[:, 1] = np.sin(phi0) * np.asarray(R0)
     xyz_inits[:, 2] = np.asarray(Z0)
     res_tys = []
     res_phi_hits = []
@@ -755,7 +767,7 @@ class MinToroidalFluxStoppingCriterion(sopp.MinToroidalFluxStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MinToroidalFluxStopingCriterion(s)]
+        stopping_criteria=[MinToroidalFluxStoppingCriterion(s)]
 
     where ``s`` is the value of the minimum normalized toroidal flux.
     """
@@ -772,7 +784,7 @@ class MaxToroidalFluxStoppingCriterion(sopp.MaxToroidalFluxStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MaxToroidalFluxStopingCriterion(s)]
+        stopping_criteria=[MaxToroidalFluxStoppingCriterion(s)]
 
     where ``s`` is the value of the maximum normalized toroidal flux.
     """
@@ -811,7 +823,7 @@ class MinRStoppingCriterion(sopp.MinRStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MinRStopingCriterion(crit_r)]
+        stopping_criteria=[MinRStoppingCriterion(crit_r)]
 
     where ``crit_r`` is the value of the critical coordinate.
     """
@@ -827,7 +839,7 @@ class MinZStoppingCriterion(sopp.MinZStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MinZStopingCriterion(crit_z)]
+        stopping_criteria=[MinZStoppingCriterion(crit_z)]
 
     where ``crit_z`` is the value of the critical coordinate.
     """
@@ -843,7 +855,7 @@ class MaxRStoppingCriterion(sopp.MaxRStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MaxRStopingCriterion(crit_r)]
+        stopping_criteria=[MaxRStoppingCriterion(crit_r)]
 
     where ``crit_r`` is the value of the critical coordinate.
     """
@@ -859,7 +871,7 @@ class MaxZStoppingCriterion(sopp.MaxZStoppingCriterion):
 
     .. code-block::
 
-        stopping_criteria=[MaxZStopingCriterion(crit_z)]
+        stopping_criteria=[MaxZStoppingCriterion(crit_z)]
 
     where ``crit_z`` is the value of the critical coordinate.
     """

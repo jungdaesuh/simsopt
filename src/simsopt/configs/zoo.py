@@ -308,11 +308,11 @@ def get_data(name, **kwargs):
             1.90731007856885e-05
         ]
         sZ = [
-            0, -0.308156954586225, -0.0186374002410851,
-            -0.000261743895528833, 5.78207516751575e-05, -0.000129121205314107,
-            3.08849630026052e-05, 1.95450172782866e-05, -8.32136392792337e-05,
-            6.19785500011441e-05, 1.36521157246782e-05, -1.46281683516623e-05,
-            -1.5142136543872e-06
+            +0.308156954586225,    +0.0186374002410851,
+            +0.000261743895528833, -5.78207516751575e-05, +0.000129121205314107,
+            -3.08849630026052e-05, -1.95450172782866e-05, +8.32136392792337e-05,
+            -6.19785500011441e-05, -1.36521157246782e-05, +1.46281683516623e-05,
+            +1.5142136543872e-06
         ]
 
     elif cfg == "lhd_like":
@@ -400,7 +400,7 @@ def get_data(name, **kwargs):
         base_curves, base_currents, nfp, coils = download_ID_from_QUASR_database(QUASR_ID, return_style="simsopt-style", use_cache=use_cache, verbose=verbose)
         bs = BiotSavart(coils)
 
-        ma = None  # quasr configurations do not provide an axis object. finding can be attempted when cbs/fieldline_integrator branch is readu
+        ma = None  # quasr configurations do not provide an axis object. finding can be attempted when cbs/fieldline_integrator branch is ready
         return base_curves, base_currents, ma, nfp, bs
 
     elif cfg.startswith("star_lite-a"):
