@@ -374,6 +374,23 @@ class Testing(unittest.TestCase):
             self.assertLess(err_new, 0.3 * err, f"New error should be less than 0.3 * old error: {err_new} < {0.3 * err}")
             err = err_new
 
+    def test_curve_surface_distance_follows_a_moving_surface(self):
+        """After the surface moves, the penalty equals one built at the new surface."""
+        curves = [c.curve for c in get_data("ncsx", coil_order=10)[4].coils]
+        surface = SurfaceRZFourier.from_nphi_ntheta(nfp=3, nphi=32, ntheta=32, ntor=0)
+        surface.set('rc(0,0)', 1.6)
+        surface.set('rc(1,0)', 0.2)
+        surface.set('zs(1,0)', 0.2)
+        J = CurveSurfaceDistance(curves, surface, 0.1)
+        self.assertEqual(J.J(), 0.)
+        surface.set('rc(1,0)', 0.3)
+        surface.set('zs(1,0)', 0.3)
+        fresh = CurveSurfaceDistance(curves, surface, 0.1)
+        self.assertGreater(fresh.J(), 0.)
+        # candidates may come in another order, which changes the sum by rounding
+        np.testing.assert_allclose(J.J(), fresh.J(), rtol=1e-13, atol=0)
+        np.testing.assert_allclose(J.dJ(), fresh.dJ(), rtol=1e-13, atol=0)
+
     def test_linking_number(self):
         for downsample in [1, 2, 5]:
             for use_jax_curve in [False, True]:
