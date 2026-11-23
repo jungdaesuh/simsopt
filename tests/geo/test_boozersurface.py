@@ -643,6 +643,45 @@ class BoozerSurfaceTests(unittest.TestCase):
                 self.assertTrue(res['success'])
                 np.testing.assert_array_equal(s.get_dofs(), x)
 
+    def test_dlabel_dsurface_taylor(self):
+        """dlabel_dsurface agrees with central differences in all surface dofs, fixed or free."""
+        rng = np.random.default_rng(3)
+        # n=51 puts the label on its own surface, which shares the dofs of the Boozer surface.
+        for n in [None, 51]:
+            with self.subTest(label_grid=n):
+                _, boozer_surface = get_boozer_surface(nphi=n, ntheta=n, boozer_type="ls", converge=False)
+                s = boozer_surface.surface
+                for i in [0, 3, 5]:
+                    s.fix(i)
+                x0 = np.array(s.local_full_x)
+                direction = rng.uniform(-1, 1, x0.shape)
+                derivative = boozer_surface.dlabel_dsurface() @ direction
+                err_old = np.inf
+                for eps in 1e-3 * 0.5**np.arange(7):
+                    s.local_full_x = x0 + eps * direction
+                    plus = boozer_surface.label.J()
+                    s.local_full_x = x0 - eps * direction
+                    minus = boozer_surface.label.J()
+                    err = abs((plus - minus) / (2 * eps) - derivative)
+                    self.assertLess(err, 0.3 * err_old)
+                    err_old = err
+
+    def test_fixed_surface_dofs_do_not_change_the_solve(self):
+        """Fixing all surface dofs gives the same exact Boozer solve as leaving them free."""
+        _, boozer_surface = get_boozer_surface(boozer_type="exact", converge=False)
+        s = boozer_surface.surface
+        x0 = s.get_dofs()
+        solutions = []
+        for fixed in [False, True]:
+            if fixed:
+                s.fix_all()
+            s.set_dofs(x0)
+            boozer_surface.need_to_run_code = True
+            res = boozer_surface.solve_residual_equation_exactly_newton(tol=1e-10, maxiter=20, iota=-0.406)
+            self.assertTrue(res['success'])
+            solutions.append(s.get_dofs())
+        np.testing.assert_array_equal(*solutions)
+
     def test_boozer_surface_quadpoints(self):
         """ 
         this unit test checks that the quadpoints mask for stellarator symmetric Boozer Surfaces are correctly initialized

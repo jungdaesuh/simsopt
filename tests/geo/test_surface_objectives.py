@@ -1,8 +1,10 @@
 import unittest
 import numpy as np
 from simsopt.field.biotsavart import BiotSavart
+from simsopt.field.coil import Coil
 from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual
 from simsopt.configs.zoo import get_data
+from simsopt.geo.boozersurface import BoozerSurface
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
 
@@ -385,6 +387,36 @@ class BoozerResidualTests(unittest.TestCase):
 
         taylor_test1(f, df, coeffs,
                      epsilons=np.power(2., -np.asarray(range(13, 19))))
+
+    def test_boozerresidual_exact_surface(self):
+        """Taylor test of BoozerResidual on BoozerExact surfaces, also with a composed label."""
+        for stellsym, composed in [(True, False), (False, False), (True, True)]:
+            with self.subTest(stellsym=stellsym, composed_label=composed):
+                bs, boozer_surface = get_boozer_surface(boozer_type='exact', stellsym=stellsym, converge=False)
+                if composed:
+                    boozer_surface = BoozerSurface(bs, boozer_surface.surface, 2 * boozer_surface.label,
+                                                   2 * boozer_surface.targetlabel)
+                if not stellsym:
+                    # Without stellarator symmetry the residual of this surface stalls near 1e-12.
+                    boozer_surface.options['newton_tol'] = 1e-10
+                res = boozer_surface.solve_residual_equation_exactly_newton(
+                    tol=boozer_surface.options['newton_tol'], maxiter=40, iota=-0.406)
+                self.assertTrue(res['success'])
+                # On the field the surface was solved for, the residual stays near zero along the
+                # whole Taylor test, so evaluate it on the same coils with scaled currents.
+                br = BoozerResidual(boozer_surface, BiotSavart([Coil(c.curve, 1.1 * c.current) for c in bs.coils]))
+
+                def f(dofs, bs=bs, br=br):
+                    bs.x = dofs
+                    return br.J()
+
+                def df(dofs, bs=bs, br=br):
+                    bs.x = dofs
+                    return br.dJ()
+
+                direction = np.random.default_rng(1).uniform(-0.5, 0.5, bs.x.shape)
+                self.assertGreater(abs(df(bs.x) @ direction), 1e-2)
+                taylor_test1(f, df, bs.x, epsilons=np.power(2., -np.asarray(range(13, 19))), direction=direction)
 
 
 class LabelTests(unittest.TestCase):
