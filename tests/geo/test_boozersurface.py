@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 from simsopt.field.coil import coils_via_symmetries
-from simsopt.geo.boozersurface import BoozerSurface
+from simsopt.geo.boozersurface import BoozerSurface, boozer_surface_residual
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
 from simsopt.geo.surfaceobjectives import ToroidalFlux, Area
@@ -559,6 +559,89 @@ class BoozerSurfaceTests(unittest.TestCase):
             err_msg=f"Residual norm {residual_norm:.2e} is not less than 1e-6. Residual: {res['residual']}")
         assert res['success'], f"Optimization did not succeed. Residual norm: {residual_norm:.2e}, Residual: {res['residual']}"
 
+
+    def test_failed_solves_that_end_worse_restore_the_starting_point(self):
+        """A failed solve that ends worse returns its starting surface, iota and G, with results evaluated there."""
+        _, ls = get_boozer_surface(boozer_type="ls", converge=False)
+        _, exact = get_boozer_surface(boozer_type="exact", converge=False)
+        # From this start with a wrong G, each solver ends worse after 2 to 5 iterations.
+        iota, G = 0., -10.
+        penalty = {'constraint_weight': 100., 'weight_inv_modB': False}
+        x = lambda b: np.concatenate((b.surface.get_dofs(), [iota, G]))
+        cases = {
+            'penalty newton': (
+                ls, lambda: ls.minimize_boozer_penalty_constraints_newton(maxiter=3, iota=iota, G=G, **penalty),
+                lambda res: zip((res['residual'], res['hessian']),
+                                ls.boozer_penalty_constraints_vectorized(x(ls), derivatives=2, optimize_G=True, **penalty)[1:])),
+            'penalty ls manual': (
+                ls, lambda: ls.minimize_boozer_penalty_constraints_ls(maxiter=3, iota=iota, G=G, method='manual', **penalty),
+                lambda res: [(res['gradient'],
+                              ls.boozer_penalty_constraints_vectorized(x(ls), derivatives=1, optimize_G=True, **penalty)[1]),
+                             (res['jacobian'], ls.minimize_boozer_penalty_constraints_ls(
+                                 maxiter=0, iota=iota, G=G, method='manual', **penalty)['jacobian'])]),
+            'exact constraints newton': (
+                exact, lambda: exact.minimize_boozer_exact_constraints_newton(maxiter=3, iota=iota, G=G),
+                lambda res: zip((res['residual'], res['jacobian']),
+                                exact.boozer_exact_constraints(np.concatenate((x(exact), [0., 0.])), derivatives=1))),
+            # Two steps end below the 1e6 placeholder norm, so this also checks the starting norm is compared.
+            'residual equation newton': (
+                exact, lambda: exact.solve_residual_equation_exactly_newton(maxiter=2, iota=iota, G=G),
+                lambda res: [(res['residual'],
+                              boozer_surface_residual(exact.surface, iota, G, exact.biotsavart, derivatives=1)[0])]),
+        }
+        for name, (boozer_surface, solve, evaluate) in cases.items():
+            with self.subTest(solver=name):
+                dofs = boozer_surface.surface.get_dofs()
+                boozer_surface.need_to_run_code = True
+                res = solve()
+                self.assertFalse(res['success'])
+                np.testing.assert_array_equal(boozer_surface.surface.get_dofs(), dofs)
+                self.assertEqual((res['iota'], res['G']), (iota, G))
+                np.testing.assert_array_equal(boozer_surface.biotsavart.get_points_cart(),
+                                              boozer_surface.surface.gamma().reshape((-1, 3)))
+                for returned, expected in evaluate(res):
+                    np.testing.assert_allclose(returned, expected, rtol=1e-12, atol=1e-12 * np.abs(expected).max())
+
+    def test_failed_scipy_solves_report_the_returned_surface(self):
+        """After a failed SciPy solve the reported values and the Biot-Savart points belong to the returned surface."""
+        with self.subTest(method='L-BFGS-B'):
+            # From a converged surface the line search fails at round-off level.
+            _, boozer_surface = get_boozer_surface(boozer_type="ls")
+            s = boozer_surface.surface
+            boozer_surface.need_to_run_code = True
+            res = boozer_surface.minimize_boozer_penalty_constraints_LBFGS(
+                tol=1e-16, maxiter=1, iota=boozer_surface.res['iota'], G=boozer_surface.res['G'],
+                constraint_weight=100., weight_inv_modB=False)
+            self.assertFalse(res['success'])
+            np.testing.assert_array_equal(boozer_surface.biotsavart.get_points_cart(), s.gamma().reshape((-1, 3)))
+            fun, gradient = boozer_surface.boozer_penalty_constraints_vectorized(
+                np.concatenate((s.get_dofs(), [res['iota'], res['G']])), derivatives=1, constraint_weight=100.,
+                optimize_G=True, weight_inv_modB=False)
+            self.assertEqual(res['fun'], fun)
+            np.testing.assert_array_equal(res['gradient'], gradient)
+        with self.subTest(method='trf'):
+            _, boozer_surface = get_boozer_surface(boozer_type="ls", converge=False)
+            res = boozer_surface.minimize_boozer_penalty_constraints_ls(
+                maxiter=4, iota=-0.406, G=-2.0, constraint_weight=100., method='trf')
+            self.assertFalse(res['success'])
+            np.testing.assert_array_equal(boozer_surface.biotsavart.get_points_cart(),
+                                          boozer_surface.surface.gamma().reshape((-1, 3)))
+
+    def test_residual_equation_newton_success_is_that_of_the_final_iterate(self):
+        """A solve that converges on its last allowed iteration succeeds."""
+        for stellsym in [True, False]:
+            with self.subTest(stellsym=stellsym):
+                _, boozer_surface = get_boozer_surface(boozer_type="exact", stellsym=stellsym, converge=False)
+                s = boozer_surface.surface
+                x0 = s.get_dofs()
+                res = boozer_surface.solve_residual_equation_exactly_newton(tol=1e-10, maxiter=20, iota=-0.406)
+                self.assertTrue(res['success'])
+                x, iterations = s.get_dofs(), res['iter']
+                s.set_dofs(x0)
+                boozer_surface.need_to_run_code = True
+                res = boozer_surface.solve_residual_equation_exactly_newton(tol=1e-10, maxiter=iterations, iota=-0.406)
+                self.assertTrue(res['success'])
+                np.testing.assert_array_equal(s.get_dofs(), x)
 
     def test_boozer_surface_quadpoints(self):
         """ 
