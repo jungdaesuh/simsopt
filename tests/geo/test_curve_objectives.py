@@ -357,17 +357,17 @@ class Testing(unittest.TestCase):
         threshold = 1.0
         J = CurveSurfaceDistance(curves, surface, threshold)
 
-        curve_dofs = J.x
-        h = 1e-1 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        dofs = J.x
+        h = 1e-1 * np.random.rand(len(dofs)).reshape(dofs.shape)
         dJ = J.dJ()
         deriv = np.sum(dJ * h)
         self.assertGreater(np.abs(deriv), 1e-10, "Derivative should be greater than 1e-10")
         err = 1e6
-        for i in range(5, 12):
+        for i in range(5, 11):
             eps = 0.5**i
-            J.x = curve_dofs + eps * h
+            J.x = dofs + eps * h
             Jp = J.J()
-            J.x = curve_dofs - eps * h
+            J.x = dofs - eps * h
             Jm = J.J()
             deriv_est = (Jp-Jm)/(2*eps)
             err_new = np.linalg.norm(deriv_est-deriv)

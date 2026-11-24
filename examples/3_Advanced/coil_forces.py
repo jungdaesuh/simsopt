@@ -139,6 +139,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 nphi = 32 if not in_github_actions else 8
 ntheta = 32 if not in_github_actions else 8
 s = SurfaceRZFourier.from_vmec_input(str(filename), range="half period", nphi=nphi, ntheta=ntheta)
+s.fix_all()
 
 # Create the initial coils:
 base_curves = create_equally_spaced_curves(

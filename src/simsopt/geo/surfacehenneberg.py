@@ -253,6 +253,9 @@ class SurfaceHenneberg(sopp.Surface, Surface):
 
         self.rhomn[1:, :] = np.reshape(v[index:], (self.mmax, 2 * self.nmax + 1), order='C')
 
+    def recompute_bell(self, parent=None):
+        self.invalidate_cache()
+
     def fixed_range(self, mmax, nmax, fixed=True):
         """
         Set the ``fixed`` property for a range of ``m`` and ``n`` values.
@@ -364,6 +367,12 @@ class SurfaceHenneberg(sopp.Surface, Surface):
                 n = -nprime + self.alpha_fac
                 s.set_zs(m, n, s.get_zs(m, n) - 0.5 * self.get_rhomn(m, nprime))
 
+        for n in range(1, s.ntor + 1):
+            s.set_rc(0, n, s.get_rc(0, n) + s.get_rc(0, -n))
+            s.set_zs(0, n, s.get_zs(0, n) - s.get_zs(0, -n))
+            s.set_rc(0, -n, 0.0)
+            s.set_zs(0, -n, 0.0)
+        s.set_zs(0, 0, 0.0)
         return s
 
     @classmethod

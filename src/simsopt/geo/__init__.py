@@ -8,6 +8,9 @@ from .curverzfourier import *
 from .curvexyzfourier import *
 from .curvexyzfouriersymmetries import *
 from .curveperturbed import *
+from .curveplanarellipticalcylindrical import *
+from .curvesuperellipse import *
+from .curveplanaronsurface import *
 from .curveobjectives import *
 from .curveplanarfourier import *
 from .framedcurve import *
@@ -29,6 +32,8 @@ from .strain_optimization import *
 from .wireframe_toroidal import *
 from .ports import *
 
+from .omnigenousfield import *
+
 from .permanent_magnet_grid import *
 
 __all__ = (curve.__all__ + curvehelical.__all__ +
@@ -45,4 +50,7 @@ __all__ = (curve.__all__ + curvehelical.__all__ +
            surfacexyztensorfourier.__all__ + surfaceobjectives.__all__ +
            strain_optimization.__all__ + framedcurve.__all__ +
            wireframe_toroidal.__all__ + ports.__all__ +
-           permanent_magnet_grid.__all__)
+           permanent_magnet_grid.__all__ +
+           curveplanarellipticalcylindrical.__all__ +
+           curvesuperellipse.__all__ + curveplanaronsurface.__all__ +
+           omnigenousfield.__all__)

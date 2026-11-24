@@ -569,7 +569,7 @@ class BoozerSurface(Optimizable):
 
         return res
 
-    def minimize_boozer_penalty_constraints_ls(self, tol=1e-12, maxiter=10, constraint_weight=1., iota=0., G=None, method='lm', weight_inv_modB=True):
+    def minimize_boozer_penalty_constraints_ls(self, tol=1e-12, maxiter=10, constraint_weight=1., iota=0., G=None, method='lm', weight_inv_modB=True, x_scale=1.0):
         """
         This function does the same as :mod:`minimize_boozer_penalty_constraints_LBFGS`, but instead of LBFGS it
         uses a nonlinear least squares algorithm when ``method='lm'``.  Options for the method 
@@ -651,7 +651,7 @@ class BoozerSurface(Optimizable):
             return self._get_residual_vector_and_jacobian(
                 x, constraint_weight, G is not None, weight_inv_modB)[1]
 
-        res = least_squares(fun, x, jac=jac, method=method, ftol=tol, xtol=tol, gtol=tol, x_scale=1.0, max_nfev=maxiter)
+        res = least_squares(fun, x, jac=jac, method=method, ftol=tol, xtol=tol, gtol=tol, x_scale=x_scale, max_nfev=maxiter)
         xsol, rsol, gsol, Jsol = res.x, res.fun, res.grad, res.jac
         if res.status <= 0:
             r0, J0 = self._get_residual_vector_and_jacobian(
